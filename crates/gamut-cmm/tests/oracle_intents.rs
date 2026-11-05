@@ -580,7 +580,7 @@ fn sampled(f: impl Fn(f64) -> f64) -> gamut_icc::Curve {
 fn gray_ramp_profile(curve: &gamut_icc::Curve) -> IccProfile {
     use gamut_icc::{
         Clut, ClutPrecision, ColorSpace, CurveOrParametric, DeviceClass, LutAToB, LutBToA,
-        ProfileHeader, Signature, TagData,
+        ProfileHeader, Tag, TagData,
     };
     let b2a = || {
         // 3→1: CLUT corners store the L coordinate.
@@ -629,10 +629,10 @@ fn gray_ramp_profile(curve: &gamut_icc::Curve) -> IccProfile {
     IccProfile {
         header,
         tags: vec![
-            (Signature(*b"A2B0"), a2b()),
-            (Signature(*b"A2B1"), a2b()),
-            (Signature(*b"B2A0"), b2a()),
-            (Signature(*b"B2A1"), b2a()),
+            Tag::new(*b"A2B0", a2b()),
+            Tag::new(*b"A2B1", a2b()),
+            Tag::new(*b"B2A0", b2a()),
+            Tag::new(*b"B2A1", b2a()),
         ],
     }
 }
@@ -644,7 +644,7 @@ fn gray_ramp_profile(curve: &gamut_icc::Curve) -> IccProfile {
 fn cmyk_mix_profile(curve: &gamut_icc::Curve) -> IccProfile {
     use gamut_icc::{
         Clut, ClutPrecision, ColorSpace, CurveOrParametric, DeviceClass, LutAToB, LutBToA,
-        ProfileHeader, Signature, TagData,
+        ProfileHeader, Tag, TagData,
     };
     let b2a = || {
         let mut samples = Vec::new();
@@ -711,10 +711,10 @@ fn cmyk_mix_profile(curve: &gamut_icc::Curve) -> IccProfile {
     IccProfile {
         header,
         tags: vec![
-            (Signature(*b"A2B0"), a2b()),
-            (Signature(*b"A2B1"), a2b()),
-            (Signature(*b"B2A0"), b2a()),
-            (Signature(*b"B2A1"), b2a()),
+            Tag::new(*b"A2B0", a2b()),
+            Tag::new(*b"A2B1", a2b()),
+            Tag::new(*b"B2A0", b2a()),
+            Tag::new(*b"B2A1", b2a()),
         ],
     }
 }
@@ -726,7 +726,7 @@ fn cmyk_mix_profile(curve: &gamut_icc::Curve) -> IccProfile {
 fn rgb_xyz_toe_profile() -> IccProfile {
     use gamut_icc::{
         Clut, ClutPrecision, ColorSpace, CurveOrParametric, DeviceClass, LutAToB, LutBToA,
-        ProfileHeader, Signature, TagData,
+        ProfileHeader, Tag, TagData,
     };
     let pass3 = |out_of: fn(u16, u16, u16) -> [u16; 3]| {
         let mut samples = Vec::new();
@@ -773,7 +773,7 @@ fn rgb_xyz_toe_profile() -> IccProfile {
     header.version.major = 2;
     IccProfile {
         header,
-        tags: vec![(Signature(*b"A2B0"), a2b), (Signature(*b"B2A0"), b2a)],
+        tags: vec![Tag::new(*b"A2B0", a2b), Tag::new(*b"B2A0", b2a)],
     }
 }
 

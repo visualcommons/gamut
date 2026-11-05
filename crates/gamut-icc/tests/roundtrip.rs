@@ -6,7 +6,7 @@
 
 use gamut_icc::{
     ColorSpace, DeviceClass, IccProfile, IccReader, IccWriter, ProfileHeader, ProfileId, Signature,
-    TagData, XyzNumber,
+    Tag, TagData, XyzNumber,
 };
 
 const D65: [f64; 2] = [0.3127, 0.3290];
@@ -119,8 +119,8 @@ fn raw_tags_round_trip_byte_exact() {
     // Start from a real profile, then inject an element of a type gamut-icc does not decode.
     let mut parsed = IccProfile::parse(&lcms2_oracle::srgb().to_bytes()).unwrap();
     let element = b"mpet\x00\x00\x00\x00opaque multiProcessElements payload".to_vec();
-    parsed.tags.push((
-        Signature(*b"mpet"),
+    parsed.tags.push(Tag::new(
+        *b"mpet",
         TagData::Raw {
             type_sig: Signature(*b"mpet"),
             bytes: element.clone(),
@@ -140,7 +140,7 @@ fn raw_tags_round_trip_byte_exact() {
 fn from_scratch_profile_round_trips_strictly() {
     let profile = IccProfile {
         header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
-        tags: vec![(Signature(*b"wtpt"), TagData::Xyz(vec![XyzNumber::D50]))],
+        tags: vec![Tag::new(*b"wtpt", TagData::Xyz(vec![XyzNumber::D50]))],
     };
     let bytes = profile.to_bytes().expect("a fresh header must serialize");
     let reparsed = IccReader::new()
@@ -159,8 +159,8 @@ fn from_scratch_profile_round_trips_strictly() {
 #[test]
 fn duplicate_tags_are_rejected_on_write() {
     let mut parsed = IccProfile::parse(&lcms2_oracle::srgb().to_bytes()).unwrap();
-    let (sig, data) = parsed.tags[0].clone();
-    parsed.tags.push((sig, data));
+    let duplicate = parsed.tags[0].clone();
+    parsed.tags.push(duplicate);
     assert!(parsed.to_bytes().is_err());
 }
 

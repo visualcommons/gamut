@@ -86,7 +86,7 @@ fn compatible(a: ColorSpace, b: ColorSpace) -> bool {
     a == b
         || matches!(
             (a, b),
-            (ColorSpace::NColor(4), ColorSpace::Cmyk) | (ColorSpace::Cmyk, ColorSpace::NColor(4))
+            (ColorSpace::NColor4, ColorSpace::Cmyk) | (ColorSpace::Cmyk, ColorSpace::NColor4)
         )
         || matches!(
             (a, b),
@@ -409,7 +409,7 @@ impl IccTransform {
 #[cfg(test)]
 mod tests {
     use gamut_icc::{
-        Curve, CurveOrParametric, IccProfile, LutAToB, ProfileHeader, Signature, TagData, U8Fixed8,
+        Curve, CurveOrParametric, IccProfile, LutAToB, ProfileHeader, Tag, TagData, U8Fixed8,
         XyzNumber,
     };
 
@@ -432,15 +432,15 @@ mod tests {
         let xyz_tag = |v: [f64; 3]| TagData::Xyz(vec![XyzNumber::from_f64(v)]);
         let gamma = || TagData::Curve(Curve::Gamma(U8Fixed8(0x0233)));
         let mut tags = vec![
-            (Signature(*b"rXYZ"), xyz_tag([0.5, 0.25, 0.0625])),
-            (Signature(*b"gXYZ"), xyz_tag([0.375, 0.625, 0.125])),
-            (Signature(*b"bXYZ"), xyz_tag([0.125, 0.125, 0.625])),
-            (Signature(*b"rTRC"), gamma()),
-            (Signature(*b"gTRC"), gamma()),
-            (Signature(*b"bTRC"), gamma()),
+            Tag::new(*b"rXYZ", xyz_tag([0.5, 0.25, 0.0625])),
+            Tag::new(*b"gXYZ", xyz_tag([0.375, 0.625, 0.125])),
+            Tag::new(*b"bXYZ", xyz_tag([0.125, 0.125, 0.625])),
+            Tag::new(*b"rTRC", gamma()),
+            Tag::new(*b"gTRC", gamma()),
+            Tag::new(*b"bTRC", gamma()),
         ];
         if let Some(white) = wtpt {
-            tags.push((Signature(*b"wtpt"), xyz_tag(white)));
+            tags.push(Tag::new(*b"wtpt", xyz_tag(white)));
         }
         IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
@@ -455,8 +455,8 @@ mod tests {
         header.pcs = ColorSpace::Lab;
         IccProfile {
             header,
-            tags: vec![(
-                Signature(*b"A2B0"),
+            tags: vec![Tag::new(
+                *b"A2B0",
                 TagData::LutAToB(LutAToB {
                     input_channels: 3,
                     output_channels: 3,
@@ -484,8 +484,8 @@ mod tests {
         }
         IccProfile {
             header,
-            tags: vec![(
-                Signature(*b"A2B0"),
+            tags: vec![Tag::new(
+                *b"A2B0",
                 TagData::LutAToB(LutAToB {
                     input_channels: 3,
                     output_channels: 3,
@@ -756,12 +756,12 @@ mod tests {
     #[test]
     fn compatible_matches_lcms2s_table() {
         assert!(compatible(ColorSpace::Rgb, ColorSpace::Rgb));
-        assert!(compatible(ColorSpace::Cmyk, ColorSpace::NColor(4)));
-        assert!(compatible(ColorSpace::NColor(4), ColorSpace::Cmyk));
+        assert!(compatible(ColorSpace::Cmyk, ColorSpace::NColor4));
+        assert!(compatible(ColorSpace::NColor4, ColorSpace::Cmyk));
         assert!(compatible(ColorSpace::Xyz, ColorSpace::Lab));
         assert!(compatible(ColorSpace::Lab, ColorSpace::Xyz));
         assert!(!compatible(ColorSpace::Rgb, ColorSpace::Cmyk));
-        assert!(!compatible(ColorSpace::NColor(3), ColorSpace::Cmyk));
+        assert!(!compatible(ColorSpace::NColor3, ColorSpace::Cmyk));
         assert!(!compatible(ColorSpace::Lab, ColorSpace::Rgb));
     }
 
@@ -770,7 +770,7 @@ mod tests {
         // The AddConversion default-arm quirk: 4CLR≡CMYK passes `compatible` but cannot
         // bridge a conversion hop.
         let (m, off) = IDENTITY;
-        let err = pcs_seam(ColorSpace::Cmyk, ColorSpace::NColor(4), m, off).unwrap_err();
+        let err = pcs_seam(ColorSpace::Cmyk, ColorSpace::NColor4, m, off).unwrap_err();
         assert_eq!(
             err.to_string(),
             "cmm: profile chain mismatch (device-space hop cannot bridge distinct colour spaces)"

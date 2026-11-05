@@ -689,12 +689,12 @@ mod tests {
     fn a_model_that_does_not_serialize_is_invalid_input_with_the_facade_detail() {
         use gamut_metadata::Metadata;
         use gamut_metadata::icc::{
-            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Signature, TagData,
+            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Tag, TagData,
         };
         // The facade's own serialization failure: an ICC model with a duplicate tag signature is
         // rejected by `gamut-icc`'s writer (ICC.1:2022 §7.3), and the encoder reports it as this
         // crate's error with the facade's message carried as detail.
-        let duplicate = (Signature(*b"wtpt"), TagData::Xyz(Vec::new()));
+        let duplicate = Tag::new(*b"wtpt", TagData::Xyz(Vec::new()));
         let bad_icc = IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
             tags: vec![duplicate.clone(), duplicate],

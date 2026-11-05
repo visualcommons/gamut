@@ -33,7 +33,7 @@
 
 use gamut_icc::{
     ColorSpace, Curve, CurveOrParametric, DeviceClass, IccProfile, LutAToB, ProfileHeader,
-    RenderingIntent, Signature, TagData,
+    RenderingIntent, Tag, TagData,
 };
 
 use crate::bpc;
@@ -65,8 +65,8 @@ fn lab_connection_profile() -> IccProfile {
     header.pcs = ColorSpace::Lab;
     IccProfile {
         header,
-        tags: vec![(
-            Signature(*b"A2B0"),
+        tags: vec![Tag::new(
+            *b"A2B0",
             TagData::LutAToB(LutAToB {
                 input_channels: 3,
                 output_channels: 3,
@@ -250,21 +250,18 @@ mod tests {
         IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
             tags: vec![
-                (
-                    Signature(*b"rXYZ"),
-                    xyz_tag([0.5 * gain, 0.25 * gain, 0.0625 * gain]),
-                ),
-                (
-                    Signature(*b"gXYZ"),
+                Tag::new(*b"rXYZ", xyz_tag([0.5 * gain, 0.25 * gain, 0.0625 * gain])),
+                Tag::new(
+                    *b"gXYZ",
                     xyz_tag([0.375 * gain, 0.625 * gain, 0.125 * gain]),
                 ),
-                (
-                    Signature(*b"bXYZ"),
+                Tag::new(
+                    *b"bXYZ",
                     xyz_tag([0.125 * gain, 0.125 * gain, 0.625 * gain]),
                 ),
-                (Signature(*b"rTRC"), gamma()),
-                (Signature(*b"gTRC"), gamma()),
-                (Signature(*b"bTRC"), gamma()),
+                Tag::new(*b"rTRC", gamma()),
+                Tag::new(*b"gTRC", gamma()),
+                Tag::new(*b"bTRC", gamma()),
             ],
         }
     }
@@ -359,8 +356,8 @@ mod tests {
         // though the proof still links through its remaining (LUT-free) tags... it cannot
         // link at all then — so pin the threshold rule on a LUT-bearing proof instead.
         let mut lut_proof = scaled_shaper(0.5);
-        lut_proof.tags.push((
-            Signature(*b"A2B1"),
+        lut_proof.tags.push(Tag::new(
+            *b"A2B1",
             TagData::LutAToB(LutAToB {
                 input_channels: 3,
                 output_channels: 3,
@@ -383,9 +380,9 @@ mod tests {
         assert_eq!(check.threshold, SHAPER_THRESHOLD);
         // A proof with ONLY LUT tags gets the loose threshold.
         let mut bare_lut = lut_proof.clone();
-        bare_lut.tags.retain(|(sig, _)| sig.0 == *b"A2B1");
-        bare_lut.tags.push((
-            Signature(*b"B2A1"),
+        bare_lut.tags.retain(|tag| tag.signature.0 == *b"A2B1");
+        bare_lut.tags.push(Tag::new(
+            *b"B2A1",
             TagData::LutBToA(gamut_icc::LutBToA {
                 input_channels: 3,
                 output_channels: 3,

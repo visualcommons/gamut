@@ -77,7 +77,7 @@ pub(crate) fn absolute_scaling(src: &IccProfile, dst: &IccProfile) -> [[f64; 3];
 
 #[cfg(test)]
 mod tests {
-    use gamut_icc::{ColorSpace, Curve, IccProfile, ProfileHeader, Signature, XyzNumber};
+    use gamut_icc::{ColorSpace, Curve, IccProfile, ProfileHeader, Tag, XyzNumber};
 
     use super::*;
 
@@ -89,7 +89,7 @@ mod tests {
         header.version.major = major;
         let mut tags = Vec::new();
         if let Some(data) = wtpt {
-            tags.push((Signature(*b"wtpt"), data));
+            tags.push(Tag::new(*b"wtpt", data));
         }
         IccProfile { header, tags }
     }

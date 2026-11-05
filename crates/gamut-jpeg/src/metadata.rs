@@ -141,9 +141,7 @@ impl JpegEncoder {
 mod tests {
     use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef};
     use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
-    use gamut_metadata::icc::{
-        ColorSpace, DeviceClass, IccProfile, ProfileHeader, Signature, TagData,
-    };
+    use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader, Tag, TagData};
     use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
 
     use super::*;
@@ -325,7 +323,7 @@ mod tests {
         // The facade's own serialization failure: an ICC model with a duplicate tag signature is
         // rejected by `gamut-icc`'s writer (ICC.1:2022 §7.3), and the encoder reports it as this
         // crate's error with the facade's message carried as detail.
-        let duplicate = (Signature(*b"wtpt"), TagData::Xyz(Vec::new()));
+        let duplicate = Tag::new(*b"wtpt", TagData::Xyz(Vec::new()));
         let bad_icc = IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
             tags: vec![duplicate.clone(), duplicate],

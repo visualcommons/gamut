@@ -622,8 +622,8 @@ mod tests {
 #[cfg(test)]
 mod icc_transform_tests {
     use gamut_icc::{
-        ColorSpace, Curve, DeviceClass, IccProfile, ProfileHeader, RenderingIntent, Signature,
-        TagData, U8Fixed8, XyzNumber,
+        ColorSpace, Curve, DeviceClass, IccProfile, ProfileHeader, RenderingIntent, Tag, TagData,
+        U8Fixed8, XyzNumber,
     };
 
     use super::{IccTransform, PipelineOptimization, Transform, TransformOptions, is_empty_layer};
@@ -636,15 +636,15 @@ mod icc_transform_tests {
     fn rgb_shaper(trc: TagData, wtpt: Option<[f64; 3]>) -> IccProfile {
         let xyz_tag = |v: [f64; 3]| TagData::Xyz(vec![XyzNumber::from_f64(v)]);
         let mut tags = vec![
-            (Signature(*b"rXYZ"), xyz_tag([0.5, 0.25, 0.0625])),
-            (Signature(*b"gXYZ"), xyz_tag([0.375, 0.625, 0.125])),
-            (Signature(*b"bXYZ"), xyz_tag([0.125, 0.125, 0.625])),
-            (Signature(*b"rTRC"), trc.clone()),
-            (Signature(*b"gTRC"), trc.clone()),
-            (Signature(*b"bTRC"), trc),
+            Tag::new(*b"rXYZ", xyz_tag([0.5, 0.25, 0.0625])),
+            Tag::new(*b"gXYZ", xyz_tag([0.375, 0.625, 0.125])),
+            Tag::new(*b"bXYZ", xyz_tag([0.125, 0.125, 0.625])),
+            Tag::new(*b"rTRC", trc.clone()),
+            Tag::new(*b"gTRC", trc.clone()),
+            Tag::new(*b"bTRC", trc),
         ];
         if let Some(white) = wtpt {
-            tags.push((Signature(*b"wtpt"), xyz_tag(white)));
+            tags.push(Tag::new(*b"wtpt", xyz_tag(white)));
         }
         IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),

@@ -1164,7 +1164,7 @@ fn multiprofile_chain_matches_lcms2() {
 /// perceptual-tag fallback, differentially against `_cmsReadDevicelinkLUT`.
 fn rgb_to_lab_lut16_link() -> IccProfile {
     use gamut_icc::{
-        ColorSpace, DeviceClass, Lut16, Matrix3x3, ProfileHeader, S15Fixed16, Signature, TagData,
+        ColorSpace, DeviceClass, Lut16, Matrix3x3, ProfileHeader, S15Fixed16, Tag, TagData,
     };
     let identity3x3 = {
         let mut elements = [S15Fixed16(0); 9];
@@ -1213,7 +1213,7 @@ fn rgb_to_lab_lut16_link() -> IccProfile {
     header.version.major = 2;
     IccProfile {
         header,
-        tags: vec![(Signature(*b"A2B0"), lut16)],
+        tags: vec![Tag::new(*b"A2B0", lut16)],
     }
 }
 
@@ -1600,13 +1600,14 @@ fn reopen_builtin(profile: &IccProfile) -> (IccProfile, Profile) {
 /// the battery's TIGHT and LOOSE oracle configurations over the same 60-pixel sweep. Returns
 /// the (TIGHT, LOOSE) worst cells. lcms2 never reads the `cicp` tag: it interpolates the TRCs.
 fn cicp_pairs(pairs: &[(&str, &str)], prefer_cicp_transfer: bool) -> (Worst, Worst) {
-    use gamut_icc::{BuiltinProfile, Cicp};
+    use gamut_core::Cicp;
+    use gamut_icc::BuiltinProfile;
     set_quiet_log_handler();
     let bt709 = IccProfile::from_cicp(Cicp {
         colour_primaries: 1,
         transfer_characteristics: 1,
         matrix_coefficients: 0,
-        video_full_range_flag: 1,
+        full_range: true,
     })
     .expect("BT.709 is a built-in CICP triple");
     let members = [
@@ -1789,7 +1790,7 @@ const SAMPLED_SRGB_ENTRIES: u16 = 1024;
 fn srgb_v2_sampled() -> IccProfile {
     use gamut_color::transfer::srgb_eotf;
     use gamut_icc::{
-        BuiltinProfile, Curve, KnownTag, ProfileVersion, Signature, TagData, TextDescription,
+        BuiltinProfile, Curve, KnownTag, ProfileVersion, Signature, Tag, TagData, TextDescription,
     };
     let mut profile = IccProfile::builtin(BuiltinProfile::Srgb).unwrap();
     profile.header.version = ProfileVersion {
@@ -1812,10 +1813,17 @@ fn srgb_v2_sampled() -> IccProfile {
         .collect();
     let trc = TagData::Curve(Curve::Sampled(table));
     let is = |sig: Signature, tags: &[KnownTag]| tags.iter().any(|&t| Signature::from(t) == sig);
-    profile
-        .tags
-        .retain(|&(sig, _)| !is(sig, &[KnownTag::ChromaticAdaptation, KnownTag::Cicp]));
-    for (sig, data) in &mut profile.tags {
+    profile.tags.retain(|tag| {
+        !is(
+            tag.signature,
+            &[KnownTag::ChromaticAdaptation, KnownTag::Cicp],
+        )
+    });
+    for Tag {
+        signature: sig,
+        data,
+    } in &mut profile.tags
+    {
         if is(
             *sig,
             &[KnownTag::RedTrc, KnownTag::GreenTrc, KnownTag::BlueTrc],

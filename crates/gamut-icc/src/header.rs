@@ -266,23 +266,40 @@ impl core::fmt::Display for ProfileVersion {
     }
 }
 
-/// The profile/device class (ICC.1:2022 §7.2.5).
+/// The profile/device class (ICC.1:2022 §7.2.5, Table 18).
+///
+/// Each discriminant is the class's four-byte signature as a big-endian `u32` — the header word
+/// itself — so `class as u32` is the value a C caller writes and reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
 pub enum DeviceClass {
     /// `scnr` — input device (scanner, camera).
-    Input,
+    Input = u32::from_be_bytes(*b"scnr"),
     /// `mntr` — display device (monitor).
-    Display,
+    Display = u32::from_be_bytes(*b"mntr"),
     /// `prtr` — output device (printer).
-    Output,
+    Output = u32::from_be_bytes(*b"prtr"),
     /// `link` — a device link (a fused device-to-device transform).
-    DeviceLink,
+    DeviceLink = u32::from_be_bytes(*b"link"),
     /// `spac` — a colour-space conversion profile.
-    ColorSpace,
+    ColorSpace = u32::from_be_bytes(*b"spac"),
     /// `abst` — an abstract profile.
-    Abstract,
+    Abstract = u32::from_be_bytes(*b"abst"),
     /// `nmcl` — a named-colour profile.
-    NamedColor,
+    NamedColor = u32::from_be_bytes(*b"nmcl"),
+}
+
+impl DeviceClass {
+    /// Every class §7.2.5 defines, in Table 18's order.
+    const ALL: [Self; 7] = [
+        Self::Input,
+        Self::Display,
+        Self::Output,
+        Self::DeviceLink,
+        Self::ColorSpace,
+        Self::Abstract,
+        Self::NamedColor,
+    ];
 }
 
 impl TryFrom<Signature> for DeviceClass {
@@ -294,127 +311,114 @@ impl TryFrom<Signature> for DeviceClass {
     ///
     /// Returns [`IccError::Malformed`] if the signature is not one of the seven defined classes.
     fn try_from(sig: Signature) -> Result<Self> {
-        Ok(match &sig.0 {
-            b"scnr" => Self::Input,
-            b"mntr" => Self::Display,
-            b"prtr" => Self::Output,
-            b"link" => Self::DeviceLink,
-            b"spac" => Self::ColorSpace,
-            b"abst" => Self::Abstract,
-            b"nmcl" => Self::NamedColor,
-            _ => return Err(IccError::Malformed("icc: unknown device class")),
-        })
+        Self::ALL
+            .into_iter()
+            .find(|&class| Signature::from(class) == sig)
+            .ok_or(IccError::Malformed("icc: unknown device class"))
     }
 }
 
 impl From<DeviceClass> for Signature {
     /// The four-byte signature for the class.
     fn from(class: DeviceClass) -> Signature {
-        Signature(match class {
-            DeviceClass::Input => *b"scnr",
-            DeviceClass::Display => *b"mntr",
-            DeviceClass::Output => *b"prtr",
-            DeviceClass::DeviceLink => *b"link",
-            DeviceClass::ColorSpace => *b"spac",
-            DeviceClass::Abstract => *b"abst",
-            DeviceClass::NamedColor => *b"nmcl",
-        })
+        Signature::from(class as u32)
     }
 }
 
-/// A colour-space signature (ICC.1:2022 §7.2.6), used for both the data colour space and the PCS.
+/// A colour-space signature (ICC.1:2022 §7.2.6, Table 19), used for both the data colour space
+/// and the PCS.
+///
+/// Each discriminant is the space's four-byte signature as a big-endian `u32` — the header word
+/// itself — so `space as u32` is the value a C caller writes and reads. The `nCLR` family is one
+/// variant per colorant count, [`NColor2`](Self::NColor2) (`2CLR`) to
+/// [`NColor15`](Self::NColor15) (`FCLR`). Marked `#[non_exhaustive]`: ICC revisions have grown
+/// Table 19 before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
 pub enum ColorSpace {
     /// `XYZ ` — CIE XYZ (a valid PCS).
-    Xyz,
+    Xyz = u32::from_be_bytes(*b"XYZ "),
     /// `Lab ` — CIE L\*a\*b\* (a valid PCS).
-    Lab,
+    Lab = u32::from_be_bytes(*b"Lab "),
     /// `Luv ` — CIE L\*u\*v\*.
-    Luv,
+    Luv = u32::from_be_bytes(*b"Luv "),
     /// `YCbr` — YCbCr.
-    YCbCr,
+    YCbCr = u32::from_be_bytes(*b"YCbr"),
     /// `Yxy ` — CIE Yxy.
-    Yxy,
+    Yxy = u32::from_be_bytes(*b"Yxy "),
     /// `RGB ` — RGB.
-    Rgb,
+    Rgb = u32::from_be_bytes(*b"RGB "),
     /// `GRAY` — grayscale.
-    Gray,
+    Gray = u32::from_be_bytes(*b"GRAY"),
     /// `HSV ` — HSV.
-    Hsv,
+    Hsv = u32::from_be_bytes(*b"HSV "),
     /// `HLS ` — HLS.
-    Hls,
+    Hls = u32::from_be_bytes(*b"HLS "),
     /// `CMYK` — CMYK.
-    Cmyk,
+    Cmyk = u32::from_be_bytes(*b"CMYK"),
     /// `CMY ` — CMY.
-    Cmy,
-    /// `nCLR` — an `n`-colorant space, `n` in 2–15 (e.g. `3CLR`, `ACLR`).
-    NColor(u8),
-}
-
-impl TryFrom<Signature> for ColorSpace {
-    type Error = IccError;
-
-    /// Maps a colour-space signature to its variant.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`IccError::Malformed`] if the signature is neither a defined space nor a valid
-    /// `nCLR` (2–15 colorants).
-    fn try_from(sig: Signature) -> Result<Self> {
-        let s = &sig.0;
-        Ok(match s {
-            b"XYZ " => Self::Xyz,
-            b"Lab " => Self::Lab,
-            b"Luv " => Self::Luv,
-            b"YCbr" => Self::YCbCr,
-            b"Yxy " => Self::Yxy,
-            b"RGB " => Self::Rgb,
-            b"GRAY" => Self::Gray,
-            b"HSV " => Self::Hsv,
-            b"HLS " => Self::Hls,
-            b"CMYK" => Self::Cmyk,
-            b"CMY " => Self::Cmy,
-            _ if s[1] == b'C' && s[2] == b'L' && s[3] == b'R' => {
-                let n = match s[0] {
-                    d @ b'2'..=b'9' => d - b'0',
-                    d @ b'A'..=b'F' => d - b'A' + 10,
-                    _ => return Err(IccError::Malformed("icc: unknown colour space")),
-                };
-                Self::NColor(n)
-            }
-            _ => return Err(IccError::Malformed("icc: unknown colour space")),
-        })
-    }
-}
-
-impl From<ColorSpace> for Signature {
-    /// The four-byte signature for the colour space.
-    fn from(space: ColorSpace) -> Signature {
-        match space {
-            ColorSpace::Xyz => Signature(*b"XYZ "),
-            ColorSpace::Lab => Signature(*b"Lab "),
-            ColorSpace::Luv => Signature(*b"Luv "),
-            ColorSpace::YCbCr => Signature(*b"YCbr"),
-            ColorSpace::Yxy => Signature(*b"Yxy "),
-            ColorSpace::Rgb => Signature(*b"RGB "),
-            ColorSpace::Gray => Signature(*b"GRAY"),
-            ColorSpace::Hsv => Signature(*b"HSV "),
-            ColorSpace::Hls => Signature(*b"HLS "),
-            ColorSpace::Cmyk => Signature(*b"CMYK"),
-            ColorSpace::Cmy => Signature(*b"CMY "),
-            ColorSpace::NColor(n) => {
-                let d = if n < 10 {
-                    b'0'.wrapping_add(n)
-                } else {
-                    b'A'.wrapping_add(n.wrapping_sub(10))
-                };
-                Signature([d, b'C', b'L', b'R'])
-            }
-        }
-    }
+    Cmy = u32::from_be_bytes(*b"CMY "),
+    /// `2CLR` — two-colour.
+    NColor2 = u32::from_be_bytes(*b"2CLR"),
+    /// `3CLR` — three-colour.
+    NColor3 = u32::from_be_bytes(*b"3CLR"),
+    /// `4CLR` — four-colour.
+    NColor4 = u32::from_be_bytes(*b"4CLR"),
+    /// `5CLR` — five-colour.
+    NColor5 = u32::from_be_bytes(*b"5CLR"),
+    /// `6CLR` — six-colour.
+    NColor6 = u32::from_be_bytes(*b"6CLR"),
+    /// `7CLR` — seven-colour.
+    NColor7 = u32::from_be_bytes(*b"7CLR"),
+    /// `8CLR` — eight-colour.
+    NColor8 = u32::from_be_bytes(*b"8CLR"),
+    /// `9CLR` — nine-colour.
+    NColor9 = u32::from_be_bytes(*b"9CLR"),
+    /// `ACLR` — ten-colour.
+    NColor10 = u32::from_be_bytes(*b"ACLR"),
+    /// `BCLR` — eleven-colour.
+    NColor11 = u32::from_be_bytes(*b"BCLR"),
+    /// `CCLR` — twelve-colour.
+    NColor12 = u32::from_be_bytes(*b"CCLR"),
+    /// `DCLR` — thirteen-colour.
+    NColor13 = u32::from_be_bytes(*b"DCLR"),
+    /// `ECLR` — fourteen-colour.
+    NColor14 = u32::from_be_bytes(*b"ECLR"),
+    /// `FCLR` — fifteen-colour.
+    NColor15 = u32::from_be_bytes(*b"FCLR"),
 }
 
 impl ColorSpace {
+    /// Every space §7.2.6 defines, in Table 19's order, closing with the `nCLR` family.
+    const ALL: [Self; 25] = [
+        Self::Xyz,
+        Self::Lab,
+        Self::Luv,
+        Self::YCbCr,
+        Self::Yxy,
+        Self::Rgb,
+        Self::Gray,
+        Self::Hsv,
+        Self::Hls,
+        Self::Cmyk,
+        Self::Cmy,
+        Self::NColor2,
+        Self::NColor3,
+        Self::NColor4,
+        Self::NColor5,
+        Self::NColor6,
+        Self::NColor7,
+        Self::NColor8,
+        Self::NColor9,
+        Self::NColor10,
+        Self::NColor11,
+        Self::NColor12,
+        Self::NColor13,
+        Self::NColor14,
+        Self::NColor15,
+    ];
+
     /// The number of device channels (components) a colour in this space carries — the sample
     /// count per pixel a CMM transform for this space consumes or produces (ICC.1:2022 Table 19).
     #[must_use]
@@ -431,22 +435,71 @@ impl ColorSpace {
             | Self::Cmy => 3,
             Self::Gray => 1,
             Self::Cmyk => 4,
-            Self::NColor(n) => *n,
+            Self::NColor2 => 2,
+            Self::NColor3 => 3,
+            Self::NColor4 => 4,
+            Self::NColor5 => 5,
+            Self::NColor6 => 6,
+            Self::NColor7 => 7,
+            Self::NColor8 => 8,
+            Self::NColor9 => 9,
+            Self::NColor10 => 10,
+            Self::NColor11 => 11,
+            Self::NColor12 => 12,
+            Self::NColor13 => 13,
+            Self::NColor14 => 14,
+            Self::NColor15 => 15,
         }
+    }
+
+    /// Whether this is one of the `nCLR` multi-colorant spaces ([`NColor2`](Self::NColor2) to
+    /// [`NColor15`](Self::NColor15)) — the "xCLR" family §8.5.2 and §8.6 condition their colorant
+    /// table requirements on.
+    #[must_use]
+    pub fn is_n_color(self) -> bool {
+        Signature::from(self).0[1..] == *b"CLR"
     }
 }
 
-/// The default rendering intent (ICC.1:2022 §7.2.15).
+impl TryFrom<Signature> for ColorSpace {
+    type Error = IccError;
+
+    /// Maps a colour-space signature to its variant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IccError::Malformed`] if the signature is neither a defined space nor a valid
+    /// `nCLR` (2–15 colorants).
+    fn try_from(sig: Signature) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|&space| Signature::from(space) == sig)
+            .ok_or(IccError::Malformed("icc: unknown colour space"))
+    }
+}
+
+impl From<ColorSpace> for Signature {
+    /// The four-byte signature for the colour space.
+    fn from(space: ColorSpace) -> Signature {
+        Signature::from(space as u32)
+    }
+}
+
+/// The default rendering intent (ICC.1:2022 §7.2.15, Table 23).
+///
+/// Each discriminant is the intent's header word, so `intent as u32` is the value a C caller
+/// writes and reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
 pub enum RenderingIntent {
     /// `0` — perceptual.
-    Perceptual,
+    Perceptual = 0,
     /// `1` — media-relative colorimetric.
-    MediaRelativeColorimetric,
+    MediaRelativeColorimetric = 1,
     /// `2` — saturation.
-    Saturation,
+    Saturation = 2,
     /// `3` — ICC-absolute colorimetric.
-    IccAbsoluteColorimetric,
+    IccAbsoluteColorimetric = 3,
 }
 
 impl TryFrom<u32> for RenderingIntent {
@@ -471,12 +524,7 @@ impl TryFrom<u32> for RenderingIntent {
 impl From<RenderingIntent> for u32 {
     /// The rendering-intent word for the variant.
     fn from(intent: RenderingIntent) -> u32 {
-        match intent {
-            RenderingIntent::Perceptual => 0,
-            RenderingIntent::MediaRelativeColorimetric => 1,
-            RenderingIntent::Saturation => 2,
-            RenderingIntent::IccAbsoluteColorimetric => 3,
-        }
+        intent as u32
     }
 }
 
@@ -636,77 +684,85 @@ mod tests {
         );
     }
 
+    /// Table 18's class signatures, written out from the spec rather than derived from the enum.
+    const DEVICE_CLASSES: [(DeviceClass, &[u8; 4]); 7] = [
+        (DeviceClass::Input, b"scnr"),
+        (DeviceClass::Display, b"mntr"),
+        (DeviceClass::Output, b"prtr"),
+        (DeviceClass::DeviceLink, b"link"),
+        (DeviceClass::ColorSpace, b"spac"),
+        (DeviceClass::Abstract, b"abst"),
+        (DeviceClass::NamedColor, b"nmcl"),
+    ];
+
+    /// Table 19's colour-space signatures and channel counts, written out from the spec.
+    const COLOR_SPACES: [(ColorSpace, &[u8; 4], u8); 25] = [
+        (ColorSpace::Xyz, b"XYZ ", 3),
+        (ColorSpace::Lab, b"Lab ", 3),
+        (ColorSpace::Luv, b"Luv ", 3),
+        (ColorSpace::YCbCr, b"YCbr", 3),
+        (ColorSpace::Yxy, b"Yxy ", 3),
+        (ColorSpace::Rgb, b"RGB ", 3),
+        (ColorSpace::Gray, b"GRAY", 1),
+        (ColorSpace::Hsv, b"HSV ", 3),
+        (ColorSpace::Hls, b"HLS ", 3),
+        (ColorSpace::Cmyk, b"CMYK", 4),
+        (ColorSpace::Cmy, b"CMY ", 3),
+        (ColorSpace::NColor2, b"2CLR", 2),
+        (ColorSpace::NColor3, b"3CLR", 3),
+        (ColorSpace::NColor4, b"4CLR", 4),
+        (ColorSpace::NColor5, b"5CLR", 5),
+        (ColorSpace::NColor6, b"6CLR", 6),
+        (ColorSpace::NColor7, b"7CLR", 7),
+        (ColorSpace::NColor8, b"8CLR", 8),
+        (ColorSpace::NColor9, b"9CLR", 9),
+        (ColorSpace::NColor10, b"ACLR", 10),
+        (ColorSpace::NColor11, b"BCLR", 11),
+        (ColorSpace::NColor12, b"CCLR", 12),
+        (ColorSpace::NColor13, b"DCLR", 13),
+        (ColorSpace::NColor14, b"ECLR", 14),
+        (ColorSpace::NColor15, b"FCLR", 15),
+    ];
+
     #[test]
-    fn device_class_signature_round_trip() {
-        for class in [
-            DeviceClass::Input,
-            DeviceClass::Display,
-            DeviceClass::Output,
-            DeviceClass::DeviceLink,
-            DeviceClass::ColorSpace,
-            DeviceClass::Abstract,
-            DeviceClass::NamedColor,
+    fn device_class_signatures_match_table_18() {
+        for (class, sig) in DEVICE_CLASSES {
+            assert_eq!(Signature::from(class), Signature(*sig), "{class:?}");
+            assert_eq!(class as u32, u32::from_be_bytes(*sig), "{class:?}");
+            assert_eq!(DeviceClass::try_from(Signature(*sig)).unwrap(), class);
+        }
+        let err = DeviceClass::try_from(Signature(*b"scnR")).unwrap_err();
+        assert_eq!(err.message(), "icc: unknown device class");
+    }
+
+    #[test]
+    fn color_space_signatures_match_table_19() {
+        for (space, sig, _) in COLOR_SPACES {
+            assert_eq!(Signature::from(space), Signature(*sig), "{space:?}");
+            assert_eq!(space as u32, u32::from_be_bytes(*sig), "{space:?}");
+            assert_eq!(ColorSpace::try_from(Signature(*sig)).unwrap(), space);
+        }
+        // Signatures that resemble `nCLR` but are not in Table 19 are rejected.
+        for bad in [
+            b"3xLR", b"3CxR", b"3CLx", b"3zzz", b"1CLR", b"GCLR", b"0CLR",
         ] {
-            assert_eq!(
-                DeviceClass::try_from(Signature::from(class)).unwrap(),
-                class
-            );
+            let err = ColorSpace::try_from(Signature(*bad)).unwrap_err();
+            assert_eq!(err.message(), "icc: unknown colour space", "{bad:?}");
         }
     }
 
     #[test]
-    fn color_space_signature_round_trip() {
-        let mut spaces = vec![
-            ColorSpace::Xyz,
-            ColorSpace::Lab,
-            ColorSpace::Luv,
-            ColorSpace::YCbCr,
-            ColorSpace::Yxy,
-            ColorSpace::Rgb,
-            ColorSpace::Gray,
-            ColorSpace::Hsv,
-            ColorSpace::Hls,
-            ColorSpace::Cmyk,
-            ColorSpace::Cmy,
-        ];
-        spaces.extend((2..=15).map(ColorSpace::NColor));
-        for space in spaces {
-            assert_eq!(ColorSpace::try_from(Signature::from(space)).unwrap(), space);
-        }
-        // Spot-check the nCLR signature encoding (decimal digit and hex letter).
-        assert_eq!(Signature::from(ColorSpace::NColor(3)), Signature(*b"3CLR"));
-        assert_eq!(Signature::from(ColorSpace::NColor(10)), Signature(*b"ACLR"));
-
-        // Signatures that resemble `nCLR` but break exactly one of the `_CLR` constraints must be
-        // rejected (each pins one conjunct of the recognition guard).
-        for bad in [b"3xLR", b"3CxR", b"3CLx", b"3zzz", b"1CLR"] {
-            assert!(
-                ColorSpace::try_from(Signature(*bad)).is_err(),
-                "{:?} should be rejected",
-                core::str::from_utf8(bad).unwrap()
-            );
+    fn is_n_color_is_the_clr_family() {
+        for (space, sig, _) in COLOR_SPACES {
+            assert_eq!(space.is_n_color(), sig[1..] == *b"CLR", "{space:?}");
         }
     }
 
     #[test]
     fn channel_count_covers_every_colour_space() {
-        for three in [
-            ColorSpace::Xyz,
-            ColorSpace::Lab,
-            ColorSpace::Luv,
-            ColorSpace::YCbCr,
-            ColorSpace::Yxy,
-            ColorSpace::Rgb,
-            ColorSpace::Hsv,
-            ColorSpace::Hls,
-            ColorSpace::Cmy,
-        ] {
-            assert_eq!(three.channel_count(), 3, "{three:?}");
+        for (space, _, channels) in COLOR_SPACES {
+            assert_eq!(space.channel_count(), channels, "{space:?}");
         }
-        assert_eq!(ColorSpace::Gray.channel_count(), 1);
-        assert_eq!(ColorSpace::Cmyk.channel_count(), 4);
-        assert_eq!(ColorSpace::NColor(2).channel_count(), 2);
-        assert_eq!(ColorSpace::NColor(15).channel_count(), 15);
     }
 
     #[test]
@@ -778,7 +834,9 @@ mod tests {
     #[test]
     fn rendering_intent_round_trip_and_range() {
         for value in 0..=3 {
-            assert_eq!(u32::from(RenderingIntent::try_from(value).unwrap()), value);
+            let intent = RenderingIntent::try_from(value).unwrap();
+            assert_eq!(u32::from(intent), value);
+            assert_eq!(intent as u32, value);
         }
         assert!(RenderingIntent::try_from(4u32).is_err());
     }

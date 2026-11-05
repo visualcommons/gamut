@@ -37,7 +37,8 @@ matrix/TRC display profile for a named space, and `IccProfile::from_cicp` does t
 H.273 code-point triple AVIF, HEIC and JXL usually signal instead of embedding a profile:
 
 ```rust
-use gamut_icc::{BuiltinProfile, Cicp, IccProfile};
+use gamut_core::Cicp;
+use gamut_icc::{BuiltinProfile, IccProfile};
 
 let p3 = IccProfile::builtin(BuiltinProfile::DisplayP3).expect("a modelled space");
 assert!(p3.validate().is_empty());
@@ -51,7 +52,7 @@ let signalled = Cicp {
     colour_primaries: 9,
     transfer_characteristics: 16,
     matrix_coefficients: 9,
-    video_full_range_flag: 0,
+    full_range: false,
 };
 assert!(IccProfile::from_cicp(signalled).is_some());
 assert!(IccProfile::from_cicp(Cicp { matrix_coefficients: 0, ..signalled }).is_none());

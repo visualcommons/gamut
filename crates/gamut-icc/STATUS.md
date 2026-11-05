@@ -64,7 +64,7 @@ exponent and the ROMM RGB `(g, a, b, c, d)` set, pinned by
 `adobe_rgb_eotf_standard` / `prophoto_rgb_eotf_standard` and by
 `oracle_uncoded_space_curves_match_gamut_color_through_lcms`; and the PCS D50 of §7.2.16, which is an ICC fact rather than
 a CIE one (see "PCS white" below), pinned by `colorants_sum_to_the_declared_media_white_point` and
-the lcms2 colorant oracle. `src/builtin.rs`'s module documentation tabulates the four. Colorimetry is not the only
+the lcms2 colorant oracle. `src/builtin/mod.rs`'s module documentation tabulates the four. Colorimetry is not the only
 reason to decline: `from_cicp` also refuses signalling this profile *shape* cannot carry, which is
 where narrow range lands — see "CICP fields the profile does not build from" below. `builtin`
 yields `Some` for every `BuiltinProfile` in this release and a test pins that.
@@ -116,7 +116,7 @@ and 5 have no `TransferCharacteristics` variant at all, while all four BT.709-fa
 (`gamut_color::transfer::bt709_eotf`, whose α and β — `BT709_ALPHA` / `BT709_BETA` — the
 parametric tag borrows rather than restates). All four are exactly encodable here as the one curve
 Table 3 defines. Each claim about gamut-color above is an assertion in the doctest on
-`src/builtin.rs`'s module documentation: which of the code points
+`src/builtin/mod.rs`'s module documentation: which of the code points
 `TransferCharacteristics::from_code_point` models, and that `standard_eotf_for` evaluates Table 3's
 `0.259719` at `V = 0.5` for each of the four.
 
@@ -169,7 +169,13 @@ and B under the others (0, 8, 16, 17; equations 27 to 29):
 | flag `1`, any coefficients | nothing | built; tag flag `1` |
 | flag `0`, luma–chroma coefficients (`9-16-9-0`, `1-13-6-0`) | Y, Cb, Cr — de-matrixed RGB is full scale | built, the same profile as flag `1`; tag flag `1` |
 | flag `0`, RGB coefficients (§10.3's `1-1-0-0`, `9-16-0-0`) | the RGB samples themselves | **declined** |
-| flag `0` under coefficient 2 (unknown) or a reserved one; any flag byte but `0`/`1` | unknown | **declined** |
+| flag `0` under coefficient 2 (unknown) or a reserved one | unknown | **declined** |
+
+A `cicpType` element is modelled as the workspace's one `gamut_core::Cicp`, whose flag is a
+`bool`. §10.3 encodes the flag "as specified in Recommendation ITU-T H.273", where §8.3 makes it a
+single bit, so the reader rejects an element whose flag byte is 2–255 — the one input that model
+stops accepting — and the writer refuses a code point above 255, which `Cicp`'s `u16` fields can
+hold but §10.3's `uInt8Number` cannot.
 
 The tag writes `1` for the admitted narrow-range case because it describes the RGB the profile
 applies to, the same reason it writes `MatrixCoefficients` `0`: once the coefficients are `0`, a
@@ -274,7 +280,7 @@ neutral axis at diffuse white.
 
 ## Conformance validation
 
-`IccProfile::validate` reports, as `Conformance` entries, the §8 required tags a profile's device
+`IccProfile::validate` reports, as `ConformanceIssue` entries, the §8 required tags a profile's device
 class is missing and — the one tag *content* rule it checks — §10.3's clause tying a `cicp` tag's
 `MatrixCoefficients` to the header's data colour space: `0` for RGB and XYZ, non-zero for YCbCr.
 Both directions are `shall`s, so a breach is reported with the same weight as a missing required

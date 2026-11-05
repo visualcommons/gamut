@@ -27,7 +27,7 @@ use gamut_color::transfer::srgb_eotf;
 use gamut_icc::{
     BuiltinProfile, Clut, ClutPrecision, ColorSpace, Curve, CurveOrParametric, DeviceClass,
     IccProfile, IccWriter, KnownTag, LutAToB, LutBToA, Mluc, MlucRecord, ProfileHeader,
-    ProfileVersion, Signature, TagData, TextDescription, U8Fixed8, XyzNumber,
+    ProfileVersion, Signature, Tag, TagData, TextDescription, U8Fixed8, XyzNumber,
 };
 
 /// Which battery entry a [`BatteryProfile`] is. Append-only: the GUI keys its selectors on it.
@@ -249,11 +249,15 @@ fn srgb_v2() -> Result<IccProfile, String> {
         ascii: "sRGB (v2, sampled TRC)".to_owned(),
         ..TextDescription::default()
     });
-    profile.tags.retain(|(sig, _)| {
+    profile.tags.retain(|Tag { signature: sig, .. }| {
         *sig != Signature::from(KnownTag::ChromaticAdaptation)
             && *sig != Signature::from(KnownTag::Cicp)
     });
-    for (sig, data) in &mut profile.tags {
+    for Tag {
+        signature: sig,
+        data,
+    } in &mut profile.tags
+    {
         let tag = *sig;
         if [KnownTag::RedTrc, KnownTag::GreenTrc, KnownTag::BlueTrc]
             .iter()
@@ -316,18 +320,18 @@ fn camera_a() -> IccProfile {
     IccProfile {
         header: input_header(ColorSpace::Xyz),
         tags: vec![
-            (KnownTag::ProfileDescription.into(), mluc("Camera A")),
-            (KnownTag::Copyright.into(), mluc(COPYRIGHT)),
-            (
-                KnownTag::MediaWhitePoint.into(),
+            Tag::new(KnownTag::ProfileDescription, mluc("Camera A")),
+            Tag::new(KnownTag::Copyright, mluc(COPYRIGHT)),
+            Tag::new(
+                KnownTag::MediaWhitePoint,
                 TagData::Xyz(vec![XyzNumber::D50]),
             ),
-            (KnownTag::RedColorant.into(), column(0)),
-            (KnownTag::GreenColorant.into(), column(1)),
-            (KnownTag::BlueColorant.into(), column(2)),
-            (KnownTag::RedTrc.into(), linear.clone()),
-            (KnownTag::GreenTrc.into(), linear.clone()),
-            (KnownTag::BlueTrc.into(), linear),
+            Tag::new(KnownTag::RedColorant, column(0)),
+            Tag::new(KnownTag::GreenColorant, column(1)),
+            Tag::new(KnownTag::BlueColorant, column(2)),
+            Tag::new(KnownTag::RedTrc, linear.clone()),
+            Tag::new(KnownTag::GreenTrc, linear.clone()),
+            Tag::new(KnownTag::BlueTrc, linear),
         ],
     }
 }
@@ -355,13 +359,13 @@ fn camera_b() -> IccProfile {
     IccProfile {
         header: input_header(ColorSpace::Lab),
         tags: vec![
-            (KnownTag::ProfileDescription.into(), mluc("Camera B")),
-            (KnownTag::Copyright.into(), mluc(COPYRIGHT)),
-            (
-                KnownTag::MediaWhitePoint.into(),
+            Tag::new(KnownTag::ProfileDescription, mluc("Camera B")),
+            Tag::new(KnownTag::Copyright, mluc(COPYRIGHT)),
+            Tag::new(
+                KnownTag::MediaWhitePoint,
                 TagData::Xyz(vec![XyzNumber::D50]),
             ),
-            (KnownTag::AToB0.into(), a2b0),
+            Tag::new(KnownTag::AToB0, a2b0),
         ],
     }
 }
@@ -590,22 +594,19 @@ fn printer() -> IccProfile {
     IccProfile {
         header,
         tags: vec![
-            (
-                KnownTag::ProfileDescription.into(),
-                mluc("Synthetic CMYK printer"),
-            ),
-            (KnownTag::Copyright.into(), mluc(COPYRIGHT)),
-            (
-                KnownTag::MediaWhitePoint.into(),
+            Tag::new(KnownTag::ProfileDescription, mluc("Synthetic CMYK printer")),
+            Tag::new(KnownTag::Copyright, mluc(COPYRIGHT)),
+            Tag::new(
+                KnownTag::MediaWhitePoint,
                 TagData::Xyz(vec![XyzNumber::from_f64(PAPER_WHITE)]),
             ),
-            (KnownTag::AToB0.into(), a2b.clone()),
-            (KnownTag::AToB1.into(), a2b.clone()),
-            (KnownTag::AToB2.into(), a2b),
-            (KnownTag::BToA0.into(), b2a(IntentMap::Perceptual)),
-            (KnownTag::BToA1.into(), b2a(IntentMap::Colorimetric)),
-            (KnownTag::BToA2.into(), b2a(IntentMap::Saturation)),
-            (KnownTag::Gamut.into(), gamt),
+            Tag::new(KnownTag::AToB0, a2b.clone()),
+            Tag::new(KnownTag::AToB1, a2b.clone()),
+            Tag::new(KnownTag::AToB2, a2b),
+            Tag::new(KnownTag::BToA0, b2a(IntentMap::Perceptual)),
+            Tag::new(KnownTag::BToA1, b2a(IntentMap::Colorimetric)),
+            Tag::new(KnownTag::BToA2, b2a(IntentMap::Saturation)),
+            Tag::new(KnownTag::Gamut, gamt),
         ],
     }
 }

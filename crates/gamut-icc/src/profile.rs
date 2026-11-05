@@ -6,6 +6,30 @@ use crate::primitives::Signature;
 use crate::tag_types::{TagData, decode_tag};
 use crate::tags::{parse_tag_table, tag_table_end};
 
+/// One row of a profile's tag table with its element decoded: the tag's [`Signature`] and the
+/// [`TagData`] it points at.
+///
+/// The on-disk offset and size are not part of the model — the serializer lays them out afresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tag {
+    /// The tag signature (ICC.1:2022 §9), e.g. `wtpt`; the key [`IccProfile::get`] looks up.
+    pub signature: Signature,
+    /// The tag's decoded element data.
+    pub data: TagData,
+}
+
+impl Tag {
+    /// A tag with the given signature — a [`crate::KnownTag`], four bytes, or a [`Signature`] —
+    /// and decoded data.
+    #[must_use]
+    pub fn new(signature: impl Into<Signature>, data: TagData) -> Self {
+        Self {
+            signature: signature.into(),
+            data,
+        }
+    }
+}
+
 /// A parsed ICC profile: the [`ProfileHeader`] plus its tags, decoded and in file order.
 ///
 /// Parse with [`IccProfile::parse`]; look up a tag with [`IccProfile::get`]. The on-disk tag table
@@ -15,8 +39,8 @@ use crate::tags::{parse_tag_table, tag_table_end};
 pub struct IccProfile {
     /// The 128-byte profile header.
     pub header: ProfileHeader,
-    /// The profile's tags in file order, each a `(signature, decoded data)` pair.
-    pub tags: Vec<(Signature, TagData)>,
+    /// The profile's tags in file order.
+    pub tags: Vec<Tag>,
 }
 
 impl IccProfile {
@@ -40,8 +64,8 @@ impl IccProfile {
     ///
     /// Returns [`IccError::Malformed`] if the model violates an invariant serialization relies on:
     /// a duplicate tag signature, LUT tables or curve sets whose lengths contradict their declared
-    /// channel counts, an 8-bit CLUT sample over 255, an over-long fixed-width name field, or
-    /// non-ASCII text in an ASCII element. These are only reachable with hand-built data — the
+    /// channel counts, an 8-bit CLUT sample over 255, a `cicp` code point over 255, an over-long
+    /// fixed-width name field, or non-ASCII text in an ASCII element. These are only reachable with hand-built data — the
     /// decoder establishes every such invariant, so a profile produced by [`IccProfile::parse`]
     /// always serializes.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -77,7 +101,10 @@ impl IccProfile {
             let element = bytes
                 .get(start..end)
                 .ok_or_else(|| at_tag(IccError::Malformed("icc: tag data out of bounds")))?;
-            tags.push((entry.signature, decode_tag(element).map_err(at_tag)?));
+            tags.push(Tag {
+                signature: entry.signature,
+                data: decode_tag(element).map_err(at_tag)?,
+            });
         }
         Ok(Self { header, tags })
     }
@@ -91,8 +118,8 @@ impl IccProfile {
         let signature = signature.into();
         self.tags
             .iter()
-            .find(|(s, _)| *s == signature)
-            .map(|(_, data)| data)
+            .find(|tag| tag.signature == signature)
+            .map(|tag| &tag.data)
     }
 }
 

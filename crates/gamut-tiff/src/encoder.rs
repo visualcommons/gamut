@@ -1438,7 +1438,7 @@ mod typed {
         use gamut_ifd::ByteOrder;
         use gamut_metadata::exif::{ExifTag, Value};
         use gamut_metadata::icc::{
-            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Signature, TagData,
+            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Tag, TagData,
         };
         use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
         use gamut_metadata::{MetadataBlock, TypedMetadata};
@@ -1653,7 +1653,7 @@ mod typed {
         fn a_model_that_does_not_serialize_is_invalid_input_with_the_facade_detail() {
             // An ICC model with a duplicate tag signature is rejected by `gamut-icc`'s writer
             // (ICC.1:2022 §7.3).
-            let duplicate = (Signature(*b"wtpt"), TagData::Xyz(Vec::new()));
+            let duplicate = Tag::new(*b"wtpt", TagData::Xyz(Vec::new()));
             let bad_icc = IccProfile {
                 header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
                 tags: vec![duplicate.clone(), duplicate],
