@@ -7,11 +7,11 @@ use common::{
     av01_item, bx, cat, empty_iprp, ftyp, full, hdlr, iinf_v0, image, infe_v2, meta, pitm_v0,
 };
 use gamut_core::ErrorKind;
-use gamut_isobmff::read;
+use gamut_isobmff::IsoBmffImage;
 
 /// A valid single-item AVIF-style file (written by this crate) to corrupt in place.
 fn valid() -> Vec<u8> {
-    gamut_isobmff::write(&image(vec![av01_item(1, vec![0xAB; 8])])).unwrap()
+    image(vec![av01_item(1, vec![0xAB; 8])]).to_bytes().unwrap()
 }
 
 /// Absolute position of the first occurrence of `fourcc`.
@@ -21,13 +21,13 @@ fn find(buf: &[u8], fourcc: &[u8; 4]) -> usize {
 
 #[track_caller]
 fn assert_read_fails(data: &[u8], expected: &str) {
-    let e = read(data).unwrap_err().to_string();
+    let e = IsoBmffImage::parse(data).unwrap_err().to_string();
     assert!(e.contains(expected), "expected {expected:?} in {e:?}");
 }
 
 #[test]
 fn valid_file_reads_back() {
-    assert!(read(&valid()).is_ok());
+    assert!(IsoBmffImage::parse(&valid()).is_ok());
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn empty_input_errors() {
 
 #[test]
 fn truncated_box_header_errors() {
-    assert!(read(&[0, 0, 0, 8]).is_err());
+    assert!(IsoBmffImage::parse(&[0, 0, 0, 8]).is_err());
 }
 
 #[test]
@@ -60,7 +60,10 @@ fn missing_mdat_box_is_tolerated() {
     let mut f = valid();
     let p = find(&f, b"mdat");
     f[p..p + 4].copy_from_slice(b"free");
-    assert_eq!(read(&f).unwrap().items[0].payload, vec![0xAB; 8]);
+    assert_eq!(
+        IsoBmffImage::parse(&f).unwrap().items[0].payload,
+        vec![0xAB; 8]
+    );
 }
 
 #[test]
@@ -81,7 +84,10 @@ fn largesize_mdat_resolves_the_shifted_payload() {
     f[size_field..mdat].copy_from_slice(&1_u32.to_be_bytes());
     f.splice(mdat + 4..mdat + 4, (u64::from(old_size) + 8).to_be_bytes());
 
-    assert_eq!(read(&f).unwrap().items[0].payload, vec![0xAB; 8]);
+    assert_eq!(
+        IsoBmffImage::parse(&f).unwrap().items[0].payload,
+        vec![0xAB; 8]
+    );
 }
 
 #[test]
@@ -90,7 +96,10 @@ fn zero_size_mdat_resolves_payload_through_end_of_input() {
     let mdat = find(&f, b"mdat");
     f[mdat - 4..mdat].copy_from_slice(&0_u32.to_be_bytes());
 
-    assert_eq!(read(&f).unwrap().items[0].payload, vec![0xAB; 8]);
+    assert_eq!(
+        IsoBmffImage::parse(&f).unwrap().items[0].payload,
+        vec![0xAB; 8]
+    );
 }
 
 #[test]
@@ -311,7 +320,10 @@ fn appended_motion_photo_stream_is_ignored() {
     motion.extend_from_slice(&second_ftyp());
     motion.extend_from_slice(&bx(b"moov", &[0u8; 16]));
     motion.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // non-box garbage
-    assert_eq!(read(&motion).unwrap(), read(&bare).unwrap());
+    assert_eq!(
+        IsoBmffImage::parse(&motion).unwrap(),
+        IsoBmffImage::parse(&bare).unwrap()
+    );
 }
 
 #[test]
@@ -321,7 +333,10 @@ fn trailing_non_box_garbage_is_tolerated() {
     let bare = valid();
     let mut f = bare.clone();
     f.extend_from_slice(b"SEFT\x00\x01\x02\x03trailing-junk");
-    assert_eq!(read(&f).unwrap(), read(&bare).unwrap());
+    assert_eq!(
+        IsoBmffImage::parse(&f).unwrap(),
+        IsoBmffImage::parse(&bare).unwrap()
+    );
 }
 
 #[test]
@@ -366,7 +381,7 @@ fn track_beside_meta_is_skipped_not_retained() {
     // `moov | trak` arm is asserted on its own: a dropped alternative would retain that box.
     for ty in [b"moov", b"trak"] {
         let f = cat(&[ftyp(), still_meta(), bx(ty, &[0u8; 16]), bx(b"mdat", &[])]);
-        let model = read(&f).unwrap();
+        let model = IsoBmffImage::parse(&f).unwrap();
         assert_eq!(model.primary_item_id, 1, "{ty:?}");
         assert!(model.top_level_boxes.is_empty(), "{ty:?} retained");
     }
@@ -377,11 +392,14 @@ fn track_without_meta_is_a_sequence_only_error() {
     // A track and no `meta`: a sequence with no still item, refused as Unsupported with a specific
     // message rather than the generic InvalidInput "missing meta" a file with neither carries.
     for ty in [b"moov", b"trak"] {
-        let e = read(&cat(&[ftyp(), bx(ty, &[0u8; 16])])).unwrap_err();
+        let e = IsoBmffImage::parse(&cat(&[ftyp(), bx(ty, &[0u8; 16])])).unwrap_err();
         assert_eq!(e.kind(), ErrorKind::Unsupported, "{ty:?}");
         assert!(e.to_string().contains("sequence-only"), "{ty:?}: {e}");
     }
-    assert_eq!(read(&ftyp()).unwrap_err().kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        IsoBmffImage::parse(&ftyp()).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
 }
 
 #[test]
@@ -389,7 +407,7 @@ fn first_ftyp_wins_over_appended_ftyp() {
     // The appended stream's ftyp has a different major brand; the primary brand must be unchanged.
     let mut f = valid();
     f.extend_from_slice(&second_ftyp()); // major brand heic
-    let model = read(&f).unwrap();
+    let model = IsoBmffImage::parse(&f).unwrap();
     assert_eq!(&model.major_brand, b"avif", "first (primary) ftyp wins");
 }
 
@@ -426,6 +444,6 @@ fn iloc_extent_into_appended_region_still_resolves() {
     let ep = find(&f, b"iloc") + 18;
     f[ep..ep + 4].copy_from_slice(&(payload_abs as u32).to_be_bytes());
 
-    let model = read(&f).unwrap();
+    let model = IsoBmffImage::parse(&f).unwrap();
     assert_eq!(model.items[0].payload, payload.to_vec());
 }

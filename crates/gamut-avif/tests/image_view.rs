@@ -12,11 +12,11 @@ use gamut_avif::{
     AvifContainer, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay, PixelAspectRatio,
     TransformativeProperty,
 };
-use gamut_core::ErrorKind;
-use gamut_isobmff::{ColourInformation, Item, NclxColr, Property, PropertyKind};
+use gamut_core::{Cicp, ErrorKind};
+use gamut_isobmff::{ColourInformation, Property, PropertyKind};
 
 fn prop(essential: bool, kind: PropertyKind) -> Property {
-    Property { essential, kind }
+    Property::new(essential, kind)
 }
 
 #[test]
@@ -31,10 +31,7 @@ fn primary_item_must_exist() {
 #[test]
 fn primary_item_must_not_be_hidden() {
     // 23008-12: the primary item shall not be hidden.
-    let hidden_primary = Item {
-        hidden: true,
-        ..av01_item(1, vec![1, 2, 3, 4])
-    };
+    let hidden_primary = av01_item(1, vec![1, 2, 3, 4]).with_hidden(true);
     let data = clean_file(1, vec![hidden_primary]);
     assert!(AvifContainer::parse(&data).is_err());
 }
@@ -45,17 +42,15 @@ fn item_kind_classification_and_av1_predicate() {
         1,
         vec![
             av01_item(1, vec![1, 2, 3, 4]),
-            Item {
-                hidden: true,
-                properties: vec![prop(
+            item(2, *b"hvc1", vec![5, 6])
+                .with_hidden(true)
+                .with_properties(vec![prop(
                     true,
                     PropertyKind::CodecConfiguration {
                         kind: *b"hvcC",
                         data: vec![1, 2, 3],
                     },
-                )],
-                ..item(2, *b"hvc1", vec![5, 6])
-            },
+                )]),
         ],
     );
     let c = AvifContainer::parse(&data).unwrap();
@@ -81,29 +76,23 @@ fn av1_config_lens_distinguishes_absent_foreign_and_malformed() {
         vec![
             av01_item(1, vec![1, 2, 3, 4]),
             // No codec configuration at all.
-            Item {
-                hidden: true,
-                properties: vec![ispe(8, 8)],
-                ..item(2, *b"av01", vec![5])
-            },
+            item(2, *b"av01", vec![5])
+                .with_hidden(true)
+                .with_properties(vec![ispe(8, 8)]),
             // A foreign (hvcC) configuration is not an av1C.
-            Item {
-                hidden: true,
-                properties: vec![prop(
+            item(3, *b"hvc1", vec![6])
+                .with_hidden(true)
+                .with_properties(vec![prop(
                     true,
                     PropertyKind::CodecConfiguration {
                         kind: *b"hvcC",
                         data: vec![1],
                     },
-                )],
-                ..item(3, *b"hvc1", vec![6])
-            },
+                )]),
             // A malformed av1C (marker bit clear).
-            Item {
-                hidden: true,
-                properties: vec![av1c(vec![0x01, 0x20, 0x00, 0x00])],
-                ..item(4, *b"av01", vec![7])
-            },
+            item(4, *b"av01", vec![7])
+                .with_hidden(true)
+                .with_properties(vec![av1c(vec![0x01, 0x20, 0x00, 0x00])]),
         ],
     );
     let c = AvifContainer::parse(&data).unwrap();
@@ -127,55 +116,52 @@ fn av1_config_lens_distinguishes_absent_foreign_and_malformed() {
 
 #[test]
 fn typed_property_accessors() {
-    let full_item = Item {
-        properties: vec![
-            av1c(AV1C_444_8BIT.to_vec()),
-            ispe(100, 200),
-            prop(
-                false,
-                PropertyKind::PixelInformation {
-                    bits_per_channel: vec![10, 10, 10],
-                },
-            ),
-            prop(
-                false,
-                PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
-                    colour_primaries: 9,
-                    transfer_characteristics: 16,
-                    matrix_coefficients: 9,
-                    full_range: true,
-                })),
-            ),
-            prop(
-                false,
-                PropertyKind::ContentLightLevel(ContentLightLevel {
-                    max_content_light_level: 1000,
-                    max_pic_average_light_level: 400,
-                }),
-            ),
-            prop(
-                false,
-                PropertyKind::PixelAspectRatio(PixelAspectRatio {
-                    h_spacing: 1,
-                    v_spacing: 1,
-                }),
-            ),
-            prop(
-                false,
-                PropertyKind::CleanAperture(CleanAperture {
-                    width_n: 90,
-                    width_d: 1,
-                    height_n: 180,
-                    height_d: 1,
-                    horiz_off_n: 5,
-                    horiz_off_d: 1,
-                    vert_off_n: 6,
-                    vert_off_d: 1,
-                }),
-            ),
-        ],
-        ..item(1, *b"av01", vec![1, 2, 3, 4])
-    };
+    let full_item = item(1, *b"av01", vec![1, 2, 3, 4]).with_properties(vec![
+        av1c(AV1C_444_8BIT.to_vec()),
+        ispe(100, 200),
+        prop(
+            false,
+            PropertyKind::PixelInformation {
+                bits_per_channel: vec![10, 10, 10],
+            },
+        ),
+        prop(
+            false,
+            PropertyKind::Colour(ColourInformation::Nclx(Cicp {
+                colour_primaries: 9,
+                transfer_characteristics: 16,
+                matrix_coefficients: 9,
+                full_range: true,
+            })),
+        ),
+        prop(
+            false,
+            PropertyKind::ContentLightLevel(ContentLightLevel {
+                max_content_light_level: 1000,
+                max_pic_average_light_level: 400,
+            }),
+        ),
+        prop(
+            false,
+            PropertyKind::PixelAspectRatio(PixelAspectRatio {
+                h_spacing: 1,
+                v_spacing: 1,
+            }),
+        ),
+        prop(
+            false,
+            PropertyKind::CleanAperture(CleanAperture {
+                width_n: 90,
+                width_d: 1,
+                height_n: 180,
+                height_d: 1,
+                horiz_off_n: 5,
+                horiz_off_d: 1,
+                vert_off_n: 6,
+                vert_off_d: 1,
+            }),
+        ),
+    ]);
     let data = clean_file(1, vec![full_item]);
     let c = AvifContainer::parse(&data).unwrap();
     let it = c.image().primary_item();
@@ -185,7 +171,7 @@ fn typed_property_accessors() {
     assert_eq!(it.bits_per_channel(), Some(&[10u8, 10, 10][..]));
     assert!(matches!(
         it.colour(),
-        Some(ColourInformation::Nclx(NclxColr {
+        Some(ColourInformation::Nclx(Cicp {
             transfer_characteristics: 16,
             ..
         }))
@@ -224,30 +210,25 @@ fn mastering_display_types_the_mdcv_property() {
     // Every field distinct, so a transposed primary pair or swapped luminance bound cannot
     // reproduce the expected value. The `clli` ahead of it checks the lens skips other HDR
     // properties rather than taking the first one.
-    let mdcv = MasteringDisplay {
-        display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
-        white_point: [15635, 16450],
-        max_display_mastering_luminance: 10_000_000,
-        min_display_mastering_luminance: 50,
-    };
-    let with_mdcv = Item {
-        properties: vec![
-            av1c(AV1C_444_8BIT.to_vec()),
-            prop(
-                false,
-                PropertyKind::ContentLightLevel(ContentLightLevel {
-                    max_content_light_level: 1000,
-                    max_pic_average_light_level: 400,
-                }),
-            ),
-            prop(false, PropertyKind::MasteringDisplayColourVolume(mdcv)),
-        ],
-        ..item(1, *b"av01", vec![1, 2, 3, 4])
-    };
-    let without = Item {
-        properties: vec![av1c(AV1C_444_8BIT.to_vec())],
-        ..item(2, *b"av01", vec![5, 6, 7, 8])
-    };
+    let mdcv = MasteringDisplay::new(
+        [[13250, 34500], [7500, 3000], [34000, 16000]],
+        [15635, 16450],
+        10_000_000,
+        50,
+    );
+    let with_mdcv = item(1, *b"av01", vec![1, 2, 3, 4]).with_properties(vec![
+        av1c(AV1C_444_8BIT.to_vec()),
+        prop(
+            false,
+            PropertyKind::ContentLightLevel(ContentLightLevel {
+                max_content_light_level: 1000,
+                max_pic_average_light_level: 400,
+            }),
+        ),
+        prop(false, PropertyKind::MasteringDisplayColourVolume(mdcv)),
+    ]);
+    let without =
+        item(2, *b"av01", vec![5, 6, 7, 8]).with_properties(vec![av1c(AV1C_444_8BIT.to_vec())]);
     let data = clean_file(1, vec![with_mdcv, without]);
     let c = AvifContainer::parse(&data).unwrap();
     let img = c.image();
@@ -269,22 +250,17 @@ fn transformative_properties_preserve_association_order() {
         vert_off_n: 0,
         vert_off_d: 1,
     });
-    let out_of_order = Item {
-        properties: vec![
-            prop(true, PropertyKind::Rotation(1)),
-            prop(true, clap.clone()),
-        ],
-        ..item(1, *b"av01", vec![1])
-    };
-    let miaf_ordered = Item {
-        hidden: true,
-        properties: vec![
+    let out_of_order = item(1, *b"av01", vec![1]).with_properties(vec![
+        prop(true, PropertyKind::Rotation(1)),
+        prop(true, clap.clone()),
+    ]);
+    let miaf_ordered = item(2, *b"av01", vec![2])
+        .with_hidden(true)
+        .with_properties(vec![
             prop(true, clap),
             prop(true, PropertyKind::Rotation(2)),
             prop(true, PropertyKind::Mirror(1)),
-        ],
-        ..item(2, *b"av01", vec![2])
-    };
+        ]);
     let data = clean_file(1, vec![out_of_order, miaf_ordered]);
     let c = AvifContainer::parse(&data).unwrap();
     let img = c.image();
@@ -313,22 +289,19 @@ fn transformative_properties_preserve_association_order() {
 
 #[test]
 fn unsupported_essential_property_flag() {
-    let unsupported = Item {
-        properties: vec![
-            av1c(AV1C_444_8BIT.to_vec()),
-            prop(
-                true, // essential + unrecognised → a conforming reader must not render it
-                PropertyKind::Other {
-                    kind: *b"a1op", // the layered-image operating-point property (not yet typed)
-                    data: vec![9],
-                },
-            ),
-        ],
-        ..item(1, *b"av01", vec![1])
-    };
-    let supported = Item {
-        hidden: true,
-        properties: vec![
+    let unsupported = item(1, *b"av01", vec![1]).with_properties(vec![
+        av1c(AV1C_444_8BIT.to_vec()),
+        prop(
+            true, // essential + unrecognised → a conforming reader must not render it
+            PropertyKind::Other {
+                kind: *b"a1op", // the layered-image operating-point property (not yet typed)
+                data: vec![9],
+            },
+        ),
+    ]);
+    let supported = item(2, *b"av01", vec![2])
+        .with_hidden(true)
+        .with_properties(vec![
             // essential codec config — decode layer's concern, not counted
             av1c(AV1C_444_8BIT.to_vec()),
             prop(
@@ -345,9 +318,7 @@ fn unsupported_essential_property_flag() {
                     data: vec![9, 9],
                 },
             ),
-        ],
-        ..item(2, *b"av01", vec![2])
-    };
+        ]);
     let data = clean_file(1, vec![unsupported, supported]);
     let c = AvifContainer::parse(&data).unwrap();
     let img = c.image();
@@ -362,27 +333,20 @@ fn rotation_and_mirror_accessors_pin_exact_values() {
     // values (not `is_some`) pin the accessors against the `None`/`Some(0)`/`Some(1)` and
     // match-arm-deletion mutants: irot(3) differs from every replacement, and the two mirror axes
     // together rule out both `Some(0)` and `Some(1)`.
-    let with_both = Item {
-        properties: vec![
-            av1c(AV1C_444_8BIT.to_vec()),
-            prop(true, PropertyKind::Rotation(3)),
-            prop(true, PropertyKind::Mirror(1)),
-        ],
-        ..item(1, *b"av01", vec![1])
-    };
-    let mirror_axis0 = Item {
-        hidden: true,
-        properties: vec![
+    let with_both = item(1, *b"av01", vec![1]).with_properties(vec![
+        av1c(AV1C_444_8BIT.to_vec()),
+        prop(true, PropertyKind::Rotation(3)),
+        prop(true, PropertyKind::Mirror(1)),
+    ]);
+    let mirror_axis0 = item(2, *b"av01", vec![2])
+        .with_hidden(true)
+        .with_properties(vec![
             av1c(AV1C_444_8BIT.to_vec()),
             prop(true, PropertyKind::Mirror(0)),
-        ],
-        ..item(2, *b"av01", vec![2])
-    };
-    let neither = Item {
-        hidden: true,
-        properties: vec![av1c(AV1C_444_8BIT.to_vec())],
-        ..item(3, *b"av01", vec![3])
-    };
+        ]);
+    let neither = item(3, *b"av01", vec![3])
+        .with_hidden(true)
+        .with_properties(vec![av1c(AV1C_444_8BIT.to_vec())]);
     let data = clean_file(1, vec![with_both, mirror_axis0, neither]);
     let c = AvifContainer::parse(&data).unwrap();
     let img = c.image();
@@ -400,11 +364,9 @@ fn unknown_item_type_is_not_classified_as_coded() {
     // An unrecognised four-cc must classify as `Unknown`, not `CodedImage`. This pins the `kind`
     // match guard (`is_coded_image_type(ty)`) and the helper against their `-> true`
     // replacements, which would misclassify it as a coded image.
-    let unknown = Item {
-        hidden: true,
-        properties: vec![av1c(AV1C_444_8BIT.to_vec())],
-        ..item(2, *b"zzzz", vec![9])
-    };
+    let unknown = item(2, *b"zzzz", vec![9])
+        .with_hidden(true)
+        .with_properties(vec![av1c(AV1C_444_8BIT.to_vec())]);
     let data = clean_file(1, vec![av01_item(1, vec![1, 2, 3, 4]), unknown]);
     let c = AvifContainer::parse(&data).unwrap();
     let it = c.image().item(2).unwrap();

@@ -49,7 +49,8 @@ fn box_types(segments: &[Segment<'_>]) -> Vec<[u8; 4]> {
 #[test]
 fn clean_file_is_all_boxes() {
     let data = clean_file(&[0xAA, 0xBB, 0xCC, 0xDD]);
-    let (segments, meta_body) = walk_segments(&data).unwrap();
+    let walk = walk_segments(&data).unwrap();
+    let (segments, meta_body) = (walk.segments, walk.meta_body);
 
     assert_covers(&segments, data.len());
     assert_eq!(box_types(&segments), vec![*b"ftyp", *b"meta", *b"mdat"]);
@@ -69,7 +70,7 @@ fn unknown_top_level_box_surfaces_verbatim() {
     let clean = clean_file(&[1, 2, 3, 4]);
     let mpvd_body = b"MP4-motion-photo-video-data".to_vec();
     let data = cat(&[clean, bx(b"mpvd", &mpvd_body)]);
-    let (segments, _) = walk_segments(&data).unwrap();
+    let segments = walk_segments(&data).unwrap().segments;
 
     assert_covers(&segments, data.len());
     assert_eq!(
@@ -103,7 +104,7 @@ fn alternate_size_headers_account_for_every_header_byte() {
     large.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
     let open = vec![0, 0, 0, 0, b's', b'k', b'i', b'p', 0xDD, 0xEE];
     let data = cat(&[clean.clone(), large.clone(), open]);
-    let (segments, _) = walk_segments(&data).unwrap();
+    let segments = walk_segments(&data).unwrap().segments;
 
     assert_covers(&segments, data.len());
     assert_eq!(
@@ -131,7 +132,7 @@ fn second_ftyp_starts_appended_stream_to_eof() {
     let clean = clean_file(&[9, 9, 9, 9]);
     let appendix = cat(&[ftyp(), b"\xDE\xAD\xBE\xEFtrailing-garbage".to_vec()]);
     let data = cat(&[clean.clone(), appendix.clone()]);
-    let (segments, _) = walk_segments(&data).unwrap();
+    let segments = walk_segments(&data).unwrap().segments;
 
     assert_covers(&segments, data.len());
     // Primary stream is unchanged; the appendix is a single AppendedStream.
@@ -158,7 +159,7 @@ fn trailing_garbage_without_ftyp_is_a_trailer() {
     let clean = clean_file(&[5, 5, 5, 5]);
     let garbage = b"SamsungSEF\x00trailer-blob".to_vec();
     let data = cat(&[clean.clone(), garbage.clone()]);
-    let (segments, _) = walk_segments(&data).unwrap();
+    let segments = walk_segments(&data).unwrap().segments;
 
     assert_covers(&segments, data.len());
     assert_eq!(box_types(&segments), vec![*b"ftyp", *b"meta", *b"mdat"]);

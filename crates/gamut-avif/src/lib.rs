@@ -68,7 +68,7 @@
 //! ```
 //! use gamut_avif::{Av1Config, Av1StillDecoder, AvifContainer, ChromaFormat, DecodedFrame};
 //! use gamut_core::Result;
-//! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, write};
+//! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind};
 //!
 //! // A stub AV1 decoder: ignores the codestream and returns a 2x2 solid-gray monochrome frame.
 //! struct GrayStub;
@@ -84,28 +84,22 @@
 //!     *b"avif",
 //!     vec![*b"avif", *b"mif1", *b"miaf"],
 //!     1,
-//!     vec![Item {
-//!         id: 1,
-//!         item_type: *b"av01",
-//!         name: String::new(),
-//!         content_type: None,
-//!         content_encoding: None,
-//!         hidden: false,
-//!         references: vec![],
-//!         properties: vec![Property {
-//!             essential: true,
-//!             kind: PropertyKind::CodecConfiguration {
-//!                 kind: *b"av1C",
-//!                 // marker+version; profile 0; monochrome, subsampling (1,1)
-//!                 data: vec![0x81, 0x00, 0x1C, 0x00],
-//!             },
-//!         }],
-//!         // Sequence header OBU (reduced_still_picture_header = 1, 2x2, 8-bit monochrome, no
-//!         // colour description, studio range) + frame OBU.
-//!         payload: vec![0x0A, 0x04, 0x18, 0x00, 0x30, 0x11, 0x32, 0x03, 0xAA, 0xBB, 0xCC],
-//!     }],
+//!     vec![
+//!         Item::new(1, *b"av01")
+//!             .with_properties(vec![Property::new(
+//!                 true,
+//!                 PropertyKind::CodecConfiguration {
+//!                     kind: *b"av1C",
+//!                     // marker+version; profile 0; monochrome, subsampling (1,1)
+//!                     data: vec![0x81, 0x00, 0x1C, 0x00],
+//!                 },
+//!             )])
+//!             // Sequence header OBU (reduced_still_picture_header = 1, 2x2, 8-bit monochrome, no
+//!             // colour description, studio range) + frame OBU.
+//!             .with_payload(vec![0x0A, 0x04, 0x18, 0x00, 0x30, 0x11, 0x32, 0x03, 0xAA, 0xBB, 0xCC]),
+//!     ],
 //! );
-//! let bytes = write(&img).unwrap();
+//! let bytes = img.to_bytes().unwrap();
 //!
 //! let container = AvifContainer::parse(&bytes).unwrap();
 //! assert!(container.image().is_av1_still());
@@ -246,7 +240,7 @@ pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
 pub use gamut_color::ChromaUpsampling;
 pub use gamut_core::Dimensions;
 // The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-heic` (#505).
-pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paByteRange, C2paSlot, C2paUnreadReason};
+pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paSlot, C2paUnreadReason};
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `AvifImage::metadata` / `AvifEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]

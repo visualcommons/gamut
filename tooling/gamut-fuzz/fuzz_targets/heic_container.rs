@@ -48,10 +48,10 @@
 //!
 //! ## The segment tiling is deliberately not checked here
 //!
-//! `HeifContainer::parse` stores `gamut_isobmff::walk_segments(data)?` verbatim and `segments()`
-//! returns it unchanged, so a tiling check here searches **the same function** the sibling
-//! `isobmff_boxes` target already searches — and over a strictly narrower input set, since it is
-//! reached only for files `gamut_isobmff::read` also accepted. Measured, not reasoned: the
+//! `HeifContainer::parse` stores `gamut_isobmff::walk_segments(data)?.segments` verbatim and
+//! `segments()` returns it unchanged, so a tiling check here searches **the same function** the
+//! sibling `isobmff_boxes` target already searches — and over a strictly narrower input set, since
+//! it is reached only for files `gamut_isobmff::IsoBmffImage::parse` also accepted. Measured, not reasoned: the
 //! `b.offset + 8..end` injection recorded in `isobmff_boxes` produced the *identical* message here,
 //! *"segment 8..24 leaves a gap or overlaps at 0"*, because it is the identical assertion over the
 //! identical values. Two ten-minute runners searching one function is a real cost at a

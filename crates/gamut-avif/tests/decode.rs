@@ -12,8 +12,8 @@ use gamut_avif::{
 use gamut_color::{ColorRange, bt601_ycbcr_to_rgb};
 use gamut_core::{Error, ErrorKind, Result};
 use gamut_isobmff::{
-    CleanAperture, ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, Property,
-    PropertyKind, write,
+    CleanAperture, ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, OverlayOffset,
+    Property, PropertyKind,
 };
 
 // ---- deterministic mock decoder --------------------------------------------------------------
@@ -262,33 +262,28 @@ fn coded_payload(chroma_idc: u8, bd: u8, base: u8, w: u32, h: u32) -> Vec<u8> {
 }
 
 fn prop_av1c(data: Vec<u8>) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::CodecConfiguration {
+    Property::new(
+        true,
+        PropertyKind::CodecConfiguration {
             kind: *b"av1C",
             data,
         },
-    }
+    )
 }
 
 fn dimg(to: &[u32]) -> ItemReference {
-    ItemReference {
-        reference_type: *b"dimg",
-        to_item_ids: to.to_vec(),
-    }
+    ItemReference::new(*b"dimg", to.to_vec())
 }
 
 fn base_item(id: u32, item_type: [u8; 4]) -> Item {
-    Item {
-        id,
-        item_type,
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: false,
-        references: vec![],
-        properties: vec![],
-        payload: vec![],
+    Item::new(id, item_type)
+}
+
+/// One `iovl` placement offset, `(horizontal, vertical)`.
+fn offset(horizontal: i32, vertical: i32) -> OverlayOffset {
+    OverlayOffset {
+        horizontal,
+        vertical,
     }
 }
 
@@ -304,11 +299,9 @@ fn coded_item(
 ) -> Item {
     let mut properties = vec![prop_av1c(av1c_record(chroma_idc, bd))];
     properties.extend(extra);
-    Item {
-        properties,
-        payload: coded_payload(chroma_idc, bd, base, w, h),
-        ..base_item(id, *b"av01")
-    }
+    base_item(id, *b"av01")
+        .with_properties(properties)
+        .with_payload(coded_payload(chroma_idc, bd, base, w, h))
 }
 
 /// Item `id`'s 8-bit RGBA presentation with nearest-neighbour chroma: the colour-conversion
@@ -325,12 +318,13 @@ fn rgba8_nearest(
 }
 
 fn file(primary_id: u32, items: Vec<Item>) -> Vec<u8> {
-    write(&IsoBmffImage::new(
+    IsoBmffImage::new(
         *b"avif",
         vec![*b"avif", *b"mif1", *b"miaf"],
         primary_id,
         items,
-    ))
+    )
+    .to_bytes()
     .expect("write model")
 }
 
@@ -376,11 +370,9 @@ fn non_conforming_payload_never_reaches_the_decoder() {
     // (validate_still_payload) before the codec hook is asked to decode it.
     let mut payload = obu(6, &[0x10, 4, 4]);
     payload.extend_from_slice(&obu(1, &seq_header(1, 8, SEQ_UNSPECIFIED_LIMITED)));
-    let item = Item {
-        properties: vec![prop_av1c(av1c_record(1, 8))],
-        payload,
-        ..base_item(1, *b"av01")
-    };
+    let item = base_item(1, *b"av01")
+        .with_properties(vec![prop_av1c(av1c_record(1, 8))])
+        .with_payload(payload);
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
     // `NeverCalled` panics if invoked; the error proves it was not.
@@ -392,13 +384,13 @@ fn non_conforming_payload_never_reaches_the_decoder() {
 
 #[test]
 fn essential_unknown_property_is_refused() {
-    let bad = Property {
-        essential: true,
-        kind: PropertyKind::Other {
+    let bad = Property::new(
+        true,
+        PropertyKind::Other {
             kind: *b"a1op", // the layered-image operating-point property (not yet typed)
             data: vec![1],
         },
-    };
+    );
     let item = coded_item(1, 1, 8, 0, 4, 4, vec![bad]);
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
@@ -410,17 +402,15 @@ fn essential_unknown_property_is_refused() {
 
 #[test]
 fn non_av1_coded_item_is_unsupported() {
-    let item = Item {
-        properties: vec![Property {
-            essential: true,
-            kind: PropertyKind::CodecConfiguration {
+    let item = base_item(1, *b"hvc1")
+        .with_properties(vec![Property::new(
+            true,
+            PropertyKind::CodecConfiguration {
                 kind: *b"hvcC",
                 data: vec![1, 2, 3],
             },
-        }],
-        payload: vec![0xAA],
-        ..base_item(1, *b"hvc1")
-    };
+        )])
+        .with_payload(vec![0xAA]);
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -431,10 +421,7 @@ fn non_av1_coded_item_is_unsupported() {
 
 #[test]
 fn av1_item_without_av1c_is_invalid() {
-    let item = Item {
-        payload: coded_payload(1, 8, 1, 2, 2),
-        ..base_item(1, *b"av01")
-    };
+    let item = base_item(1, *b"av01").with_payload(coded_payload(1, 8, 1, 2, 2));
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -601,19 +588,14 @@ fn grid_item(id: u32, rows: u16, columns: u16, ow: u32, oh: u32, tiles: &[u32]) 
     }
     .to_bytes()
     .unwrap();
-    Item {
-        references: vec![dimg(tiles)],
-        payload,
-        ..base_item(id, *b"grid")
-    }
+    base_item(id, *b"grid")
+        .with_references(vec![dimg(tiles)])
+        .with_payload(payload)
 }
 
 /// A hidden monochrome tile of the given base at 2x2.
 fn mono_tile(id: u32, base: u8) -> Item {
-    Item {
-        hidden: true,
-        ..coded_item(id, 0, 8, base, 2, 2, vec![])
-    }
+    coded_item(id, 0, 8, base, 2, 2, vec![]).with_hidden(true)
 }
 
 /// The tile bases a 2x2 grid of 2x2 monochrome tiles is built from.
@@ -678,10 +660,7 @@ fn a_grid_places_its_tiles_in_row_major_order() {
 #[test]
 fn grid_non_uniform_tiles_are_unsupported() {
     // Mixed tile size.
-    let big = Item {
-        hidden: true,
-        ..coded_item(3, 0, 8, 40, 2, 3, vec![])
-    };
+    let big = coded_item(3, 0, 8, 40, 2, 3, vec![]).with_hidden(true);
     let g = grid_item(1, 1, 2, 4, 2, &[2, 3]);
     let bytes = file(1, vec![g, mono_tile(2, 10), big]);
     let c = AvifContainer::parse(&bytes).unwrap();
@@ -691,10 +670,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     ));
 
     // Mixed chroma.
-    let chroma_tile = Item {
-        hidden: true,
-        ..coded_item(3, 1, 8, 40, 2, 2, vec![])
-    };
+    let chroma_tile = coded_item(3, 1, 8, 40, 2, 2, vec![]).with_hidden(true);
     let g = grid_item(1, 1, 2, 4, 2, &[2, 3]);
     let bytes = file(1, vec![g, mono_tile(2, 10), chroma_tile]);
     let c = AvifContainer::parse(&bytes).unwrap();
@@ -704,10 +680,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     ));
 
     // Mixed bit depth.
-    let deep = Item {
-        hidden: true,
-        ..coded_item(3, 0, 10, 40, 2, 2, vec![])
-    };
+    let deep = coded_item(3, 0, 10, 40, 2, 2, vec![]).with_hidden(true);
     let g = grid_item(1, 1, 2, 4, 2, &[2, 3]);
     let bytes = file(1, vec![g, mono_tile(2, 10), deep]);
     let c = AvifContainer::parse(&bytes).unwrap();
@@ -725,10 +698,7 @@ fn grid_exact_fit_colour_assembles_all_planes() {
     // assembly branch, so the `chroma == Monochrome` test's `== -> !=` inversion (which would
     // drop the chroma planes and fail `DecodedFrame::new`) is caught by asserting exact Cb/Cr
     // samples.
-    let color_tile = |id: u32, base: u8| Item {
-        hidden: true,
-        ..coded_item(id, 3, 8, base, 2, 2, vec![])
-    };
+    let color_tile = |id: u32, base: u8| coded_item(id, 3, 8, base, 2, 2, vec![]).with_hidden(true);
     let grid = grid_item(1, 1, 2, 4, 2, &[2, 3]);
     let bytes = file(1, vec![grid, color_tile(2, 10), color_tile(3, 40)]);
     let container = AvifContainer::parse(&bytes).unwrap();
@@ -775,14 +745,8 @@ fn grid_output_dimension_guard_rejects_each_violation_individually() {
 #[test]
 fn iden_planar_is_a_pure_passthrough() {
     // iden (id 1) → coded source (id 2): the planar surface returns the source frame untouched.
-    let source = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 30, 4, 2, vec![])
-    };
-    let iden = Item {
-        references: vec![dimg(&[2])],
-        ..base_item(1, *b"iden")
-    };
+    let source = coded_item(2, 3, 8, 30, 4, 2, vec![]).with_hidden(true);
+    let iden = base_item(1, *b"iden").with_references(vec![dimg(&[2])]);
     let bytes = file(1, vec![iden, source]);
     let container = AvifContainer::parse(&bytes).unwrap();
 
@@ -797,14 +761,8 @@ fn iden_planar_is_a_pure_passthrough() {
 
 #[test]
 fn iden_requires_exactly_one_source() {
-    let iden = Item {
-        references: vec![dimg(&[2, 3])],
-        ..base_item(1, *b"iden")
-    };
-    let s = |id| Item {
-        hidden: true,
-        ..coded_item(id, 0, 8, 1, 2, 2, vec![])
-    };
+    let iden = base_item(1, *b"iden").with_references(vec![dimg(&[2, 3])]);
+    let s = |id| coded_item(id, 0, 8, 1, 2, 2, vec![]).with_hidden(true);
     let bytes = file(1, vec![iden, s(2), s(3)]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -817,22 +775,19 @@ fn iden_requires_exactly_one_source() {
 
 #[test]
 fn overlay_via_planar_is_unsupported() {
-    let a = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 10, 2, 2, vec![])
-    };
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0; 4],
-            output_width: 4,
-            output_height: 4,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let a = coded_item(2, 3, 8, 10, 2, 2, vec![]).with_hidden(true);
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0; 4],
+                output_width: 4,
+                output_height: 4,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, a]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -845,15 +800,10 @@ fn overlay_via_planar_is_unsupported() {
 
 #[test]
 fn metadata_item_is_not_a_decodable_image() {
-    let exif = Item {
-        hidden: true,
-        references: vec![ItemReference {
-            reference_type: *b"cdsc",
-            to_item_ids: vec![1],
-        }],
-        payload: b"\x00\x00\x00\x00MM\x00*".to_vec(),
-        ..base_item(2, *b"Exif")
-    };
+    let exif = base_item(2, *b"Exif")
+        .with_hidden(true)
+        .with_references(vec![ItemReference::new(*b"cdsc", vec![1])])
+        .with_payload(b"\x00\x00\x00\x00MM\x00*".to_vec());
     let bytes = file(1, vec![coded_item(1, 0, 8, 1, 2, 2, vec![]), exif]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -872,15 +822,10 @@ fn metadata_item_is_not_a_decodable_image() {
 #[test]
 fn mutual_dimg_cycle_errors_without_overflow() {
     // 1 (iden) → 2 (iden) → 1 …
-    let a = Item {
-        references: vec![dimg(&[2])],
-        ..base_item(1, *b"iden")
-    };
-    let b = Item {
-        hidden: true,
-        references: vec![dimg(&[1])],
-        ..base_item(2, *b"iden")
-    };
+    let a = base_item(1, *b"iden").with_references(vec![dimg(&[2])]);
+    let b = base_item(2, *b"iden")
+        .with_hidden(true)
+        .with_references(vec![dimg(&[1])]);
     let bytes = file(1, vec![a, b]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -895,16 +840,13 @@ fn derivation_depth_is_bounded() {
     // works.
     let mut items = Vec::new();
     for id in 1..=8u32 {
-        items.push(Item {
-            hidden: id != 1,
-            references: vec![dimg(&[id + 1])],
-            ..base_item(id, *b"iden")
-        });
+        items.push(
+            base_item(id, *b"iden")
+                .with_hidden(id != 1)
+                .with_references(vec![dimg(&[id + 1])]),
+        );
     }
-    items.push(Item {
-        hidden: true,
-        ..coded_item(9, 0, 8, 5, 2, 2, vec![])
-    });
+    items.push(coded_item(9, 0, 8, 5, 2, 2, vec![]).with_hidden(true));
     let bytes = file(1, items);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -913,19 +855,11 @@ fn derivation_depth_is_bounded() {
     ));
 
     // A 2-deep iden chain onto the same leaf decodes fine.
-    let i1 = Item {
-        references: vec![dimg(&[2])],
-        ..base_item(1, *b"iden")
-    };
-    let i2 = Item {
-        hidden: true,
-        references: vec![dimg(&[3])],
-        ..base_item(2, *b"iden")
-    };
-    let leaf = Item {
-        hidden: true,
-        ..coded_item(3, 0, 8, 5, 2, 2, vec![])
-    };
+    let i1 = base_item(1, *b"iden").with_references(vec![dimg(&[2])]);
+    let i2 = base_item(2, *b"iden")
+        .with_hidden(true)
+        .with_references(vec![dimg(&[3])]);
+    let leaf = coded_item(3, 0, 8, 5, 2, 2, vec![]).with_hidden(true);
     let bytes = file(1, vec![i1, i2, leaf]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(
@@ -938,36 +872,28 @@ fn derivation_depth_is_bounded() {
 // ---- RGBA fixtures ---------------------------------------------------------------------------
 
 fn colr(matrix: u16, full: bool) -> Property {
-    Property {
-        essential: false,
-        kind: PropertyKind::Colour(gamut_isobmff::ColourInformation::Nclx(
-            gamut_isobmff::NclxColr {
-                colour_primaries: 1,
-                transfer_characteristics: 13,
-                matrix_coefficients: matrix,
-                full_range: full,
-            },
-        )),
-    }
+    Property::new(
+        false,
+        PropertyKind::Colour(gamut_isobmff::ColourInformation::Nclx(gamut_core::Cicp {
+            colour_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: matrix,
+            full_range: full,
+        })),
+    )
 }
 
 fn irot(turns: u8) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::Rotation(turns),
-    }
+    Property::new(true, PropertyKind::Rotation(turns))
 }
 fn imir(axis: u8) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::Mirror(axis),
-    }
+    Property::new(true, PropertyKind::Mirror(axis))
 }
 #[allow(clippy::too_many_arguments)]
 fn clap(wn: u32, wd: u32, hn: u32, hd: u32, hon: u32, hod: u32, von: u32, vod: u32) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::CleanAperture(CleanAperture {
+    Property::new(
+        true,
+        PropertyKind::CleanAperture(CleanAperture {
             width_n: wn,
             width_d: wd,
             height_n: hn,
@@ -977,26 +903,21 @@ fn clap(wn: u32, wd: u32, hn: u32, hd: u32, hon: u32, hod: u32, von: u32, vod: u
             vert_off_n: von,
             vert_off_d: vod,
         }),
-    }
+    )
 }
 
 /// An alpha auxiliary of the given chroma layout and bit depth, `auxl`-referencing `master`.
 fn alpha_aux_full(id: u32, master: u32, base: u8, w: u32, h: u32, chroma_idc: u8, bd: u8) -> Item {
-    let auxc = Property {
-        essential: false,
-        kind: PropertyKind::AuxiliaryType {
+    let auxc = Property::new(
+        false,
+        PropertyKind::AuxiliaryType {
             aux_type: "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha".to_string(),
             aux_subtype: vec![],
         },
-    };
-    Item {
-        hidden: true,
-        references: vec![ItemReference {
-            reference_type: *b"auxl",
-            to_item_ids: vec![master],
-        }],
-        ..coded_item(id, chroma_idc, bd, base, w, h, vec![auxc])
-    }
+    );
+    coded_item(id, chroma_idc, bd, base, w, h, vec![auxc])
+        .with_hidden(true)
+        .with_references(vec![ItemReference::new(*b"auxl", vec![master])])
 }
 
 /// A monochrome 8-bit alpha auxiliary (the canonical shape).
@@ -1129,15 +1050,10 @@ fn grid_planar_and_rgba_agree() {
 fn iden_rgba_applies_its_own_transforms() {
     // iden (id 1, irot=1) → coded source (id 2). RGBA applies iden's rotation to the source's
     // identity-mapped pixels.
-    let source = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 30, 4, 2, vec![colr(0, true)])
-    };
-    let iden = Item {
-        references: vec![dimg(&[2])],
-        properties: vec![irot(1), colr(0, true)],
-        ..base_item(1, *b"iden")
-    };
+    let source = coded_item(2, 3, 8, 30, 4, 2, vec![colr(0, true)]).with_hidden(true);
+    let iden = base_item(1, *b"iden")
+        .with_references(vec![dimg(&[2])])
+        .with_properties(vec![irot(1), colr(0, true)]);
     let bytes = file(1, vec![iden, source]);
     let container = AvifContainer::parse(&bytes).unwrap();
 
@@ -1520,12 +1436,12 @@ fn unsupported_colour_falls_back_to_planar_only() {
     }
 
     // An ICC-only colr likewise: planar delivers, RGBA refuses.
-    let icc = Property {
-        essential: false,
-        kind: PropertyKind::Colour(gamut_isobmff::ColourInformation::RestrictedIcc(vec![
+    let icc = Property::new(
+        false,
+        PropertyKind::Colour(gamut_isobmff::ColourInformation::RestrictedIcc(vec![
             1, 2, 3, 4,
         ])),
-    };
+    );
     let item = coded_item(1, 1, 8, 10, 4, 4, vec![icc]);
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
@@ -1795,24 +1711,21 @@ fn overlay_blend_rounding_is_observable_on_a_translucent_canvas() {
     // Every other overlay test composites onto an *opaque* canvas, where `da · (MAX - sa)` is
     // always a multiple of MAX and the source-over rounding addends cancel exactly. This one uses
     // a nearly-transparent canvas fill so both addends change the result.
-    let src = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 0, 2, 2, vec![colr(0, true)])
-    };
+    let src = coded_item(2, 3, 8, 0, 2, 2, vec![colr(0, true)]).with_hidden(true);
     let src_alpha = alpha_aux(3, 2, 0, 2, 2);
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            // (2, 1, 0) at alpha 1 after `>> 8`.
-            canvas_fill_value: [0x0200, 0x0100, 0x0000, 0x0100],
-            output_width: 2,
-            output_height: 2,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                // (2, 1, 0) at alpha 1 after `>> 8`.
+                canvas_fill_value: [0x0200, 0x0100, 0x0000, 0x0100],
+                output_width: 2,
+                output_height: 2,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, src, src_alpha]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let got = container
@@ -1828,27 +1741,21 @@ fn overlay_blend_rounding_is_observable_on_a_translucent_canvas() {
 fn overlay_composites_at_sixteen_bit_across_mixed_depths() {
     // An `iovl` may composite sub-items of different coded depths — only `grid` requires
     // uniformity. Normalizing every sub-item to the full 16-bit range is what makes that work.
-    let a = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)])
-    };
-    let b = Item {
-        hidden: true,
-        ..coded_item(3, 3, 10, 130, 2, 2, vec![colr(0, true)])
-    };
-    let ov = Item {
-        references: vec![dimg(&[2, 3])],
-        payload: ImageOverlay {
-            // On the 16-bit surface the fill channels are used verbatim, not shifted down.
-            canvas_fill_value: [0x1234, 0x5678, 0x9ABC, 0xFFFF],
-            output_width: 4,
-            output_height: 4,
-            offsets: vec![(-1, -1), (1, 1)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let a = coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)]).with_hidden(true);
+    let b = coded_item(3, 3, 10, 130, 2, 2, vec![colr(0, true)]).with_hidden(true);
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2, 3])])
+        .with_payload(
+            ImageOverlay {
+                // On the 16-bit surface the fill channels are used verbatim, not shifted down.
+                canvas_fill_value: [0x1234, 0x5678, 0x9ABC, 0xFFFF],
+                output_width: 4,
+                output_height: 4,
+                offsets: vec![offset(-1, -1), offset(1, 1)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, a, b]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let got = container
@@ -2061,13 +1968,8 @@ fn absent_alpha_is_opaque() {
 
 #[test]
 fn premultiplied_flag_is_queryable() {
-    let master = Item {
-        references: vec![ItemReference {
-            reference_type: *b"prem",
-            to_item_ids: vec![2],
-        }],
-        ..coded_item(1, 3, 8, 33, 2, 2, vec![colr(0, true)])
-    };
+    let master = coded_item(1, 3, 8, 33, 2, 2, vec![colr(0, true)])
+        .with_references(vec![ItemReference::new(*b"prem", vec![2])]);
     let bytes = file(1, vec![master, alpha_aux(2, 1, 77, 2, 2)]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(container.image().is_premultiplied(1));
@@ -2085,27 +1987,21 @@ fn overlay_composites_with_fill_clipping_and_alpha() {
     // Canvas 4x4, fill (10,20,30,255). Input A (opaque, id 2) at (-1,-1): only its (1,1) pixel
     // lands at canvas (0,0). Input B (id 3) has an alpha auxiliary (id 4) at (1,1), so it blends
     // over the fill.
-    let a = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)])
-    };
-    let b = Item {
-        hidden: true,
-        ..coded_item(3, 3, 8, 130, 2, 2, vec![colr(0, true)])
-    };
+    let a = coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)]).with_hidden(true);
+    let b = coded_item(3, 3, 8, 130, 2, 2, vec![colr(0, true)]).with_hidden(true);
     let b_alpha = alpha_aux(4, 3, 90, 2, 2);
-    let ov = Item {
-        references: vec![dimg(&[2, 3])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0x0A00, 0x1400, 0x1E00, 0xFF00], // (10, 20, 30, 255) after >> 8
-            output_width: 4,
-            output_height: 4,
-            offsets: vec![(-1, -1), (1, 1)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2, 3])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0x0A00, 0x1400, 0x1E00, 0xFF00], // (10, 20, 30, 255) after >> 8
+                output_width: 4,
+                output_height: 4,
+                offsets: vec![offset(-1, -1), offset(1, 1)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, a, b, b_alpha]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let got = container
@@ -2164,22 +2060,19 @@ fn overlay_zero_height_canvas_is_rejected_by_its_own_guard() {
     // An overlay canvas with a zero height: the `ow != 0 && oh != 0` guard must reject it. The
     // `&& -> ||` mutant lets the degenerate canvas through, failing later with a different
     // ("zero-sized image") error — so the exact guard message pins it.
-    let src = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 10, 2, 2, vec![colr(0, true)])
-    };
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0; 4],
-            output_width: 4,
-            output_height: 0,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let src = coded_item(2, 3, 8, 10, 2, 2, vec![colr(0, true)]).with_hidden(true);
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0; 4],
+                output_width: 4,
+                output_height: 0,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, src]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let err = container
@@ -2198,24 +2091,21 @@ fn composite_over_fully_transparent_pixel_clears_in_place() {
     // `canvas[di..di+4]`. The `+ -> -`/`*` mutants on that slice bound write to the wrong pixel
     // (or panic), so pinning the cleared pixel — and that its neighbour is untouched — kills
     // them.
-    let src = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 167, 2, 1, vec![colr(0, true)])
-    };
+    let src = coded_item(2, 3, 8, 167, 2, 1, vec![colr(0, true)]).with_hidden(true);
     // Alpha auxiliary base 253 ⇒ alpha (0,0) = 253, alpha (1,0) = (253 + 3) & 0xFF = 0.
     let src_alpha = alpha_aux(3, 2, 253, 2, 1);
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0x0A00, 0x1400, 0x1E00, 0x0000], // (10, 20, 30, 0) after >> 8
-            output_width: 2,
-            output_height: 1,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0x0A00, 0x1400, 0x1E00, 0x0000], // (10, 20, 30, 0) after >> 8
+                output_width: 2,
+                output_height: 1,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, src, src_alpha]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let got = container
@@ -2230,23 +2120,21 @@ fn composite_over_source_over_rounding_is_golden() {
     // A semi-transparent (alpha 128) source over an opaque black canvas. The channel blend
     // `(num + out_a/2) / out_a` rounds half up; dropping the half (`out_a / 2 -> out_a % 2`)
     // shifts every channel down by one. The exact blended pixel pins the rounding.
-    let src = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 167, 1, 1, vec![colr(0, true)]) // identity ⇒ [R=1, G=167, B=207]
-    };
+    let src = coded_item(2, 3, 8, 167, 1, 1, vec![colr(0, true)]) // identity ⇒ [R=1, G=167, B=207]
+        .with_hidden(true);
     let src_alpha = alpha_aux(3, 2, 128, 1, 1); // alpha 128
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0, 0, 0, 0xFF00], // opaque black
-            output_width: 1,
-            output_height: 1,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0, 0, 0, 0xFF00], // opaque black
+                output_width: 1,
+                output_height: 1,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, src, src_alpha]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let got = container
@@ -2257,13 +2145,13 @@ fn composite_over_source_over_rounding_is_golden() {
 
 #[test]
 fn essential_unknown_property_is_refused_on_rgba_too() {
-    let bad = Property {
-        essential: true,
-        kind: PropertyKind::Other {
+    let bad = Property::new(
+        true,
+        PropertyKind::Other {
             kind: *b"a1lx",
             data: vec![1],
         },
-    };
+    );
     let item = coded_item(1, 1, 8, 0, 4, 4, vec![bad]);
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
@@ -2276,10 +2164,7 @@ fn essential_unknown_property_is_refused_on_rgba_too() {
 #[test]
 fn primary_rgba_decodes_the_primary_item() {
     let primary = coded_item(1, 3, 8, 42, 2, 2, vec![colr(0, true)]);
-    let other = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 99, 2, 2, vec![colr(0, true)])
-    };
+    let other = coded_item(2, 3, 8, 99, 2, 2, vec![colr(0, true)]).with_hidden(true);
     let bytes = file(1, vec![primary, other]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let rgba = container
@@ -2333,12 +2218,12 @@ fn rgba16_of_item(item: Item) -> Result<Vec<u16>> {
 
 /// An ICC `colr` (`rICC`) carrying `profile`.
 fn icc_colr(profile: &[u8]) -> Property {
-    Property {
-        essential: false,
-        kind: PropertyKind::Colour(gamut_isobmff::ColourInformation::UnrestrictedIcc(
+    Property::new(
+        false,
+        PropertyKind::Colour(gamut_isobmff::ColourInformation::UnrestrictedIcc(
             profile.to_vec(),
         )),
-    }
+    )
 }
 
 #[test]
@@ -2437,10 +2322,7 @@ const SEQ_BT709_FULL: SeqColour = SeqColour {
 
 /// A coded 4:2:0 8-bit 4x4 item whose sequence header codes `seq`, carrying `props`.
 fn seq_coloured_item(id: u32, seq: SeqColour, props: Vec<Property>) -> Item {
-    Item {
-        payload: coded_payload_with(1, 8, seq, 15, 4, 4),
-        ..coded_item(id, 1, 8, 15, 4, 4, props)
-    }
+    coded_item(id, 1, 8, 15, 4, 4, props).with_payload(coded_payload_with(1, 8, seq, 15, 4, 4))
 }
 
 /// The 8-bit RGBA samples of item 1 of a file holding `items`.
@@ -2510,18 +2392,9 @@ fn colr_less_grid_takes_its_colour_from_the_first_tiles_header() {
     // The tiles disagree; libavif harvests an absent colr from the first, so must this.
     let grid = |grid_props: Vec<Property>, first: SeqColour, second: SeqColour| {
         vec![
-            Item {
-                properties: grid_props,
-                ..grid_item(1, 1, 2, 8, 4, &[2, 3])
-            },
-            Item {
-                hidden: true,
-                ..seq_coloured_item(2, first, vec![])
-            },
-            Item {
-                hidden: true,
-                ..seq_coloured_item(3, second, vec![])
-            },
+            grid_item(1, 1, 2, 8, 4, &[2, 3]).with_properties(grid_props),
+            seq_coloured_item(2, first, vec![]).with_hidden(true),
+            seq_coloured_item(3, second, vec![]).with_hidden(true),
         ]
     };
     assert_eq!(
@@ -2538,15 +2411,10 @@ fn colr_less_grid_takes_its_colour_from_the_first_tiles_header() {
 fn colr_less_iden_takes_its_colour_from_its_sources_header() {
     let iden = |iden_props: Vec<Property>, source: SeqColour| {
         vec![
-            Item {
-                references: vec![dimg(&[2])],
-                properties: iden_props,
-                ..base_item(1, *b"iden")
-            },
-            Item {
-                hidden: true,
-                ..seq_coloured_item(2, source, vec![])
-            },
+            base_item(1, *b"iden")
+                .with_references(vec![dimg(&[2])])
+                .with_properties(iden_props),
+            seq_coloured_item(2, source, vec![]).with_hidden(true),
         ]
     };
     assert_eq!(
@@ -2561,10 +2429,7 @@ fn colr_less_item_with_a_malformed_header_is_refused_on_rgba_only() {
     // RGBA surface refuses rather than guess a colour, and the planar surface still delivers.
     let mut payload = obu(1, &[0x18]);
     payload.extend_from_slice(&obu(6, &[15, 4, 4]));
-    let item = Item {
-        payload,
-        ..coded_item(1, 1, 8, 15, 4, 4, vec![])
-    };
+    let item = coded_item(1, 1, 8, 15, 4, 4, vec![]).with_payload(payload);
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(
@@ -2621,11 +2486,9 @@ fn config_obus_item(config_header: &[u8], payload_header: Option<&[u8]>) -> Item
     record.extend_from_slice(&obu(1, config_header));
     let mut payload = payload_header.map(|h| obu(1, h)).unwrap_or_default();
     payload.extend_from_slice(&obu(6, &[1, 2, 2]));
-    Item {
-        properties: vec![prop_av1c(record)],
-        payload,
-        ..base_item(1, *b"av01")
-    }
+    base_item(1, *b"av01")
+        .with_properties(vec![prop_av1c(record)])
+        .with_payload(payload)
 }
 
 #[test]
@@ -2666,26 +2529,17 @@ fn av1_sequence_header_refuses_an_item_without_one() {
     assert!(refused(
         vec![
             grid_item(1, 1, 1, 4, 4, &[2]),
-            Item {
-                hidden: true,
-                ..coded_item(2, 1, 8, 15, 4, 4, vec![])
-            }
+            coded_item(2, 1, 8, 15, 4, 4, vec![]).with_hidden(true)
         ],
         1
     ));
     // An AV1 item whose payload and configOBUs both lack a sequence header.
-    let headerless = Item {
-        payload: obu(6, &[15, 4, 4]),
-        ..coded_item(1, 1, 8, 15, 4, 4, vec![])
-    };
+    let headerless = coded_item(1, 1, 8, 15, 4, 4, vec![]).with_payload(obu(6, &[15, 4, 4]));
     assert!(refused(vec![headerless], 1));
     // A malformed (truncated) sequence header.
     let mut truncated = obu(1, &[0x18]);
     truncated.extend_from_slice(&obu(6, &[15, 4, 4]));
-    let malformed = Item {
-        payload: truncated,
-        ..coded_item(1, 1, 8, 15, 4, 4, vec![])
-    };
+    let malformed = coded_item(1, 1, 8, 15, 4, 4, vec![]).with_payload(truncated);
     assert!(refused(vec![malformed], 1));
 }
 
@@ -2710,22 +2564,19 @@ const PIXEL_REFUSAL: (ErrorKind, Option<&str>) = (
 
 /// An `iovl` of the given canvas over one hidden 2x2 4:4:4 input.
 fn overlay_file(ow: u32, oh: u32) -> Vec<u8> {
-    let input = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 10, 2, 2, vec![])
-    };
-    let overlay = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0; 4],
-            output_width: ow,
-            output_height: oh,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let input = coded_item(2, 3, 8, 10, 2, 2, vec![]).with_hidden(true);
+    let overlay = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0; 4],
+                output_width: ow,
+                output_height: oh,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     file(1, vec![overlay, input])
 }
 
@@ -2816,13 +2667,13 @@ fn a_grid_whose_tiles_overhang_past_the_limits_stops_after_its_first_tile() {
 
 #[test]
 fn a_coded_item_whose_ispe_is_past_the_limits_never_reaches_the_decoder() {
-    let ispe = Property {
-        essential: false,
-        kind: PropertyKind::ImageSpatialExtents {
+    let ispe = Property::new(
+        false,
+        PropertyKind::ImageSpatialExtents {
             width: 4,
             height: 4,
         },
-    };
+    );
     let bytes = file(1, vec![coded_item(1, 1, 8, 20, 4, 4, vec![ispe])]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert_eq!(
@@ -2900,14 +2751,8 @@ fn a_nested_grid_of_reused_references_is_refused_at_the_default_decode_cap() {
         1,
         vec![
             grid_item(1, 255, 255, 1, 1, &refs(2)),
-            Item {
-                hidden: true,
-                ..grid_item(2, 255, 255, 1, 1, &refs(3))
-            },
-            Item {
-                hidden: true,
-                ..coded_item(3, 0, 8, 0, 1, 1, vec![])
-            },
+            grid_item(2, 255, 255, 1, 1, &refs(3)).with_hidden(true),
+            coded_item(3, 0, 8, 0, 1, 1, vec![]).with_hidden(true),
         ],
     );
     let image = AvifContainer::parse(&bytes).unwrap().image().clone();
@@ -2990,14 +2835,8 @@ fn a_grid_evaluation_is_charged_to_the_derived_cap_before_any_tile_is_decoded() 
 
 #[test]
 fn an_iden_evaluation_is_charged_to_the_derived_cap_before_its_source_is_decoded() {
-    let source = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 30, 4, 2, vec![])
-    };
-    let iden = Item {
-        references: vec![dimg(&[2])],
-        ..base_item(1, *b"iden")
-    };
+    let source = coded_item(2, 3, 8, 30, 4, 2, vec![]).with_hidden(true);
+    let iden = base_item(1, *b"iden").with_references(vec![dimg(&[2])]);
     let bytes = file(1, vec![iden, source]);
     let image = AvifContainer::parse(&bytes).unwrap().image().clone();
     assert_eq!(

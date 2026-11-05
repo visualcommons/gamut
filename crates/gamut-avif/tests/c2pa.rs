@@ -23,7 +23,7 @@ use gamut_avif::{
     SegmentKind,
 };
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
-use gamut_isobmff::{IsoBmffImage, TopLevelBox, TopLevelPosition, write};
+use gamut_isobmff::{IsoBmffImage, TopLevelBox, TopLevelPosition};
 
 const W: u32 = 34;
 const H: u32 = 18;
@@ -85,14 +85,15 @@ fn two_equal_length_stores_give_files_that_differ_exactly_in_the_reported_slot()
         .expect("encode b");
 
     let range = report_a.c2pa.expect("a slot was written");
-    assert_eq!(report_b.c2pa, Some(range), "same offset for both");
-    assert_eq!(range.len(), LEN);
+    assert_eq!(report_b.c2pa, Some(range.clone()), "same offset for both");
+    assert_eq!(range.end - range.start, LEN as u64);
     assert_eq!(file_a.len(), file_b.len());
-    assert_eq!(range.bytes_in(&file_a), Some(&a[..]), "a's slot holds a");
-    assert_eq!(range.bytes_in(&file_b), Some(&b[..]), "b's slot holds b");
+    let (start, end) = (range.start as usize, range.end as usize);
+    assert_eq!(file_a.get(start..end), Some(&a[..]), "a's slot holds a");
+    assert_eq!(file_b.get(start..end), Some(&b[..]), "b's slot holds b");
     // Outside the slot the files are byte-identical: nothing moved, nothing else changed.
-    assert_eq!(file_a[..range.start()], file_b[..range.start()]);
-    assert_eq!(file_a[range.end()..], file_b[range.end()..]);
+    assert_eq!(file_a[..start], file_b[..start]);
+    assert_eq!(file_a[end..], file_b[end..]);
 }
 
 #[test]
@@ -106,10 +107,11 @@ fn patching_a_reserved_slot_at_the_reported_range_reproduces_the_written_store_f
         .encode_with_report(image(&rgb))
         .expect("encode reserved");
     let range = report.c2pa.expect("a slot was reserved");
-    assert_eq!(range.len(), LEN);
+    assert_eq!(range.end - range.start, LEN as u64);
+    let (start, end) = (range.start as usize, range.end as usize);
     assert!(
-        range
-            .bytes_in(&reserved)
+        reserved
+            .get(start..end)
             .expect("inside the file")
             .iter()
             .all(|&b| b == 0),
@@ -118,8 +120,8 @@ fn patching_a_reserved_slot_at_the_reported_range_reproduces_the_written_store_f
 
     // The signer's move: overwrite the slot in place. The result must be the file the encoder
     // would have written for that store — the two paths agree on every byte.
-    range
-        .bytes_in_mut(&mut reserved)
+    reserved
+        .get_mut(start..end)
         .expect("inside the file")
         .copy_from_slice(&store);
     let direct = AvifEncoder::new()
@@ -148,7 +150,7 @@ fn encode_with_report_yields_encode_to_vec_bytes_and_no_range_when_unconfigured(
         .encode_with_report(image(&rgb))
         .expect("encode with report");
     assert_eq!(bytes, plain);
-    assert_eq!(report.c2pa.map(|r| r.len()), Some(64));
+    assert_eq!(report.c2pa.map(|r| r.end - r.start), Some(64));
 }
 
 #[test]
@@ -160,14 +162,21 @@ fn the_crate_locates_the_slot_it_reserved_at_the_reported_range() {
         .expect("encode");
     let container = AvifContainer::parse(&bytes).expect("gamut-avif parses its own output");
     let store = container.c2pa_slot().expect("the slot is located");
-    assert_eq!(Some(store.range), report.c2pa, "reader and writer agree");
+    assert_eq!(
+        Some(store.range.clone()),
+        report.c2pa,
+        "reader and writer agree"
+    );
     assert_eq!(
         store.slot_bytes,
         &[0u8; 128][..],
         "an unfilled slot is zeros"
     );
     assert_eq!(store.purpose, C2paBoxPurpose::Manifest);
-    assert_eq!(store.range.bytes_in(&bytes), Some(store.slot_bytes));
+    assert_eq!(
+        bytes.get(store.range.start as usize..store.range.end as usize),
+        Some(store.slot_bytes)
+    );
     assert_eq!(container.c2pa_slots().count(), 1);
 
     // A file with no box locates nothing.
@@ -198,7 +207,11 @@ fn with_c2pa_writes_and_locates_a_store_shorter_than_a_jumbf_box_header() {
             .encode_with_report(image(&rgb))
             .unwrap_or_else(|err| panic!("a {len}-byte store is written: {err}"));
         let range = report.c2pa.expect("a slot was written");
-        assert_eq!(range.bytes_in(&bytes), Some(&store[..]), "{len}");
+        assert_eq!(
+            bytes.get(range.start as usize..range.end as usize),
+            Some(&store[..]),
+            "{len}"
+        );
         let container = AvifContainer::parse(&bytes).expect("gamut-avif parses its own output");
         let slot = container.c2pa_slot().expect("the short slot is located");
         assert_eq!(slot.range, range, "{len}");
@@ -229,19 +242,25 @@ fn a_file_mid_update_reports_its_original_and_update_stores_in_file_order() {
         TopLevelBox::uuid(C2PA_UUID, c2pa_box(b"update", &update))
             .with_position(TopLevelPosition::Trailing),
     ]);
-    let bytes = write(&model).expect("writes");
+    let bytes = model.to_bytes().expect("writes");
     let container = AvifContainer::parse(&bytes).expect("parses");
 
     let stores: Vec<_> = container.c2pa_slots().collect();
     assert_eq!(stores.len(), 2);
     assert_eq!(stores[0].purpose, C2paBoxPurpose::Original);
     assert_eq!(stores[0].slot_bytes, &original[..]);
-    assert_eq!(stores[0].range.bytes_in(&bytes), Some(&original[..]));
+    assert_eq!(
+        bytes.get(stores[0].range.start as usize..stores[0].range.end as usize),
+        Some(&original[..])
+    );
     assert_eq!(stores[1].purpose, C2paBoxPurpose::Update);
     assert_eq!(stores[1].slot_bytes, &update[..]);
-    assert_eq!(stores[1].range.bytes_in(&bytes), Some(&update[..]));
+    assert_eq!(
+        bytes.get(stores[1].range.start as usize..stores[1].range.end as usize),
+        Some(&update[..])
+    );
     // The update box is the file's last box, so its slot runs to end of file.
-    assert_eq!(stores[1].range.end(), bytes.len());
+    assert_eq!(stores[1].range.end, bytes.len() as u64);
     // `c2pa()` is "the first one", never a judgement about which is active.
     assert_eq!(
         container.c2pa_slot().map(|s| s.purpose),
@@ -257,7 +276,7 @@ fn a_store_after_a_top_level_moov_and_before_mdat_reports_before_media_data() {
     // so a store between `moov` and `mdat` is reachable and reports `BeforeMediaData` with the
     // plain located headline. A change to that is a decision, and flips this pin with it.
     //
-    // `gamut_isobmff::write` refuses a `moov` top-level box, so the file is written with a `free`
+    // `IsoBmffImage::to_bytes` refuses a `moov` top-level box, so the file is written with a `free`
     // box of the same length in its place and the four type bytes are rewritten afterwards: every
     // `iloc` offset into `mdat` stays valid.
     let interior = payload(0x55, 24);
@@ -280,7 +299,7 @@ fn a_store_after_a_top_level_moov_and_before_mdat_reports_before_media_data() {
         TopLevelBox::new(*b"free", vec![0u8; 16]),
         TopLevelBox::uuid(C2PA_UUID, c2pa_box(b"manifest", &store)),
     ]);
-    let mut bytes = write(&model).expect("writes");
+    let mut bytes = model.to_bytes().expect("writes");
     let free = bytes
         .windows(4)
         .position(|w| w == b"free")
@@ -305,7 +324,11 @@ fn a_store_after_a_top_level_moov_and_before_mdat_reports_before_media_data() {
     let summary = container.c2pa_summary();
     assert_eq!(summary.stores.len(), 1);
     assert!(summary.unread.is_empty());
-    assert_eq!(summary.stores[0].range.bytes_in(&bytes), Some(&store[..]));
+    let range = &summary.stores[0].range;
+    assert_eq!(
+        bytes.get(range.start as usize..range.end as usize),
+        Some(&store[..])
+    );
     assert_eq!(summary.stores[0].position, C2paBoxPosition::BeforeMediaData);
     assert_eq!(
         summary.summary_lines(),

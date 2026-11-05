@@ -156,12 +156,14 @@ const CLLI: ContentLightLevel = ContentLightLevel {
 
 /// Every field differs from every other, so a transposed primary pair or swapped luminance bound
 /// cannot reproduce the expected value.
-const MDCV: MasteringDisplay = MasteringDisplay {
-    display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
-    white_point: [15635, 16450],
-    max_display_mastering_luminance: 10_000_000,
-    min_display_mastering_luminance: 50,
-};
+fn mdcv() -> MasteringDisplay {
+    MasteringDisplay::new(
+        [[13250, 34500], [7500, 3000], [34000, 16000]],
+        [15635, 16450],
+        10_000_000,
+        50,
+    )
+}
 
 /// A PQ-tagged BT.2020 encoder carrying both HDR properties — the configuration they describe.
 fn hdr_encoder() -> AvifEncoder {
@@ -169,7 +171,7 @@ fn hdr_encoder() -> AvifEncoder {
         .with_primaries(ColorPrimaries::Bt2020)
         .with_transfer(TransferCharacteristics::Pq)
         .with_content_light_level(CLLI)
-        .with_mastering_display(MDCV)
+        .with_mastering_display(mdcv())
 }
 
 #[test]
@@ -189,7 +191,7 @@ fn libavif_accepts_the_mastering_display_property() {
     // here (gamut-heic's `oracle_isobmff_mdcv` checks the box layout against libheif). What it can
     // check is placement: libavif ignores an item citing an *essential* property it does not
     // support, so a wrongly-essential `mdcv` would leave it with no primary image to parse.
-    let avif = encode(AvifEncoder::new().with_mastering_display(MDCV));
+    let avif = encode(AvifEncoder::new().with_mastering_display(mdcv()));
     let s = libavif_oracle::introspect(&avif).expect("libavif parses the container");
     assert_eq!((s.width, s.height), (W, H));
 }
@@ -202,7 +204,7 @@ fn the_crate_reads_back_the_hdr_properties_as_descriptive() {
     let primary = container.image().primary_item();
 
     assert_eq!(primary.content_light_level(), Some(CLLI));
-    assert_eq!(primary.mastering_display(), Some(MDCV));
+    assert_eq!(primary.mastering_display(), Some(mdcv()));
 
     let properties = &primary.as_isobmff_item().properties;
     let position = |want: fn(&PropertyKind) -> bool| {

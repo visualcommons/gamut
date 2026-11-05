@@ -69,6 +69,6 @@ pub fn reserve_avif(len: usize) -> Result<(Vec<u8>, std::ops::Range<usize>)> {
     let range = report.c2pa.ok_or_else(|| {
         OracleError::Asset("encode_with_report reported no range for the reserved slot".into())
     })?;
-    // The oracle's patch API takes a plain range; gamut's has no conversion to one (#780).
-    Ok((bytes, range.start()..range.end()))
+    // The oracle's patch API takes an in-memory `Range<usize>`; gamut reports a file `Range<u64>`.
+    Ok((bytes, range.start as usize..range.end as usize))
 }

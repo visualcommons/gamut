@@ -2,7 +2,7 @@
 //! (ISO/IEC 23008-12 §6.6.2.4.2), pinned independently of the serialiser.
 
 use gamut_core::ErrorKind;
-use gamut_isobmff::ImageOverlay;
+use gamut_isobmff::{ImageOverlay, OverlayOffset};
 
 /// A 16-bit-form payload: version 0, flags 0, canvas fill R,G,B,A = 1111/2222/3333/FFFF, canvas
 /// 64×48, two composed inputs at (10, -1) and (-5, 32000) — negative offsets pin sign extension.
@@ -31,7 +31,16 @@ fn model_16() -> ImageOverlay {
         canvas_fill_value: [0x1111, 0x2222, 0x3333, 0xFFFF],
         output_width: 64,
         output_height: 48,
-        offsets: vec![(10, -1), (-5, 32000)],
+        offsets: vec![
+            OverlayOffset {
+                horizontal: 10,
+                vertical: -1,
+            },
+            OverlayOffset {
+                horizontal: -5,
+                vertical: 32000,
+            },
+        ],
     }
 }
 
@@ -40,17 +49,27 @@ fn model_32() -> ImageOverlay {
         canvas_fill_value: [0x1111, 0x2222, 0x3333, 0xFFFF],
         output_width: 65536,
         output_height: 1,
-        offsets: vec![(-70000, 100000)],
+        offsets: vec![OverlayOffset {
+            horizontal: -70000,
+            vertical: 100000,
+        }],
     }
 }
 
-/// A canvas with a distinctive fill and the given dims/offsets, for form-selection boundary probes.
+/// A canvas with a distinctive fill and the given dims and `(horizontal, vertical)` offsets, for
+/// form-selection boundary probes.
 fn ov(output_width: u32, output_height: u32, offsets: Vec<(i32, i32)>) -> ImageOverlay {
     ImageOverlay {
         canvas_fill_value: [0, 0, 0, 0xFFFF],
         output_width,
         output_height,
-        offsets,
+        offsets: offsets
+            .into_iter()
+            .map(|(horizontal, vertical)| OverlayOffset {
+                horizontal,
+                vertical,
+            })
+            .collect(),
     }
 }
 

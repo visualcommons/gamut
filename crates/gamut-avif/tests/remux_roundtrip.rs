@@ -30,8 +30,11 @@ fn remux_preserves_decoded_pixels() {
 
     // gamut-isobmff parses the foreign container and re-serialises it (normalised box versions,
     // single-extent mdat), never touching the opaque coded payload.
-    let model = gamut_isobmff::read(&src).expect("gamut-isobmff reads the foreign container");
-    let remuxed = gamut_isobmff::write(&model).expect("gamut-isobmff writes the container");
+    let model = gamut_isobmff::IsoBmffImage::parse(&src)
+        .expect("gamut-isobmff reads the foreign container");
+    let remuxed = model
+        .to_bytes()
+        .expect("gamut-isobmff writes the container");
     assert_ne!(
         remuxed, src,
         "the writer normalises, so the container bytes are expected to differ"
@@ -65,12 +68,15 @@ fn remux_with_a_c2pa_uuid_box_preserves_decoded_pixels() {
     // store; nothing here validates it. Where the box lands is pinned exact-byte in
     // gamut-isobmff's `tests/top_level.rs`, not here.
     let src = std::fs::read(corpus_444()).expect("read the corpus fixture");
-    let mut model = gamut_isobmff::read(&src).expect("gamut-isobmff reads the foreign container");
+    let mut model = gamut_isobmff::IsoBmffImage::parse(&src)
+        .expect("gamut-isobmff reads the foreign container");
     model.push_top_level_box(TopLevelBox::uuid(
         C2PA_UUID,
         b"opaque-manifest-store".to_vec(),
     ));
-    let with_box = gamut_isobmff::write(&model).expect("gamut-isobmff writes the container");
+    let with_box = model
+        .to_bytes()
+        .expect("gamut-isobmff writes the container");
 
     let original = libavif_oracle::decode_avif(&src).expect("libavif decodes the original");
     let carrying = libavif_oracle::decode_avif(&with_box)

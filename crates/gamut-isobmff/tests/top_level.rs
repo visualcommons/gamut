@@ -11,9 +11,7 @@
 mod common;
 
 use common::{av01_item, bx, cat, ftyp, hdlr, iinf_v0, image, infe_v2, meta, pitm_v0};
-use gamut_isobmff::{
-    IsoBmffImage, SegmentKind, TopLevelBox, TopLevelPosition, read, walk_segments, write,
-};
+use gamut_isobmff::{IsoBmffImage, SegmentKind, TopLevelBox, TopLevelPosition, walk_segments};
 
 /// C2PA 2.4 §A.5.1: the `ContentProvenanceBox` user type `D8FEC3D6-1B0E-483C-9297-5828877EC481`.
 const C2PA_UUID: [u8; 16] = [
@@ -51,7 +49,7 @@ fn c2pa_uuid_box_is_written_after_ftyp_and_before_meta() {
     let store = b"c2pa-manifest-store".to_vec();
     let img = image(vec![av01_item(1, vec![1, 2, 3, 4])])
         .with_top_level_boxes(vec![TopLevelBox::uuid(C2PA_UUID, store.clone())]);
-    let f = write(&img).unwrap();
+    let f = IsoBmffImage::to_bytes(&img).unwrap();
 
     // §A.5.3: after ftyp, before the first mdat (and here before meta as well).
     assert_eq!(types(&f), [*b"ftyp", *b"uuid", *b"meta", *b"mdat"]);
@@ -72,7 +70,7 @@ fn trailing_box_is_written_after_mdat() {
     let img = image(vec![av01_item(1, vec![1, 2, 3, 4])]).with_top_level_boxes(vec![
         TopLevelBox::new(*b"free", vec![0xAA, 0xBB]).with_position(TopLevelPosition::Trailing),
     ]);
-    let f = write(&img).unwrap();
+    let f = IsoBmffImage::to_bytes(&img).unwrap();
 
     assert_eq!(types(&f), [*b"ftyp", *b"meta", *b"mdat", *b"free"]);
     // The file ends with the exact box: size 10, `free`, the two payload bytes, no user type.
@@ -93,7 +91,7 @@ fn boxes_keep_model_order_within_each_position() {
         TopLevelBox::new(*b"skip", vec![1]).with_position(TopLevelPosition::Trailing),
         TopLevelBox::new(*b"free", vec![3]).with_position(TopLevelPosition::Trailing),
     ]);
-    let f = write(&img).unwrap();
+    let f = IsoBmffImage::to_bytes(&img).unwrap();
 
     let boxes = top_level(&f);
     let summary: Vec<([u8; 4], u8)> = boxes
@@ -118,9 +116,9 @@ fn boxes_keep_model_order_within_each_position() {
 fn read_then_write_is_byte_identical_for_a_file_carrying_top_level_boxes() {
     // What makes retaining the boxes safe rather than lossy: a file this crate wrote with boxes at
     // both positions re-serialises to the identical bytes after a read.
-    let f = write(&image_with_both_positions()).unwrap();
-    let parsed = read(&f).unwrap();
-    assert_eq!(write(&parsed).unwrap(), f);
+    let f = IsoBmffImage::to_bytes(&image_with_both_positions()).unwrap();
+    let parsed = IsoBmffImage::parse(&f).unwrap();
+    assert_eq!(IsoBmffImage::to_bytes(&parsed).unwrap(), f);
 }
 
 #[test]
@@ -145,7 +143,7 @@ fn reader_positions_boxes_by_whether_mdat_precedes_them() {
         bx(b"mdat", &[9, 9, 9, 9]),
         bx(b"free", b"after"),
     ]);
-    let img = read(&data).unwrap();
+    let img = IsoBmffImage::parse(&data).unwrap();
 
     assert_eq!(
         img.top_level_boxes,
@@ -161,8 +159,8 @@ fn reader_positions_boxes_by_whether_mdat_precedes_them() {
 fn written_top_level_boxes_are_fully_accounted() {
     // Every byte of a file carrying top-level boxes still maps to a Box segment — the boxes are
     // well-formed spans, not a trailer, and nothing is left unclassified.
-    let f = write(&image_with_both_positions()).unwrap();
-    let (segments, _) = walk_segments(&f).unwrap();
+    let f = IsoBmffImage::to_bytes(&image_with_both_positions()).unwrap();
+    let segments = walk_segments(&f).unwrap().segments;
 
     assert!(
         gamut_core::segment::covers(&segments, f.len()),
@@ -189,7 +187,7 @@ fn push_top_level_box_appends_within_the_position_group() {
         TopLevelBox::uuid(C2PA_UUID, vec![1]),
         TopLevelBox::new(*b"free", vec![2]).with_position(TopLevelPosition::Trailing),
     ]);
-    let mut model = read(&write(&start).unwrap()).unwrap();
+    let mut model = IsoBmffImage::parse(&IsoBmffImage::to_bytes(&start).unwrap()).unwrap();
     let order = |m: &IsoBmffImage| -> Vec<(u8, TopLevelPosition)> {
         m.top_level_boxes
             .iter()

@@ -9,10 +9,10 @@
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
+use gamut::core::Cicp;
 use gamut::isobmff::{
-    self, CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, ImageGrid,
-    IsoBmffImage, Item, ItemReference, MasteringDisplay, NclxColr, PixelAspectRatio, Property,
-    PropertyKind,
+    CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, ImageGrid, IsoBmffImage,
+    Item, ItemReference, MasteringDisplay, PixelAspectRatio, Property, PropertyKind,
 };
 
 use crate::error::CliError;
@@ -51,7 +51,7 @@ pub(crate) fn run(cmd: &IsobmffCommand) -> Result<(), CliError> {
 /// Parses `input` and prints its container structure.
 fn inspect(input: &Path) -> Result<(), CliError> {
     let data = read_file(input)?;
-    let img = isobmff::read(&data)?;
+    let img = IsoBmffImage::parse(&data)?;
     print_container(input, data.len(), &img);
     Ok(())
 }
@@ -63,9 +63,9 @@ fn inspect(input: &Path) -> Result<(), CliError> {
 const SEQUENCE_BRANDS: [[u8; 4]; 6] = [*b"avis", *b"msf1", *b"hevc", *b"hevx", *b"hevm", *b"hevs"];
 
 /// Rebrands a model read from a file that may carry an image-sequence track as the still-only file
-/// `write` produces from it.
+/// `to_bytes` produces from it.
 ///
-/// `read` skips a top-level `moov` beside the `meta` still and `write` never emits one, so the
+/// `parse` skips a top-level `moov` beside the `meta` still and `to_bytes` never emits one, so the
 /// remuxed copy has no track; leaving `avis`/`msf1` in its `ftyp` would claim one (AVIF §7). The
 /// sequence brands are dropped from the compatible list, and a sequence major brand is replaced by
 /// the first compatible brand left. `avio` is kept: AVIF §6.2 constrains the image items by it too.
@@ -92,11 +92,11 @@ fn drop_sequence_brands(model: &mut IsoBmffImage) -> Result<(), CliError> {
 /// Parses `input`, re-serialises it to `output`, and verifies the read→write round-trip.
 fn remux(input: &Path, output: &Path) -> Result<(), CliError> {
     let data = read_file(input)?;
-    let mut model = isobmff::read(&data)?;
+    let mut model = IsoBmffImage::parse(&data)?;
     drop_sequence_brands(&mut model)?;
-    let bytes = isobmff::write(&model)?;
+    let bytes = model.to_bytes()?;
     // Round-trip guard: re-parsing our own output must reproduce the model exactly.
-    if isobmff::read(&bytes)? != model {
+    if IsoBmffImage::parse(&bytes)? != model {
         return Err(CliError::Codec(gamut::core::Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "isobmff remux: re-parsed container did not match the source model",
@@ -123,7 +123,7 @@ fn remux(input: &Path, output: &Path) -> Result<(), CliError> {
 /// Builds the demonstration container and writes it to `output`.
 fn build(output: &Path) -> Result<(), CliError> {
     let img = demo_image()?;
-    let bytes = isobmff::write(&img)?;
+    let bytes = img.to_bytes()?;
     write_file(output, &bytes)?;
     println!(
         "wrote {} ({} bytes): {} item(s) exercising the full still-image model, primary item {}",
@@ -324,6 +324,7 @@ fn render_property(p: &Property) -> String {
             white_point: [wx, wy],
             max_display_mastering_luminance,
             min_display_mastering_luminance,
+            ..
         }) => format!(
             "mdcv  primaries=({},{}) ({},{}) ({},{}) white=({wx},{wy}) \
              luminance={min_display_mastering_luminance}..{max_display_mastering_luminance}",
@@ -371,34 +372,16 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
     let pixi = |bits: &[u8]| PropertyKind::PixelInformation {
         bits_per_channel: bits.to_vec(),
     };
-    let essential = |kind| Property {
-        essential: true,
-        kind,
-    };
-    let descriptive = |kind| Property {
-        essential: false,
-        kind,
-    };
+    let essential = |kind| Property::new(true, kind);
+    let descriptive = |kind| Property::new(false, kind);
 
     // Primary: a grid derived image over two tiles, carrying the transform properties.
-    let grid = Item {
-        id: 1,
-        item_type: *b"grid",
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: false,
-        references: vec![
-            ItemReference {
-                reference_type: *b"dimg",
-                to_item_ids: vec![2, 3],
-            },
-            ItemReference {
-                reference_type: *b"prem",
-                to_item_ids: vec![4],
-            },
-        ],
-        properties: vec![
+    let grid = Item::new(1, *b"grid")
+        .with_references(vec![
+            ItemReference::new(*b"dimg", vec![2, 3]),
+            ItemReference::new(*b"prem", vec![4]),
+        ])
+        .with_properties(vec![
             descriptive(ispe(256, 128)),
             essential(PropertyKind::Rotation(1)),
             essential(PropertyKind::Mirror(0)),
@@ -416,85 +399,64 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
                 h_spacing: 1,
                 v_spacing: 1,
             })),
-        ],
-        payload: ImageGrid {
-            rows: 1,
-            columns: 2,
-            output_width: 256,
-            output_height: 128,
-        }
-        .to_bytes()?,
-    };
+        ])
+        .with_payload(
+            ImageGrid {
+                rows: 1,
+                columns: 2,
+                output_width: 256,
+                output_height: 128,
+            }
+            .to_bytes()?,
+        );
 
     // Tile A: nclx colour, HDR `mdcv` (BT.2020 primaries, D65, 0.005..1000 cd/m²), plus an
     // unrecognised `amve` property carried verbatim.
-    let tile_a = Item {
-        id: 2,
-        item_type: *b"av01",
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: true,
-        references: vec![],
-        properties: vec![
+    let tile_a = Item::new(2, *b"av01")
+        .with_hidden(true)
+        .with_properties(vec![
             essential(av1c()),
             descriptive(ispe(128, 128)),
             descriptive(pixi(&[8, 8, 8])),
-            descriptive(PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
+            descriptive(PropertyKind::Colour(ColourInformation::Nclx(Cicp {
                 colour_primaries: 1,
                 transfer_characteristics: 13,
                 matrix_coefficients: 6,
                 full_range: true,
             }))),
             descriptive(PropertyKind::MasteringDisplayColourVolume(
-                MasteringDisplay {
-                    display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
-                    white_point: [15635, 16450],
-                    max_display_mastering_luminance: 10_000_000,
-                    min_display_mastering_luminance: 50,
-                },
+                MasteringDisplay::new(
+                    [[8500, 39850], [6550, 2300], [35400, 14600]],
+                    [15635, 16450],
+                    10_000_000,
+                    50,
+                ),
             )),
             descriptive(PropertyKind::Other {
                 kind: *b"amve",
                 data: vec![0; 8],
             }),
-        ],
-        payload: vec![0xde, 0xad, 0xbe, 0xef],
-    };
+        ])
+        .with_payload(vec![0xde, 0xad, 0xbe, 0xef]);
 
     // Tile B: an unrestricted ICC profile in `colr`.
-    let tile_b = Item {
-        id: 3,
-        item_type: *b"av01",
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: true,
-        references: vec![],
-        properties: vec![
+    let tile_b = Item::new(3, *b"av01")
+        .with_hidden(true)
+        .with_properties(vec![
             essential(av1c()),
             descriptive(ispe(128, 128)),
             descriptive(pixi(&[8, 8, 8])),
             descriptive(PropertyKind::Colour(ColourInformation::UnrestrictedIcc(
                 vec![0u8; 12],
             ))),
-        ],
-        payload: vec![0xca, 0xfe, 0xba, 0xbe],
-    };
+        ])
+        .with_payload(vec![0xca, 0xfe, 0xba, 0xbe]);
 
     // Alpha auxiliary for the grid, monochrome, essential auxC type.
-    let alpha = Item {
-        id: 4,
-        item_type: *b"av01",
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: true,
-        references: vec![ItemReference {
-            reference_type: *b"auxl",
-            to_item_ids: vec![1],
-        }],
-        properties: vec![
+    let alpha = Item::new(4, *b"av01")
+        .with_hidden(true)
+        .with_references(vec![ItemReference::new(*b"auxl", vec![1])])
+        .with_properties(vec![
             essential(av1c()),
             descriptive(ispe(256, 128)),
             descriptive(pixi(&[8])),
@@ -502,55 +464,25 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
                 aux_type: "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha".to_string(),
                 aux_subtype: Vec::new(),
             }),
-        ],
-        payload: vec![0x00, 0x11, 0x22, 0x33],
-    };
+        ])
+        .with_payload(vec![0x00, 0x11, 0x22, 0x33]);
 
     // Exif metadata item describing the primary.
-    let exif = Item {
-        id: 5,
-        item_type: *b"Exif",
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: false,
-        references: vec![ItemReference {
-            reference_type: *b"cdsc",
-            to_item_ids: vec![1],
-        }],
-        properties: vec![],
-        payload: b"\x00\x00\x00\x00II*\x00\x08\x00\x00\x00".to_vec(),
-    };
+    let exif = Item::new(5, *b"Exif")
+        .with_references(vec![ItemReference::new(*b"cdsc", vec![1])])
+        .with_payload(b"\x00\x00\x00\x00II*\x00\x08\x00\x00\x00".to_vec());
 
     // XMP metadata item (a `mime` item with an RDF/XML content type).
-    let xmp = Item {
-        id: 6,
-        item_type: *b"mime",
-        name: String::new(),
-        content_type: Some("application/rdf+xml".to_string()),
-        content_encoding: None,
-        hidden: false,
-        references: vec![ItemReference {
-            reference_type: *b"cdsc",
-            to_item_ids: vec![1],
-        }],
-        properties: vec![],
-        payload: b"<?xpacket?><x:xmpmeta/>".to_vec(),
-    };
+    let xmp = Item::new(6, *b"mime")
+        .with_content_type("application/rdf+xml")
+        .with_references(vec![ItemReference::new(*b"cdsc", vec![1])])
+        .with_payload(b"<?xpacket?><x:xmpmeta/>".to_vec());
 
     // Thumbnail: a restricted ICC profile plus an HDR content-light-level property.
-    let thumb = Item {
-        id: 7,
-        item_type: *b"av01",
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: true,
-        references: vec![ItemReference {
-            reference_type: *b"thmb",
-            to_item_ids: vec![1],
-        }],
-        properties: vec![
+    let thumb = Item::new(7, *b"av01")
+        .with_hidden(true)
+        .with_references(vec![ItemReference::new(*b"thmb", vec![1])])
+        .with_properties(vec![
             essential(av1c()),
             descriptive(ispe(64, 32)),
             descriptive(pixi(&[8, 8, 8])),
@@ -561,9 +493,8 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
                 max_content_light_level: 1000,
                 max_pic_average_light_level: 400,
             })),
-        ],
-        payload: vec![0x44, 0x55, 0x66, 0x77],
-    };
+        ])
+        .with_payload(vec![0x44, 0x55, 0x66, 0x77]);
 
     Ok(IsoBmffImage::new(
         *b"avif",
@@ -571,11 +502,7 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
         1,
         vec![grid, tile_a, tile_b, alpha, exif, xmp, thumb],
     )
-    .with_groups(vec![EntityGroup {
-        group_type: *b"altr",
-        group_id: 1000,
-        entity_ids: vec![1, 7],
-    }]))
+    .with_groups(vec![EntityGroup::new(*b"altr", 1000, vec![1, 7])]))
 }
 
 #[cfg(test)]
@@ -585,8 +512,8 @@ mod tests {
     #[test]
     fn demo_image_round_trips_through_write_read() {
         let img = demo_image().expect("demo image builds");
-        let bytes = isobmff::write(&img).expect("write");
-        let back = isobmff::read(&bytes).expect("read");
+        let bytes = img.to_bytes().expect("write");
+        let back = IsoBmffImage::parse(&bytes).expect("read");
         assert_eq!(back, img);
     }
 

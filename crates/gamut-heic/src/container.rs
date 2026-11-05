@@ -9,12 +9,12 @@
 //!
 //! The top-level walk is [`gamut_isobmff::walk_segments`], shared with the sibling container
 //! crate (#436), and stops on exactly the same rules as
-//! [`gamut_isobmff::read`] — the first `ftyp` wins, a second top-level `ftyp` begins the appended
+//! [`IsoBmffImage::parse`] — the first `ftyp` wins, a second top-level `ftyp` begins the appended
 //! stream, and a malformed trailing box is tolerated (as a trailer) only once both `ftyp` and
 //! `meta` have been seen — so the byte-accounting walk and the semantic parse never disagree.
 
 use gamut_core::Result;
-use gamut_isobmff::read;
+use gamut_isobmff::IsoBmffImage;
 
 use crate::image::HeifImage;
 
@@ -32,7 +32,7 @@ use crate::image::HeifImage;
 /// [`SegmentKind::Trailer`].
 ///
 /// The [`image`](Self::image) field is the role-typed semantic view of the *primary* still-image
-/// stream. Boxes inside `meta` that [`gamut_isobmff::read`] does not consume (e.g. a `dinf`/`dref`
+/// stream. Boxes inside `meta` that [`IsoBmffImage::parse`] does not consume (e.g. a `dinf`/`dref`
 /// pair or a `uuid` box) are surfaced in [`unknown_meta_boxes`](Self::unknown_meta_boxes) so that,
 /// at the meta level too, nothing is silently dropped.
 #[derive(Debug)]
@@ -51,7 +51,7 @@ pub use gamut_isobmff::{Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 impl<'a> HeifContainer<'a> {
     /// Parses `data` into the total byte-accounting representation and the role-typed semantic view.
     ///
-    /// The semantic layer is [`gamut_isobmff::read`] wrapped in a [`HeifImage`], which additionally
+    /// The semantic layer is [`IsoBmffImage::parse`] wrapped in a [`HeifImage`], which additionally
     /// validates the primary item at parse time (the `pitm` id must name an existing, non-hidden
     /// item — ISO/IEC 23008-12). The byte-accounting layer walks the top-level boxes into
     /// [`segments`](Self::segments) covering every byte, and shadow-walks `meta` for boxes `read`
@@ -59,7 +59,7 @@ impl<'a> HeifContainer<'a> {
     ///
     /// # Errors
     ///
-    /// Propagates every [`gamut_isobmff::read`] error (a missing/truncated required box, an
+    /// Propagates every [`IsoBmffImage::parse`] error (a missing/truncated required box, an
     /// out-of-scope feature such as a sequence-only file, …) and returns an
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
     /// primary item is missing or hidden. A malformed top-level box *before* both `ftyp` and `meta`
@@ -70,17 +70,17 @@ impl<'a> HeifContainer<'a> {
         // Semantic parse first: it enforces the stricter rules (refusing a sequence-only file,
         // missing required boxes, …). Because it succeeds only once `ftyp`+`meta` are seen and uses
         // the identical `BoxReader` walk, the byte-accounting walk below cannot then disagree.
-        let image = HeifImage::new(read(data)?)?;
-        let (segments, meta_body) = gamut_isobmff::walk_segments(data)?;
-        let unknown_meta_boxes = match meta_body {
+        let image = HeifImage::new(IsoBmffImage::parse(data)?)?;
+        let walk = gamut_isobmff::walk_segments(data)?;
+        let unknown_meta_boxes = match walk.meta_body {
             Some(body) => gamut_isobmff::walk_meta_children(body)?,
-            // Unreachable once `read` has succeeded (it requires `meta`); an empty list is the
+            // Unreachable once `parse` has succeeded (it requires `meta`); an empty list is the
             // honest answer if it ever were.
             None => Vec::new(),
         };
         Ok(Self {
             data,
-            segments,
+            segments: walk.segments,
             image,
             unknown_meta_boxes,
         })

@@ -7,13 +7,13 @@
 //! reference transforms.
 
 use gamut_color::{ColorRange, bt601_ycbcr_to_rgb};
-use gamut_core::{Error, ErrorKind, Result};
+use gamut_core::{Cicp, Error, ErrorKind, Result};
 use gamut_heic::{
     ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder, iter_nal_units,
 };
 use gamut_isobmff::{
     CleanAperture, ColourInformation, ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference,
-    NclxColr, Property, PropertyKind, write,
+    OverlayOffset, Property, PropertyKind,
 };
 
 // ---- deterministic mock decoder --------------------------------------------------------------
@@ -118,51 +118,45 @@ fn coded_payload(base: u8, w: u32, h: u32) -> Vec<u8> {
 }
 
 fn prop_hvcc(data: Vec<u8>) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::CodecConfiguration {
+    Property::new(
+        true,
+        PropertyKind::CodecConfiguration {
             kind: *b"hvcC",
             data,
         },
-    }
+    )
 }
 
 fn colr(matrix: u16, full: bool) -> Property {
-    Property {
-        essential: false,
-        kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
+    Property::new(
+        false,
+        PropertyKind::Colour(ColourInformation::Nclx(Cicp {
             colour_primaries: 1,
             transfer_characteristics: 13,
             matrix_coefficients: matrix,
             full_range: full,
         })),
-    }
+    )
 }
 
 fn icc(profile: &[u8]) -> Property {
-    Property {
-        essential: false,
-        kind: PropertyKind::Colour(ColourInformation::UnrestrictedIcc(profile.to_vec())),
-    }
+    Property::new(
+        false,
+        PropertyKind::Colour(ColourInformation::UnrestrictedIcc(profile.to_vec())),
+    )
 }
 
 fn irot(turns: u8) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::Rotation(turns),
-    }
+    Property::new(true, PropertyKind::Rotation(turns))
 }
 fn imir(axis: u8) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::Mirror(axis),
-    }
+    Property::new(true, PropertyKind::Mirror(axis))
 }
 #[allow(clippy::too_many_arguments)]
 fn clap(wn: u32, wd: u32, hn: u32, hd: u32, hon: u32, hod: u32, von: u32, vod: u32) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::CleanAperture(CleanAperture {
+    Property::new(
+        true,
+        PropertyKind::CleanAperture(CleanAperture {
             width_n: wn,
             width_d: wd,
             height_n: hn,
@@ -172,28 +166,23 @@ fn clap(wn: u32, wd: u32, hn: u32, hd: u32, hon: u32, hod: u32, von: u32, vod: u
             vert_off_n: von,
             vert_off_d: vod,
         }),
-    }
+    )
 }
 
 fn dimg(to: &[u32]) -> ItemReference {
-    ItemReference {
-        reference_type: *b"dimg",
-        to_item_ids: to.to_vec(),
+    ItemReference::new(*b"dimg", to.to_vec())
+}
+
+/// An `iovl` sub-image offset.
+fn offset(horizontal: i32, vertical: i32) -> OverlayOffset {
+    OverlayOffset {
+        horizontal,
+        vertical,
     }
 }
 
 fn base_item(id: u32, item_type: [u8; 4]) -> Item {
-    Item {
-        id,
-        item_type,
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: false,
-        references: vec![],
-        properties: vec![],
-        payload: vec![],
-    }
+    Item::new(id, item_type)
 }
 
 /// A coded `hvc1` item with the given chroma/bit-depth config and `(base, w, h)` payload.
@@ -208,21 +197,15 @@ fn coded_item(
 ) -> Item {
     let mut properties = vec![prop_hvcc(hvcc_record(chroma_idc, bd))];
     properties.extend(extra);
-    Item {
-        properties,
-        payload: coded_payload(base, w, h),
-        ..base_item(id, *b"hvc1")
-    }
+    base_item(id, *b"hvc1")
+        .with_properties(properties)
+        .with_payload(coded_payload(base, w, h))
 }
 
 fn file(primary_id: u32, items: Vec<Item>) -> Vec<u8> {
-    write(&IsoBmffImage::new(
-        *b"heic",
-        vec![*b"heic", *b"mif1"],
-        primary_id,
-        items,
-    ))
-    .expect("write model")
+    IsoBmffImage::new(*b"heic", vec![*b"heic", *b"mif1"], primary_id, items)
+        .to_bytes()
+        .expect("write model")
 }
 
 // ---- coded-item planar decode ----------------------------------------------------------------
@@ -268,11 +251,9 @@ fn non_irap_payload_never_reaches_the_decoder() {
     let nal = [0x02u8, 0x01, 0xDD];
     let mut payload = (nal.len() as u32).to_be_bytes().to_vec();
     payload.extend_from_slice(&nal);
-    let item = Item {
-        properties: vec![prop_hvcc(hvcc_record(1, 8))],
-        payload,
-        ..base_item(1, *b"hvc1")
-    };
+    let item = base_item(1, *b"hvc1")
+        .with_properties(vec![prop_hvcc(hvcc_record(1, 8))])
+        .with_payload(payload);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
     // `NeverCalled` panics if invoked; the error proves it was not.
@@ -284,13 +265,13 @@ fn non_irap_payload_never_reaches_the_decoder() {
 
 #[test]
 fn essential_unknown_property_is_refused() {
-    let bad = Property {
-        essential: true,
-        kind: PropertyKind::Other {
+    let bad = Property::new(
+        true,
+        PropertyKind::Other {
             kind: *b"zzzz",
             data: vec![1, 2, 3],
         },
-    };
+    );
     let item = coded_item(1, 1, 8, 0, 4, 4, vec![bad]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
@@ -309,17 +290,15 @@ fn essential_unknown_property_is_refused() {
 
 #[test]
 fn non_hevc_coded_item_is_unsupported() {
-    let item = Item {
-        properties: vec![Property {
-            essential: true,
-            kind: PropertyKind::CodecConfiguration {
+    let item = base_item(1, *b"av01")
+        .with_properties(vec![Property::new(
+            true,
+            PropertyKind::CodecConfiguration {
                 kind: *b"av1C",
                 data: vec![0x81, 0, 0, 0],
             },
-        }],
-        payload: vec![0xAA],
-        ..base_item(1, *b"av01")
-    };
+        )])
+        .with_payload(vec![0xAA]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -488,19 +467,14 @@ fn grid_item(id: u32, rows: u16, columns: u16, ow: u32, oh: u32, tiles: &[u32]) 
     }
     .to_bytes()
     .unwrap();
-    Item {
-        references: vec![dimg(tiles)],
-        payload,
-        ..base_item(id, *b"grid")
-    }
+    base_item(id, *b"grid")
+        .with_references(vec![dimg(tiles)])
+        .with_payload(payload)
 }
 
 /// A hidden monochrome tile of the given base at 2x2.
 fn mono_tile(id: u32, base: u8) -> Item {
-    Item {
-        hidden: true,
-        ..coded_item(id, 0, 8, base, 2, 2, vec![])
-    }
+    coded_item(id, 0, 8, base, 2, 2, vec![]).with_hidden(true)
 }
 
 #[test]
@@ -597,10 +571,7 @@ fn expand_limited(y: u16) -> u8 {
 #[test]
 fn grid_non_uniform_tiles_are_unsupported() {
     // Mixed tile size.
-    let big = Item {
-        hidden: true,
-        ..coded_item(3, 0, 8, 40, 2, 3, vec![])
-    };
+    let big = coded_item(3, 0, 8, 40, 2, 3, vec![]).with_hidden(true);
     let g = grid_item(1, 1, 2, 4, 2, &[2, 3]);
     let bytes = file(1, vec![g, mono_tile(2, 10), big]);
     let c = HeifContainer::parse(&bytes).unwrap();
@@ -610,10 +581,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     ));
 
     // Mixed chroma.
-    let chroma_tile = Item {
-        hidden: true,
-        ..coded_item(3, 1, 8, 40, 2, 2, vec![])
-    };
+    let chroma_tile = coded_item(3, 1, 8, 40, 2, 2, vec![]).with_hidden(true);
     let g = grid_item(1, 1, 2, 4, 2, &[2, 3]);
     let bytes = file(1, vec![g, mono_tile(2, 10), chroma_tile]);
     let c = HeifContainer::parse(&bytes).unwrap();
@@ -623,10 +591,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     ));
 
     // Mixed bit depth.
-    let deep = Item {
-        hidden: true,
-        ..coded_item(3, 0, 10, 40, 2, 2, vec![])
-    };
+    let deep = coded_item(3, 0, 10, 40, 2, 2, vec![]).with_hidden(true);
     let g = grid_item(1, 1, 2, 4, 2, &[2, 3]);
     let bytes = file(1, vec![g, mono_tile(2, 10), deep]);
     let c = HeifContainer::parse(&bytes).unwrap();
@@ -642,15 +607,10 @@ fn grid_non_uniform_tiles_are_unsupported() {
 fn iden_passes_through_and_applies_its_own_transforms() {
     // iden (id 1, irot=1) → coded source (id 2). Planar is a pure passthrough of the source; RGBA
     // applies iden's rotation.
-    let source = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 30, 4, 2, vec![colr(0, true)])
-    };
-    let iden = Item {
-        references: vec![dimg(&[2])],
-        properties: vec![irot(1), colr(0, true)],
-        ..base_item(1, *b"iden")
-    };
+    let source = coded_item(2, 3, 8, 30, 4, 2, vec![colr(0, true)]).with_hidden(true);
+    let iden = base_item(1, *b"iden")
+        .with_references(vec![dimg(&[2])])
+        .with_properties(vec![irot(1), colr(0, true)]);
     let bytes = file(1, vec![iden, source]);
     let container = HeifContainer::parse(&bytes).unwrap();
 
@@ -1354,15 +1314,9 @@ fn identity_matrix_maps_gbr_directly_at_ten_bit() {
 fn grid_and_irot_on_a_ten_bit_item() {
     // The combination issue #303 calls out: derived-image assembly and a transform on a >8-bit
     // item, presented through the wide surface.
-    let tile = |id: u32, base: u8| Item {
-        hidden: true,
-        ..coded_item(id, 0, 10, base, 2, 2, vec![])
-    };
+    let tile = |id: u32, base: u8| coded_item(id, 0, 10, base, 2, 2, vec![]).with_hidden(true);
     let bases = [10u8, 40, 70, 100];
-    let grid = Item {
-        properties: vec![irot(1)],
-        ..grid_item(1, 2, 2, 3, 3, &[2, 3, 4, 5])
-    };
+    let grid = grid_item(1, 2, 2, 3, 3, &[2, 3, 4, 5]).with_properties(vec![irot(1)]);
     let bytes = file(
         1,
         vec![
@@ -1495,24 +1449,21 @@ fn overlay_blend_rounding_is_observable_on_a_translucent_canvas() {
     // always a multiple of MAX and the source-over rounding addends cancel exactly. This one uses
     // a nearly-transparent canvas fill so both addends — the alpha term and the per-channel term —
     // change the result, pinning the `MAX / 2` rounding the blend depends on.
-    let src = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 0, 2, 2, vec![colr(0, true)])
-    };
+    let src = coded_item(2, 3, 8, 0, 2, 2, vec![colr(0, true)]).with_hidden(true);
     let src_alpha = alpha_aux(3, 2, 0, 2, 2);
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            // (2, 1, 0) at alpha 1 after `>> 8`.
-            canvas_fill_value: [0x0200, 0x0100, 0x0000, 0x0100],
-            output_width: 2,
-            output_height: 2,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                // (2, 1, 0) at alpha 1 after `>> 8`.
+                canvas_fill_value: [0x0200, 0x0100, 0x0000, 0x0100],
+                output_width: 2,
+                output_height: 2,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, src, src_alpha]);
     let container = HeifContainer::parse(&bytes).unwrap();
     let got = container
@@ -1553,27 +1504,21 @@ fn overlay_blend_rounding_is_observable_on_a_translucent_canvas() {
 fn overlay_composites_at_sixteen_bit_across_mixed_depths() {
     // An `iovl` may composite sub-items of different coded depths — only `grid` requires
     // uniformity. Normalizing every sub-item to the full 16-bit range is what makes that work.
-    let a = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)])
-    };
-    let b = Item {
-        hidden: true,
-        ..coded_item(3, 3, 10, 130, 2, 2, vec![colr(0, true)])
-    };
-    let ov = Item {
-        references: vec![dimg(&[2, 3])],
-        payload: ImageOverlay {
-            // On the 16-bit surface the fill channels are used verbatim, not shifted down.
-            canvas_fill_value: [0x1234, 0x5678, 0x9ABC, 0xFFFF],
-            output_width: 4,
-            output_height: 4,
-            offsets: vec![(-1, -1), (1, 1)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let a = coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)]).with_hidden(true);
+    let b = coded_item(3, 3, 10, 130, 2, 2, vec![colr(0, true)]).with_hidden(true);
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2, 3])])
+        .with_payload(
+            ImageOverlay {
+                // On the 16-bit surface the fill channels are used verbatim, not shifted down.
+                canvas_fill_value: [0x1234, 0x5678, 0x9ABC, 0xFFFF],
+                output_width: 4,
+                output_height: 4,
+                offsets: vec![offset(-1, -1), offset(1, 1)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, a, b]);
     let container = HeifContainer::parse(&bytes).unwrap();
     let got = container
@@ -1623,21 +1568,16 @@ fn alpha_aux(id: u32, master: u32, base: u8, w: u32, h: u32) -> Item {
 
 /// An alpha auxiliary at an explicit bit depth (monochrome), for testing the >8-bit rescale.
 fn alpha_aux_bd(id: u32, master: u32, base: u8, w: u32, h: u32, bd: u8) -> Item {
-    let auxc = Property {
-        essential: false,
-        kind: PropertyKind::AuxiliaryType {
+    let auxc = Property::new(
+        false,
+        PropertyKind::AuxiliaryType {
             aux_type: "urn:mpeg:hevc:2015:auxid:1".to_string(),
             aux_subtype: vec![],
         },
-    };
-    Item {
-        hidden: true,
-        references: vec![ItemReference {
-            reference_type: *b"auxl",
-            to_item_ids: vec![master],
-        }],
-        ..coded_item(id, 0, bd, base, w, h, vec![auxc])
-    }
+    );
+    coded_item(id, 0, bd, base, w, h, vec![auxc])
+        .with_hidden(true)
+        .with_references(vec![ItemReference::new(*b"auxl", vec![master])])
 }
 
 #[test]
@@ -1738,13 +1678,8 @@ fn absent_alpha_is_opaque() {
 
 #[test]
 fn premultiplied_flag_is_queryable() {
-    let master = Item {
-        references: vec![ItemReference {
-            reference_type: *b"prem",
-            to_item_ids: vec![2],
-        }],
-        ..coded_item(1, 3, 8, 33, 2, 2, vec![colr(0, true)])
-    };
+    let master = coded_item(1, 3, 8, 33, 2, 2, vec![colr(0, true)])
+        .with_references(vec![ItemReference::new(*b"prem", vec![2])]);
     let bytes = file(1, vec![master, alpha_aux(2, 1, 77, 2, 2)]);
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(container.image().is_premultiplied(1));
@@ -1760,22 +1695,19 @@ fn premultiplied_flag_is_queryable() {
 
 #[test]
 fn overlay_via_planar_is_unsupported() {
-    let a = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 10, 2, 2, vec![colr(0, true)])
-    };
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0; 4],
-            output_width: 4,
-            output_height: 4,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let a = coded_item(2, 3, 8, 10, 2, 2, vec![colr(0, true)]).with_hidden(true);
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0; 4],
+                output_width: 4,
+                output_height: 4,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, a]);
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -1791,27 +1723,21 @@ fn overlay_composites_with_fill_clipping_and_alpha() {
     // Canvas 4x4, fill (10,20,30,255). Input A (opaque, id 2) at (-1,-1): only its (1,1) pixel lands
     // at canvas (0,0). Input B (id 3) has a monochrome alpha auxiliary (id 4) at (1,1), so it blends
     // over the fill.
-    let a = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)])
-    };
-    let b = Item {
-        hidden: true,
-        ..coded_item(3, 3, 8, 130, 2, 2, vec![colr(0, true)])
-    };
+    let a = coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)]).with_hidden(true);
+    let b = coded_item(3, 3, 8, 130, 2, 2, vec![colr(0, true)]).with_hidden(true);
     let b_alpha = alpha_aux(4, 3, 90, 2, 2);
-    let ov = Item {
-        references: vec![dimg(&[2, 3])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0x0A00, 0x1400, 0x1E00, 0xFF00], // (10, 20, 30, 255) after >> 8
-            output_width: 4,
-            output_height: 4,
-            offsets: vec![(-1, -1), (1, 1)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2, 3])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0x0A00, 0x1400, 0x1E00, 0xFF00], // (10, 20, 30, 255) after >> 8
+                output_width: 4,
+                output_height: 4,
+                offsets: vec![offset(-1, -1), offset(1, 1)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, a, b, b_alpha]);
     let container = HeifContainer::parse(&bytes).unwrap();
     let got = container
@@ -1870,15 +1796,10 @@ fn overlay_composites_with_fill_clipping_and_alpha() {
 #[test]
 fn mutual_dimg_cycle_errors_without_overflow() {
     // 1 (iden) → 2 (iden) → 1 …
-    let a = Item {
-        references: vec![dimg(&[2])],
-        ..base_item(1, *b"iden")
-    };
-    let b = Item {
-        hidden: true,
-        references: vec![dimg(&[1])],
-        ..base_item(2, *b"iden")
-    };
+    let a = base_item(1, *b"iden").with_references(vec![dimg(&[2])]);
+    let b = base_item(2, *b"iden")
+        .with_hidden(true)
+        .with_references(vec![dimg(&[1])]);
     let bytes = file(1, vec![a, b]);
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -1894,16 +1815,13 @@ fn derivation_depth_is_bounded() {
     // A chain 1→2→…→8 of idens onto a coded leaf 9 exceeds the depth limit; a shallow chain works.
     let mut items = Vec::new();
     for id in 1..=8u32 {
-        items.push(Item {
-            hidden: id != 1,
-            references: vec![dimg(&[id + 1])],
-            ..base_item(id, *b"iden")
-        });
+        items.push(
+            base_item(id, *b"iden")
+                .with_hidden(id != 1)
+                .with_references(vec![dimg(&[id + 1])]),
+        );
     }
-    items.push(Item {
-        hidden: true,
-        ..coded_item(9, 0, 8, 5, 2, 2, vec![])
-    });
+    items.push(coded_item(9, 0, 8, 5, 2, 2, vec![]).with_hidden(true));
     let bytes = file(1, items);
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
@@ -1914,19 +1832,11 @@ fn derivation_depth_is_bounded() {
     ));
 
     // A 2-deep iden chain onto the same leaf decodes fine.
-    let i1 = Item {
-        references: vec![dimg(&[2])],
-        ..base_item(1, *b"iden")
-    };
-    let i2 = Item {
-        hidden: true,
-        references: vec![dimg(&[3])],
-        ..base_item(2, *b"iden")
-    };
-    let leaf = Item {
-        hidden: true,
-        ..coded_item(3, 0, 8, 5, 2, 2, vec![])
-    };
+    let i1 = base_item(1, *b"iden").with_references(vec![dimg(&[2])]);
+    let i2 = base_item(2, *b"iden")
+        .with_hidden(true)
+        .with_references(vec![dimg(&[3])]);
+    let leaf = coded_item(3, 0, 8, 5, 2, 2, vec![]).with_hidden(true);
     let bytes = file(1, vec![i1, i2, leaf]);
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(
@@ -1941,10 +1851,7 @@ fn derivation_depth_is_bounded() {
 
 /// A hidden 4:4:4 colour tile of the given base at 2x2.
 fn color_tile(id: u32, base: u8) -> Item {
-    Item {
-        hidden: true,
-        ..coded_item(id, 3, 8, base, 2, 2, vec![])
-    }
+    coded_item(id, 3, 8, base, 2, 2, vec![]).with_hidden(true)
 }
 
 #[test]
@@ -2005,22 +1912,19 @@ fn overlay_zero_height_canvas_is_rejected_by_its_own_guard() {
     // An overlay canvas with a zero height: the `ow != 0 && oh != 0` guard must reject it. The
     // `&& -> ||` mutant lets the degenerate canvas through, failing later with a different
     // ("zero-sized image") error — so the exact guard message pins it.
-    let src = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 10, 2, 2, vec![colr(0, true)])
-    };
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0; 4],
-            output_width: 4,
-            output_height: 0,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let src = coded_item(2, 3, 8, 10, 2, 2, vec![colr(0, true)]).with_hidden(true);
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0; 4],
+                output_width: 4,
+                output_height: 0,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, src]);
     let container = HeifContainer::parse(&bytes).unwrap();
     let err = container
@@ -2258,24 +2162,21 @@ fn composite_over_fully_transparent_pixel_clears_in_place() {
     // transparent output pixel, taking the `out_a == 0` fast path that writes `canvas[di..di+4]`.
     // The `+ -> -`/`*` mutants on that slice bound write to the wrong pixel (or panic), so pinning
     // the cleared pixel — and that its neighbour is untouched — kills them.
-    let src = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 167, 2, 1, vec![colr(0, true)])
-    };
+    let src = coded_item(2, 3, 8, 167, 2, 1, vec![colr(0, true)]).with_hidden(true);
     // Alpha auxiliary base 253 ⇒ alpha (0,0) = 253, alpha (1,0) = (253 + 3) & 0xFF = 0.
     let src_alpha = alpha_aux(3, 2, 253, 2, 1);
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0x0A00, 0x1400, 0x1E00, 0x0000], // (10, 20, 30, 0) after >> 8
-            output_width: 2,
-            output_height: 1,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0x0A00, 0x1400, 0x1E00, 0x0000], // (10, 20, 30, 0) after >> 8
+                output_width: 2,
+                output_height: 1,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, src, src_alpha]);
     let container = HeifContainer::parse(&bytes).unwrap();
     let got = container
@@ -2291,23 +2192,21 @@ fn composite_over_source_over_rounding_is_golden() {
     // A semi-transparent (alpha 128) source over an opaque black canvas. The channel blend
     // `(num + out_a/2) / out_a` rounds half up; dropping the half (`out_a / 2 -> out_a % 2`) shifts
     // every channel down by one. The exact blended pixel pins the rounding.
-    let src = Item {
-        hidden: true,
-        ..coded_item(2, 3, 8, 167, 1, 1, vec![colr(0, true)]) // identity ⇒ [R=1, G=167, B=207]
-    };
+    // identity ⇒ [R=1, G=167, B=207]
+    let src = coded_item(2, 3, 8, 167, 1, 1, vec![colr(0, true)]).with_hidden(true);
     let src_alpha = alpha_aux(3, 2, 128, 1, 1); // alpha 128
-    let ov = Item {
-        references: vec![dimg(&[2])],
-        payload: ImageOverlay {
-            canvas_fill_value: [0, 0, 0, 0xFF00], // opaque black
-            output_width: 1,
-            output_height: 1,
-            offsets: vec![(0, 0)],
-        }
-        .to_bytes()
-        .unwrap(),
-        ..base_item(1, *b"iovl")
-    };
+    let ov = base_item(1, *b"iovl")
+        .with_references(vec![dimg(&[2])])
+        .with_payload(
+            ImageOverlay {
+                canvas_fill_value: [0, 0, 0, 0xFF00], // opaque black
+                output_width: 1,
+                output_height: 1,
+                offsets: vec![offset(0, 0)],
+            }
+            .to_bytes()
+            .unwrap(),
+        );
     let bytes = file(1, vec![ov, src, src_alpha]);
     let container = HeifContainer::parse(&bytes).unwrap();
     let got = container

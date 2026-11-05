@@ -1,11 +1,11 @@
-//! Shared AVIF test fixtures: model builders that drive `gamut_isobmff::write`, plus hand-authored
+//! Shared AVIF test fixtures: model builders that drive `IsoBmffImage::to_bytes`, plus hand-authored
 //! box byte-builders (mirroring `gamut-isobmff/tests/common`) for the accounting/meta cases that a
 //! normalising writer cannot express.
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
 use gamut_avif::{Av1Config, Av1StillDecoder, DecodedFrame};
 use gamut_core::{Error, Result};
-use gamut_isobmff::{IsoBmffImage, Item, ItemReference, Property, PropertyKind, write};
+use gamut_isobmff::{IsoBmffImage, Item, ItemReference, Property, PropertyKind};
 
 /// A minimal valid `av1C` record: High profile (4:4:4), level 0, 8-bit, empty `configOBUs`.
 pub const AV1C_444_8BIT: [u8; 4] = [0x81, 0x20, 0x00, 0x00];
@@ -14,63 +14,44 @@ pub const AV1C_444_8BIT: [u8; 4] = [0x81, 0x20, 0x00, 0x00];
 
 /// A bare item: no name, no mime info, no references, no properties.
 pub fn item(id: u32, item_type: [u8; 4], payload: Vec<u8>) -> Item {
-    Item {
-        id,
-        item_type,
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: false,
-        references: vec![],
-        properties: vec![],
-        payload,
-    }
+    Item::new(id, item_type).with_payload(payload)
 }
 
 /// An `av1C` codec-configuration property (essential), with the given opaque record bytes.
 pub fn av1c(data: Vec<u8>) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::CodecConfiguration {
+    Property::new(
+        true,
+        PropertyKind::CodecConfiguration {
             kind: *b"av1C",
             data,
         },
-    }
+    )
 }
 
 /// A non-essential `ispe` property.
 pub fn ispe(width: u32, height: u32) -> Property {
-    Property {
-        essential: false,
-        kind: PropertyKind::ImageSpatialExtents { width, height },
-    }
+    Property::new(false, PropertyKind::ImageSpatialExtents { width, height })
 }
 
 /// A non-essential `auxC` property with the given aux-type URN.
 pub fn auxc(aux_type: &str) -> Property {
-    Property {
-        essential: false,
-        kind: PropertyKind::AuxiliaryType {
+    Property::new(
+        false,
+        PropertyKind::AuxiliaryType {
             aux_type: aux_type.to_string(),
             aux_subtype: vec![],
         },
-    }
+    )
 }
 
 /// An outgoing item reference.
 pub fn iref(reference_type: &[u8; 4], to: &[u32]) -> ItemReference {
-    ItemReference {
-        reference_type: *reference_type,
-        to_item_ids: to.to_vec(),
-    }
+    ItemReference::new(*reference_type, to.to_vec())
 }
 
 /// A canonical AV1 coded-image item: `av01`, one `av1C` + one `ispe`, with the given payload.
 pub fn av01_item(id: u32, payload: Vec<u8>) -> Item {
-    Item {
-        properties: vec![av1c(AV1C_444_8BIT.to_vec()), ispe(64, 48)],
-        ..item(id, *b"av01", payload)
-    }
+    item(id, *b"av01", payload).with_properties(vec![av1c(AV1C_444_8BIT.to_vec()), ispe(64, 48)])
 }
 
 /// Wraps items into a complete `avif` file whose primary is the item with `primary_id`.
@@ -85,7 +66,9 @@ pub fn avif_image(primary_id: u32, items: Vec<Item>) -> IsoBmffImage {
 
 /// Serialises a model to a clean AVIF file (`ftyp` + `meta` + `mdat`).
 pub fn clean_file(primary_id: u32, items: Vec<Item>) -> Vec<u8> {
-    write(&avif_image(primary_id, items)).expect("valid model")
+    avif_image(primary_id, items)
+        .to_bytes()
+        .expect("valid model")
 }
 
 // ---- hand-authored box byte-builders -------------------------------------------------------

@@ -141,7 +141,7 @@ one only together with the injection that shows it can fail.
 | `ifd_read` | `gamut-ifd` | `read`, `IfdReader::read_tree`, `read_audited` | the dual-ledger audit is complete — no byte read outside a claim, **and** no claim unread |
 | `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | the geometry the decode hands back equals the geometry the tags declare — reaching only the two lines that copy the shared tag reader's dimensions into `DecodedImage` and `convert_from_raw`'s output dims, never the reader itself |
 | `dng_decode` | `gamut-dng` | `DngDecoder::{decode,verify_new_raw_image_digest}` | none — the crash oracle alone; its two assertions are structure pins |
-| `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `read`, `BoxReader` | the segments tile `0..len` exactly — contiguous, **and** covering to end of file |
+| `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `IsoBmffImage::parse`, `BoxReader` | the segments tile `0..len` exactly — contiguous, **and** covering to end of file |
 | `heic_container` | `gamut-heic` | `HeifContainer::parse` | every accessor agrees with the segment list, **and** every borrowed slice lies inside `data()` |
 | `heic_hvcc` | `gamut-heic` | `HevcConfig::parse`, `annex_b*`, `validate_still_payload`, `iter_nal_units` | the Annex-B emitters append rather than replace — on the success path **and** on the error path |
 
@@ -247,9 +247,9 @@ defect it advertised produced no report:
    copy its dimensions on to the caller's buffer. That reach is narrow but not empty, and the
    transposition above is a defect in exactly those lines that any non-square file reports. So it
    is the row's listed check, with the reach written into the row rather than implied.
-7. `isobmff_boxes` claimed the box cursor strictly advances. `BoxReader::next_box` reads its
-   4-byte size and 4-byte type through `take` before any success return, so no declared box size
-   can stall the cursor: with the `size < header_size` guard removed, 851 173 executions over
+7. `isobmff_boxes` claimed the box cursor strictly advances. `BoxReader`'s `Iterator::next` reads
+   its 4-byte size and 4-byte type through `bytes` before any success return, so no declared box
+   size can stall the cursor: with the `size < header_size` guard removed, 851 173 executions over
    61 seconds reported nothing, while a `self.pos` rewind reports on the first seed.
 8. `heic_container` checked that the segments tile `0..len`. `HeifContainer::parse` stores
    `gamut_isobmff::walk_segments(data)?` verbatim, so that is the same assertion over the same
@@ -279,7 +279,7 @@ as one at the site and none is listed in the table above.
 | the digest verdict matches the decoded field | `dng_decode` | both sides read `NewRawImageDigest` out of IFD 0 with the same expression; the call is made anyway for the crash oracle |
 | a page that decodes must also describe | `tiff_decode` | `decode_page_samples` calls the tag reader before it reads a pixel |
 | the sample count matches the declared geometry's product | `tiff_decode` | `ImageBuf` sizes its storage from its own dimensions, so this is the row's live check times `Rgb8::CHANNELS` |
-| the box cursor strictly advances, and never runs past the end | `isobmff_boxes` | `next_box` consumes its 8-byte header through `take` before any success return |
+| the box cursor strictly advances, and never runs past the end | `isobmff_boxes` | `BoxReader`'s `Iterator::next` consumes its 8-byte header through `bytes` before any success return |
 | no segment is empty | `isobmff_boxes` | every shape `walk_segments` pushes is widened by that same header read, or runs to end of file |
 
 The `gamut-ifd` wrapper pin (entry 1) lives in `crates/gamut-ifd/tests/robustness.rs` instead, over

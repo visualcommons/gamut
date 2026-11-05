@@ -54,7 +54,7 @@ fn update_slot(asset: &[u8]) -> Result<std::ops::Range<usize>> {
     container
         .c2pa_slots()
         .find(|slot| slot.purpose == C2paBoxPurpose::Update)
-        .map(|slot| slot.range.start()..slot.range.end())
+        .map(|slot| slot.range.start as usize..slot.range.end as usize)
         .ok_or_else(|| OracleError::Asset("no `update` store in the mid-update file".into()))
 }
 

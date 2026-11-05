@@ -212,7 +212,7 @@ fn the_avif_and_heic_summaries_report_the_store_c2pa_rs_wrote() {
     };
     assert!(avif.unread.is_empty(), "gamut-avif: c2pa-rs writes one box");
     assert_eq!(
-        store.range.start()..store.range.end(),
+        store.range.start as usize..store.range.end as usize,
         expected,
         "gamut-avif: the store's offsets and size"
     );
@@ -225,7 +225,7 @@ fn the_avif_and_heic_summaries_report_the_store_c2pa_rs_wrote() {
     };
     assert!(heic.unread.is_empty(), "gamut-heic: c2pa-rs writes one box");
     assert_eq!(
-        store.range.start()..store.range.end(),
+        store.range.start as usize..store.range.end as usize,
         expected,
         "gamut-heic: the store's offsets and size"
     );

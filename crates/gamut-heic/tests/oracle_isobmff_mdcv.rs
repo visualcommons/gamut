@@ -1,4 +1,4 @@
-//! Differential check of `gamut_isobmff::read`'s typed `mdcv` property against an independent
+//! Differential check of `gamut_isobmff::IsoBmffImage::parse`'s typed `mdcv` property against an independent
 //! writer (issue #699, remainder of #645).
 //!
 //! The test sits in gamut-heic rather than gamut-isobmff because this crate already has a normal
@@ -43,7 +43,8 @@ fn read_types_libheif_written_mdcv_with_the_values_libheif_was_given() {
     )
     .expect("libheif encodes the mdcv fixture");
 
-    let image = gamut_isobmff::read(&heic).expect("gamut_isobmff reads the libheif file");
+    let image =
+        gamut_isobmff::IsoBmffImage::parse(&heic).expect("gamut_isobmff reads the libheif file");
     let primary = image
         .items
         .iter()
@@ -59,12 +60,12 @@ fn read_types_libheif_written_mdcv_with_the_values_libheif_was_given() {
     assert_eq!(
         typed,
         [&PropertyKind::MasteringDisplayColourVolume(
-            gamut_isobmff::MasteringDisplay {
-                display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
-                white_point: [15635, 16450],
-                max_display_mastering_luminance: 10_000_000,
-                min_display_mastering_luminance: 50,
-            }
+            gamut_isobmff::MasteringDisplay::new(
+                [[13250, 34500], [7500, 3000], [34000, 16000]],
+                [15635, 16450],
+                10_000_000,
+                50,
+            )
         )],
         "exactly one typed mdcv, carrying the input values in stored order"
     );

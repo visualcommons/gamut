@@ -5,9 +5,10 @@
 mod common;
 
 use common::{av01_item, image, item};
+use gamut_core::Cicp;
 use gamut_isobmff::{
-    CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, ItemReference, NclxColr,
-    PixelAspectRatio, Property, PropertyKind, read, write,
+    CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, IsoBmffImage, ItemReference,
+    PixelAspectRatio, Property, PropertyKind,
 };
 
 fn be32(buf: &[u8], p: usize) -> u32 {
@@ -35,7 +36,7 @@ fn count(buf: &[u8], fourcc: &[u8; 4]) -> usize {
 
 #[test]
 fn meta_contains_the_required_child_boxes() {
-    let f = write(&image(vec![av01_item(1, vec![1, 2, 3, 4])])).unwrap();
+    let f = IsoBmffImage::to_bytes(&image(vec![av01_item(1, vec![1, 2, 3, 4])])).unwrap();
     for fourcc in [
         b"hdlr", b"pitm", b"iloc", b"iinf", b"infe", b"iprp", b"ipco", b"ipma",
     ] {
@@ -50,7 +51,7 @@ fn meta_contains_the_required_child_boxes() {
 
 #[test]
 fn top_level_layout_is_ftyp_then_meta_then_mdat() {
-    let f = write(&image(vec![av01_item(1, vec![1, 2, 3, 4])])).unwrap();
+    let f = IsoBmffImage::to_bytes(&image(vec![av01_item(1, vec![1, 2, 3, 4])])).unwrap();
     assert_eq!(&f[4..8], b"ftyp");
     assert!(find(&f, b"ftyp") < find(&f, b"meta"));
     assert!(find(&f, b"meta") < find(&f, b"mdat"));
@@ -58,7 +59,7 @@ fn top_level_layout_is_ftyp_then_meta_then_mdat() {
 
 #[test]
 fn ftyp_body_is_exact() {
-    let f = write(&image(vec![av01_item(1, vec![0xA5; 4])])).unwrap();
+    let f = IsoBmffImage::to_bytes(&image(vec![av01_item(1, vec![0xA5; 4])])).unwrap();
     // major `avif`, minor 0, compatible avif/mif1/miaf/MA1A.
     assert_eq!(
         box_body(&f, b"ftyp"),
@@ -71,16 +72,16 @@ fn colr_nclx_body_encodes_every_field() {
     // Distinct non-zero CICP code points and full_range = true so every byte (incl. the bit-7
     // full_range flag) is observable.
     let mut it = item(1, *b"av01", vec![0; 8]);
-    it.properties = vec![Property {
-        essential: false,
-        kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
+    it.properties = vec![Property::new(
+        false,
+        PropertyKind::Colour(ColourInformation::Nclx(Cicp {
             colour_primaries: 2,
             transfer_characteristics: 3,
             matrix_coefficients: 5,
             full_range: true,
         })),
-    }];
-    let f = write(&image(vec![it])).unwrap();
+    )];
+    let f = IsoBmffImage::to_bytes(&image(vec![it])).unwrap();
     assert_eq!(
         box_body(&f, b"colr"),
         &[b'n', b'c', b'l', b'x', 0, 2, 0, 3, 0, 5, 0x80]
@@ -93,16 +94,16 @@ fn property_bodies_are_exact() {
     // the ISO/IEC 14496-12 / 23008-12 field layouts.
     let mut it = av01_item(1, vec![0; 4]);
     it.properties = vec![
-        Property {
-            essential: false,
-            kind: PropertyKind::AuxiliaryType {
+        Property::new(
+            false,
+            PropertyKind::AuxiliaryType {
                 aux_type: "urn:x".into(),
                 aux_subtype: vec![0xAA],
             },
-        },
-        Property {
-            essential: true,
-            kind: PropertyKind::CleanAperture(CleanAperture {
+        ),
+        Property::new(
+            true,
+            PropertyKind::CleanAperture(CleanAperture {
                 width_n: 1,
                 width_d: 2,
                 height_n: 3,
@@ -112,27 +113,27 @@ fn property_bodies_are_exact() {
                 vert_off_n: 7,
                 vert_off_d: 8,
             }),
-        },
-        Property {
-            essential: false,
-            kind: PropertyKind::PixelAspectRatio(PixelAspectRatio {
+        ),
+        Property::new(
+            false,
+            PropertyKind::PixelAspectRatio(PixelAspectRatio {
                 h_spacing: 9,
                 v_spacing: 10,
             }),
-        },
-        Property {
-            essential: false,
-            kind: PropertyKind::ContentLightLevel(ContentLightLevel {
+        ),
+        Property::new(
+            false,
+            PropertyKind::ContentLightLevel(ContentLightLevel {
                 max_content_light_level: 0x1234,
                 max_pic_average_light_level: 0x0056,
             }),
-        },
-        Property {
-            essential: false,
-            kind: PropertyKind::Colour(ColourInformation::RestrictedIcc(vec![0xDE, 0xAD])),
-        },
+        ),
+        Property::new(
+            false,
+            PropertyKind::Colour(ColourInformation::RestrictedIcc(vec![0xDE, 0xAD])),
+        ),
     ];
-    let f = write(&image(vec![it])).unwrap();
+    let f = IsoBmffImage::to_bytes(&image(vec![it])).unwrap();
     // auxC: FullBox v0 + NUL-terminated URN + subtype bytes.
     assert_eq!(
         box_body(&f, b"auxC"),
@@ -156,7 +157,7 @@ fn infe_body_encodes_mime_fields_and_hidden_flag() {
     xmp.content_type = Some("a/b".into());
     xmp.content_encoding = Some("gz".into());
     xmp.hidden = true;
-    let f = write(&image(vec![av01_item(1, vec![0; 4]), xmp])).unwrap();
+    let f = IsoBmffImage::to_bytes(&image(vec![av01_item(1, vec![0; 4]), xmp])).unwrap();
     // The second infe is the mime item's.
     let p = find(&f, b"infe");
     let rest = &f[p + 4..];
@@ -178,11 +179,8 @@ fn infe_body_encodes_mime_fields_and_hidden_flag() {
 #[test]
 fn iref_body_is_exact() {
     let mut alpha = item(2, *b"av01", vec![2]);
-    alpha.references = vec![ItemReference {
-        reference_type: *b"auxl",
-        to_item_ids: vec![1],
-    }];
-    let f = write(&image(vec![av01_item(1, vec![0; 4]), alpha])).unwrap();
+    alpha.references = vec![ItemReference::new(*b"auxl", vec![1])];
+    let f = IsoBmffImage::to_bytes(&image(vec![av01_item(1, vec![0; 4]), alpha])).unwrap();
     // iref: FullBox v0 wrapping one SingleItemTypeReferenceBox `auxl` (from 2, count 1, to 1).
     assert_eq!(
         box_body(&f, b"iref"),
@@ -195,12 +193,8 @@ fn iref_body_is_exact() {
 #[test]
 fn grpl_body_is_exact() {
     let mut img = image(vec![av01_item(1, vec![0; 4]), av01_item(2, vec![1; 4])]);
-    img.groups = vec![EntityGroup {
-        group_type: *b"altr",
-        group_id: 100,
-        entity_ids: vec![1, 2],
-    }];
-    let f = write(&img).unwrap();
+    img.groups = vec![EntityGroup::new(*b"altr", 100, vec![1, 2])];
+    let f = IsoBmffImage::to_bytes(&img).unwrap();
     // grpl wraps one EntityToGroupBox `altr` (FullBox v0): group_id 100, 2 entities, ids 1 and 2.
     assert_eq!(
         box_body(&f, b"grpl"),
@@ -215,7 +209,7 @@ fn grpl_body_is_exact() {
 
 #[test]
 fn ipma_associates_base_properties_with_essential_av1c() {
-    let f = write(&image(vec![av01_item(1, vec![0; 8])])).unwrap();
+    let f = IsoBmffImage::to_bytes(&image(vec![av01_item(1, vec![0; 8])])).unwrap();
     let ipma = box_body(&f, b"ipma");
     assert_eq!(ipma[3], 0, "flags: single-byte association form");
     assert_eq!(ipma[10], 4, "association_count");
@@ -226,15 +220,11 @@ fn ipma_associates_base_properties_with_essential_av1c() {
 #[test]
 fn ipma_marks_transforms_essential() {
     let mut it = av01_item(1, vec![0; 8]);
-    it.properties.push(Property {
-        essential: true,
-        kind: PropertyKind::Rotation(1),
-    });
-    it.properties.push(Property {
-        essential: true,
-        kind: PropertyKind::Mirror(1),
-    });
-    let f = write(&image(vec![it])).unwrap();
+    it.properties
+        .push(Property::new(true, PropertyKind::Rotation(1)));
+    it.properties
+        .push(Property::new(true, PropertyKind::Mirror(1)));
+    let f = IsoBmffImage::to_bytes(&image(vec![it])).unwrap();
     let ipma = box_body(&f, b"ipma");
     assert_eq!(ipma[10], 6, "association_count");
     assert_eq!(&ipma[11..17], &[0x81, 2, 3, 4, 0x85, 0x86]);
@@ -247,19 +237,21 @@ fn ipma_switches_to_16bit_entries_above_127_pool_slots() {
     // form must still be used (the boundary is the normalisation contract, not a free choice).
     let props = |n: u8| -> Vec<Property> {
         (0..n)
-            .map(|n| Property {
-                essential: n == 0, // only the first association carries the essential bit
-                kind: PropertyKind::Other {
-                    kind: *b"unkn",
-                    data: vec![n],
-                },
+            .map(|n| {
+                Property::new(
+                    n == 0, // only the first association carries the essential bit
+                    PropertyKind::Other {
+                        kind: *b"unkn",
+                        data: vec![n],
+                    },
+                )
             })
             .collect()
     };
 
     let mut narrow = item(1, *b"av01", vec![0; 4]);
     narrow.properties = props(127);
-    let f = write(&image(vec![narrow])).unwrap();
+    let f = IsoBmffImage::to_bytes(&image(vec![narrow])).unwrap();
     let ipma = box_body(&f, b"ipma");
     assert_eq!(
         ipma[3], 0,
@@ -269,7 +261,7 @@ fn ipma_switches_to_16bit_entries_above_127_pool_slots() {
 
     let mut wide = item(1, *b"av01", vec![0; 4]);
     wide.properties = props(128);
-    let f = write(&image(vec![wide])).unwrap();
+    let f = IsoBmffImage::to_bytes(&image(vec![wide])).unwrap();
     let ipma = box_body(&f, b"ipma");
     assert_eq!(ipma[3], 1, "flags & 1: 16-bit association form");
     assert_eq!(ipma[10], 128, "association_count");
@@ -279,16 +271,16 @@ fn ipma_switches_to_16bit_entries_above_127_pool_slots() {
 #[test]
 fn iloc_extent_resolves_to_the_item_payload() {
     let payload = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    let f = write(&image(vec![av01_item(1, payload.clone())])).unwrap();
+    let f = IsoBmffImage::to_bytes(&image(vec![av01_item(1, payload.clone())])).unwrap();
     // The reader resolves the iloc extent against the file; the recovered payload must be exact.
-    assert_eq!(read(&f).unwrap().items[0].payload, payload);
+    assert_eq!(IsoBmffImage::parse(&f).unwrap().items[0].payload, payload);
 }
 
 #[test]
 fn identical_properties_are_pooled_into_one_ipco_entry() {
     // Two items with identical ispe/pixi/colr/av1C must share one ipco entry each (dedup), not
     // duplicate them. A "never dedup" writer would emit two of each.
-    let f = write(&image(vec![
+    let f = IsoBmffImage::to_bytes(&image(vec![
         av01_item(1, vec![1, 1, 1]),
         av01_item(2, vec![2, 2, 2, 2]),
     ]))
@@ -297,7 +289,7 @@ fn identical_properties_are_pooled_into_one_ipco_entry() {
     assert_eq!(count(&f, b"av1C"), 1, "av1C should be pooled");
     assert_eq!(count(&f, b"colr"), 1, "colr should be pooled");
     // ...but both items still round-trip with their full property lists.
-    let parsed = read(&f).unwrap();
+    let parsed = IsoBmffImage::parse(&f).unwrap();
     assert_eq!(parsed.items.len(), 2);
     assert_eq!(parsed.items[0].properties.len(), 4);
     assert_eq!(parsed.items[1].properties.len(), 4);

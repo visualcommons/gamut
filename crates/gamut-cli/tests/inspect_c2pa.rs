@@ -8,7 +8,7 @@
 //! crate's tests; what is pinned here is that this binary routes the file correctly and prints the
 //! crate's words through, unabridged, without moving any verdict.
 //!
-//! HEIC fixtures are built by `gamut::isobmff::write` and then have hand-authored top-level boxes
+//! HEIC fixtures are built by `gamut::isobmff::IsoBmffImage::to_bytes` and then have hand-authored top-level boxes
 //! spliced in after `ftyp`, since a C2PA `uuid` box is not part of the writer's model; the other
 //! formats' fixtures come from gamut's own encoders, whose reported ranges are what the report must
 //! repeat. C2PA clause references are to the 2.4 specification.
@@ -16,7 +16,7 @@
 use std::process::{Command, Output};
 
 use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgb8};
-use gamut::isobmff::{IsoBmffImage, Item, Property, PropertyKind, write};
+use gamut::isobmff::{IsoBmffImage, Item, Property, PropertyKind};
 
 /// The C2PA `ContentProvenanceBox` extended (user) type — C2PA 2.4 §A.5.1.1.
 const C2PA_UUID: [u8; 16] = [
@@ -25,42 +25,35 @@ const C2PA_UUID: [u8; 16] = [
 
 /// A coded-image item with one essential codec-configuration property.
 fn coded_item(id: u32, item_type: [u8; 4], config: [u8; 4]) -> Item {
-    Item {
-        id,
-        item_type,
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: false,
-        references: vec![],
-        properties: vec![
-            Property {
-                essential: true,
-                kind: PropertyKind::CodecConfiguration {
+    Item::new(id, item_type)
+        .with_properties(vec![
+            Property::new(
+                true,
+                PropertyKind::CodecConfiguration {
                     kind: config,
                     data: vec![1, 2, 3, 4],
                 },
-            },
-            Property {
-                essential: false,
-                kind: PropertyKind::ImageSpatialExtents {
+            ),
+            Property::new(
+                false,
+                PropertyKind::ImageSpatialExtents {
                     width: 64,
                     height: 48,
                 },
-            },
-        ],
-        payload: vec![9, 9, 9, 9],
-    }
+            ),
+        ])
+        .with_payload(vec![9, 9, 9, 9])
 }
 
 /// A HEVC still image: major brand `heic`, one `hvc1` item carrying an `hvcC`.
 fn heic_file() -> Vec<u8> {
-    write(&IsoBmffImage::new(
+    IsoBmffImage::new(
         *b"heic",
         vec![*b"heic", *b"mif1"],
         1,
         vec![coded_item(1, *b"hvc1", *b"hvcC")],
-    ))
+    )
+    .to_bytes()
     .expect("valid HEVC still-image model")
 }
 
@@ -68,12 +61,13 @@ fn heic_file() -> Vec<u8> {
 /// item with an `av1C`, and no HEVC brand anywhere. This is the file the major-brand test alone
 /// cannot tell from a HEIC (`references/heif` §7 settles it on the primary item's `hvcC`).
 fn mif1_avif_file() -> Vec<u8> {
-    write(&IsoBmffImage::new(
+    IsoBmffImage::new(
         *b"mif1",
         vec![*b"mif1", *b"miaf", *b"avif"],
         1,
         vec![coded_item(1, *b"av01", *b"av1C")],
-    ))
+    )
+    .to_bytes()
     .expect("valid AVIF-shaped model")
 }
 
@@ -245,12 +239,13 @@ fn an_avif_whose_major_brand_is_mif1_is_reported_as_an_avif_not_a_heic() {
 fn an_isobmff_still_image_neither_crate_confirms_is_an_unsupported_container() {
     // A `mif1` file whose primary item is neither HEVC nor AV1: both predicates decline it, so the
     // command names the brand rather than reporting anyone's provenance for it.
-    let file = write(&IsoBmffImage::new(
+    let file = IsoBmffImage::new(
         *b"mif1",
         vec![*b"mif1", *b"miaf"],
         1,
         vec![coded_item(1, *b"j2k1", *b"j2kH")],
-    ))
+    )
+    .to_bytes()
     .expect("valid MIAF-shaped model");
     let out = run_inspect("other.heif", &file, None);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -553,8 +548,8 @@ fn an_avif_the_encoder_signed_reports_its_store_at_the_encoders_range() {
         stdout.contains(&format!(
             "box_purpose \"manifest\": {} bytes at [{}, {})",
             store.len(),
-            range.start(),
-            range.end()
+            range.start,
+            range.end
         )),
         "{stdout}"
     );
@@ -922,12 +917,9 @@ fn json_output_lists_every_heic_c2pa_box_past_the_text_cap() {
         assert_eq!(json["size"], store.size());
         assert_eq!(
             json["range"],
-            json_range(store.range.start() as u64, store.range.end() as u64)
+            json_range(store.range.start, store.range.end)
         );
-        assert_eq!(
-            json["slot"],
-            json_range(store.slot.start() as u64, store.slot.end() as u64)
-        );
+        assert_eq!(json["slot"], json_range(store.slot.start, store.slot.end));
         assert_eq!(json["position"], "before_media_data");
     }
     let unread = &doc["c2pa"]["unread"];
@@ -935,10 +927,7 @@ fn json_output_lists_every_heic_c2pa_box_past_the_text_cap() {
     assert_eq!(unread[0]["reason"], "not_version_zero");
     assert_eq!(
         unread[0]["range"],
-        json_range(
-            summary.unread[0].range.start() as u64,
-            summary.unread[0].range.end() as u64
-        )
+        json_range(summary.unread[0].range.start, summary.unread[0].range.end)
     );
     assert_eq!(doc["c2pa"]["merkle"], serde_json::json!([]));
     assert_eq!(doc["c2pa"]["other_uuid_boxes"], 1);
@@ -1000,12 +989,9 @@ fn json_output_reports_an_avif_store_and_its_slot_at_the_encoders_range() {
     assert_eq!(stores[0]["size"], store.len());
     assert_eq!(
         stores[0]["range"],
-        json_range(slot.start() as u64, (slot.start() + store.len()) as u64)
+        json_range(slot.start, slot.start + store.len() as u64)
     );
-    assert_eq!(
-        stores[0]["slot"],
-        json_range(slot.start() as u64, slot.end() as u64)
-    );
+    assert_eq!(stores[0]["slot"], json_range(slot.start, slot.end));
     assert_eq!(
         doc["c2pa"]["not_validated"],
         gamut::avif::C2PA_NOT_VALIDATED
@@ -1038,10 +1024,7 @@ fn json_output_lists_an_avifs_unread_and_merkle_boxes_after_its_media_data() {
     assert_eq!(unread.as_array().map(Vec::len), Some(1), "{doc}");
     assert_eq!(
         unread[0]["range"],
-        json_range(
-            summary.unread[0].range.start() as u64,
-            summary.unread[0].range.end() as u64
-        )
+        json_range(summary.unread[0].range.start, summary.unread[0].range.end)
     );
     assert_eq!(unread[0]["reason"], "not_version_zero");
     assert_eq!(
@@ -1053,10 +1036,7 @@ fn json_output_lists_an_avifs_unread_and_merkle_boxes_after_its_media_data() {
     assert_eq!(merkle.as_array().map(Vec::len), Some(1), "{doc}");
     assert_eq!(
         merkle[0]["range"],
-        json_range(
-            summary.merkle[0].range.start() as u64,
-            summary.merkle[0].range.end() as u64
-        )
+        json_range(summary.merkle[0].range.start, summary.merkle[0].range.end)
     );
     assert_eq!(merkle[0]["position"], "after_media_data");
 }

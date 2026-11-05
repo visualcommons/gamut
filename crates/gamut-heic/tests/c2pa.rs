@@ -11,24 +11,26 @@
 
 mod common;
 
+use core::ops::Range;
+
 use common::{
     C2PA_UUID, bx, c2pa_box, cat, clean_file, ftyp, hdlr, hvc1_item, iinf_v0, infe_v2, jumbf_store,
     meta, pitm_v0, uuid_box,
 };
 use gamut_heic::{
-    C2paBoxPosition, C2paBoxPurpose, C2paByteRange, C2paPresence, C2paUnreadReason, HeifContainer,
+    C2paBoxPosition, C2paBoxPurpose, C2paPresence, C2paUnreadReason, HeifContainer,
     UnknownBoxLocation,
 };
 
 /// `[start, end)`, which the caller states with `start <= end`.
-fn range(start: usize, end: usize) -> C2paByteRange {
-    C2paByteRange::new(start, end).expect("start <= end")
+fn range(start: usize, end: usize) -> Range<u64> {
+    assert!(start <= end, "start <= end");
+    start as u64..end as u64
 }
 
 /// The bytes `range` covers in `data`, which must hold them.
-fn at(data: &[u8], range: C2paByteRange) -> &[u8] {
-    range
-        .bytes_in(data)
+fn at<'a>(data: &'a [u8], range: &Range<u64>) -> &'a [u8] {
+    data.get(range.start as usize..range.end as usize)
         .expect("the range lies inside the file")
 }
 
@@ -74,11 +76,11 @@ fn manifest_store_range_excludes_every_byte_of_framing() {
     assert_eq!(found.bytes, store.as_slice());
     assert_eq!(found.purpose, C2paBoxPurpose::Manifest);
     // The range is an index into the file, not just a length: the bytes it names *are* the store.
-    assert_eq!(at(&data, found.range), store.as_slice());
+    assert_eq!(at(&data, &found.range), store.as_slice());
     // The byte immediately before the store is the last byte of the merkle offset, and the byte
     // immediately after is the first padding byte — the range is tight on both ends.
-    assert_eq!(data[found.range.start() - 1], 0x00);
-    assert_eq!(data[found.range.end()], 0xEE);
+    assert_eq!(data[found.range.start as usize - 1], 0x00);
+    assert_eq!(data[found.range.end as usize], 0xEE);
 }
 
 #[test]
@@ -142,7 +144,7 @@ fn update_with_the_c2pa_rs_merkle_offset_is_located() {
     // then 8 for the merkle offset = 59.
     assert_eq!(found.range, range(59, 88));
     assert_eq!(found.bytes, store.as_slice());
-    assert_eq!(at(&data, found.range), store.as_slice());
+    assert_eq!(at(&data, &found.range), store.as_slice());
     // The eight bytes before the store are the zero-filled offset, outside the range.
     assert_eq!(&data[51..59], &[0u8; 8]);
 }
@@ -163,7 +165,7 @@ fn update_without_a_merkle_offset_is_located_by_the_fallback_probe() {
     assert_eq!(found.purpose, C2paBoxPurpose::Update);
     assert_eq!(found.range, range(51, 80));
     assert_eq!(found.bytes, store.as_slice());
-    assert_eq!(at(&data, found.range), store.as_slice());
+    assert_eq!(at(&data, &found.range), store.as_slice());
 }
 
 #[test]
@@ -219,8 +221,8 @@ fn mid_update_file_reports_both_stores_in_file_order() {
     assert_eq!(all[1].purpose, C2paBoxPurpose::Update);
     assert_eq!(all[1].bytes, update.as_slice());
     // File order, and the second range starts after the first ends.
-    assert!(all[0].range.end() < all[1].range.start());
-    assert_eq!(at(&data, all[1].range), update.as_slice());
+    assert!(all[0].range.end < all[1].range.start);
+    assert_eq!(at(&data, &all[1].range), update.as_slice());
     assert_eq!(c.c2pa().expect("first store"), all[0]);
 }
 
@@ -241,7 +243,7 @@ fn the_summary_carries_every_located_store_with_its_range_size_and_purpose() {
     for (reported, found) in summary.stores.iter().zip(&located) {
         assert_eq!(reported.range, found.range);
         assert_eq!(reported.purpose, found.purpose);
-        assert_eq!(reported.size(), found.bytes.len());
+        assert_eq!(reported.size(), found.bytes.len() as u64);
     }
     // The two stores differ in size, so a summary built from the wrong store is visible here.
     assert_ne!(summary.stores[0].size(), summary.stores[1].size());
@@ -326,7 +328,7 @@ fn largesize_header_shifts_the_range_by_its_extra_eight_bytes() {
     let found = c.c2pa().expect("manifest store located");
     assert_eq!(found.range, range(69, 98));
     assert_eq!(found.bytes, store().as_slice());
-    assert_eq!(at(&data, found.range), store().as_slice());
+    assert_eq!(at(&data, &found.range), store().as_slice());
 }
 
 #[test]
@@ -651,7 +653,7 @@ fn an_unread_boxs_range_covers_the_whole_uuid_box() {
         summary.unread[0].range,
         range(AFTER_FTYP, AFTER_FTYP + inner.len())
     );
-    assert_eq!(at(&data, summary.unread[0].range), inner.as_slice());
+    assert_eq!(at(&data, &summary.unread[0].range), inner.as_slice());
 }
 
 #[test]
@@ -767,7 +769,7 @@ fn a_store_after_a_sequence_moov_is_flagged_by_its_position() {
 #[test]
 fn a_uuid_box_too_short_to_hold_an_extended_type_never_reaches_the_c2pa_lens() {
     // Why `classify_uuid_box`'s short-body arm is unreachable rather than a classification: the
-    // container rejects such a box outright (`gamut_isobmff::BoxReader::next_box`, "truncated uuid
+    // container rejects such a box outright (`gamut_isobmff::BoxReader`'s `next`, "truncated uuid
     // user type"), so there is no summary to report it in — the whole file fails to parse.
     for short in [0usize, 15] {
         let data = file_with(&[bx(b"uuid", &vec![0xAB; short])]);

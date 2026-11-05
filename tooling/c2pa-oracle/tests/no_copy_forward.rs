@@ -63,8 +63,8 @@ fn store_of(parent: &[u8]) -> Vec<u8> {
     let slot = container
         .c2pa_slot()
         .expect("gamut-avif locates the parent's store");
-    slot.range
-        .bytes_in(parent)
+    parent
+        .get(slot.range.start as usize..slot.range.end as usize)
         .expect("the slot lies inside the parent")
         .to_vec()
 }

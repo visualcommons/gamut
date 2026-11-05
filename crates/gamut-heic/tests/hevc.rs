@@ -8,7 +8,7 @@ mod common;
 use common::{clean_file, item};
 use gamut_core::ErrorKind;
 use gamut_heic::{ChromaFormat, HeifContainer, HevcConfig, NalHeader, NalUnitType, iter_nal_units};
-use gamut_isobmff::{Item, Property, PropertyKind};
+use gamut_isobmff::{Property, PropertyKind};
 
 // ---- byte-builders ---------------------------------------------------------------------------
 
@@ -512,16 +512,13 @@ fn validate_still_payload_rejects_trailing_picture() {
 
 /// A single-`hvc1`-item HEIF file whose primary carries `hvcc_data` as its `hvcC` property.
 fn file_with_hvcc(hvcc_data: Vec<u8>) -> Vec<u8> {
-    let it = Item {
-        properties: vec![Property {
-            essential: true,
-            kind: PropertyKind::CodecConfiguration {
-                kind: *b"hvcC",
-                data: hvcc_data,
-            },
-        }],
-        ..item(1, *b"hvc1", vec![0xAA])
-    };
+    let it = item(1, *b"hvc1", vec![0xAA]).with_properties(vec![Property::new(
+        true,
+        PropertyKind::CodecConfiguration {
+            kind: *b"hvcC",
+            data: hvcc_data,
+        },
+    )]);
     clean_file(1, vec![it])
 }
 
@@ -541,16 +538,13 @@ fn hevc_config_present_parses() {
 #[test]
 fn hevc_config_absent_for_av1c_item() {
     // An av01 item with an av1C configuration (no hvcC) → None (absent, not malformed).
-    let it = Item {
-        properties: vec![Property {
-            essential: true,
-            kind: PropertyKind::CodecConfiguration {
-                kind: *b"av1C",
-                data: vec![0x81, 0x00, 0x00, 0x00],
-            },
-        }],
-        ..item(1, *b"av01", vec![0xAA])
-    };
+    let it = item(1, *b"av01", vec![0xAA]).with_properties(vec![Property::new(
+        true,
+        PropertyKind::CodecConfiguration {
+            kind: *b"av1C",
+            data: vec![0x81, 0x00, 0x00, 0x00],
+        },
+    )]);
     let bytes = clean_file(1, vec![it]);
     let container = HeifContainer::parse(&bytes).expect("parse");
     assert!(container.image().primary_item().hevc_config().is_none());

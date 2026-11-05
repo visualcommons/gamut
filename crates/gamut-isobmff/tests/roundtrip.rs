@@ -9,15 +9,16 @@
 mod common;
 
 use common::{av01_item, image, item};
+use gamut_core::Cicp;
 use gamut_isobmff::{
     CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, IsoBmffImage, Item,
-    ItemReference, MasteringDisplay, NclxColr, PixelAspectRatio, Property, PropertyKind,
-    TopLevelBox, TopLevelPosition, read, write,
+    ItemReference, MasteringDisplay, PixelAspectRatio, Property, PropertyKind, TopLevelBox,
+    TopLevelPosition,
 };
 
 #[track_caller]
 fn assert_roundtrips(img: &IsoBmffImage) {
-    assert_eq!(&read(&write(img).unwrap()).unwrap(), img);
+    assert_eq!(&IsoBmffImage::parse(&img.to_bytes().unwrap()).unwrap(), img);
 }
 
 #[test]
@@ -33,23 +34,19 @@ fn transform_properties() {
     // Every legal irot/imir value, incl. the boundary angles and a full_range=false colr.
     for (angle, axis) in [(1, 0), (3, 1), (0, 1)] {
         let mut item = av01_item(1, vec![9; 16]);
-        item.properties[3] = Property {
-            essential: false,
-            kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
+        item.properties[3] = Property::new(
+            false,
+            PropertyKind::Colour(ColourInformation::Nclx(Cicp {
                 colour_primaries: 9,
                 transfer_characteristics: 16,
                 matrix_coefficients: 9,
                 full_range: false,
             })),
-        };
-        item.properties.push(Property {
-            essential: true,
-            kind: PropertyKind::Rotation(angle),
-        });
-        item.properties.push(Property {
-            essential: true,
-            kind: PropertyKind::Mirror(axis),
-        });
+        );
+        item.properties
+            .push(Property::new(true, PropertyKind::Rotation(angle)));
+        item.properties
+            .push(Property::new(true, PropertyKind::Mirror(axis)));
         assert_roundtrips(&image(vec![item]));
     }
 }
@@ -60,22 +57,16 @@ fn alpha_auxiliary_item() {
     // premultiplication signalled via prem.
     let mut alpha = av01_item(2, vec![7; 24]);
     alpha.hidden = true;
-    alpha.properties.push(Property {
-        essential: false,
-        kind: PropertyKind::AuxiliaryType {
+    alpha.properties.push(Property::new(
+        false,
+        PropertyKind::AuxiliaryType {
             aux_type: "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha".into(),
             aux_subtype: vec![],
         },
-    });
+    ));
     alpha.references = vec![
-        ItemReference {
-            reference_type: *b"auxl",
-            to_item_ids: vec![1],
-        },
-        ItemReference {
-            reference_type: *b"prem",
-            to_item_ids: vec![1],
-        },
+        ItemReference::new(*b"auxl", vec![1]),
+        ItemReference::new(*b"prem", vec![1]),
     ];
     assert_roundtrips(&image(vec![av01_item(1, vec![1; 32]), alpha]));
 }
@@ -86,17 +77,11 @@ fn exif_and_xmp_metadata_items() {
     // encoding), each describing the primary image via cdsc.
     let mut exif = item(2, *b"Exif", vec![0, 0, 0, 0, b'M', b'M']);
     exif.name = "exif".into();
-    exif.references = vec![ItemReference {
-        reference_type: *b"cdsc",
-        to_item_ids: vec![1],
-    }];
+    exif.references = vec![ItemReference::new(*b"cdsc", vec![1])];
     let mut xmp = item(3, *b"mime", b"<x:xmpmeta/>".to_vec());
     xmp.content_type = Some("application/rdf+xml".into());
     xmp.content_encoding = Some("deflate".into());
-    xmp.references = vec![ItemReference {
-        reference_type: *b"cdsc",
-        to_item_ids: vec![1],
-    }];
+    xmp.references = vec![ItemReference::new(*b"cdsc", vec![1])];
     assert_roundtrips(&image(vec![av01_item(1, vec![5; 16]), exif, xmp]));
 }
 
@@ -107,10 +92,7 @@ fn icc_colour_profiles() {
         ColourInformation::UnrestrictedIcc(vec![1, 2, 3, 4, 5]),
     ] {
         let mut item = av01_item(1, vec![3; 9]);
-        item.properties[3] = Property {
-            essential: false,
-            kind: PropertyKind::Colour(icc),
-        };
+        item.properties[3] = Property::new(false, PropertyKind::Colour(icc));
         assert_roundtrips(&image(vec![item]));
     }
 }
@@ -118,25 +100,25 @@ fn icc_colour_profiles() {
 #[test]
 fn hdr_and_aspect_properties() {
     let mut item = av01_item(1, vec![8; 12]);
-    item.properties.push(Property {
-        essential: false,
-        kind: PropertyKind::ContentLightLevel(ContentLightLevel {
+    item.properties.push(Property::new(
+        false,
+        PropertyKind::ContentLightLevel(ContentLightLevel {
             max_content_light_level: 1000,
             max_pic_average_light_level: 400,
         }),
-    });
-    item.properties.push(Property {
-        essential: false,
-        kind: PropertyKind::MasteringDisplayColourVolume(MasteringDisplay {
-            display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
-            white_point: [15635, 16450],
-            max_display_mastering_luminance: 10_000_000,
-            min_display_mastering_luminance: 50,
-        }),
-    });
-    item.properties.push(Property {
-        essential: true,
-        kind: PropertyKind::CleanAperture(CleanAperture {
+    ));
+    item.properties.push(Property::new(
+        false,
+        PropertyKind::MasteringDisplayColourVolume(MasteringDisplay::new(
+            [[8500, 39850], [6550, 2300], [35400, 14600]],
+            [15635, 16450],
+            10_000_000,
+            50,
+        )),
+    ));
+    item.properties.push(Property::new(
+        true,
+        PropertyKind::CleanAperture(CleanAperture {
             width_n: 40,
             width_d: 1,
             height_n: 30,
@@ -146,14 +128,14 @@ fn hdr_and_aspect_properties() {
             vert_off_n: 1,
             vert_off_d: 2,
         }),
-    });
-    item.properties.push(Property {
-        essential: false,
-        kind: PropertyKind::PixelAspectRatio(PixelAspectRatio {
+    ));
+    item.properties.push(Property::new(
+        false,
+        PropertyKind::PixelAspectRatio(PixelAspectRatio {
             h_spacing: 4,
             v_spacing: 3,
         }),
-    });
+    ));
     assert_roundtrips(&image(vec![item]));
 }
 
@@ -169,17 +151,14 @@ fn grid_derivation_with_hidden_tiles() {
         })
         .collect();
     let mut grid = item(10, *b"grid", vec![0, 0, 1, 1, 0, 64, 0, 64]);
-    grid.references = vec![ItemReference {
-        reference_type: *b"dimg",
-        to_item_ids: vec![1, 2, 3, 4],
-    }];
-    grid.properties = vec![Property {
-        essential: false,
-        kind: PropertyKind::ImageSpatialExtents {
+    grid.references = vec![ItemReference::new(*b"dimg", vec![1, 2, 3, 4])];
+    grid.properties = vec![Property::new(
+        false,
+        PropertyKind::ImageSpatialExtents {
             width: 64,
             height: 64,
         },
-    }];
+    )];
     let mut items = vec![grid];
     items.extend(tiles);
     assert_roundtrips(&image(items));
@@ -188,11 +167,7 @@ fn grid_derivation_with_hidden_tiles() {
 #[test]
 fn entity_groups() {
     let mut img = image(vec![av01_item(1, vec![1; 8]), av01_item(2, vec![2; 8])]);
-    img.groups = vec![EntityGroup {
-        group_type: *b"altr",
-        group_id: 100,
-        entity_ids: vec![1, 2],
-    }];
+    img.groups = vec![EntityGroup::new(*b"altr", 100, vec![1, 2])];
     assert_roundtrips(&img);
 }
 
@@ -211,13 +186,13 @@ fn wide_ipma_indices() {
     // More than 127 distinct pooled properties forces the 16-bit ipma association form.
     let mut it = av01_item(1, vec![6; 10]);
     for n in 0..130u8 {
-        it.properties.push(Property {
-            essential: n % 2 == 0,
-            kind: PropertyKind::Other {
+        it.properties.push(Property::new(
+            n % 2 == 0,
+            PropertyKind::Other {
                 kind: *b"unkn",
                 data: vec![n],
             },
-        });
+        ));
     }
     assert_roundtrips(&image(vec![it]));
 }
@@ -243,20 +218,20 @@ fn unknown_property_preserved_verbatim() {
     // An unrecognised property box (and an av1C with a non-empty configOBUs tail) must survive as
     // opaque bytes.
     let mut it = av01_item(1, vec![1; 10]);
-    it.properties[0] = Property {
-        essential: true,
-        kind: PropertyKind::CodecConfiguration {
+    it.properties[0] = Property::new(
+        true,
+        PropertyKind::CodecConfiguration {
             kind: *b"av1C",
             data: vec![0x81, 0x05, 0x0c, 0x00, 0xaa, 0xbb, 0xcc],
         },
-    };
-    it.properties.push(Property {
-        essential: false,
-        kind: PropertyKind::Other {
+    );
+    it.properties.push(Property::new(
+        false,
+        PropertyKind::Other {
             kind: *b"a1op",
             data: vec![0x01],
         },
-    });
+    ));
     assert_roundtrips(&image(vec![it]));
 }
 
