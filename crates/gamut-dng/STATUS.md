@@ -334,7 +334,11 @@ separate path (below).
   `MIN_STORE_LEN`, so a signer needs no direct `gamut-ifd` dependency either;
   `lossless_jpeg::{encode, decode}` stay module-scoped deliberately (a codec namespace).
 - `Compression::is_supported` became `is_decodable` (every decodable scheme encodes, with the
-  documented `jxl-encode`/Deflate-depth caveats).
+  documented `jxl-encode`/Deflate-depth caveats). Since #1133, `Compression`,
+  `PhotometricInterpretation`, `Predictor` and `SampleFormat` are `gamut-ifd`'s shared
+  `#[repr(u16)]` enums, re-exported from `values` under their TIFF names (`Compression::None`
+  and `Jpeg`, `Predictor::HorizontalDifferencing{,X2,X4}`), and `is_decodable`/`is_lossy` are
+  crate-private: what this crate decodes is stated on `DngEncoder::with_compression`.
 - JPEG XL range semantics are frozen to the reference SDK's: decoded JXL data is full-range
   16-bit; a JXL IFD's `BitsPerSample` records codestream precision; encode requires 16-bit
   input.
