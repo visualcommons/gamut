@@ -41,7 +41,9 @@
 //! use gamut_heif::{AlphaChroma, Codestream, DecodeOptions, DecodedFrame, HeifImage};
 //! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind};
 //!
-//! /// A toy codec: `tst1` items whose one-byte configuration is the gray level they decode to.
+//! /// A toy codec: `av01` items whose one-byte `tstC` configuration is the gray level they
+//! /// decode to. (A binding can only claim one of the coded-image types `HeifItem::kind`
+//! /// classifies, so the toy borrows AV1's.)
 //! struct Toy;
 //! struct Backend;
 //!

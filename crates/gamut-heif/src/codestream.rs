@@ -51,6 +51,10 @@ pub trait Codestream {
     const ALPHA: AlphaChroma;
 
     /// Whether `item_type` names a coded item of this codec (`av01`; `hvc1`/`hev1`).
+    ///
+    /// Only an item [`HeifItem::kind`](crate::HeifItem::kind) classifies as
+    /// [`ItemKind::CodedImage`](crate::ItemKind::CodedImage) reaches a binding — `av01`,
+    /// `hvc1`, `hev1`, `vvc1` and `vvi1` — so a type outside that set is never asked about.
     fn is_coded_item(item_type: &[u8; 4]) -> bool;
 
     /// Parses the [`CONFIGURATION_BOX`](Self::CONFIGURATION_BOX) property body.
