@@ -170,7 +170,9 @@ fn generic_matrix(
     // `DecodedFrame` admits any depth in 8..=16, but only the CICP-modeled depths have a
     // de-matrixing; an unmodeled depth is an explicit refusal, never a silent reinterpretation.
     let depth = BitDepth::from_bits(u32::from(bit_depth)).ok_or_else(unsupported)?;
-    YcbcrMatrix::new(coefficients, range, depth)
+    // YCgCo and the other non-Kr/Kb code points parse but have no de-matrixing: the same
+    // refusal, under the caller's origin rather than gamut-color's.
+    YcbcrMatrix::new(coefficients, range, depth).map_err(|_| unsupported())
 }
 
 /// Converts a planar [`DecodedFrame`] to an interleaved RGBA buffer (opaque alpha) at the
@@ -541,5 +543,467 @@ pub(crate) fn composite_over<T: RgbaSample>(
             }
             canvas[di + 3] = T::narrow(out_a as u32);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gamut_core::{Dimensions, ErrorKind};
+
+    use super::*;
+
+    const ORIGIN: &str = "gamut-caller";
+
+    /// A frame of `w × h` at `depth` and `chroma` from explicit planes.
+    fn frame(
+        (w, h): (u32, u32),
+        depth: u8,
+        chroma: ChromaSubsampling,
+        planes: [Vec<u16>; 3],
+    ) -> DecodedFrame {
+        let [y, cb, cr] = planes;
+        DecodedFrame::new(Dimensions::new(w, h).unwrap(), depth, chroma, y, cb, cr).unwrap()
+    }
+
+    fn refusal<T: core::fmt::Debug>(result: Result<T>) -> (ErrorKind, Option<&'static str>) {
+        let error = result.unwrap_err();
+        assert_eq!(error.origin(), Some(ORIGIN));
+        (error.kind(), error.static_message())
+    }
+
+    fn to_rgba8(
+        f: &DecodedFrame,
+        colour: (u16, ColorRange),
+        up: ChromaUpsampling,
+    ) -> Result<Vec<u8>> {
+        frame_to_rgba::<u8>(f, colour, up, ORIGIN)
+    }
+
+    #[test]
+    fn rescale_rounds_to_nearest_and_saturates() {
+        assert_eq!(rescale::<u8>(200, 255), 200);
+        assert_eq!(rescale::<u16>(200, 255), 200 * 257);
+        // (15·65535 + 511) / 1023 = 961.4…; bit replication would give 960.
+        assert_eq!(rescale::<u16>(15, 1023), 961);
+        assert_eq!(rescale::<u8>(512, 1023), 128);
+        assert_eq!(rescale::<u8>(300, 255), 255);
+    }
+
+    #[test]
+    fn a_canvas_fill_keeps_its_most_significant_bits() {
+        assert_eq!(u8::from_canvas_fill(0x12FF), 0x12);
+        assert_eq!(u16::from_canvas_fill(0x12FF), 0x12FF);
+    }
+
+    #[test]
+    fn studio_swing_gray_expands_at_its_coded_depth() {
+        let limited = |y, depth| expand_gray::<u16>(y, depth, ColorRange::Limited);
+        assert_eq!(expand_gray::<u8>(16, 8, ColorRange::Limited), 0);
+        assert_eq!(expand_gray::<u8>(235, 8, ColorRange::Limited), 255);
+        // ((126 - 16)·255 + 109) / 219 = 128.6… → 128.
+        assert_eq!(expand_gray::<u8>(126, 8, ColorRange::Limited), 128);
+        assert_eq!(expand_gray::<u8>(250, 8, ColorRange::Limited), 255);
+        assert_eq!(expand_gray::<u8>(3, 8, ColorRange::Limited), 0);
+        assert_eq!(limited(64, 10), 0);
+        assert_eq!(limited(940, 10), 65535);
+        assert_eq!(expand_gray::<u8>(77, 8, ColorRange::Full), 77);
+        assert_eq!(expand_gray::<u16>(1023, 10, ColorRange::Full), 65535);
+    }
+
+    #[test]
+    fn bt601_at_8_bits_takes_the_libwebp_exact_inverse() {
+        // One pixel per row: black, white, and a saturated red at limited range.
+        let f = frame(
+            (1, 3),
+            8,
+            ChromaSubsampling::Cs444,
+            [vec![16, 235, 81], vec![128, 128, 90], vec![128, 128, 240]],
+        );
+        let rgba = to_rgba8(&f, (6, ColorRange::Limited), ChromaUpsampling::Nearest).unwrap();
+        let expected: Vec<u8> = [(16, 128, 128), (235, 128, 128), (81, 90, 240)]
+            .into_iter()
+            .flat_map(|(y, cb, cr)| {
+                let (r, g, b) = bt601_ycbcr_to_rgb(y, cb, cr, ColorRange::Limited);
+                [r, g, b, 255]
+            })
+            .collect();
+        assert_eq!(rgba, expected);
+        assert_eq!(&rgba[..8], &[0, 0, 0, 255, 255, 255, 255, 255]);
+        // Matrices 2 (unspecified) and 5 present exactly as 6.
+        for matrix in [2, 5] {
+            assert_eq!(
+                to_rgba8(&f, (matrix, ColorRange::Limited), ChromaUpsampling::Nearest).unwrap(),
+                rgba
+            );
+        }
+    }
+
+    #[test]
+    fn deeper_frames_take_the_generic_matrix_and_unspecified_is_bt601() {
+        let f = frame(
+            (1, 2),
+            10,
+            ChromaSubsampling::Cs444,
+            [vec![1023, 300], vec![512, 700], vec![512, 200]],
+        );
+        let rgba16 = |matrix| {
+            frame_to_rgba::<u16>(
+                &f,
+                (matrix, ColorRange::Full),
+                ChromaUpsampling::Nearest,
+                ORIGIN,
+            )
+            .unwrap()
+        };
+        // Full-range white stays white at the 16-bit scale.
+        assert_eq!(&rgba16(1)[..4], &[65535; 4]);
+        let bt601 = YcbcrMatrix::new(MatrixCoefficients::Bt601, ColorRange::Full, BitDepth::Ten)
+            .unwrap()
+            .to_rgb(300, 700, 200);
+        let expected = [bt601.0, bt601.1, bt601.2].map(|s| rescale::<u16>(s, 1023));
+        assert_eq!(&rgba16(2)[4..7], &expected);
+        assert_eq!(rgba16(2), rgba16(6));
+        assert_ne!(rgba16(1), rgba16(6));
+    }
+
+    #[test]
+    fn unpresentable_colour_is_refused_with_the_callers_origin() {
+        let f = |depth| {
+            frame(
+                (1, 1),
+                depth,
+                ChromaSubsampling::Cs444,
+                [vec![0], vec![0], vec![0]],
+            )
+        };
+        let unsupported = |matrix, depth| {
+            refusal(to_rgba8(
+                &f(depth),
+                (matrix, ColorRange::Full),
+                ChromaUpsampling::Nearest,
+            ))
+            .0
+        };
+        // YCgCo (8), a chromaticity-derived matrix (12), a reserved code point (3).
+        for matrix in [8, 12, 3] {
+            assert_eq!(unsupported(matrix, 8), ErrorKind::Unsupported, "{matrix}");
+        }
+        assert_eq!(
+            refusal(to_rgba8(
+                &f(10),
+                (1, ColorRange::Full),
+                ChromaUpsampling::Nearest
+            )),
+            (ErrorKind::Unsupported, Some(u8::TOO_DEEP))
+        );
+        // 9 bits is a depth `DecodedFrame` admits but CICP does not model.
+        let nine = frame_to_rgba::<u16>(
+            &f(9),
+            (1, ColorRange::Full),
+            ChromaUpsampling::Nearest,
+            ORIGIN,
+        );
+        assert_eq!(refusal(nine).0, ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn identity_maps_planes_to_gbr_and_needs_4_4_4() {
+        let f = frame(
+            (1, 1),
+            8,
+            ChromaSubsampling::Cs444,
+            [vec![10], vec![20], vec![30]],
+        );
+        let rgba = to_rgba8(&f, (0, ColorRange::Limited), ChromaUpsampling::Nearest).unwrap();
+        assert_eq!(rgba, [30, 10, 20, 255]);
+        let f = frame(
+            (2, 1),
+            8,
+            ChromaSubsampling::Cs422,
+            [vec![10, 11], vec![20], vec![30]],
+        );
+        assert_eq!(
+            refusal(to_rgba8(
+                &f,
+                (0, ColorRange::Full),
+                ChromaUpsampling::Nearest
+            )),
+            (
+                ErrorKind::Unsupported,
+                Some("HEIF: identity matrix (mc = 0) requires 4:4:4 chroma")
+            )
+        );
+    }
+
+    #[test]
+    fn monochrome_replicates_expanded_luma() {
+        let f = frame(
+            (2, 1),
+            8,
+            ChromaSubsampling::Cs400,
+            [vec![16, 235], vec![], vec![]],
+        );
+        // The matrix is irrelevant to a monochrome frame, even an unpresentable one.
+        let rgba = to_rgba8(&f, (8, ColorRange::Limited), ChromaUpsampling::Nearest).unwrap();
+        assert_eq!(rgba, [0, 0, 0, 255, 255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn nearest_upsampling_indexes_chroma_by_each_axis_factor() {
+        // 2×2 luma at 4:4:0: one chroma row, two columns. Column x reads chroma[x] on both rows.
+        let f = frame(
+            (2, 2),
+            8,
+            ChromaSubsampling::Cs440,
+            [vec![128; 4], vec![60, 200], vec![128, 128]],
+        );
+        let rgba = to_rgba8(&f, (6, ColorRange::Full), ChromaUpsampling::Nearest).unwrap();
+        let px = |i: usize| &rgba[i * 4..i * 4 + 3];
+        assert_eq!(px(0), px(2));
+        assert_eq!(px(1), px(3));
+        assert_ne!(px(0), px(1));
+        // 2×2 at 4:2:2: one chroma column per row; row y reads chroma[y] on both columns.
+        let f = frame(
+            (2, 2),
+            8,
+            ChromaSubsampling::Cs422,
+            [vec![128; 4], vec![60, 200], vec![128, 128]],
+        );
+        let rgba = to_rgba8(&f, (6, ColorRange::Full), ChromaUpsampling::Nearest).unwrap();
+        let px = |i: usize| &rgba[i * 4..i * 4 + 3];
+        assert_eq!(px(0), px(1));
+        assert_eq!(px(2), px(3));
+        assert_ne!(px(0), px(2));
+    }
+
+    #[test]
+    fn interpolated_upsampling_blends_subsampled_chroma_only() {
+        // 4×1 at 4:2:2 with two very different chroma samples: replication keeps pairs equal,
+        // the bilinear filter does not.
+        let f = frame(
+            (4, 1),
+            8,
+            ChromaSubsampling::Cs422,
+            [vec![128; 4], vec![16, 240], vec![128, 128]],
+        );
+        let colour = (6, ColorRange::Full);
+        let nearest = to_rgba8(&f, colour, ChromaUpsampling::Nearest).unwrap();
+        let interpolated = to_rgba8(&f, colour, ChromaUpsampling::Interpolated).unwrap();
+        assert_eq!(nearest[4..8], nearest[8 - 4..8]);
+        assert_eq!(nearest[0..4], nearest[4..8]);
+        assert_ne!(interpolated[4..8], nearest[4..8]);
+        // At 4:4:4 there is nothing to interpolate.
+        let f = frame(
+            (2, 1),
+            8,
+            ChromaSubsampling::Cs444,
+            [vec![128; 2], vec![16, 240], vec![128, 128]],
+        );
+        assert_eq!(
+            to_rgba8(&f, colour, ChromaUpsampling::Interpolated).unwrap(),
+            to_rgba8(&f, colour, ChromaUpsampling::Nearest).unwrap()
+        );
+        // 4:2:0 interpolates down the column too: the two rows of a 1×4 frame differ.
+        let f = frame(
+            (1, 4),
+            8,
+            ChromaSubsampling::Cs420,
+            [vec![128; 4], vec![16, 240], vec![128, 128]],
+        );
+        let interpolated = to_rgba8(&f, colour, ChromaUpsampling::Interpolated).unwrap();
+        let nearest = to_rgba8(&f, colour, ChromaUpsampling::Nearest).unwrap();
+        assert_eq!(nearest[0..4], nearest[4..8]);
+        assert_ne!(interpolated[4..8], nearest[4..8]);
+    }
+
+    #[test]
+    fn alpha_takes_the_auxiliarys_luma_at_its_own_depth() {
+        let mut rgba = vec![0u8; 8];
+        let alpha = frame(
+            (2, 1),
+            10,
+            ChromaSubsampling::Cs400,
+            [vec![0, 1023], vec![], vec![]],
+        );
+        apply_alpha(&mut rgba, (2, 1), &alpha, AlphaChroma::Monochrome, ORIGIN).unwrap();
+        assert_eq!(rgba, [0, 0, 0, 0, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_coloured_alpha_is_refused_only_under_the_monochrome_policy() {
+        let alpha = frame(
+            (2, 1),
+            8,
+            ChromaSubsampling::Cs444,
+            [vec![7, 9], vec![1, 1], vec![2, 2]],
+        );
+        let mut rgba = vec![0u8; 8];
+        assert_eq!(
+            refusal(apply_alpha(
+                &mut rgba,
+                (2, 1),
+                &alpha,
+                AlphaChroma::Monochrome,
+                ORIGIN
+            )),
+            (
+                ErrorKind::InvalidInput,
+                Some("HEIF: alpha auxiliary must be monochrome")
+            )
+        );
+        apply_alpha(&mut rgba, (2, 1), &alpha, AlphaChroma::Any, ORIGIN).unwrap();
+        assert_eq!((rgba[3], rgba[7]), (7, 9));
+        let mismatch = Some("HEIF: alpha auxiliary dimensions do not match the master image");
+        for size in [(1, 1), (2, 2)] {
+            assert_eq!(
+                refusal(apply_alpha(
+                    &mut rgba,
+                    size,
+                    &alpha,
+                    AlphaChroma::Any,
+                    ORIGIN
+                ))
+                .1,
+                mismatch
+            );
+        }
+    }
+
+    /// A `w × h` buffer whose pixel `i` is `[i, i, i, i]`.
+    fn numbered(w: u32, h: u32) -> Vec<u8> {
+        (0..(w * h) as u8).flat_map(|i| [i; 4]).collect()
+    }
+
+    /// The pixel numbers of an RGBA buffer built by [`numbered`].
+    fn order(rgba: &[u8]) -> Vec<u8> {
+        rgba.chunks(4).map(|px| px[0]).collect()
+    }
+
+    #[test]
+    fn rotation_and_mirrors_move_pixels_as_specified() {
+        // 3×2:  0 1 2 / 3 4 5.
+        let src = numbered(3, 2);
+        let (rotated, w, h) = rotate90_ccw(&src, 3, 2, ORIGIN).unwrap();
+        // Anti-clockwise: the right column becomes the top row.
+        assert_eq!((w, h), (2, 3));
+        assert_eq!(order(&rotated), [2, 5, 1, 4, 0, 3]);
+        assert_eq!(
+            order(&mirror(&src, 3, 2, 1, ORIGIN).unwrap()),
+            [2, 1, 0, 5, 4, 3]
+        );
+        assert_eq!(
+            order(&mirror(&src, 3, 2, 0, ORIGIN).unwrap()),
+            [3, 4, 5, 0, 1, 2]
+        );
+    }
+
+    fn clap(
+        width: (u32, u32),
+        height: (u32, u32),
+        h_off: (i32, u32),
+        v_off: (i32, u32),
+    ) -> CleanAperture {
+        CleanAperture {
+            width_n: width.0,
+            width_d: width.1,
+            height_n: height.0,
+            height_d: height.1,
+            horiz_off_n: h_off.0 as u32,
+            horiz_off_d: h_off.1,
+            vert_off_n: v_off.0 as u32,
+            vert_off_d: v_off.1,
+        }
+    }
+
+    #[test]
+    fn clap_crops_the_centred_window_moved_by_its_signed_offset() {
+        // 4×4: rows 0..3, 4..7, 8..11, 12..15.
+        let src = numbered(4, 4);
+        let (centred, w, h) =
+            crop_clap(&src, 4, 4, &clap((2, 1), (2, 1), (0, 1), (0, 1)), ORIGIN).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(order(&centred), [5, 6, 9, 10]);
+        // Offset −1 horizontally (two's complement), +1 vertically; halves combine exactly.
+        let (moved, _, _) =
+            crop_clap(&src, 4, 4, &clap((2, 1), (2, 1), (-2, 2), (1, 1)), ORIGIN).unwrap();
+        assert_eq!(order(&moved), [8, 9, 12, 13]);
+    }
+
+    #[test]
+    fn a_clap_that_is_not_a_whole_window_inside_the_image_is_refused() {
+        let src = numbered(4, 4);
+        let crop = |c| refusal(crop_clap(&src, 4, 4, &c, ORIGIN)).1;
+        let zero_denominator = Some("HEIF: clap has a zero denominator");
+        assert_eq!(crop(clap((2, 0), (2, 1), (0, 1), (0, 1))), zero_denominator);
+        assert_eq!(crop(clap((2, 1), (2, 0), (0, 1), (0, 1))), zero_denominator);
+        assert_eq!(crop(clap((2, 1), (2, 1), (0, 0), (0, 1))), zero_denominator);
+        assert_eq!(crop(clap((2, 1), (2, 1), (0, 1), (0, 0))), zero_denominator);
+        let fractional = Some("HEIF: clap width/height is not integer-valued");
+        assert_eq!(crop(clap((3, 2), (2, 1), (0, 1), (0, 1))), fractional);
+        assert_eq!(crop(clap((2, 1), (3, 2), (0, 1), (0, 1))), fractional);
+        let empty = Some("HEIF: clap has a zero-sized crop");
+        assert_eq!(crop(clap((0, 1), (2, 1), (0, 1), (0, 1))), empty);
+        assert_eq!(crop(clap((2, 1), (0, 1), (0, 1), (0, 1))), empty);
+        // A 3-wide window in 4 centres on a half pixel.
+        let off_grid = Some("HEIF: clap offset is not integer-valued");
+        assert_eq!(crop(clap((3, 1), (2, 1), (0, 1), (0, 1))), off_grid);
+        assert_eq!(crop(clap((2, 1), (3, 1), (0, 1), (0, 1))), off_grid);
+        let outside = Some("HEIF: clap crop window lies outside the image");
+        assert_eq!(crop(clap((2, 1), (2, 1), (-2, 1), (0, 1))), outside);
+        assert_eq!(crop(clap((2, 1), (2, 1), (0, 1), (-2, 1))), outside);
+        assert_eq!(crop(clap((2, 1), (2, 1), (2, 1), (0, 1))), outside);
+        assert_eq!(crop(clap((2, 1), (2, 1), (0, 1), (2, 1))), outside);
+        // The whole image is a window inside it.
+        assert!(crop_clap(&src, 4, 4, &clap((4, 1), (4, 1), (0, 1), (0, 1)), ORIGIN).is_ok());
+    }
+
+    #[test]
+    fn transforms_apply_in_list_order() {
+        let src = (numbered(3, 2), 3, 2);
+        let rotate_then_mirror = apply_transforms(
+            vec![
+                TransformativeProperty::Rotation(1),
+                TransformativeProperty::Mirror(1),
+            ],
+            src.clone(),
+            ORIGIN,
+        )
+        .unwrap();
+        let mirror_then_rotate = apply_transforms(
+            vec![
+                TransformativeProperty::Mirror(1),
+                TransformativeProperty::Rotation(1),
+            ],
+            src,
+            ORIGIN,
+        )
+        .unwrap();
+        assert_eq!(order(&rotate_then_mirror.0), [5, 2, 4, 1, 3, 0]);
+        assert_eq!(order(&mirror_then_rotate.0), [0, 3, 1, 4, 2, 5]);
+        assert_eq!((rotate_then_mirror.1, rotate_then_mirror.2), (2, 3));
+    }
+
+    #[test]
+    fn source_over_blends_unassociated_alpha_and_clips_to_the_canvas() {
+        // An opaque red canvas under a half-transparent green source.
+        let mut canvas = [255u8, 0, 0, 255].repeat(2);
+        composite_over(&mut canvas, (2, 1), &[0, 255, 0, 128], (1, 1), (1, 0));
+        // out_a = 128 + round(255·127/255) = 255; red = round(round(255·255·127/255)/255) = 127.
+        assert_eq!(canvas, [255, 0, 0, 255, 127, 128, 0, 255]);
+        // Two transparent pixels make a transparent pixel, whatever their colour.
+        let mut clear = [9u8, 9, 9, 0];
+        composite_over(&mut clear, (1, 1), &[7, 7, 7, 0], (1, 1), (0, 0));
+        assert_eq!(clear, [0; 4]);
+        // A source hanging off every edge writes only the overlap.
+        let mut canvas = [0u8; 4];
+        let src = [200u8, 200, 200, 255].repeat(9);
+        composite_over(&mut canvas, (1, 1), &src, (3, 3), (-1, -1));
+        assert_eq!(canvas, [200, 200, 200, 255]);
+        let mut untouched = [1u8, 2, 3, 4];
+        composite_over(&mut untouched, (1, 1), &src[..4], (1, 1), (1, 0));
+        composite_over(&mut untouched, (1, 1), &src[..4], (1, 1), (0, 1));
+        composite_over(&mut untouched, (1, 1), &src[..4], (1, 1), (-1, 0));
+        composite_over(&mut untouched, (1, 1), &src[..4], (1, 1), (0, -1));
+        assert_eq!(untouched, [1, 2, 3, 4]);
     }
 }
