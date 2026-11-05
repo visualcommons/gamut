@@ -10,38 +10,39 @@
 //! Inter-frame syntax is the one exception. `gamut` is image-first (no inter coding, per the
 //! workspace charter), so a non-intra `frame_type` is refused where it is read; the reference,
 //! motion-vector, and global-motion syntax that follows is never reachable.
+//!
+//! This module holds `uncompressed_header()` itself — the frame type, size, render size and
+//! superres (§5.9.2/§5.9.5/§5.9.6/§5.9.8), the delta-q/delta-lf flags, the lossless derivation and
+//! `read_tx_mode()` — and each nested sub-syntax with its own parameter type is a submodule:
+//! [`tile_info`] (§5.9.15), [`quantization`] (§5.9.12/§5.9.13), [`segmentation`] (§5.9.14),
+//! [`loop_filter`] (§5.9.11), [`cdef`] (§5.9.19), [`restoration`] (§5.9.20) and [`film_grain`]
+//! (§5.9.30).
 
+mod cdef;
+mod film_grain;
+mod loop_filter;
+mod quantization;
+mod restoration;
+mod segmentation;
+mod tile_info;
+
+pub use cdef::CdefParams;
 use gamut_bitstream::BitReader;
 use gamut_color::{BitDepth, ChromaSubsampling};
 use gamut_core::{Error, Result};
+pub use loop_filter::LoopFilterParams;
+pub use quantization::QuantizationParams;
+pub use restoration::{LrParams, RestorationType};
+pub use segmentation::SegmentationParams;
+use segmentation::{MAX_SEGMENTS, get_qindex_ignoring_delta};
+pub use tile_info::TileInfo;
+// The decode test fixtures size a synthetic tile grid with the parser's own `tile_log2`.
+#[cfg(test)]
+pub(crate) use tile_info::tile_log2;
 
 use super::ORIGIN;
-use super::obu::{
-    SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS, SequenceHeader, subsampling_x, subsampling_y,
-};
+use super::obu::{SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS, SequenceHeader};
 
-/// `MAX_SEGMENTS` (§3).
-pub(crate) const MAX_SEGMENTS: usize = 8;
-/// `SEG_LVL_MAX` (§3).
-pub(crate) const SEG_LVL_MAX: usize = 8;
-/// `SEG_LVL_ALT_Q` (§3).
-pub(crate) const SEG_LVL_ALT_Q: usize = 0;
-/// `SEG_LVL_REF_FRAME` (§3).
-const SEG_LVL_REF_FRAME: usize = 5;
-/// `MAX_LOOP_FILTER` (§3).
-const MAX_LOOP_FILTER: i32 = 63;
-/// `TOTAL_REFS_PER_FRAME` (§3).
-const TOTAL_REFS_PER_FRAME: usize = 8;
-/// `MAX_TILE_WIDTH` (§3), in luma samples.
-const MAX_TILE_WIDTH: u32 = 4096;
-/// `MAX_TILE_AREA` (§3), in luma samples.
-const MAX_TILE_AREA: u32 = 4096 * 2304;
-/// `MAX_TILE_ROWS` / `MAX_TILE_COLS` (§3).
-const MAX_TILE_ROWS: u32 = 64;
-/// See [`MAX_TILE_ROWS`].
-const MAX_TILE_COLS: u32 = 64;
-/// `RESTORATION_TILESIZE_MAX` (§3).
-const RESTORATION_TILESIZE_MAX: u32 = 256;
 /// `SUPERRES_NUM` (§3), the fixed numerator of the upscaling ratio.
 const SUPERRES_NUM: u32 = 8;
 /// `SUPERRES_DENOM_MIN` (§3).
@@ -53,23 +54,6 @@ const KEY_FRAME: u8 = 0;
 /// `INTRA_ONLY_FRAME` (§6.8.2).
 const INTRA_ONLY_FRAME: u8 = 2;
 
-/// `Segmentation_Feature_Bits` (§5.9.14).
-const SEGMENTATION_FEATURE_BITS: [u32; SEG_LVL_MAX] = [8, 6, 6, 6, 6, 3, 0, 0];
-/// `Segmentation_Feature_Signed` (§5.9.14).
-const SEGMENTATION_FEATURE_SIGNED: [bool; SEG_LVL_MAX] =
-    [true, true, true, true, true, false, false, false];
-/// `Segmentation_Feature_Max` (§5.9.14).
-const SEGMENTATION_FEATURE_MAX: [i32; SEG_LVL_MAX] = [
-    255,
-    MAX_LOOP_FILTER,
-    MAX_LOOP_FILTER,
-    MAX_LOOP_FILTER,
-    MAX_LOOP_FILTER,
-    7,
-    0,
-    0,
-];
-
 /// `TxMode` (§6.8.21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxMode {
@@ -79,198 +63,6 @@ pub enum TxMode {
     Largest,
     /// `TX_MODE_SELECT`: the transform size is coded per block.
     Select,
-}
-
-/// `FrameRestorationType` (§6.10.15), after `Remap_Lr_Type`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RestorationType {
-    /// `RESTORE_NONE`.
-    None,
-    /// `RESTORE_WIENER`.
-    Wiener,
-    /// `RESTORE_SGRPROJ`: self-guided restoration.
-    SgrProj,
-    /// `RESTORE_SWITCHABLE`: chosen per restoration unit.
-    Switchable,
-}
-
-/// `Remap_Lr_Type` (§5.9.20).
-const REMAP_LR_TYPE: [RestorationType; 4] = [
-    RestorationType::None,
-    RestorationType::Switchable,
-    RestorationType::Wiener,
-    RestorationType::SgrProj,
-];
-
-/// `loop_filter_params()` (§5.9.11).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct LoopFilterParams {
-    /// `loop_filter_level[0..4]`: two luma passes then U and V.
-    pub level: [u8; 4],
-    /// `loop_filter_sharpness`.
-    pub sharpness: u8,
-    /// `loop_filter_delta_enabled`.
-    pub delta_enabled: bool,
-    /// `loop_filter_ref_deltas[TOTAL_REFS_PER_FRAME]`.
-    pub ref_deltas: [i8; TOTAL_REFS_PER_FRAME],
-    /// `loop_filter_mode_deltas[2]`.
-    pub mode_deltas: [i8; 2],
-}
-
-impl LoopFilterParams {
-    /// The `setup_past_independence()` defaults (§7.20), which are also what §5.9.11 restores on
-    /// the `CodedLossless || allow_intrabc` early return.
-    const fn defaults() -> Self {
-        Self {
-            level: [0; 4],
-            sharpness: 0,
-            delta_enabled: false,
-            // INTRA_FRAME = 1, GOLDEN/ALTREF/ALTREF2 = -1, the rest 0.
-            ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1],
-            mode_deltas: [0; 2],
-        }
-    }
-}
-
-/// `cdef_params()` (§5.9.19). Strengths are stored post-mapping (a coded secondary of 3 becomes 4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct CdefParams {
-    /// `CdefDamping`.
-    pub damping: u32,
-    /// `cdef_bits`: `1 << cdef_bits` strength sets are signalled.
-    pub bits: u32,
-    /// `cdef_y_pri_strength[i]`.
-    pub y_pri: [u8; 8],
-    /// `cdef_y_sec_strength[i]`, after the 3 → 4 remap.
-    pub y_sec: [u8; 8],
-    /// `cdef_uv_pri_strength[i]`.
-    pub uv_pri: [u8; 8],
-    /// `cdef_uv_sec_strength[i]`, after the 3 → 4 remap.
-    pub uv_sec: [u8; 8],
-}
-
-impl CdefParams {
-    /// The §5.9.19 early-return values when CDEF is off.
-    const fn disabled() -> Self {
-        Self {
-            damping: 3,
-            bits: 0,
-            y_pri: [0; 8],
-            y_sec: [0; 8],
-            uv_pri: [0; 8],
-            uv_sec: [0; 8],
-        }
-    }
-}
-
-/// `lr_params()` (§5.9.20).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct LrParams {
-    /// `FrameRestorationType[plane]`.
-    pub frame_restoration_type: [RestorationType; 3],
-    /// `LoopRestorationSize[plane]`.
-    pub loop_restoration_size: [u32; 3],
-    /// `UsesLr`.
-    pub uses_lr: bool,
-}
-
-impl LrParams {
-    /// The §5.9.20 early-return values when restoration is off.
-    const fn disabled() -> Self {
-        Self {
-            frame_restoration_type: [RestorationType::None; 3],
-            loop_restoration_size: [RESTORATION_TILESIZE_MAX; 3],
-            uses_lr: false,
-        }
-    }
-}
-
-/// `segmentation_params()` (§5.9.14).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SegmentationParams {
-    /// `segmentation_enabled`.
-    pub enabled: bool,
-    /// `segmentation_update_map`.
-    pub update_map: bool,
-    /// `segmentation_temporal_update`.
-    pub temporal_update: bool,
-    /// `FeatureEnabled[segment][feature]`.
-    pub feature_enabled: [[bool; SEG_LVL_MAX]; MAX_SEGMENTS],
-    /// `FeatureData[segment][feature]`, already clipped to the feature's range.
-    pub feature_data: [[i32; SEG_LVL_MAX]; MAX_SEGMENTS],
-    /// `SegIdPreSkip`.
-    pub seg_id_pre_skip: bool,
-    /// `LastActiveSegId`.
-    pub last_active_seg_id: u8,
-}
-
-impl SegmentationParams {
-    /// All features off — the §5.9.14 `segmentation_enabled == 0` branch.
-    const fn disabled() -> Self {
-        Self {
-            enabled: false,
-            update_map: false,
-            temporal_update: false,
-            feature_enabled: [[false; SEG_LVL_MAX]; MAX_SEGMENTS],
-            feature_data: [[0; SEG_LVL_MAX]; MAX_SEGMENTS],
-            seg_id_pre_skip: false,
-            last_active_seg_id: 0,
-        }
-    }
-
-    /// `seg_feature_active_idx( segmentId, feature )` (§6.10.8).
-    #[must_use]
-    pub const fn feature_active(&self, segment: usize, feature: usize) -> bool {
-        self.enabled && self.feature_enabled[segment][feature]
-    }
-}
-
-/// `quantization_params()` (§5.9.12).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct QuantizationParams {
-    /// `base_q_idx`.
-    pub base_q_idx: u8,
-    /// `DeltaQYDc`.
-    pub delta_q_y_dc: i32,
-    /// `DeltaQUDc`.
-    pub delta_q_u_dc: i32,
-    /// `DeltaQUAc`.
-    pub delta_q_u_ac: i32,
-    /// `DeltaQVDc`.
-    pub delta_q_v_dc: i32,
-    /// `DeltaQVAc`.
-    pub delta_q_v_ac: i32,
-    /// `using_qmatrix`.
-    pub using_qmatrix: bool,
-    /// `qm_y` / `qm_u` / `qm_v`, valid only when `using_qmatrix`.
-    pub qm: [u8; 3],
-}
-
-/// The tile grid of `tile_info()` (§5.9.15).
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct TileInfo {
-    /// `TileCols`.
-    pub tile_cols: usize,
-    /// `TileRows`.
-    pub tile_rows: usize,
-    /// `TileColsLog2`.
-    pub tile_cols_log2: u32,
-    /// `TileRowsLog2`.
-    pub tile_rows_log2: u32,
-    /// `MiColStarts[0..=TileCols]`.
-    pub mi_col_starts: Vec<u32>,
-    /// `MiRowStarts[0..=TileRows]`.
-    pub mi_row_starts: Vec<u32>,
-    /// `context_update_tile_id`.
-    pub context_update_tile_id: u32,
-    /// `TileSizeBytes`.
-    pub tile_size_bytes: usize,
 }
 
 /// The parsed uncompressed frame header (§5.9.2), plus the derived values §5.9.2 computes.
@@ -452,9 +244,9 @@ impl FrameHeader {
         let mi_cols = 2 * ((frame_width + 7) >> 3);
         let mi_rows = 2 * ((frame_height + 7) >> 3);
 
-        let tile_info = Self::tile_info(r, seq, mi_cols, mi_rows)?;
-        let quant = Self::quantization_params(r, seq)?;
-        let segmentation = Self::segmentation_params(r)?;
+        let tile_info = TileInfo::parse(r, seq, mi_cols, mi_rows)?;
+        let quant = QuantizationParams::parse(r, seq)?;
+        let segmentation = SegmentationParams::parse(r)?;
 
         // delta_q_params() (§5.9.17) then delta_lf_params() (§5.9.18).
         let delta_q_present = quant.base_q_idx > 0 && r.flag()?;
@@ -489,17 +281,17 @@ impl FrameHeader {
         }
         let all_lossless = coded_lossless && frame_width == upscaled_width;
 
-        let loop_filter = Self::loop_filter_params(
+        let loop_filter = LoopFilterParams::parse(
             r,
             coded_lossless || allow_intrabc,
             seq.color.subsampling.num_planes(),
         )?;
-        let cdef = Self::cdef_params(
+        let cdef = CdefParams::parse(
             r,
             coded_lossless || allow_intrabc || !seq.enable_cdef,
             seq.color.subsampling.num_planes(),
         )?;
-        let lr = Self::lr_params(r, seq, all_lossless || allow_intrabc)?;
+        let lr = LrParams::parse(r, seq, all_lossless || allow_intrabc)?;
 
         // read_tx_mode() (§5.9.21).
         let tx_mode = if coded_lossless {
@@ -513,7 +305,7 @@ impl FrameHeader {
         // allow_warped_motion is inferred 0.
         let reduced_tx_set = r.flag()?;
         // global_motion_params() codes nothing for an intra frame.
-        let apply_grain = Self::film_grain_params(r, seq)?;
+        let apply_grain = film_grain::film_grain_params(r, seq)?;
 
         Ok(Self {
             frame_width,
@@ -591,393 +383,6 @@ impl FrameHeader {
         }
     }
 
-    /// `tile_info()` (§5.9.15), both the uniform and the explicit spacing branch.
-    fn tile_info(
-        r: &mut BitReader<'_>,
-        seq: &SequenceHeader,
-        mi_cols: u32,
-        mi_rows: u32,
-    ) -> Result<TileInfo> {
-        let (sb_shift, sb_cols, sb_rows) = if seq.use_128x128_superblock {
-            (5u32, (mi_cols + 31) >> 5, (mi_rows + 31) >> 5)
-        } else {
-            (4u32, (mi_cols + 15) >> 4, (mi_rows + 15) >> 4)
-        };
-        let sb_size = sb_shift + 2;
-        let max_tile_width_sb = MAX_TILE_WIDTH >> sb_size;
-        let mut max_tile_area_sb = MAX_TILE_AREA >> (2 * sb_size);
-        let min_log2_tile_cols = tile_log2(max_tile_width_sb, sb_cols);
-        let max_log2_tile_cols = tile_log2(1, sb_cols.min(MAX_TILE_COLS));
-        let max_log2_tile_rows = tile_log2(1, sb_rows.min(MAX_TILE_ROWS));
-        let min_log2_tiles = min_log2_tile_cols.max(tile_log2(max_tile_area_sb, sb_rows * sb_cols));
-
-        let mut mi_col_starts = Vec::new();
-        let mut mi_row_starts = Vec::new();
-        let tile_cols_log2;
-        let tile_rows_log2;
-
-        if r.flag()? {
-            // uniform_tile_spacing_flag == 1.
-            let mut cols_log2 = min_log2_tile_cols;
-            while cols_log2 < max_log2_tile_cols {
-                if r.flag()? {
-                    cols_log2 += 1;
-                } else {
-                    break;
-                }
-            }
-            let tile_width_sb = (sb_cols + (1 << cols_log2) - 1) >> cols_log2;
-            let mut start_sb = 0;
-            while start_sb < sb_cols {
-                mi_col_starts.push(start_sb << sb_shift);
-                start_sb += tile_width_sb;
-            }
-            mi_col_starts.push(mi_cols);
-
-            let min_log2_tile_rows = min_log2_tiles.saturating_sub(cols_log2);
-            let mut rows_log2 = min_log2_tile_rows;
-            while rows_log2 < max_log2_tile_rows {
-                if r.flag()? {
-                    rows_log2 += 1;
-                } else {
-                    break;
-                }
-            }
-            let tile_height_sb = (sb_rows + (1 << rows_log2) - 1) >> rows_log2;
-            let mut start_sb = 0;
-            while start_sb < sb_rows {
-                mi_row_starts.push(start_sb << sb_shift);
-                start_sb += tile_height_sb;
-            }
-            mi_row_starts.push(mi_rows);
-
-            tile_cols_log2 = cols_log2;
-            tile_rows_log2 = rows_log2;
-        } else {
-            // Explicit tile sizes.
-            let mut widest_tile_sb = 0;
-            let mut start_sb = 0;
-            while start_sb < sb_cols {
-                mi_col_starts.push(start_sb << sb_shift);
-                let max_width = (sb_cols - start_sb).min(max_tile_width_sb);
-                let size_sb = r.ns(max_width)? + 1;
-                widest_tile_sb = widest_tile_sb.max(size_sb);
-                start_sb += size_sb;
-            }
-            mi_col_starts.push(mi_cols);
-            let cols = mi_col_starts.len() - 1;
-            tile_cols_log2 = tile_log2(1, cols as u32);
-
-            max_tile_area_sb = if min_log2_tiles > 0 {
-                (sb_rows * sb_cols) >> (min_log2_tiles + 1)
-            } else {
-                sb_rows * sb_cols
-            };
-            let max_tile_height_sb = (max_tile_area_sb / widest_tile_sb.max(1)).max(1);
-            let mut start_sb = 0;
-            while start_sb < sb_rows {
-                mi_row_starts.push(start_sb << sb_shift);
-                let max_height = (sb_rows - start_sb).min(max_tile_height_sb);
-                let size_sb = r.ns(max_height)? + 1;
-                start_sb += size_sb;
-            }
-            mi_row_starts.push(mi_rows);
-            tile_rows_log2 = tile_log2(1, (mi_row_starts.len() - 1) as u32);
-        }
-
-        let tile_cols = mi_col_starts.len() - 1;
-        let tile_rows = mi_row_starts.len() - 1;
-        // Both are at least 1 by construction: `mi_cols`/`mi_rows` are at least 2 for a frame of
-        // at least one sample, so `sb_cols`/`sb_rows` are at least 1 and each start loop above
-        // pushes at least one start before its end.
-
-        let (context_update_tile_id, tile_size_bytes) = if tile_cols_log2 > 0 || tile_rows_log2 > 0
-        {
-            let id = r.f(tile_rows_log2 + tile_cols_log2)?;
-            let bytes = r.f(2)? as usize + 1;
-            (id, bytes)
-        } else {
-            (0, 1)
-        };
-        if context_update_tile_id as usize >= tile_cols * tile_rows {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 tile_info: context_update_tile_id is out of range",
-            ));
-        }
-
-        Ok(TileInfo {
-            tile_cols,
-            tile_rows,
-            tile_cols_log2,
-            tile_rows_log2,
-            mi_col_starts,
-            mi_row_starts,
-            context_update_tile_id,
-            tile_size_bytes,
-        })
-    }
-
-    /// `quantization_params()` (§5.9.12).
-    fn quantization_params(
-        r: &mut BitReader<'_>,
-        seq: &SequenceHeader,
-    ) -> Result<QuantizationParams> {
-        let base_q_idx = r.f(8)? as u8;
-        let delta_q_y_dc = read_delta_q(r)?;
-        let (delta_q_u_dc, delta_q_u_ac, delta_q_v_dc, delta_q_v_ac) =
-            if seq.color.subsampling.num_planes() > 1 {
-                let diff_uv_delta = seq.color.separate_uv_delta_q && r.flag()?;
-                let u_dc = read_delta_q(r)?;
-                let u_ac = read_delta_q(r)?;
-                if diff_uv_delta {
-                    (u_dc, u_ac, read_delta_q(r)?, read_delta_q(r)?)
-                } else {
-                    (u_dc, u_ac, u_dc, u_ac)
-                }
-            } else {
-                (0, 0, 0, 0)
-            };
-        let using_qmatrix = r.flag()?;
-        let qm = if using_qmatrix {
-            let y = r.f(4)? as u8;
-            let u = r.f(4)? as u8;
-            let v = if seq.color.separate_uv_delta_q {
-                r.f(4)? as u8
-            } else {
-                u
-            };
-            [y, u, v]
-        } else {
-            [0; 3]
-        };
-        Ok(QuantizationParams {
-            base_q_idx,
-            delta_q_y_dc,
-            delta_q_u_dc,
-            delta_q_u_ac,
-            delta_q_v_dc,
-            delta_q_v_ac,
-            using_qmatrix,
-            qm,
-        })
-    }
-
-    /// `segmentation_params()` (§5.9.14).
-    ///
-    /// `primary_ref_frame` is `PRIMARY_REF_NONE` for every frame this decoder accepts, so
-    /// `segmentation_update_map` / `_temporal_update` / `_update_data` are inferred and the
-    /// temporal-prediction branch is unreachable.
-    fn segmentation_params(r: &mut BitReader<'_>) -> Result<SegmentationParams> {
-        if !r.flag()? {
-            return Ok(SegmentationParams::disabled());
-        }
-        let mut params = SegmentationParams {
-            enabled: true,
-            update_map: true,
-            // `segmentation_temporal_update` is inferred 0, which `disabled()` already holds.
-            ..SegmentationParams::disabled()
-        };
-        for segment in 0..MAX_SEGMENTS {
-            for feature in 0..SEG_LVL_MAX {
-                if !r.flag()? {
-                    continue;
-                }
-                params.feature_enabled[segment][feature] = true;
-                let bits = SEGMENTATION_FEATURE_BITS[feature];
-                let limit = SEGMENTATION_FEATURE_MAX[feature];
-                // A zero-width feature (6 and 7) reads no bits and clamps to 0, which `f(0)`
-                // and `Clip3(0, 0, ..)` already give — no special case needed.
-                params.feature_data[segment][feature] = if SEGMENTATION_FEATURE_SIGNED[feature] {
-                    r.su(bits + 1)?.clamp(-limit, limit)
-                } else {
-                    (r.f(bits)? as i32).clamp(0, limit)
-                };
-            }
-        }
-        for segment in 0..MAX_SEGMENTS {
-            for feature in 0..SEG_LVL_MAX {
-                if params.feature_enabled[segment][feature] {
-                    params.last_active_seg_id = segment as u8;
-                    if feature >= SEG_LVL_REF_FRAME {
-                        params.seg_id_pre_skip = true;
-                    }
-                }
-            }
-        }
-        Ok(params)
-    }
-
-    /// `loop_filter_params()` (§5.9.11).
-    fn loop_filter_params(
-        r: &mut BitReader<'_>,
-        skipped: bool,
-        num_planes: usize,
-    ) -> Result<LoopFilterParams> {
-        let mut lf = LoopFilterParams::defaults();
-        if skipped {
-            return Ok(lf);
-        }
-        lf.level[0] = r.f(6)? as u8;
-        lf.level[1] = r.f(6)? as u8;
-        if num_planes > 1 && (lf.level[0] != 0 || lf.level[1] != 0) {
-            lf.level[2] = r.f(6)? as u8;
-            lf.level[3] = r.f(6)? as u8;
-        }
-        lf.sharpness = r.f(3)? as u8;
-        lf.delta_enabled = r.flag()?;
-        if lf.delta_enabled && r.flag()? {
-            // loop_filter_delta_update.
-            for delta in &mut lf.ref_deltas {
-                if r.flag()? {
-                    *delta = r.su(7)? as i8;
-                }
-            }
-            for delta in &mut lf.mode_deltas {
-                if r.flag()? {
-                    *delta = r.su(7)? as i8;
-                }
-            }
-        }
-        Ok(lf)
-    }
-
-    /// `cdef_params()` (§5.9.19).
-    fn cdef_params(r: &mut BitReader<'_>, skipped: bool, num_planes: usize) -> Result<CdefParams> {
-        if skipped {
-            return Ok(CdefParams::disabled());
-        }
-        let mut cdef = CdefParams::disabled();
-        cdef.damping = r.f(2)? + 3;
-        cdef.bits = r.f(2)?;
-        for i in 0..(1usize << cdef.bits) {
-            cdef.y_pri[i] = r.f(4)? as u8;
-            cdef.y_sec[i] = remap_sec_strength(r.f(2)? as u8);
-            if num_planes > 1 {
-                cdef.uv_pri[i] = r.f(4)? as u8;
-                cdef.uv_sec[i] = remap_sec_strength(r.f(2)? as u8);
-            }
-        }
-        Ok(cdef)
-    }
-
-    /// `lr_params()` (§5.9.20).
-    fn lr_params(r: &mut BitReader<'_>, seq: &SequenceHeader, skipped: bool) -> Result<LrParams> {
-        if skipped || !seq.enable_restoration {
-            return Ok(LrParams::disabled());
-        }
-        let mut lr = LrParams::disabled();
-        let mut uses_chroma_lr = false;
-        for plane in 0..seq.color.subsampling.num_planes() {
-            let kind = REMAP_LR_TYPE[r.f(2)? as usize];
-            lr.frame_restoration_type[plane] = kind;
-            if kind != RestorationType::None {
-                lr.uses_lr = true;
-                if plane > 0 {
-                    uses_chroma_lr = true;
-                }
-            }
-        }
-        if lr.uses_lr {
-            let mut shift = r.f(1)?;
-            if seq.use_128x128_superblock {
-                shift += 1;
-            } else if shift != 0 {
-                shift += r.f(1)?;
-            }
-            lr.loop_restoration_size[0] = RESTORATION_TILESIZE_MAX >> (2 - shift);
-            let uv_shift = if subsampling_x(seq.color.subsampling) == 1
-                && subsampling_y(seq.color.subsampling) == 1
-                && uses_chroma_lr
-            {
-                r.f(1)?
-            } else {
-                0
-            };
-            lr.loop_restoration_size[1] = lr.loop_restoration_size[0] >> uv_shift;
-            lr.loop_restoration_size[2] = lr.loop_restoration_size[1];
-        }
-        Ok(lr)
-    }
-
-    /// `film_grain_params()` (§5.9.30). Returns `apply_grain`.
-    ///
-    /// The parameters are consumed for their bit width even though this decoder does not
-    /// synthesise grain: they precede nothing else in the header, but reading them keeps the
-    /// trailing-bits check meaningful, and `apply_grain` is what
-    /// [`FrameHeader::reject_unsupported_tools`] refuses on.
-    fn film_grain_params(r: &mut BitReader<'_>, seq: &SequenceHeader) -> Result<bool> {
-        if !seq.film_grain_params_present {
-            return Ok(false);
-        }
-        if !r.flag()? {
-            return Ok(false);
-        }
-        let _ = r.f(16)?; // grain_seed
-        // frame_type is always intra here, so update_grain is inferred 1.
-        let num_y_points = r.f(4)?;
-        for _ in 0..num_y_points {
-            let _ = r.f(8)?; // point_y_value
-            let _ = r.f(8)?; // point_y_scaling
-        }
-        let mono = seq.color.subsampling.num_planes() == 1;
-        let chroma_scaling_from_luma = if mono { false } else { r.flag()? };
-        let (mut num_cb_points, mut num_cr_points) = (0, 0);
-        if !mono
-            && !chroma_scaling_from_luma
-            && !(subsampling_x(seq.color.subsampling) == 1
-                && subsampling_y(seq.color.subsampling) == 1
-                && num_y_points == 0)
-        {
-            num_cb_points = r.f(4)?;
-            for _ in 0..num_cb_points {
-                let _ = r.f(8)?;
-                let _ = r.f(8)?;
-            }
-            num_cr_points = r.f(4)?;
-            for _ in 0..num_cr_points {
-                let _ = r.f(8)?;
-                let _ = r.f(8)?;
-            }
-        }
-        let _ = r.f(2)?; // grain_scaling_minus_8
-        let ar_coeff_lag = r.f(2)?;
-        let num_pos_luma = 2 * ar_coeff_lag * (ar_coeff_lag + 1);
-        let num_pos_chroma = if num_y_points > 0 {
-            for _ in 0..num_pos_luma {
-                let _ = r.f(8)?;
-            }
-            num_pos_luma + 1
-        } else {
-            num_pos_luma
-        };
-        if chroma_scaling_from_luma || num_cb_points > 0 {
-            for _ in 0..num_pos_chroma {
-                let _ = r.f(8)?;
-            }
-        }
-        if chroma_scaling_from_luma || num_cr_points > 0 {
-            for _ in 0..num_pos_chroma {
-                let _ = r.f(8)?;
-            }
-        }
-        let _ = r.f(2)?; // ar_coeff_shift_minus_6
-        let _ = r.f(2)?; // grain_scale_shift
-        if num_cb_points > 0 {
-            let _ = r.f(8)?; // cb_mult
-            let _ = r.f(8)?; // cb_luma_mult
-            let _ = r.f(9)?; // cb_offset
-        }
-        if num_cr_points > 0 {
-            let _ = r.f(8)?;
-            let _ = r.f(8)?;
-            let _ = r.f(9)?;
-        }
-        let _ = r.f(1)?; // overlap_flag
-        let _ = r.f(1)?; // clip_to_restricted_range
-        Ok(true)
-    }
-
     /// Refuses the tools this decoder parses but does not implement.
     ///
     /// Called once the header is complete, so the message names the tool rather than surfacing as
@@ -1025,46 +430,6 @@ impl FrameHeader {
     }
 }
 
-/// `read_delta_q()` (§5.9.13).
-fn read_delta_q(r: &mut BitReader<'_>) -> Result<i32> {
-    if r.flag()? { r.su(7) } else { Ok(0) }
-}
-
-/// The §5.9.19 secondary-strength remap: a coded 3 means 4.
-const fn remap_sec_strength(coded: u8) -> u8 {
-    if coded == 3 { 4 } else { coded }
-}
-
-/// `tile_log2( blkSize, target )` (§5.9.16): the smallest `k` with `blkSize << k >= target`.
-///
-/// `blkSize << k >= target` is `1 << k >= ceil(target / blkSize)`, so `k` is the exponent of the
-/// next power of two at or above that quotient — computed directly, as the encoder's twin in
-/// `crate::headers` is, rather than by the spec's counting loop: its `k += 1` → `k *= 1` mutant
-/// never advances `k` from 0 and spun until the gate's timeout (#914). Every caller passes a
-/// `blkSize` of at least 1 (`1`, `maxTileWidthSb`, or `maxTileAreaSb`, both §3 constants shifted
-/// by at most `2 * 7`).
-pub(crate) fn tile_log2(blk_size: u32, target: u32) -> u32 {
-    target
-        .div_ceil(blk_size)
-        .next_power_of_two()
-        .trailing_zeros()
-}
-
-/// `get_qindex( 1, segmentId )` (§7.12.2) — the `ignoreDeltaQ` form the header's `CodedLossless`
-/// derivation uses, before any per-block `CurrentQIndex` exists.
-fn get_qindex_ignoring_delta(
-    seg: &SegmentationParams,
-    quant: &QuantizationParams,
-    segment: usize,
-) -> i32 {
-    let base = i32::from(quant.base_q_idx);
-    if seg.feature_active(segment, SEG_LVL_ALT_Q) {
-        (base + seg.feature_data[segment][SEG_LVL_ALT_Q]).clamp(0, 255)
-    } else {
-        base
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,7 +440,7 @@ mod tests {
 
     /// The in-loop filters [`parse_encoder_headers`] has the encoder signal: a non-zero value in
     /// every field, so each reads back as itself rather than as a default.
-    const ENCODER_FILTERS: FrameFilters = FrameFilters {
+    pub(super) const ENCODER_FILTERS: FrameFilters = FrameFilters {
         deblock_level: 37,
         cdef: CdefStrengths {
             y_pri: 9,
@@ -1105,7 +470,7 @@ mod tests {
 
     /// The headers the encoder writes for a frame whose in-loop filters are `filters`, with luma
     /// restoration signalled when `luma_lr` and the block variation `variation`.
-    fn parse_encoder_headers_with(
+    pub(super) fn parse_encoder_headers_with(
         width: u32,
         height: u32,
         base_q_idx: u8,
@@ -1261,34 +626,6 @@ mod tests {
     }
 
     #[test]
-    fn segmentation_alt_q_survives_the_round_trip() {
-        let (_, fh) = parse_encoder_headers_with(
-            128,
-            96,
-            100,
-            None,
-            ENCODER_FILTERS,
-            true,
-            BlockVariation::SyntaxExercise,
-        );
-        for (segment, alt) in crate::tile::SEG_ALT_Q.iter().enumerate() {
-            match alt {
-                Some(delta) => {
-                    assert!(fh.segmentation.feature_active(segment, SEG_LVL_ALT_Q));
-                    assert_eq!(fh.segmentation.feature_data[segment][SEG_LVL_ALT_Q], *delta);
-                }
-                None => assert!(!fh.segmentation.feature_active(segment, SEG_LVL_ALT_Q)),
-            }
-        }
-        assert!(!fh.segmentation.seg_id_pre_skip, "ALT_Q is below REF_FRAME");
-        // §5.9.14: every frame this decoder accepts has primary_ref_frame == PRIMARY_REF_NONE,
-        // which infers segmentation_update_map = 1 and segmentation_temporal_update = 0 rather
-        // than coding them — so an enabled segmentation always reports a fresh map.
-        assert!(fh.segmentation.update_map);
-        assert!(!fh.segmentation.temporal_update);
-    }
-
-    #[test]
     fn superres_downscales_the_coded_width() {
         // coded_denom 7 ⇒ SuperresDenom 16, so FrameWidth = round(256 * 8 / 16) = 128.
         let (_, fh) = parse_encoder_headers(256, 64, 100, Some(7));
@@ -1326,7 +663,9 @@ mod tests {
     /// The position check is what makes fields the decoder *discards* testable: reading one at the
     /// wrong width leaves every later field misplaced, which a `FrameHeader` comparison alone can
     /// miss entirely when the misplaced fields are all thrown away (film grain is nothing else).
-    fn parse_built(still: &crate::decode::testutil::StillBuilder) -> (SequenceHeader, FrameHeader) {
+    pub(super) fn parse_built(
+        still: &crate::decode::testutil::StillBuilder,
+    ) -> (SequenceHeader, FrameHeader) {
         let seq = SequenceHeader::parse(&still.sequence_header()).unwrap();
         let (payload, header_bits) = still.frame_obu_with_header_bits();
         let mut r = BitReader::new(&payload);
@@ -1337,38 +676,6 @@ mod tests {
             "the parser must consume the coded header bit for bit"
         );
         (seq, fh)
-    }
-
-    #[test]
-    fn loop_filter_defaults_match_setup_past_independence() {
-        // §7.20: INTRA_FRAME is +1, GOLDEN/ALTREF/ALTREF2 are -1, everything else 0. A
-        // CodedLossless frame returns these without coding any bits (§5.9.11).
-        let (_, fh) = parse_built(&crate::decode::testutil::StillBuilder::default());
-        assert!(fh.coded_lossless);
-        assert_eq!(fh.loop_filter.ref_deltas, [1, 0, 0, 0, -1, 0, -1, -1]);
-        assert_eq!(fh.loop_filter.mode_deltas, [0, 0]);
-        assert_eq!(fh.loop_filter.level, [0; 4]);
-        assert!(!fh.loop_filter.delta_enabled);
-        assert_eq!(fh.loop_filter.sharpness, 0);
-    }
-
-    #[test]
-    fn cdef_params_are_skipped_when_coded_lossless_even_with_cdef_enabled() {
-        // §5.9.19 returns early on `CodedLossless || allow_intrabc || !enable_cdef`. With CDEF
-        // enabled in the sequence header, only the CodedLossless term can skip the block — and it
-        // must, or the parser would consume strength bits that were never written.
-        let still = crate::decode::testutil::StillBuilder {
-            enable_cdef: true,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (seq, fh) = parse_built(&still);
-        assert!(seq.enable_cdef, "the sequence header enables CDEF");
-        assert!(fh.coded_lossless);
-        assert_eq!(fh.cdef, CdefParams::disabled());
-        // Everything after cdef_params still lands correctly, which is what proves no bits were
-        // consumed by mistake.
-        assert!(fh.reduced_tx_set);
-        assert_eq!(fh.tx_mode, TxMode::Only4x4);
     }
 
     #[test]
@@ -1530,139 +837,6 @@ mod tests {
     }
 
     #[test]
-    fn tile_info_uses_the_128x128_superblock_geometry() {
-        // §5.9.15 derives sbCols/sbRows and sbSize from `use_128x128_superblock`; a 128-wide
-        // frame is two 64-superblocks but only one 128-superblock, so the two grids differ.
-        let base = crate::decode::testutil::StillBuilder {
-            width: 128,
-            height: 128,
-            width_bits: 8,
-            height_bits: 8,
-            tile_cols_log2: 1,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (seq64, small) = parse_built(&base);
-        assert!(!seq64.use_128x128_superblock);
-        assert_eq!(small.tile_info.tile_cols, 2, "two 64x64 superblock columns");
-        assert_eq!(small.tile_info.mi_col_starts, vec![0, 16, small.mi_cols]);
-
-        let (seq128, large) = parse_built(&crate::decode::testutil::StillBuilder {
-            use_128x128_superblock: true,
-            tile_cols_log2: 0,
-            ..base
-        });
-        assert!(seq128.use_128x128_superblock);
-        assert_eq!(
-            large.tile_info.tile_cols, 1,
-            "the same frame is a single 128x128 superblock column"
-        );
-        assert_eq!(large.tile_info.mi_col_starts, vec![0, large.mi_cols]);
-    }
-
-    #[test]
-    fn tile_info_derives_the_tile_limits_from_the_superblock_size() {
-        // `maxTileWidthSb = MAX_TILE_WIDTH >> sbSize` and
-        // `maxTileAreaSb = MAX_TILE_AREA >> (2 * sbSize)` set `minLog2TileCols` and
-        // `minLog2Tiles`, which force a minimum number of tiles once a frame is wide or large
-        // enough. A frame wider than MAX_TILE_WIDTH cannot be one tile column.
-        let wide = crate::decode::testutil::StillBuilder {
-            width: 8192,
-            height: 128,
-            width_bits: 13,
-            height_bits: 8,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&wide);
-        assert!(
-            fh.tile_info.tile_cols >= 2,
-            "8192 px exceeds MAX_TILE_WIDTH, so one tile column is illegal"
-        );
-        assert_eq!(fh.tile_info.tile_cols_log2, 1);
-
-        // A frame whose area exceeds MAX_TILE_AREA forces extra tiles through minLog2Tiles even
-        // when each column is narrow enough.
-        let big = crate::decode::testutil::StillBuilder {
-            width: 4096,
-            height: 4096,
-            width_bits: 12,
-            height_bits: 12,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&big);
-        assert!(
-            fh.tile_info.tile_cols * fh.tile_info.tile_rows >= 2,
-            "a 4096x4096 frame exceeds MAX_TILE_AREA for a single tile"
-        );
-    }
-
-    #[test]
-    fn tile_info_spaces_multiple_tile_rows_uniformly() {
-        // 256x256 is 4x4 64x64-superblocks. `tile_rows_log2 = 1` splits it into two tile rows of
-        // `ceil(4 / 2) = 2` superblocks, so the second row starts at superblock 2 — MI unit
-        // `2 << sbShift` = 32. Every other case in this suite has a single tile row, where both
-        // the ceiling term and the `<< sbShift` are unobservable: the loop pushes one start of 0
-        // whatever they compute.
-        let still = crate::decode::testutil::StillBuilder {
-            width: 256,
-            height: 256,
-            width_bits: 8,
-            height_bits: 8,
-            tile_rows_log2: 1,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&still);
-        assert_eq!(fh.tile_info.tile_rows, 2);
-        assert_eq!(fh.tile_info.mi_row_starts, [0, 32, 64]);
-        assert_eq!(fh.tile_info.tile_rows_log2, 1);
-        // The columns stay a single tile, so the row spacing is the only thing under test.
-        assert_eq!(fh.tile_info.tile_cols, 1);
-        assert_eq!(fh.tile_info.mi_col_starts, [0, 64]);
-    }
-
-    #[test]
-    fn tile_info_reads_explicit_tile_spacing() {
-        // `uniform_tile_spacing_flag = 0` codes every tile's width and height as an `ns()` size
-        // instead of deriving them from a log2 count (§5.9.15). Neither `gamut-av1`'s encoder nor
-        // libaom ever writes this branch — both emit uniform spacing — so `StillBuilder` is the
-        // only way to reach it. A 2x2 grid over 4x4 superblocks puts each boundary at superblock
-        // 2, MI unit 32.
-        let still = crate::decode::testutil::StillBuilder {
-            width: 256,
-            height: 256,
-            width_bits: 8,
-            height_bits: 8,
-            explicit_tiles: Some((&[2, 2], &[2, 2])),
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&still);
-        assert_eq!(fh.tile_info.tile_cols, 2);
-        assert_eq!(fh.tile_info.tile_rows, 2);
-        assert_eq!(fh.tile_info.mi_col_starts, [0, 32, 64]);
-        assert_eq!(fh.tile_info.mi_row_starts, [0, 32, 64]);
-        assert_eq!(fh.tile_info.tile_cols_log2, 1);
-        assert_eq!(fh.tile_info.tile_rows_log2, 1);
-    }
-
-    #[test]
-    fn lr_params_are_skipped_when_all_lossless_even_with_restoration_enabled() {
-        // §5.9.20 returns the disabled defaults without coding a bit once AllLossless holds, even
-        // though the sequence header enabled restoration. Reading `lr_type` here would consume
-        // the bits that follow it and desync the rest of the header.
-        let still = crate::decode::testutil::StillBuilder {
-            enable_restoration: true,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (seq, fh) = parse_built(&still);
-        assert!(seq.enable_restoration);
-        assert!(fh.all_lossless);
-        assert_eq!(fh.lr.frame_restoration_type, [RestorationType::None; 3]);
-        assert!(!fh.lr.uses_lr);
-        assert_eq!(fh.lr.loop_restoration_size, [RESTORATION_TILESIZE_MAX; 3]);
-        // The bit `lr_params()` must not have eaten.
-        assert!(fh.reduced_tx_set);
-    }
-
-    #[test]
     fn superres_rounds_with_half_the_denominator() {
         // §5.9.8: FrameWidth = (UpscaledWidth * 8 + SuperresDenom / 2) / SuperresDenom. The
         // `/ 2` rounding term changes the result for an odd denominator, so coded_denom 2
@@ -1673,60 +847,6 @@ mod tests {
         assert_eq!(fh.upscaled_width, 64);
         assert_eq!(fh.frame_width, (64 * 8 + 11 / 2) / 11);
         assert_eq!(fh.frame_width, 47);
-    }
-
-    #[test]
-    fn tile_log2_matches_the_spec_definition() {
-        assert_eq!(tile_log2(1, 1), 0);
-        assert_eq!(tile_log2(1, 2), 1);
-        assert_eq!(tile_log2(1, 3), 2);
-        assert_eq!(tile_log2(1, 4), 2);
-        assert_eq!(tile_log2(1, 5), 3);
-        assert_eq!(tile_log2(64, 64), 0);
-        assert_eq!(tile_log2(64, 65), 1);
-        assert_eq!(tile_log2(64, 256), 2);
-        // `maxTileAreaSb` for 64x64 superblocks against a frame area just either side of a
-        // doubling.
-        assert_eq!(tile_log2(2304, 4608), 1);
-        assert_eq!(tile_log2(2304, 4609), 2);
-    }
-
-    #[test]
-    fn secondary_strength_remaps_only_three() {
-        assert_eq!(remap_sec_strength(0), 0);
-        assert_eq!(remap_sec_strength(1), 1);
-        assert_eq!(remap_sec_strength(2), 2);
-        assert_eq!(remap_sec_strength(3), 4);
-    }
-
-    #[test]
-    fn get_qindex_applies_the_segment_delta_and_clips() {
-        let quant = QuantizationParams {
-            base_q_idx: 100,
-            delta_q_y_dc: 0,
-            delta_q_u_dc: 0,
-            delta_q_u_ac: 0,
-            delta_q_v_dc: 0,
-            delta_q_v_ac: 0,
-            using_qmatrix: false,
-            qm: [0; 3],
-        };
-        let mut seg = SegmentationParams::disabled();
-        assert_eq!(get_qindex_ignoring_delta(&seg, &quant, 0), 100);
-
-        seg.enabled = true;
-        seg.feature_enabled[0][SEG_LVL_ALT_Q] = true;
-        seg.feature_data[0][SEG_LVL_ALT_Q] = -30;
-        assert_eq!(get_qindex_ignoring_delta(&seg, &quant, 0), 70);
-
-        // Clipping at both ends.
-        seg.feature_data[0][SEG_LVL_ALT_Q] = -255;
-        assert_eq!(get_qindex_ignoring_delta(&seg, &quant, 0), 0);
-        seg.feature_data[0][SEG_LVL_ALT_Q] = 255;
-        assert_eq!(get_qindex_ignoring_delta(&seg, &quant, 0), 255);
-
-        // An inactive segment ignores the data even when the array holds a value.
-        assert_eq!(get_qindex_ignoring_delta(&seg, &quant, 1), 100);
     }
 
     #[test]
@@ -1780,321 +900,6 @@ mod tests {
                 .unwrap_err()
                 .static_message(),
             Some("AV1 decode: monochrome streams are not implemented")
-        );
-    }
-
-    #[test]
-    fn tile_info_recomputes_the_row_area_limit_from_the_coded_columns() {
-        // §5.9.15's explicit-spacing branch recomputes `maxTileAreaSb` *after* the columns are
-        // read: `(sbRows * sbCols) >> (minLog2Tiles + 1)` when `minLog2Tiles > 0`, the whole frame
-        // area otherwise. That sets `maxTileHeightSb`, the `ns()` bound every row size is coded
-        // against, so a wrong area reads the wrong number of bits per row.
-        //
-        // 3136 px is 49 64x64 superblocks each way. 49 * 49 = 2401 exceeds `maxTileAreaSb` (2304),
-        // so `minLog2Tiles` is 1 and the recomputed area is 2401 >> 2 = 600. A widest column of 25
-        // superblocks then caps a tile row at 600 / 25 = 24, which is why the rows below are
-        // 17 + 16 + 16 and not a single 49. Taking the `else` branch would allow 96, and dividing
-        // instead of multiplying would collapse the cap to 1 and split the frame into 49 rows.
-        let still = crate::decode::testutil::StillBuilder {
-            width: 3136,
-            height: 3136,
-            width_bits: 12,
-            height_bits: 12,
-            explicit_tiles: Some((&[25, 24], &[17, 16, 16])),
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&still);
-        assert_eq!(fh.tile_info.tile_cols, 2);
-        assert_eq!(fh.tile_info.tile_rows, 3);
-        assert_eq!(fh.tile_info.mi_col_starts, [0, 400, 784]);
-        assert_eq!(fh.tile_info.mi_row_starts, [0, 272, 528, 784]);
-        assert_eq!(fh.tile_info.tile_cols_log2, 1);
-        assert_eq!(fh.tile_info.tile_rows_log2, 2);
-    }
-
-    #[test]
-    fn loop_filter_codes_the_chroma_levels_when_either_luma_level_is_set() {
-        // §5.9.11 codes `loop_filter_level[2]` and `[3]` when NumPlanes > 1 and *either* luma
-        // level is non-zero. gamut's encoder derives both luma levels from `base_q_idx` and so
-        // always writes them equal; only a hand-built header separates the spec's `||` from `&&`.
-        let still = crate::decode::testutil::StillBuilder {
-            base_q_idx: 128,
-            loop_filter_level: [0, 5, 17, 34],
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&still);
-        assert!(!fh.coded_lossless, "base_q_idx 128 codes the filter blocks");
-        assert_eq!(fh.loop_filter.level, [0, 5, 17, 34]);
-        assert_eq!(fh.tx_mode, TxMode::Largest);
-
-        // The mirror case: with both luma levels zero no chroma level is coded at all, and the
-        // §7.20 ref-delta defaults still stand because `loop_filter_delta_enabled` is 0.
-        let (_, quiet) = parse_built(&crate::decode::testutil::StillBuilder {
-            loop_filter_level: [0, 0, 17, 34],
-            ..still
-        });
-        assert_eq!(quiet.loop_filter.level, [0; 4]);
-        assert_eq!(quiet.loop_filter.ref_deltas, [1, 0, 0, 0, -1, 0, -1, -1]);
-    }
-
-    #[test]
-    fn lr_params_code_the_uv_shift_only_for_subsampled_chroma_restoration() {
-        // §5.9.20 codes `lr_uv_shift` only when `subsampling_x`, `subsampling_y` and `usesChromaLr`
-        // all hold, and `usesChromaLr` is set by a plane *after* the first choosing a restoration
-        // type. gamut's encoder emits 4:4:4 with Wiener on luma alone, so it exercises neither.
-        let still = crate::decode::testutil::StillBuilder {
-            colour: crate::decode::testutil::BuilderColour::Yuv420,
-            base_q_idx: 128,
-            enable_restoration: true,
-            lr: crate::decode::testutil::LrSpec {
-                // Wiener on Y and U, none on V: the chroma term comes from plane 1.
-                types: [2, 2, 0],
-                unit_shift: 2,
-                uv_shift: 1,
-            },
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs420);
-        assert!(fh.lr.uses_lr);
-        assert_eq!(
-            fh.lr.frame_restoration_type,
-            [
-                RestorationType::Wiener,
-                RestorationType::Wiener,
-                RestorationType::None
-            ]
-        );
-        // LoopRestorationSize[0] = 256 >> (2 - 2); the chroma planes take a further lr_uv_shift.
-        assert_eq!(fh.lr.loop_restoration_size, [256, 128, 128]);
-
-        // Luma-only restoration leaves `usesChromaLr` clear, so no `lr_uv_shift` is coded and the
-        // chroma sizes follow the luma one.
-        let (_, luma_only) = parse_built(&crate::decode::testutil::StillBuilder {
-            lr: crate::decode::testutil::LrSpec {
-                types: [2, 0, 0],
-                unit_shift: 2,
-                uv_shift: 0,
-            },
-            ..still
-        });
-        assert!(luma_only.lr.uses_lr);
-        assert_eq!(luma_only.lr.loop_restoration_size, [256; 3]);
-    }
-
-    #[test]
-    fn film_grain_params_are_consumed_at_their_full_width() {
-        // §5.9.30 is parsed purely for its width — the decoder keeps only `apply_grain` — so the
-        // bit-position check in `parse_built` is what pins every field. `film_grain_params_present`
-        // is 0 in everything either encoder emits, so this syntax is otherwise never entered.
-        //
-        // 4:4:4 with luma *and* chroma points takes the widest path: `numPosLuma` is
-        // 2 * 2 * 3 = 12 AR coefficients, `numPosChroma` is 13 because num_y_points is non-zero,
-        // and both the cb and the cr multiplier triples are coded.
-        let still = crate::decode::testutil::StillBuilder {
-            film_grain: Some(crate::decode::testutil::GrainSpec {
-                num_y_points: 3,
-                chroma_scaling_from_luma: false,
-                num_cb_points: 2,
-                num_cr_points: 1,
-                ar_coeff_lag: 2,
-            }),
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (seq, fh) = parse_built(&still);
-        assert!(seq.film_grain_params_present);
-        assert!(fh.apply_grain);
-        assert_eq!(
-            fh.reject_unsupported_tools(&seq)
-                .unwrap_err()
-                .static_message(),
-            Some("AV1 decode: film grain synthesis is not implemented")
-        );
-
-        // `apply_grain = 0` still costs the one flag and nothing else.
-        let (_, none) = parse_built(&crate::decode::testutil::StillBuilder {
-            film_grain: None,
-            ..still
-        });
-        assert!(!none.apply_grain);
-    }
-
-    #[test]
-    fn film_grain_omits_the_chroma_points_for_subsampled_grain_without_luma_points() {
-        // §5.9.30 forces `num_cb_points` and `num_cr_points` to 0 — coding neither field, neither
-        // set of AR coefficients, and neither multiplier triple — when the stream is 4:2:0 and
-        // `num_y_points` is 0. It is the one input where all three terms of that condition are
-        // load-bearing, and where `chroma_scaling_from_luma || num_cb_points` must stay a genuine
-        // test rather than an always-true one.
-        let still = crate::decode::testutil::StillBuilder {
-            colour: crate::decode::testutil::BuilderColour::Yuv420,
-            film_grain: Some(crate::decode::testutil::GrainSpec {
-                num_y_points: 0,
-                chroma_scaling_from_luma: false,
-                num_cb_points: 0,
-                num_cr_points: 0,
-                // numPosLuma = 12, and with no luma points numPosChroma is 12 too — coefficients
-                // that must not be read at all here.
-                ar_coeff_lag: 2,
-            }),
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs420);
-        assert!(seq.film_grain_params_present);
-        assert!(fh.apply_grain);
-    }
-
-    #[test]
-    fn film_grain_codes_the_chroma_points_for_4_2_2_grain_without_luma_points() {
-        // The §5.9.30 chroma-point exemption needs `subsampling_x`, `subsampling_y` *and*
-        // `num_y_points == 0`. 4:2:2 with no luma points fails only the `subsampling_y` term, so
-        // the counts and their multiplier triples are still coded.
-        let still = crate::decode::testutil::StillBuilder {
-            colour: crate::decode::testutil::BuilderColour::Yuv422,
-            film_grain: Some(crate::decode::testutil::GrainSpec {
-                num_y_points: 0,
-                chroma_scaling_from_luma: false,
-                num_cb_points: 1,
-                num_cr_points: 2,
-                ar_coeff_lag: 1,
-            }),
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs422);
-        assert!(fh.apply_grain);
-    }
-
-    #[test]
-    fn a_monochrome_frame_codes_no_chroma_quantizer_deltas() {
-        // §5.9.12 codes the U (and V) `delta_coded` flags only when NumPlanes > 1. Zero luma
-        // filter levels keep `loop_filter_params()` from coding any chroma level either way.
-        let still = crate::decode::testutil::StillBuilder {
-            colour: crate::decode::testutil::BuilderColour::Monochrome,
-            base_q_idx: 128,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs400);
-        assert_eq!(fh.quant.base_q_idx, 128);
-    }
-
-    #[test]
-    fn a_monochrome_frame_codes_no_chroma_filter_levels() {
-        // §5.9.11 codes `loop_filter_level[2]` and `[3]` only when NumPlanes > 1, whatever the
-        // luma levels are.
-        let still = crate::decode::testutil::StillBuilder {
-            colour: crate::decode::testutil::BuilderColour::Monochrome,
-            base_q_idx: 128,
-            loop_filter_level: [5, 9, 17, 34],
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&still);
-        assert_eq!(fh.loop_filter.level, [5, 9, 0, 0]);
-    }
-
-    #[test]
-    fn cdef_params_code_one_strength_set_per_cdef_bits_value() {
-        // §5.9.19 reads `1 << cdef_bits` strength sets. Every other fixture has `cdef_bits = 0`,
-        // where one set is read whatever the shift does.
-        let still = crate::decode::testutil::StillBuilder {
-            base_q_idx: 128,
-            enable_cdef: true,
-            cdef_bits: 1,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&still);
-        assert_eq!(fh.cdef.bits, 1);
-        assert_eq!(fh.cdef.y_pri[..2], [1, 2]);
-        assert_eq!(fh.cdef.uv_pri[..2], [1, 2]);
-    }
-
-    #[test]
-    fn a_monochrome_frame_codes_no_chroma_cdef_strengths() {
-        // §5.9.19 codes `cdef_uv_pri_strength` / `cdef_uv_sec_strength` only when NumPlanes > 1.
-        // Two strength sets put a luma strength after the first set, so reading chroma strengths
-        // for the one plane would misplace it as well as overrun the header.
-        let still = crate::decode::testutil::StillBuilder {
-            colour: crate::decode::testutil::BuilderColour::Monochrome,
-            base_q_idx: 128,
-            enable_cdef: true,
-            cdef_bits: 1,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs400);
-        assert_eq!(fh.cdef.y_pri[..2], [1, 2]);
-        assert_eq!(fh.cdef.uv_pri, [0; 8]);
-    }
-
-    #[test]
-    fn lr_unit_size_under_128x128_superblocks_adds_the_implicit_shift() {
-        // §5.9.20: with `use_128x128_superblock` the coded `lr_unit_shift` is incremented, so a
-        // coded 0 is a shift of 1 and `LoopRestorationSize` is 256 >> (2 - 1) = 128. Every other
-        // fixture codes a shift of 2, where `>> 0` and `<< 0` agree.
-        let still = crate::decode::testutil::StillBuilder {
-            use_128x128_superblock: true,
-            base_q_idx: 128,
-            enable_restoration: true,
-            lr: crate::decode::testutil::LrSpec {
-                types: [2, 0, 0],
-                unit_shift: 1,
-                uv_shift: 0,
-            },
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&still);
-        assert_eq!(fh.lr.loop_restoration_size, [128; 3]);
-    }
-
-    #[test]
-    fn tile_info_bounds_explicit_rows_by_the_frame_area_below_the_tile_limit() {
-        // §5.9.15's explicit branch with `minLog2Tiles == 0` takes the whole `sbRows * sbCols`
-        // as `maxTileAreaSb`. A 256x256 frame is 4x4 superblocks; one column 4 wide leaves
-        // `maxTileHeightSb = 16 / 4 = 4`, so a single 4-superblock row is coded against `ns(4)`.
-        // Halving the area, or adding instead of multiplying, gives a cap of 2 and a narrower
-        // `ns()`.
-        let still = crate::decode::testutil::StillBuilder {
-            width: 256,
-            height: 256,
-            width_bits: 8,
-            height_bits: 8,
-            explicit_tiles: Some((&[4], &[4])),
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&still);
-        assert_eq!(fh.tile_info.tile_rows, 1);
-        assert_eq!(fh.tile_info.mi_row_starts, [0, 64]);
-    }
-
-    #[test]
-    fn context_update_tile_id_must_name_a_tile_of_the_grid() {
-        // §6.8.14: `context_update_tile_id` must be less than `TileCols * TileRows`. Three
-        // columns code it in `TileColsLog2 = 2` bits, so id 3 is codable but names no tile —
-        // and is still below `TileCols + TileRows = 4`.
-        let still = crate::decode::testutil::StillBuilder {
-            width: 256,
-            width_bits: 8,
-            explicit_tiles: Some((&[1, 1, 2], &[1])),
-            context_update_tile_id: 2,
-            ..crate::decode::testutil::StillBuilder::default()
-        };
-        let (_, fh) = parse_built(&still);
-        assert_eq!(fh.tile_info.tile_cols, 3);
-        assert_eq!(fh.tile_info.context_update_tile_id, 2);
-
-        let past = crate::decode::testutil::StillBuilder {
-            context_update_tile_id: 3,
-            ..still
-        };
-        let seq = SequenceHeader::parse(&past.sequence_header()).unwrap();
-        let payload = past.frame_obu();
-        assert_eq!(
-            FrameHeader::parse(&mut BitReader::new(&payload), &seq)
-                .unwrap_err()
-                .static_message(),
-            Some("AV1 tile_info: context_update_tile_id is out of range")
         );
     }
 
