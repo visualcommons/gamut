@@ -31,7 +31,7 @@ use gamut::core::{Dimensions, EncodeImage, Gray8, ImageRef};
 
 #[test]
 fn metadata_facade_round_trips_through_a_jpeg_stream() {
-    use gamut::jpeg::{JpegEncoder, metadata};
+    use gamut::jpeg::{JpegDecoder, JpegEncoder};
     use gamut::metadata::exif::{ByteOrder, Exif, ExifTag, Value};
     use gamut::metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
     use gamut::metadata::xmp::{WellKnownNs, XmpMeta};
@@ -57,7 +57,7 @@ fn metadata_facade_round_trips_through_a_jpeg_stream() {
         .encode_to_vec(image)
         .unwrap();
 
-    let read = metadata(&jpeg).unwrap();
+    let read = JpegDecoder::new().metadata(&jpeg).unwrap();
     let through_jpeg = Metadata::parse_blocks(&[
         MetadataBlock::Exif(read.exif.as_deref().unwrap()),
         MetadataBlock::Xmp(read.xmp.as_deref().unwrap()),

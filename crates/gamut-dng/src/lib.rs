@@ -25,7 +25,7 @@
 //!
 //! - **Layouts & compression**: strips and DNG-1.7 tiles; uncompressed, Deflate (encoded with
 //!   [`gamut_deflate`], inflated by its shared bounded inflate under a cap derived from the chunk
-//!   geometry), lossless JPEG (the public SOF3 [`lossless_jpeg`] module), and **JPEG XL** (Compression
+//!   geometry), lossless JPEG (SOF3, coded by [`gamut_jpeg::lossless`]), and **JPEG XL** (Compression
 //!   52546 — the Apple ProRAW codec; decode is pure-Rust jxl-rs, encode is the opt-in
 //!   `jxl-encode` feature), with row/column interleave de-interleaving on decode.
 //! - **Raw model**: CFA and `LinearRaw` photometries at 1–16 bits, the typed [`RawLevels`] level
@@ -82,7 +82,6 @@ pub mod encoder;
 pub mod gain_map;
 pub mod levels;
 pub mod linearize;
-pub mod lossless_jpeg;
 pub mod metadata;
 pub mod opcode;
 pub mod profile;
@@ -138,7 +137,6 @@ pub use gamut_metadata::exif::{Exif, ExifTag, Rational};
 pub use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
 pub use levels::RawLevels;
 pub use linearize::LinearImage;
-pub use lossless_jpeg::LosslessJpeg;
 pub use metadata::DngMetadata;
 pub use opcode::{Opcode, OpcodeList, opcode_id};
 pub use profile::CameraProfile;

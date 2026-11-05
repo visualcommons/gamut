@@ -146,7 +146,6 @@ use gamut_core::Dimensions;
 use gamut_dng::raw::cfa_color;
 use gamut_dng::{
     CalibrationIlluminant, CameraProfile, Compression, DngDecoder, DngEncoder, RawImage,
-    lossless_jpeg,
 };
 
 fn main() {
@@ -411,7 +410,7 @@ const fn dng_jobs() -> [DngJob; CASES.len() * 2] {
 /// Which implementation one `decode_lossless_jpeg` measurement runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum JpegImpl {
-    /// gamut's `lossless_jpeg::decode`, filling one `Vec<u16>`.
+    /// gamut's `gamut_jpeg::lossless::decode`, filling one `Vec<u16>`.
     Gamut,
     /// The Adobe DNG SDK's `DecodeLosslessJPEG<Scalar>`, exported across the FFI boundary.
     AdobeSdk,
@@ -730,7 +729,7 @@ fn preview_decode_bytes() -> usize {
 /// CFA, three interleaved for `LinearRaw`.
 fn lossless_jpeg_stream(photometry: Photometry) -> Vec<u8> {
     let planes = photometry.planes() as usize;
-    lossless_jpeg::encode(
+    gamut_jpeg::lossless::encode(
         &sensor_samples(photometry.planes()),
         WIDTH as usize,
         HEIGHT as usize,
@@ -1004,7 +1003,7 @@ fn decode_lossless_jpeg(bencher: Bencher, job: JpegJob) {
     match job.imp {
         JpegImpl::Gamut => bencher.bench_local(|| {
             drop(black_box(
-                lossless_jpeg::decode(black_box(&stream)).expect("decode"),
+                gamut_jpeg::lossless::decode(black_box(&stream)).expect("decode"),
             ));
         }),
         JpegImpl::AdobeSdk => bencher.bench_local(|| {

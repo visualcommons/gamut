@@ -1,5 +1,6 @@
-//! The pluggable **whole-interchange-stream** codestream seam: [`JpegStreamDecoder`],
-//! [`JpegStreamEncoder`], and their [`gamut_codec_abi`] adapters.
+//! The pluggable **whole-interchange-stream** codestream seam: [`JpegCodestreamDecoder`],
+//! [`JpegCodestreamEncoder`], and their [`gamut_codec_abi`] adapters [`AbiJpegDecoder`] /
+//! [`AbiJpegEncoder`]. Private; every item is re-exported at the crate root.
 //!
 //! # Why the seam is the whole SOI..EOI stream
 //!
@@ -25,8 +26,8 @@
 //!
 //! - **Decode** — the crate still parses the marker layer *first*, into a [`JpegStreamInfo`]
 //!   (dimensions, process, per-component sampling, precision), and only then hands the **full**
-//!   stream to the first backend whose [`JpegStreamDecoder::supports`] returns `true`. APPn metadata
-//!   (EXIF / XMP / multi-segment ICC) is **never** delegated: [`crate::metadata`] is a crate-side
+//!   stream to the first backend whose [`JpegCodestreamDecoder::supports`] returns `true`. APPn metadata
+//!   (EXIF / XMP / multi-segment ICC) is **never** delegated: [`JpegDecoder::metadata`](crate::JpegDecoder::metadata) is a crate-side
 //!   marker walk that no backend can observe, intercept, or alter.
 //! - **Encode** — a backend produces the **full** JFIF stream from the raster and the
 //!   [`JpegEncodeRequest`]; the crate then validates it (SOI..EOI framing, parsable marker layer)
@@ -41,25 +42,24 @@
 //!
 //! # Fallback contract
 //!
-//! Backends are tried in **push order** ([`crate::JpegDecoder::push_backend`] /
-//! [`crate::JpegEncoder::push_backend`]); the crate's own built-in codec is the implicit tail and
-//! runs last. `supports() == false` is the only signal that falls through to the next backend. A
-//! backend that accepts a job and *then* fails **propagates** its error — the built-in tail is not
-//! retried, because a partially-produced result must never be silently masked. The one exception is
-//! the codec-abi adapters' *late* [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED),
-//! which is a decline expressed after acceptance; it is carried as the
-//! [`backend_declined`] sentinel error and re-enters the fall-through path.
-
-use std::sync::{Arc, Mutex};
+//! Backends are tried in **push order** ([`crate::JpegDecoder::with_backend`] /
+//! [`crate::JpegEncoder::with_backend`]) through the workspace's one
+//! [`Registry`](gamut_codec_abi::Registry); the crate's own built-in codec is the implicit tail
+//! and runs last. `supports() == false` is the **only** signal that falls through to the next
+//! backend. A backend that accepts a job and *then* fails — a codec-abi backend's late
+//! [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) included — **propagates** its
+//! error unchanged: the built-in tail is not retried, because a partially-produced result must
+//! never be silently masked.
 
 use gamut_codec_abi::{
-    Decoder as AbiDecode, EncodeConfig, Encoder as AbiEncode, ImageDesc, MAX_PLANES, Status,
-    StreamConfig, codec_id,
+    Decoder as AbiDecode, EncodeConfig, Encoder as AbiEncode, ImageDesc, MAX_PLANES, Registry,
+    RegistryError, Status, StreamConfig, codec_id,
 };
+use gamut_color::ChromaSubsampling;
 use gamut_core::{Error, PixelFormat, Result};
 
 use crate::decoder::{JpegProcess, frame_header};
-use crate::encoder::ChromaSubsampling;
+use crate::encoder::Process;
 
 /// The codec identifier gamut uses for JPEG-1 on the [`gamut_codec_abi`] seam: the big-endian
 /// FourCC `"JPEG"` (`0x4A50_4547`).
@@ -67,30 +67,6 @@ use crate::encoder::ChromaSubsampling;
 /// It is written to [`StreamConfig::codec_id`] and [`EncodeConfig::codec_id`] by the adapters in
 /// this module, so a foreign backend registered for several formats can dispatch on it.
 pub const JPEG_CODEC_ID: u32 = codec_id(*b"JPEG");
-
-/// The message carried by the [`backend_declined`] sentinel error.
-const DECLINED_MSG: &str = "JPEG: backend declined the stream after accepting it";
-
-/// The error a backend returns to **decline after accepting** — the late counterpart of
-/// `supports() == false`.
-///
-/// The typed traits report a normal decline through `supports`, so this sentinel exists for
-/// backends that can only discover they cannot handle a job once they have started it — notably a
-/// [`gamut_codec_abi`] backend that returns [`Status::UNSUPPORTED`] from `decode`/`encode` after
-/// having answered its `supports` affirmatively. Returning it from
-/// [`JpegStreamDecoder::decode`] / [`JpegStreamEncoder::encode`] resumes the push-order fall-through
-/// at the next backend; **every other** error is terminal and propagates to the caller unchanged.
-#[must_use]
-pub fn backend_declined() -> Error {
-    Error::unsupported(env!("CARGO_PKG_NAME"), DECLINED_MSG)
-}
-
-/// Returns `true` iff `err` is the [`backend_declined`] sentinel, i.e. the registry treats it as a
-/// fall-through rather than a failure.
-#[must_use]
-pub fn is_backend_declined(err: &Error) -> bool {
-    err.kind() == gamut_core::ErrorKind::Unsupported && err.static_message() == Some(DECLINED_MSG)
-}
 
 /// The pixel layouts the JPEG seam exchanges: [`PixelFormat::Gray8`] (1 component),
 /// [`PixelFormat::Rgb8`] (3), and [`PixelFormat::Cmyk8`] (4) — interleaved 8-bit samples, the forms
@@ -118,18 +94,18 @@ fn sample_len(width: u32, height: u32, format: PixelFormat) -> Option<usize> {
         .checked_mul(format.channels())
 }
 
-/// What the crate tells a [`JpegStreamDecoder`] about a stream before handing it over: everything
+/// What the crate tells a [`JpegCodestreamDecoder`] about a stream before handing it over: everything
 /// the marker layer declares, parsed **by the crate** (T.81 §B.2.2).
 ///
-/// A backend uses it to decide [`JpegStreamDecoder::supports`] without parsing the stream itself,
+/// A backend uses it to decide [`JpegCodestreamDecoder::supports`] without parsing the stream itself,
 /// and to size its output. Marked `#[non_exhaustive]`; read through the getters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct JpegStreamInfo {
     /// Samples per line `X`.
     width: u32,
-    /// Number of lines `Y`; `0` when the frame defers its height to a DNL segment (§B.2.5).
-    height: u32,
+    /// Number of lines `Y`; `None` when the frame defers its height to a DNL segment (§B.2.5).
+    height: Option<u32>,
     /// Sample precision `P` in bits, as declared — **not** clamped to what the built-in supports, so
     /// a backend may accept a 12-bit frame the built-in decoder rejects.
     precision: u8,
@@ -171,7 +147,7 @@ impl JpegStreamInfo {
         }
         Ok(Self {
             width: u32::from(width),
-            height: u32::from(height),
+            height: (height != 0).then_some(u32::from(height)),
             precision,
             process,
             sampling,
@@ -184,9 +160,10 @@ impl JpegStreamInfo {
         self.width
     }
 
-    /// Number of lines `Y`, or `0` when a DNL segment defines the height (§B.2.5).
+    /// Number of lines `Y`, or `None` when a DNL segment defines the height (§B.2.5): the frame
+    /// header's `Y = 0` is that deferral, never an empty image.
     #[must_use]
-    pub fn height(&self) -> u32 {
+    pub fn height(&self) -> Option<u32> {
         self.height
     }
 
@@ -229,16 +206,16 @@ impl JpegStreamInfo {
             return None;
         }
         match luma {
-            (1, 1) => Some(ChromaSubsampling::Ycbcr444),
-            (2, 1) => Some(ChromaSubsampling::Ycbcr422),
-            (2, 2) => Some(ChromaSubsampling::Ycbcr420),
-            (1, 2) => Some(ChromaSubsampling::Ycbcr440),
+            (1, 1) => Some(ChromaSubsampling::Cs444),
+            (2, 1) => Some(ChromaSubsampling::Cs422),
+            (2, 2) => Some(ChromaSubsampling::Cs420),
+            (1, 2) => Some(ChromaSubsampling::Cs440),
             _ => None,
         }
     }
 }
 
-/// The owned output of a [`JpegStreamDecoder`]: one interleaved 8-bit raster.
+/// The owned output of a [`JpegCodestreamDecoder`]: one interleaved 8-bit raster.
 ///
 /// Backends return *presented* samples — the form nvJPEG, V4L2, and libjpeg-turbo all emit — so the
 /// crate does not re-run colour conversion on backend output. [`PixelFormat::Gray8`] is replicated
@@ -312,7 +289,7 @@ impl DecodedJpeg {
     }
 }
 
-/// A borrowed interleaved 8-bit raster handed to a [`JpegStreamEncoder`].
+/// A borrowed interleaved 8-bit raster handed to a [`JpegCodestreamEncoder`].
 ///
 /// The crate builds it from the [`gamut_core::ImageRef`] the caller passed to
 /// [`gamut_core::EncodeImage::encode_image`], so a backend reads the caller's buffer directly with
@@ -381,7 +358,7 @@ impl<'a> RasterRef<'a> {
     }
 }
 
-/// The encode job handed to a [`JpegStreamEncoder`]: the raster's shape plus the
+/// The encode job handed to a [`JpegCodestreamEncoder`]: the raster's shape plus the
 /// [`crate::JpegEncoder`] settings that shape the coded stream.
 ///
 /// Metadata is deliberately **absent**: APPn segments are crate-owned and are patched into whatever
@@ -395,7 +372,7 @@ pub struct JpegEncodeRequest {
     format: PixelFormat,
     quality: u8,
     subsampling: ChromaSubsampling,
-    progressive: bool,
+    process: Process,
     restart_interval: u16,
 }
 
@@ -408,7 +385,7 @@ impl JpegEncodeRequest {
         format: PixelFormat,
         quality: u8,
         subsampling: ChromaSubsampling,
-        progressive: bool,
+        process: Process,
         restart_interval: u16,
     ) -> Self {
         Self {
@@ -417,7 +394,7 @@ impl JpegEncodeRequest {
             format,
             quality,
             subsampling,
-            progressive,
+            process,
             restart_interval,
         }
     }
@@ -454,10 +431,13 @@ impl JpegEncodeRequest {
         self.subsampling
     }
 
-    /// `true` when the progressive DCT process (SOF2) was requested.
+    /// The requested coding [`Process`]: baseline with the typical tables, baseline with
+    /// optimized tables, or progressive (SOF2). A progressive request always carries
+    /// [`ProgressiveScript::Libjpeg`](crate::ProgressiveScript::Libjpeg): any other script pins the
+    /// encode to the built-in encoder, so no backend is offered it.
     #[must_use]
-    pub fn progressive(&self) -> bool {
-        self.progressive
+    pub fn process(&self) -> Process {
+        self.process
     }
 
     /// The requested restart interval in MCUs; `0` disables restarts.
@@ -469,10 +449,9 @@ impl JpegEncodeRequest {
 
 /// A pluggable JPEG **decode** backend, consuming a whole SOI..EOI interchange stream.
 ///
-/// `Send` is a supertrait because the crate stores backends behind an `Arc<Mutex<..>>` so
-/// [`crate::JpegDecoder`] stays `Clone` with `&self` decode methods; a `!Send` backend can still be
-/// wrapped by the caller.
-pub trait JpegStreamDecoder: Send {
+/// `Send` is not a supertrait: [`JpegDecoder::with_backend`](crate::JpegDecoder::with_backend)
+/// bounds it where the backend is inserted, which is what keeps the decoder `Send + Sync`.
+pub trait JpegCodestreamDecoder {
     /// Reports whether this backend can decode the stream the crate has just parsed. Returning
     /// `false` is the primary signal that lets the crate fall through to the next backend, and
     /// finally to its own built-in decoder.
@@ -483,8 +462,8 @@ pub trait JpegStreamDecoder: Send {
     ///
     /// # Errors
     ///
-    /// Any error propagates to the caller unchanged and the built-in decoder is **not** tried,
-    /// except [`backend_declined`], which resumes the fall-through at the next backend.
+    /// Any error propagates to the caller unchanged; neither a later backend nor the built-in
+    /// decoder is tried. Declining is [`supports`](Self::supports)' job alone.
     fn decode(&mut self, info: &JpegStreamInfo, jpeg: &[u8]) -> Result<DecodedJpeg>;
 }
 
@@ -493,7 +472,10 @@ pub trait JpegStreamDecoder: Send {
 /// The returned stream is validated by the crate, and its APPn metadata segments are replaced by
 /// the encoder's configured EXIF / XMP / ICC (see the module docs) — a backend neither has to emit
 /// them nor can override them.
-pub trait JpegStreamEncoder: Send {
+///
+/// `Send` is not a supertrait: [`JpegEncoder::with_backend`](crate::JpegEncoder::with_backend)
+/// bounds it where the backend is inserted.
+pub trait JpegCodestreamEncoder {
     /// Reports whether this backend can satisfy the encode job. Returning `false` falls through to
     /// the next backend, and finally to the crate's own built-in encoder.
     fn supports(&mut self, req: &JpegEncodeRequest) -> bool;
@@ -502,66 +484,50 @@ pub trait JpegStreamEncoder: Send {
     ///
     /// # Errors
     ///
-    /// Any error propagates to the caller unchanged and the built-in encoder is **not** tried,
-    /// except [`backend_declined`], which resumes the fall-through at the next backend.
+    /// Any error propagates to the caller unchanged; neither a later backend nor the built-in
+    /// encoder is tried. Declining is [`supports`](Self::supports)' job alone.
     fn encode(&mut self, req: &JpegEncodeRequest, image: &RasterRef<'_>) -> Result<Vec<u8>>;
 }
 
-/// One registry slot. `Arc` so cloning a codec **shares** its backends; `Mutex` so the codec's
-/// `&self` methods can call the backends' `&mut self` ones.
-pub(crate) type DecoderSlot = Arc<Mutex<dyn JpegStreamDecoder>>;
+/// The decode registry: pushed backends, each `Send` (bound at insertion).
+pub(crate) type DecoderRegistry = Registry<dyn JpegCodestreamDecoder + Send>;
 
-/// One registry slot; see [`DecoderSlot`].
-pub(crate) type EncoderSlot = Arc<Mutex<dyn JpegStreamEncoder>>;
+/// The encode registry: pushed backends, each `Send` (bound at insertion).
+pub(crate) type EncoderRegistry = Registry<dyn JpegCodestreamEncoder + Send>;
 
-/// Raised when a backend panicked while holding its registry lock.
-fn poisoned() -> Error {
-    Error::invalid_input(
-        env!("CARGO_PKG_NAME"),
-        "JPEG: a backend poisoned the registry lock",
-    )
+/// Maps a registry run onto the codec's `Result<Option<_>>`: `None` when every backend declined
+/// (the caller then runs the built-in tail), the accepting backend's error unchanged, and an error
+/// when a backend panicked while holding its lock.
+fn registry_result<R>(run: core::result::Result<R, RegistryError<Error>>) -> Result<Option<R>> {
+    match run {
+        Ok(out) => Ok(Some(out)),
+        Err(RegistryError::Unsupported) => Ok(None),
+        Err(RegistryError::Backend(err)) => Err(err),
+        Err(RegistryError::Poisoned) => Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: a backend poisoned the registry lock",
+        )),
+    }
 }
 
 /// Runs the decode registry in push order, returning the first accepted result, or `None` when
 /// every backend declined (the caller then runs the built-in decoder).
 pub(crate) fn decode_with_backends(
-    backends: &[DecoderSlot],
+    backends: &DecoderRegistry,
     info: &JpegStreamInfo,
     jpeg: &[u8],
 ) -> Result<Option<DecodedJpeg>> {
-    for slot in backends {
-        let mut backend = slot.lock().map_err(|_| poisoned())?;
-        if !backend.supports(info) {
-            continue;
-        }
-        match backend.decode(info, jpeg) {
-            Ok(decoded) => return Ok(Some(decoded)),
-            Err(err) if is_backend_declined(&err) => continue,
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(None)
+    registry_result(backends.run(|b| b.supports(info), |b| b.decode(info, jpeg)))
 }
 
 /// Runs the encode registry in push order, returning the first accepted stream, or `None` when
 /// every backend declined (the caller then runs the built-in encoder).
 pub(crate) fn encode_with_backends(
-    backends: &[EncoderSlot],
+    backends: &EncoderRegistry,
     req: &JpegEncodeRequest,
     image: &RasterRef<'_>,
 ) -> Result<Option<Vec<u8>>> {
-    for slot in backends {
-        let mut backend = slot.lock().map_err(|_| poisoned())?;
-        if !backend.supports(req) {
-            continue;
-        }
-        match backend.encode(req, image) {
-            Ok(stream) => return Ok(Some(stream)),
-            Err(err) if is_backend_declined(&err) => continue,
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(None)
+    registry_result(backends.run(|b| b.supports(req), |b| b.encode(req, image)))
 }
 
 /// The [`StreamConfig`] the decode adapter builds from a [`JpegStreamInfo`].
@@ -570,7 +536,8 @@ fn stream_config(info: &JpegStreamInfo) -> StreamConfig {
     StreamConfig::new(
         JPEG_CODEC_ID,
         info.width(),
-        info.height(),
+        // The C descriptor's own convention for a DNL-deferred height is `0`.
+        info.height().unwrap_or(0),
         u32::from(info.precision()),
     )
 }
@@ -623,36 +590,53 @@ const _: () = {
 
 /// Adapts a [`gamut_codec_abi::Decoder`] — a foreign C backend reached through
 /// [`gamut_codec_abi::bridge::ForeignDecoder`], or any Rust implementation of the shared twin — into
-/// a [`JpegStreamDecoder`].
+/// a [`JpegCodestreamDecoder`].
 ///
 /// The adapter allocates the interleaved output buffer (sized from the frame's component count, see
 /// the crate's presentation rules), fills a single-plane [`ImageDesc`] over it, and calls the ABI
-/// `decode` with the **whole** interchange stream as the codestream. A late
-/// [`Status::UNSUPPORTED`] becomes [`backend_declined`] — the registry then tries the next backend;
-/// any other non-OK status becomes a terminal
-/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error that propagates. The numeric
-/// status is retained as diagnostic detail.
+/// `decode` with the **whole** interchange stream as the codestream. Any non-OK status — a late
+/// [`Status::UNSUPPORTED`] included, since declining is `supports`' job alone — becomes a terminal
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error that propagates
+/// unchanged. The numeric status is retained as diagnostic detail.
 #[derive(Debug, Clone)]
-pub struct AbiStreamDecoder<D> {
+pub struct AbiJpegDecoder<D> {
     inner: D,
 }
 
-impl<D> AbiStreamDecoder<D> {
+impl<D> AbiJpegDecoder<D> {
     /// Wraps an ABI decoder backend.
     #[must_use]
     pub fn new(inner: D) -> Self {
         Self { inner }
     }
+
+    /// The wrapped backend.
+    #[must_use]
+    pub fn get_ref(&self) -> &D {
+        &self.inner
+    }
+
+    /// The wrapped backend, mutably.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut D {
+        &mut self.inner
+    }
+
+    /// Unwraps the backend.
+    #[must_use]
+    pub fn into_inner(self) -> D {
+        self.inner
+    }
 }
 
-impl<D: AbiDecode + Send> JpegStreamDecoder for AbiStreamDecoder<D> {
+impl<D: AbiDecode> JpegCodestreamDecoder for AbiJpegDecoder<D> {
     fn supports(&mut self, info: &JpegStreamInfo) -> bool {
         self.inner.supports(&stream_config(info))
     }
 
     fn decode(&mut self, info: &JpegStreamInfo, jpeg: &[u8]) -> Result<DecodedJpeg> {
         let format = abi_output_format(info)?;
-        let (width, height) = (info.width(), info.height());
+        let (width, height) = (info.width(), info.height().unwrap_or(0));
         let len = sample_len(width, height, format)
             .filter(|&n| n != 0)
             .ok_or_else(|| {
@@ -666,8 +650,6 @@ impl<D: AbiDecode + Send> JpegStreamDecoder for AbiStreamDecoder<D> {
         let status = self.inner.decode(&stream_config(info), jpeg, &desc);
         if status.is_ok() {
             DecodedJpeg::new(width, height, format, samples)
-        } else if status.is_unsupported() {
-            Err(backend_declined())
         } else {
             Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -680,25 +662,43 @@ impl<D: AbiDecode + Send> JpegStreamDecoder for AbiStreamDecoder<D> {
 
 /// Adapts a [`gamut_codec_abi::Encoder`] — a foreign C backend reached through
 /// [`gamut_codec_abi::bridge::ForeignEncoder`], or any Rust implementation of the shared twin —
-/// into a [`JpegStreamEncoder`].
+/// into a [`JpegCodestreamEncoder`].
 ///
 /// The adapter describes the caller's raster as a single-plane [`ImageDesc`] and concatenates the
-/// chunks the backend streams through the sink into the interchange stream. Late-status handling
-/// mirrors [`AbiStreamDecoder`].
+/// chunks the backend streams through the sink into the interchange stream. Any non-OK status is a
+/// terminal error, as for [`AbiJpegDecoder`].
 #[derive(Debug, Clone)]
-pub struct AbiStreamEncoder<E> {
+pub struct AbiJpegEncoder<E> {
     inner: E,
 }
 
-impl<E> AbiStreamEncoder<E> {
+impl<E> AbiJpegEncoder<E> {
     /// Wraps an ABI encoder backend.
     #[must_use]
     pub fn new(inner: E) -> Self {
         Self { inner }
     }
+
+    /// The wrapped backend.
+    #[must_use]
+    pub fn get_ref(&self) -> &E {
+        &self.inner
+    }
+
+    /// The wrapped backend, mutably.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut E {
+        &mut self.inner
+    }
+
+    /// Unwraps the backend.
+    #[must_use]
+    pub fn into_inner(self) -> E {
+        self.inner
+    }
 }
 
-impl<E: AbiEncode + Send> JpegStreamEncoder for AbiStreamEncoder<E> {
+impl<E: AbiEncode> JpegCodestreamEncoder for AbiJpegEncoder<E> {
     fn supports(&mut self, req: &JpegEncodeRequest) -> bool {
         self.inner.supports(&encode_config(req))
     }
@@ -721,8 +721,6 @@ impl<E: AbiEncode + Send> JpegStreamEncoder for AbiStreamEncoder<E> {
             });
         if status.is_ok() {
             Ok(stream)
-        } else if status.is_unsupported() {
-            Err(backend_declined())
         } else {
             Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -743,21 +741,37 @@ mod tests {
     }
 
     #[test]
-    fn declined_sentinel_round_trips_and_nothing_else_matches() {
-        let err = backend_declined();
-        assert!(is_backend_declined(&err));
+    fn registry_result_maps_each_outcome() {
+        assert_eq!(registry_result::<u8>(Ok(7)).unwrap(), Some(7));
         assert_eq!(
-            err.to_string(),
-            "unsupported: JPEG: backend declined the stream after accepting it [origin: gamut-jpeg]"
+            registry_result::<u8>(Err(RegistryError::Unsupported)).unwrap(),
+            None
         );
-        assert!(!is_backend_declined(&Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "JPEG: something else"
-        )));
-        assert!(!is_backend_declined(&Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            DECLINED_MSG
-        )));
+        let backend = Error::unsupported("test", "a backend's own refusal");
+        assert_eq!(
+            registry_result::<u8>(Err(RegistryError::Backend(backend)))
+                .unwrap_err()
+                .to_string(),
+            "unsupported: a backend's own refusal [origin: test]"
+        );
+        assert_eq!(
+            registry_result::<u8>(Err(RegistryError::Poisoned))
+                .unwrap_err()
+                .to_string(),
+            "invalid input: JPEG: a backend poisoned the registry lock [origin: gamut-jpeg]"
+        );
+    }
+
+    #[test]
+    fn adapters_expose_and_return_the_wrapped_backend() {
+        let mut dec = AbiJpegDecoder::new(3u8);
+        *dec.get_mut() += 1;
+        assert_eq!(*dec.get_ref(), 4);
+        assert_eq!(dec.into_inner(), 4);
+        let mut enc = AbiJpegEncoder::new(5u8);
+        *enc.get_mut() += 1;
+        assert_eq!(*enc.get_ref(), 6);
+        assert_eq!(enc.into_inner(), 6);
     }
 
     #[test]
@@ -844,7 +858,7 @@ mod tests {
     fn abi_output_format_follows_component_count() {
         let info = |nf: usize| JpegStreamInfo {
             width: 4,
-            height: 4,
+            height: Some(4),
             precision: 8,
             process: JpegProcess::Baseline,
             sampling: vec![(1, 1); nf],
@@ -864,7 +878,7 @@ mod tests {
     fn descriptors_carry_the_jpeg_codec_id_and_frame_shape() {
         let info = JpegStreamInfo {
             width: 7,
-            height: 5,
+            height: Some(5),
             precision: 12,
             process: JpegProcess::Progressive,
             sampling: vec![(2, 2), (1, 1), (1, 1)],
@@ -876,14 +890,20 @@ mod tests {
         assert_eq!(cfg.extradata_len, 0);
         assert!(cfg.extradata.is_null());
         assert!(cfg.is_abi_current());
+        // A DNL-deferred height reaches the C descriptor as its own convention, `0`.
+        let deferred = JpegStreamInfo {
+            height: None,
+            ..info.clone()
+        };
+        assert_eq!(stream_config(&deferred).height, 0);
 
         let req = JpegEncodeRequest::new(
             7,
             5,
             PixelFormat::Rgb8,
             83,
-            ChromaSubsampling::Ycbcr422,
-            true,
+            ChromaSubsampling::Cs422,
+            Process::Progressive(crate::ProgressiveScript::Libjpeg),
             9,
         );
         let ecfg = encode_config(&req);
@@ -895,8 +915,11 @@ mod tests {
         assert_eq!((req.width(), req.height()), (7, 5));
         assert_eq!(req.format(), PixelFormat::Rgb8);
         assert_eq!(req.quality(), 83);
-        assert_eq!(req.subsampling(), ChromaSubsampling::Ycbcr422);
-        assert!(req.progressive());
+        assert_eq!(req.subsampling(), ChromaSubsampling::Cs422);
+        assert_eq!(
+            req.process(),
+            Process::Progressive(crate::ProgressiveScript::Libjpeg)
+        );
         assert_eq!(req.restart_interval(), 9);
     }
 
@@ -921,30 +944,43 @@ mod tests {
         assert_eq!(image_desc(4, 2, PixelFormat::Cmyk8, base).strides[0], 16);
     }
 
+    /// A frame header's `Y = 0` is a DNL-deferred height (§B.2.5), parsed as no height.
+    #[test]
+    fn parse_reports_a_dnl_deferred_height_as_none() {
+        let sof = |y: u8| {
+            vec![
+                0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 8, 0x00, y, 0x00, 0x08, 1, 1, 0x11, 0, 0xFF,
+                0xD9,
+            ]
+        };
+        assert_eq!(JpegStreamInfo::parse(&sof(0)).unwrap().height(), None);
+        assert_eq!(JpegStreamInfo::parse(&sof(1)).unwrap().height(), Some(1));
+    }
+
     #[test]
     fn subsampling_maps_only_the_named_grids() {
         let info = |sampling: Vec<(u8, u8)>| JpegStreamInfo {
             width: 8,
-            height: 8,
+            height: Some(8),
             precision: 8,
             process: JpegProcess::Baseline,
             sampling,
         };
         assert_eq!(
             info(vec![(1, 1), (1, 1), (1, 1)]).subsampling(),
-            Some(ChromaSubsampling::Ycbcr444)
+            Some(ChromaSubsampling::Cs444)
         );
         assert_eq!(
             info(vec![(2, 1), (1, 1), (1, 1)]).subsampling(),
-            Some(ChromaSubsampling::Ycbcr422)
+            Some(ChromaSubsampling::Cs422)
         );
         assert_eq!(
             info(vec![(2, 2), (1, 1), (1, 1)]).subsampling(),
-            Some(ChromaSubsampling::Ycbcr420)
+            Some(ChromaSubsampling::Cs420)
         );
         assert_eq!(
             info(vec![(1, 2), (1, 1), (1, 1)]).subsampling(),
-            Some(ChromaSubsampling::Ycbcr440)
+            Some(ChromaSubsampling::Cs440)
         );
         // Not three components.
         assert_eq!(info(vec![(1, 1)]).subsampling(), None);

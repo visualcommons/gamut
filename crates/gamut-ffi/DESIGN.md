@@ -254,7 +254,7 @@ fail loudly, at compile time wherever structurally possible:
   the seam crate itself const-pins `ABI_VERSION`, `Status` values, and vtable/descriptor field
   offsets, and `gamut-core` const-pins the `PixelFormat`/`ColorModel` discriminants.
 - **CI diff gates** for what compilation cannot see: `check-ffi-header` (committed `gamut.h`
-  vs fresh cbindgen output) and `check-ffi-seams` (the workspace's `pub fn push_backend` set vs
+  vs fresh cbindgen output) and `check-ffi-seams` (the workspace's `pub fn push_backend` / `pub fn with_backend` set vs
   the committed `SEAMS.txt` manifest — a format crate *gaining* a seam is unreferencable from
   here, so it is the one drift class caught in CI rather than by the compiler).
 

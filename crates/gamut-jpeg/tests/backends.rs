@@ -13,12 +13,11 @@ use gamut_core::{
     Cmyk8, DecodeImage, Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, PixelFormat,
     Rgb8,
 };
-use gamut_jpeg::backend::{
-    AbiStreamDecoder, AbiStreamEncoder, DecodedJpeg, JPEG_CODEC_ID, JpegEncodeRequest,
-    JpegStreamDecoder, JpegStreamEncoder, JpegStreamInfo, RasterRef, backend_declined,
-    is_backend_declined,
+use gamut_jpeg::{
+    AbiJpegDecoder, AbiJpegEncoder, ChromaSubsampling, DecodeLimits, DecodedJpeg, JPEG_CODEC_ID,
+    JpegCodestreamDecoder, JpegCodestreamEncoder, JpegDecoder, JpegEncodeRequest, JpegEncoder,
+    JpegProcess, JpegStreamInfo, Process, ProgressiveScript, RasterRef,
 };
-use gamut_jpeg::{ChromaSubsampling, JpegDecoder, JpegEncoder, JpegProcess};
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures
@@ -47,8 +46,12 @@ fn rgb_pixels() -> Vec<u8> {
 fn golden_encoder(progressive: bool) -> JpegEncoder {
     JpegEncoder::new()
         .with_quality(78)
-        .with_subsampling(ChromaSubsampling::Ycbcr420)
-        .with_progressive(progressive)
+        .with_subsampling(ChromaSubsampling::Cs420)
+        .with_process(if progressive {
+            Process::Progressive(ProgressiveScript::Libjpeg)
+        } else {
+            Process::Baseline
+        })
 }
 
 /// Loads a byte-exact golden captured from the encoder *before* the backend seam existed.
@@ -85,10 +88,8 @@ enum Act {
     Accept,
     /// Accept, then fail terminally.
     Fail,
-    /// Accept, then return the late-decline sentinel.
-    LateDecline,
     /// Accept, then fail with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
-    /// error that is *not* the late-decline sentinel.
+    /// error.
     Unsupported,
 }
 
@@ -101,7 +102,7 @@ struct ScriptedDecoder {
     out: DecodedJpeg,
 }
 
-impl JpegStreamDecoder for ScriptedDecoder {
+impl JpegCodestreamDecoder for ScriptedDecoder {
     fn supports(&mut self, _info: &JpegStreamInfo) -> bool {
         self.log.lock().unwrap().push(self.name);
         self.act != Act::Decline
@@ -110,7 +111,6 @@ impl JpegStreamDecoder for ScriptedDecoder {
     fn decode(&mut self, _info: &JpegStreamInfo, _jpeg: &[u8]) -> gamut_core::Result<DecodedJpeg> {
         match self.act {
             Act::Accept => Ok(self.out.clone()),
-            Act::LateDecline => Err(backend_declined()),
             Act::Unsupported => Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "scripted decode unsupported",
@@ -132,7 +132,7 @@ struct ScriptedEncoder {
     out: Vec<u8>,
 }
 
-impl JpegStreamEncoder for ScriptedEncoder {
+impl JpegCodestreamEncoder for ScriptedEncoder {
     fn supports(&mut self, _req: &JpegEncodeRequest) -> bool {
         self.log.lock().unwrap().push(self.name);
         self.act != Act::Decline
@@ -145,7 +145,6 @@ impl JpegStreamEncoder for ScriptedEncoder {
     ) -> gamut_core::Result<Vec<u8>> {
         match self.act {
             Act::Accept => Ok(self.out.clone()),
-            Act::LateDecline => Err(backend_declined()),
             Act::Unsupported => Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "scripted encode unsupported",
@@ -214,14 +213,14 @@ fn an_empty_registry_leaves_both_directions_on_the_built_in_path() {
     let dec = JpegDecoder::new();
     assert_eq!(
         format!("{dec:?}"),
-        "JpegDecoder { max_width: 65535, max_height: 65535, max_image_bytes: 67108864, backends: 0, \
-         upsampling: Interpolated }"
+        "JpegDecoder { limits: DecodeLimits { max_width: 65535, max_height: 65535, \
+         max_image_bytes: 67108864 }, backends: 0, upsampling: Interpolated }"
     );
     let a: ImageBuf<Gray8> = dec.decode_image(&plain).unwrap();
 
     // Pushing a backend that always declines must not change either result.
     let log: Log = Arc::default();
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "e",
         act: Act::Decline,
         log: log.clone(),
@@ -229,7 +228,7 @@ fn an_empty_registry_leaves_both_directions_on_the_built_in_path() {
     });
     assert_eq!(enc.encode_to_vec(gi).unwrap(), plain);
     let mut dec2 = JpegDecoder::new();
-    dec2.push_backend(ScriptedDecoder {
+    dec2 = dec2.with_backend(ScriptedDecoder {
         name: "d",
         act: Act::Decline,
         log: log.clone(),
@@ -254,7 +253,7 @@ fn decode_tries_backends_in_push_order_and_stops_at_the_first_acceptance() {
         ("second", Act::Accept),
         ("third", Act::Accept),
     ] {
-        dec.push_backend(ScriptedDecoder {
+        dec = dec.with_backend(ScriptedDecoder {
             name,
             act,
             log: log.clone(),
@@ -273,7 +272,7 @@ fn decode_falls_through_to_the_built_in_tail_when_every_backend_declines() {
     let log: Log = Arc::default();
     let mut dec = JpegDecoder::new();
     for name in ["a", "b", "c"] {
-        dec.push_backend(ScriptedDecoder {
+        dec = dec.with_backend(ScriptedDecoder {
             name,
             act: Act::Decline,
             log: log.clone(),
@@ -291,13 +290,13 @@ fn decode_accepted_then_failed_propagates_and_never_reaches_the_built_in_tail() 
     let builtin: ImageBuf<Gray8> = JpegDecoder::new().decode_image(&stream).unwrap();
     let log: Log = Arc::default();
     let mut dec = JpegDecoder::new();
-    dec.push_backend(ScriptedDecoder {
+    dec = dec.with_backend(ScriptedDecoder {
         name: "failing",
         act: Act::Fail,
         log: log.clone(),
         out: flat_gray(),
     });
-    dec.push_backend(ScriptedDecoder {
+    dec = dec.with_backend(ScriptedDecoder {
         name: "never",
         act: Act::Accept,
         log: log.clone(),
@@ -308,28 +307,6 @@ fn decode_accepted_then_failed_propagates_and_never_reaches_the_built_in_tail() 
     // Only the failing backend ran: neither a later backend nor the built-in tail was consulted.
     assert_eq!(*log.lock().unwrap(), vec!["failing"]);
     assert!(!builtin.as_samples().is_empty());
-}
-
-#[test]
-fn decode_late_decline_resumes_the_fall_through() {
-    let stream = backend_stream();
-    let log: Log = Arc::default();
-    let mut dec = JpegDecoder::new();
-    dec.push_backend(ScriptedDecoder {
-        name: "late",
-        act: Act::LateDecline,
-        log: log.clone(),
-        out: flat_gray(),
-    });
-    dec.push_backend(ScriptedDecoder {
-        name: "next",
-        act: Act::Accept,
-        log: log.clone(),
-        out: flat_gray(),
-    });
-    let img: ImageBuf<Gray8> = dec.decode_image(&stream).unwrap();
-    assert_eq!(*log.lock().unwrap(), vec!["late", "next"]);
-    assert_eq!(img.as_samples(), vec![99u8; (W * H) as usize]);
 }
 
 #[test]
@@ -344,7 +321,7 @@ fn encode_tries_backends_in_push_order_and_stops_at_the_first_acceptance() {
         ("second", Act::Accept),
         ("third", Act::Accept),
     ] {
-        enc.push_backend(ScriptedEncoder {
+        enc = enc.with_backend(ScriptedEncoder {
             name,
             act,
             log: log.clone(),
@@ -365,7 +342,7 @@ fn encode_falls_through_to_the_built_in_tail_when_every_backend_declines() {
     let log: Log = Arc::default();
     let mut enc = JpegEncoder::new();
     for name in ["a", "b", "c"] {
-        enc.push_backend(ScriptedEncoder {
+        enc = enc.with_backend(ScriptedEncoder {
             name,
             act: Act::Decline,
             log: log.clone(),
@@ -382,13 +359,13 @@ fn encode_accepted_then_failed_propagates_and_never_reaches_the_built_in_tail() 
     let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
     let log: Log = Arc::default();
     let mut enc = JpegEncoder::new();
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "failing",
         act: Act::Fail,
         log: log.clone(),
         out: Vec::new(),
     });
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "never",
         act: Act::Accept,
         log: log.clone(),
@@ -402,43 +379,21 @@ fn encode_accepted_then_failed_propagates_and_never_reaches_the_built_in_tail() 
     assert!(out.is_empty());
 }
 
+/// `supports() == false` is the only fall-through: an accepting backend's `Unsupported` error is
+/// terminal, like any other failure (Q2 of the pre-freeze decisions removed the late-decline
+/// sentinel that used to resume the walk).
 #[test]
-fn encode_late_decline_resumes_the_fall_through() {
-    let g = gray_pixels();
-    let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
-    let produced = backend_stream();
-    let log: Log = Arc::default();
-    let mut enc = JpegEncoder::new();
-    enc.push_backend(ScriptedEncoder {
-        name: "late",
-        act: Act::LateDecline,
-        log: log.clone(),
-        out: Vec::new(),
-    });
-    enc.push_backend(ScriptedEncoder {
-        name: "next",
-        act: Act::Accept,
-        log: log.clone(),
-        out: produced.clone(),
-    });
-    assert_eq!(enc.encode_to_vec(gi).unwrap(), produced);
-    assert_eq!(*log.lock().unwrap(), vec!["late", "next"]);
-}
-
-/// Only the exact [`backend_declined`] sentinel resumes the fall-through: an accepting backend's
-/// other `Unsupported` error is terminal, like any other failure.
-#[test]
-fn decode_unsupported_other_than_the_sentinel_is_terminal() {
+fn decode_unsupported_after_accepting_is_terminal() {
     let stream = backend_stream();
     let log: Log = Arc::default();
     let mut dec = JpegDecoder::new();
-    dec.push_backend(ScriptedDecoder {
+    dec = dec.with_backend(ScriptedDecoder {
         name: "unsupported",
         act: Act::Unsupported,
         log: log.clone(),
         out: flat_gray(),
     });
-    dec.push_backend(ScriptedDecoder {
+    dec = dec.with_backend(ScriptedDecoder {
         name: "never",
         act: Act::Accept,
         log: log.clone(),
@@ -450,20 +405,20 @@ fn decode_unsupported_other_than_the_sentinel_is_terminal() {
     assert_eq!(*log.lock().unwrap(), vec!["unsupported"]);
 }
 
-/// The encode twin of [`decode_unsupported_other_than_the_sentinel_is_terminal`].
+/// The encode twin of [`decode_unsupported_after_accepting_is_terminal`].
 #[test]
-fn encode_unsupported_other_than_the_sentinel_is_terminal() {
+fn encode_unsupported_after_accepting_is_terminal() {
     let g = gray_pixels();
     let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
     let log: Log = Arc::default();
     let mut enc = JpegEncoder::new();
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "unsupported",
         act: Act::Unsupported,
         log: log.clone(),
         out: Vec::new(),
     });
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "never",
         act: Act::Accept,
         log: log.clone(),
@@ -478,11 +433,33 @@ fn encode_unsupported_other_than_the_sentinel_is_terminal() {
     assert!(out.is_empty());
 }
 
+/// A colour encode at 4:0:0 has no three-component JPEG frame, so it is refused before any pushed
+/// backend is consulted — even one that would accept the job.
+#[test]
+fn rgb_at_4_0_0_is_refused_before_a_backend_is_asked() {
+    let c = rgb_pixels();
+    let ci = ImageRef::<Rgb8>::new(&c, dims()).unwrap();
+    let log: Log = Arc::default();
+    let enc = JpegEncoder::new()
+        .with_subsampling(ChromaSubsampling::Cs400)
+        .with_backend(ScriptedEncoder {
+            name: "accepting",
+            act: Act::Accept,
+            log: log.clone(),
+            out: backend_stream(),
+        });
+    let mut out = Vec::new();
+    let err = enc.encode_image(ci, &mut out).unwrap_err();
+    assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+    assert!(log.lock().unwrap().is_empty());
+    assert!(out.is_empty());
+}
+
 #[test]
 fn cloning_shares_backends_rather_than_duplicating_them() {
     /// Counts how many encodes the *shared* backend instance saw.
     struct Counting(Arc<AtomicUsize>, Vec<u8>);
-    impl JpegStreamEncoder for Counting {
+    impl JpegCodestreamEncoder for Counting {
         fn supports(&mut self, _req: &JpegEncodeRequest) -> bool {
             true
         }
@@ -497,7 +474,7 @@ fn cloning_shares_backends_rather_than_duplicating_them() {
     }
     let calls = Arc::new(AtomicUsize::new(0));
     let mut enc = JpegEncoder::new();
-    enc.push_backend(Counting(calls.clone(), backend_stream()));
+    enc = enc.with_backend(Counting(calls.clone(), backend_stream()));
     let clone = enc.clone();
     let g = gray_pixels();
     let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
@@ -515,20 +492,20 @@ fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
     let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
     let log: Log = Arc::default();
     let mut enc = JpegEncoder::new();
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "shared",
         act: Act::Decline,
         log: log.clone(),
         out: Vec::new(),
     });
     let mut clone = enc.clone();
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "original-only",
         act: Act::Decline,
         log: log.clone(),
         out: Vec::new(),
     });
-    clone.push_backend(ScriptedEncoder {
+    clone = clone.with_backend(ScriptedEncoder {
         name: "clone-only",
         act: Act::Decline,
         log: log.clone(),
@@ -544,20 +521,20 @@ fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
     let stream = backend_stream();
     let log: Log = Arc::default();
     let mut dec = JpegDecoder::new();
-    dec.push_backend(ScriptedDecoder {
+    dec = dec.with_backend(ScriptedDecoder {
         name: "shared",
         act: Act::Decline,
         log: log.clone(),
         out: flat_gray(),
     });
     let mut clone = dec.clone();
-    dec.push_backend(ScriptedDecoder {
+    dec = dec.with_backend(ScriptedDecoder {
         name: "original-only",
         act: Act::Decline,
         log: log.clone(),
         out: flat_gray(),
     });
-    clone.push_backend(ScriptedDecoder {
+    clone = clone.with_backend(ScriptedDecoder {
         name: "clone-only",
         act: Act::Decline,
         log: log.clone(),
@@ -573,7 +550,7 @@ fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
 
 /// A backend that panics in `supports`, poisoning the lock of the registry slot that holds it.
 struct PanickyEncoder;
-impl JpegStreamEncoder for PanickyEncoder {
+impl JpegCodestreamEncoder for PanickyEncoder {
     fn supports(&mut self, _req: &JpegEncodeRequest) -> bool {
         panic!("backend panicked");
     }
@@ -588,7 +565,7 @@ impl JpegStreamEncoder for PanickyEncoder {
 
 /// The decode twin of [`PanickyEncoder`].
 struct PanickyDecoder;
-impl JpegStreamDecoder for PanickyDecoder {
+impl JpegCodestreamDecoder for PanickyDecoder {
     fn supports(&mut self, _info: &JpegStreamInfo) -> bool {
         panic!("backend panicked");
     }
@@ -607,7 +584,7 @@ fn a_panicking_encode_backend_poisons_the_registry() {
     let g = gray_pixels();
     let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
     let mut enc = JpegEncoder::new();
-    enc.push_backend(PanickyEncoder);
+    enc = enc.with_backend(PanickyEncoder);
     let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| enc.encode_to_vec(gi)));
     assert!(first.is_err(), "the backend's panic unwinds to the caller");
     let mut out = Vec::new();
@@ -622,7 +599,7 @@ fn a_panicking_encode_backend_poisons_the_registry() {
 fn a_panicking_decode_backend_poisons_the_registry() {
     let stream = backend_stream();
     let mut dec = JpegDecoder::new();
-    dec.push_backend(PanickyDecoder);
+    dec = dec.with_backend(PanickyDecoder);
     let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         DecodeImage::<Gray8>::decode_image(&dec, &stream)
     }));
@@ -639,7 +616,7 @@ fn a_panicking_decode_backend_poisons_the_registry() {
 /// A decode backend that captures the [`JpegStreamInfo`] it was offered, then declines.
 struct Capturing(Arc<Mutex<Option<JpegStreamInfo>>>);
 
-impl JpegStreamDecoder for Capturing {
+impl JpegCodestreamDecoder for Capturing {
     fn supports(&mut self, info: &JpegStreamInfo) -> bool {
         *self.0.lock().unwrap() = Some(info.clone());
         false
@@ -653,7 +630,7 @@ impl JpegStreamDecoder for Capturing {
 fn captured(stream: &[u8]) -> JpegStreamInfo {
     let seen = Arc::new(Mutex::new(None));
     let mut dec = JpegDecoder::new();
-    dec.push_backend(Capturing(seen.clone()));
+    dec = dec.with_backend(Capturing(seen.clone()));
     let _: ImageBuf<Rgb8> = dec.decode_image(stream).unwrap();
     let info = seen.lock().unwrap().clone();
     info.expect("backend was consulted")
@@ -665,27 +642,27 @@ fn stream_info_is_populated_before_the_backend_is_consulted() {
     let ci = ImageRef::<Rgb8>::new(&c, dims()).unwrap();
 
     let baseline_420 = JpegEncoder::new()
-        .with_subsampling(ChromaSubsampling::Ycbcr420)
+        .with_subsampling(ChromaSubsampling::Cs420)
         .encode_to_vec(ci)
         .unwrap();
     let info = captured(&baseline_420);
     assert_eq!(info.width(), W);
-    assert_eq!(info.height(), H);
+    assert_eq!(info.height(), Some(H));
     assert_eq!(info.components(), 3);
     assert_eq!(info.precision(), 8);
     assert_eq!(info.process(), JpegProcess::Baseline);
     assert_eq!(info.sampling_factors(), &[(2, 2), (1, 1), (1, 1)]);
-    assert_eq!(info.subsampling(), Some(ChromaSubsampling::Ycbcr420));
+    assert_eq!(info.subsampling(), Some(ChromaSubsampling::Cs420));
 
     let prog_422 = JpegEncoder::new()
-        .with_subsampling(ChromaSubsampling::Ycbcr422)
-        .with_progressive(true)
+        .with_subsampling(ChromaSubsampling::Cs422)
+        .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
         .encode_to_vec(ci)
         .unwrap();
     let info = captured(&prog_422);
     assert_eq!(info.process(), JpegProcess::Progressive);
     assert_eq!(info.sampling_factors(), &[(2, 1), (1, 1), (1, 1)]);
-    assert_eq!(info.subsampling(), Some(ChromaSubsampling::Ycbcr422));
+    assert_eq!(info.subsampling(), Some(ChromaSubsampling::Cs422));
 
     let g = gray_pixels();
     let gray = JpegEncoder::new()
@@ -727,7 +704,7 @@ fn stream_info_parse_rejects_malformed_streams_before_any_backend_runs() {
     // A backend must never be consulted for a stream the crate cannot parse.
     let seen = Arc::new(Mutex::new(None));
     let mut dec = JpegDecoder::new();
-    dec.push_backend(Capturing(seen.clone()));
+    dec = dec.with_backend(Capturing(seen.clone()));
     assert!(DecodeImage::<Rgb8>::decode_image(&dec, &[0xFF, 0xD9]).is_err());
     assert!(seen.lock().unwrap().is_none());
 }
@@ -736,11 +713,11 @@ fn stream_info_parse_rejects_malformed_streams_before_any_backend_runs() {
 /// sample count, and first byte.
 type SeenRequest = Arc<Mutex<Option<(JpegEncodeRequest, u32, u32, PixelFormat, usize, u8)>>>;
 
-/// An encode backend that captures the request and raster it was offered, then declines late so the
-/// built-in encoder still produces the output.
+/// An encode backend that captures the request and raster it was offered, then hands back
+/// [`backend_stream`], a valid stream of the fixture's dimensions.
 struct CapturingEncoder(SeenRequest);
 
-impl JpegStreamEncoder for CapturingEncoder {
+impl JpegCodestreamEncoder for CapturingEncoder {
     fn supports(&mut self, _req: &JpegEncodeRequest) -> bool {
         true
     }
@@ -757,7 +734,7 @@ impl JpegStreamEncoder for CapturingEncoder {
             image.samples().len(),
             image.samples()[0],
         ));
-        Err(backend_declined())
+        Ok(backend_stream())
     }
 }
 
@@ -771,14 +748,14 @@ fn the_encode_request_mirrors_every_encoder_setting_and_the_raster() {
     // Defaults: quality 75, 4:2:0, sequential, no restarts.
     let seen = Arc::new(Mutex::new(None));
     let mut enc = JpegEncoder::new();
-    enc.push_backend(CapturingEncoder(seen.clone()));
+    enc = enc.with_backend(CapturingEncoder(seen.clone()));
     enc.encode_to_vec(gi).unwrap();
     let (req, w, h, fmt, len, first) = seen.lock().unwrap().unwrap();
     assert_eq!((req.width(), req.height()), (W, H));
     assert_eq!(req.format(), PixelFormat::Gray8);
     assert_eq!(req.quality(), 75);
-    assert_eq!(req.subsampling(), ChromaSubsampling::Ycbcr420);
-    assert!(!req.progressive(), "the default process is sequential");
+    assert_eq!(req.subsampling(), ChromaSubsampling::Cs420);
+    assert_eq!(req.process(), Process::Baseline, "the default process");
     assert_eq!(req.restart_interval(), 0);
     assert_eq!((w, h, fmt), (W, H, PixelFormat::Gray8));
     assert_eq!(len, (W * H) as usize);
@@ -788,19 +765,33 @@ fn the_encode_request_mirrors_every_encoder_setting_and_the_raster() {
     let seen = Arc::new(Mutex::new(None));
     let mut enc = JpegEncoder::new()
         .with_quality(31)
-        .with_subsampling(ChromaSubsampling::Ycbcr444)
-        .with_progressive(true)
+        .with_subsampling(ChromaSubsampling::Cs444)
+        .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
         .with_restart_interval(5);
-    enc.push_backend(CapturingEncoder(seen.clone()));
+    enc = enc.with_backend(CapturingEncoder(seen.clone()));
     enc.encode_to_vec(ci).unwrap();
     let (req, w, h, fmt, len, first) = seen.lock().unwrap().unwrap();
     assert_eq!(req.quality(), 31);
-    assert_eq!(req.subsampling(), ChromaSubsampling::Ycbcr444);
-    assert!(req.progressive());
+    assert_eq!(req.subsampling(), ChromaSubsampling::Cs444);
+    assert_eq!(
+        req.process(),
+        Process::Progressive(ProgressiveScript::Libjpeg)
+    );
     assert_eq!(req.restart_interval(), 5);
     assert_eq!((w, h, fmt), (W, H, PixelFormat::Rgb8));
     assert_eq!(len, (W * H * 3) as usize);
     assert_eq!(first, c[0]);
+
+    // Optimized tables are a process too: the backend is told, rather than offered what looks
+    // like a plain baseline job.
+    let seen = Arc::new(Mutex::new(None));
+    JpegEncoder::new()
+        .with_process(Process::Optimized)
+        .with_backend(CapturingEncoder(seen.clone()))
+        .encode_to_vec(gi)
+        .unwrap();
+    let (req, ..) = seen.lock().unwrap().unwrap();
+    assert_eq!(req.process(), Process::Optimized);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -823,7 +814,7 @@ fn icc_fixture() -> Vec<u8> {
 /// A backend that returns a stream with **no** APPn metadata of its own.
 struct BareStream(Vec<u8>);
 
-impl JpegStreamEncoder for BareStream {
+impl JpegCodestreamEncoder for BareStream {
     fn supports(&mut self, _req: &JpegEncodeRequest) -> bool {
         true
     }
@@ -840,21 +831,21 @@ impl JpegStreamEncoder for BareStream {
 fn a_backend_stream_without_appn_still_gets_the_crates_metadata() {
     let bare = backend_stream();
     assert_eq!(
-        gamut_jpeg::metadata(&bare).unwrap(),
-        gamut_jpeg::JpegMetadata::default(),
+        gamut_jpeg::JpegDecoder::new().metadata(&bare).unwrap(),
+        gamut_jpeg::RawMetadata::default(),
         "the fixture backend stream must start out metadata-free"
     );
     let mut enc = JpegEncoder::new()
         .with_exif(&exif_fixture())
         .with_xmp(&xmp_fixture())
         .with_icc_profile(&icc_fixture());
-    enc.push_backend(BareStream(bare.clone()));
+    enc = enc.with_backend(BareStream(bare.clone()));
     let g = gray_pixels();
     let out = enc
         .encode_to_vec(ImageRef::<Gray8>::new(&g, dims()).unwrap())
         .unwrap();
 
-    let meta = gamut_jpeg::metadata(&out).unwrap();
+    let meta = gamut_jpeg::JpegDecoder::new().metadata(&out).unwrap();
     assert_eq!(meta.exif.as_deref(), Some(exif_fixture().as_slice()));
     assert_eq!(meta.xmp.as_deref(), Some(xmp_fixture().as_slice()));
     // Multi-segment ICC reassembles on the decode side.
@@ -890,7 +881,7 @@ fn patched_metadata_lands_exactly_where_the_built_in_prologue_puts_it() {
         .with_exif(&exif_fixture())
         .with_xmp(&xmp_fixture())
         .with_icc_profile(&icc_fixture());
-    enc.push_backend(BareStream(bare));
+    enc = enc.with_backend(BareStream(bare));
     assert_eq!(enc.encode_to_vec(gi).unwrap(), expected);
 }
 
@@ -912,13 +903,13 @@ fn a_backend_stream_with_its_own_appn_is_patched_not_double_written() {
         .with_exif(&exif_fixture())
         .with_xmp(&xmp_fixture())
         .with_icc_profile(&icc_fixture());
-    enc.push_backend(BareStream(theirs));
+    enc = enc.with_backend(BareStream(theirs));
     let out = enc.encode_to_vec(gi).unwrap();
 
     // Exactly one EXIF APP1 + one XMP APP1, and exactly the three chunks of *our* profile.
     assert_eq!(count_segments(&out, 0xE1), 2);
     assert_eq!(count_segments(&out, 0xE2), 3);
-    let meta = gamut_jpeg::metadata(&out).unwrap();
+    let meta = gamut_jpeg::JpegDecoder::new().metadata(&out).unwrap();
     assert_eq!(meta.exif.as_deref(), Some(exif_fixture().as_slice()));
     assert_eq!(meta.xmp.as_deref(), Some(xmp_fixture().as_slice()));
     assert_eq!(meta.icc.as_deref(), Some(icc_fixture().as_slice()));
@@ -934,12 +925,12 @@ fn a_backend_stream_loses_appn_metadata_the_encoder_did_not_configure() {
         .encode_to_vec(gi)
         .unwrap();
     let mut enc = JpegEncoder::new();
-    enc.push_backend(BareStream(theirs));
+    enc = enc.with_backend(BareStream(theirs));
     let out = enc.encode_to_vec(gi).unwrap();
     // The crate owns metadata: with none configured, the produced stream carries none.
     assert_eq!(
-        gamut_jpeg::metadata(&out).unwrap(),
-        gamut_jpeg::JpegMetadata::default()
+        gamut_jpeg::JpegDecoder::new().metadata(&out).unwrap(),
+        gamut_jpeg::RawMetadata::default()
     );
     assert_eq!(count_segments(&out, 0xE1), 0);
     assert_eq!(count_segments(&out, 0xE2), 0);
@@ -953,7 +944,7 @@ fn metadata_caps_are_validated_before_any_backend_runs() {
     let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
     let log: Log = Arc::default();
     let mut enc = JpegEncoder::new().with_xmp(&vec![b'x'; 65_503]);
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "never",
         act: Act::Accept,
         log: log.clone(),
@@ -997,7 +988,7 @@ fn a_backend_stream_that_is_not_a_jpeg_is_rejected() {
         ),
     ] {
         let mut enc = JpegEncoder::new();
-        enc.push_backend(BareStream(bytes));
+        enc = enc.with_backend(BareStream(bytes));
         assert_eq!(
             enc.encode_to_vec(gi).unwrap_err().static_message().unwrap(),
             msg
@@ -1024,7 +1015,7 @@ fn decode_metadata_is_never_delegated_to_a_backend() {
     // A backend that hands back an unrelated raster cannot influence what `metadata` reports.
     let log: Log = Arc::default();
     let mut dec = JpegDecoder::new();
-    dec.push_backend(ScriptedDecoder {
+    dec = dec.with_backend(ScriptedDecoder {
         name: "x",
         act: Act::Accept,
         log: log.clone(),
@@ -1032,7 +1023,7 @@ fn decode_metadata_is_never_delegated_to_a_backend() {
     });
     let img: ImageBuf<Gray8> = dec.decode_image(&stream).unwrap();
     assert_eq!(img.as_samples(), vec![99u8; (W * H) as usize]);
-    let meta = gamut_jpeg::metadata(&stream).unwrap();
+    let meta = gamut_jpeg::JpegDecoder::new().metadata(&stream).unwrap();
     assert_eq!(meta.exif.as_deref(), Some(exif_fixture().as_slice()));
     assert_eq!(meta.icc.as_deref(), Some(icc_fixture().as_slice()));
 }
@@ -1064,7 +1055,7 @@ fn count_segments(stream: &[u8], marker: u8) -> usize {
 /// A decode backend that returns a fixed raster for every stream.
 struct Fixed(DecodedJpeg);
 
-impl JpegStreamDecoder for Fixed {
+impl JpegCodestreamDecoder for Fixed {
     fn supports(&mut self, _info: &JpegStreamInfo) -> bool {
         true
     }
@@ -1075,7 +1066,7 @@ impl JpegStreamDecoder for Fixed {
 
 fn decoder_returning(raster: DecodedJpeg) -> JpegDecoder {
     let mut dec = JpegDecoder::new();
-    dec.push_backend(Fixed(raster));
+    dec = dec.with_backend(Fixed(raster));
     dec
 }
 
@@ -1083,8 +1074,9 @@ fn decoder_returning(raster: DecodedJpeg) -> JpegDecoder {
 fn decoder_limits_run_before_backend_selection_and_after_backend_output() {
     let stream = backend_stream();
     let log: Log = Arc::default();
-    let mut preflight = JpegDecoder::new().with_max_dimensions(W - 1, H);
-    preflight.push_backend(ScriptedDecoder {
+    let mut preflight = JpegDecoder::new()
+        .with_limits(DecodeLimits::new().with_max_width(W - 1).with_max_height(H));
+    preflight = preflight.with_backend(ScriptedDecoder {
         name: "must-not-run",
         act: Act::Accept,
         log: log.clone(),
@@ -1110,7 +1102,7 @@ fn decoder_limits_run_before_backend_selection_and_after_backend_output() {
         )
         .unwrap(),
     )
-    .with_max_dimensions(W, H);
+    .with_limits(DecodeLimits::new().with_max_width(W).with_max_height(H));
     assert_eq!(
         DecodeImage::<Gray8>::decode_image(&too_wide, &stream)
             .unwrap_err()
@@ -1122,7 +1114,7 @@ fn decoder_limits_run_before_backend_selection_and_after_backend_output() {
     let too_many_bytes = decoder_returning(
         DecodedJpeg::new(W, H, PixelFormat::Rgb8, vec![0; (W * H * 3) as usize]).unwrap(),
     )
-    .with_max_image_bytes((W * H) as usize);
+    .with_limits(DecodeLimits::new().with_max_image_bytes((W * H) as usize));
     assert_eq!(
         DecodeImage::<Rgb8>::decode_image(&too_many_bytes, &stream)
             .unwrap_err()
@@ -1144,7 +1136,7 @@ fn backend_limit_error_leaves_decode_into_destination_unchanged() {
         )
         .unwrap(),
     )
-    .with_max_dimensions(W, H);
+    .with_limits(DecodeLimits::new().with_max_width(W).with_max_height(H));
     let mut dst = ImageBuf::<Gray8>::new(vec![77; (W * H) as usize], dims()).unwrap();
     let ptr = dst.as_samples().as_ptr();
 
@@ -1298,7 +1290,7 @@ fn abi_decode_adapter_round_trips_bytes_and_carries_the_frame_shape() {
     let stream = backend_stream();
     let seen = Arc::new(Mutex::new(None));
     let mut dec = JpegDecoder::new();
-    dec.push_backend(AbiStreamDecoder::new(AbiDec {
+    dec = dec.with_backend(AbiJpegDecoder::new(AbiDec {
         supports: true,
         status: Status::OK,
         fill: 42,
@@ -1315,13 +1307,13 @@ fn abi_decode_adapter_round_trips_bytes_and_carries_the_frame_shape() {
 }
 
 #[test]
-fn abi_decode_adapter_declines_on_unsupported_and_propagates_other_statuses() {
+fn abi_decode_adapter_declines_only_in_supports_and_propagates_every_failure_status() {
     let stream = backend_stream();
     let seen = Arc::new(Mutex::new(None));
 
     // `supports() == false` → normal fall-through to the built-in tail.
     let mut dec = JpegDecoder::new();
-    dec.push_backend(AbiStreamDecoder::new(AbiDec {
+    dec = dec.with_backend(AbiJpegDecoder::new(AbiDec {
         supports: false,
         status: Status::OK,
         fill: 1,
@@ -1331,20 +1323,25 @@ fn abi_decode_adapter_declines_on_unsupported_and_propagates_other_statuses() {
     let builtin: ImageBuf<Gray8> = JpegDecoder::new().decode_image(&stream).unwrap();
     assert_eq!(via_backend.as_samples(), builtin.as_samples());
 
-    // A *late* UNSUPPORTED is a decline: the built-in tail still runs.
+    // A *late* UNSUPPORTED (after `supports` accepted) is terminal, not a decline: `supports` is
+    // the only fall-through, so the built-in tail does not run.
     let mut dec = JpegDecoder::new();
-    dec.push_backend(AbiStreamDecoder::new(AbiDec {
+    dec = dec.with_backend(AbiJpegDecoder::new(AbiDec {
         supports: true,
         status: Status::UNSUPPORTED,
         fill: 1,
         seen: seen.clone(),
     }));
-    let late: ImageBuf<Gray8> = dec.decode_image(&stream).unwrap();
-    assert_eq!(late.as_samples(), builtin.as_samples());
+    let late = DecodeImage::<Gray8>::decode_image(&dec, &stream).unwrap_err();
+    assert_eq!(
+        late.static_message(),
+        Some("JPEG: codec-abi decode backend returned a failure status")
+    );
+    assert_eq!(late.detail(), Some("codec-abi status -1"));
 
     // Any other non-OK status is terminal.
     let mut dec = JpegDecoder::new();
-    dec.push_backend(AbiStreamDecoder::new(AbiDec {
+    dec = dec.with_backend(AbiJpegDecoder::new(AbiDec {
         supports: true,
         status: Status(-7),
         fill: 1,
@@ -1411,7 +1408,7 @@ fn abi_encode_adapter_concatenates_chunks_and_describes_the_raster() {
     let produced = backend_stream();
     let seen = Arc::new(Mutex::new(None));
     let mut enc = JpegEncoder::new().with_quality(63);
-    enc.push_backend(AbiStreamEncoder::new(AbiEnc {
+    enc = enc.with_backend(AbiJpegEncoder::new(AbiEnc {
         supports: true,
         status: Status::OK,
         out: produced.clone(),
@@ -1425,7 +1422,7 @@ fn abi_encode_adapter_concatenates_chunks_and_describes_the_raster() {
 }
 
 #[test]
-fn abi_encode_adapter_declines_on_unsupported_and_propagates_other_statuses() {
+fn abi_encode_adapter_declines_only_in_supports_and_propagates_every_failure_status() {
     let g = gray_pixels();
     let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
     let builtin = JpegEncoder::new().encode_to_vec(gi).unwrap();
@@ -1436,7 +1433,7 @@ fn abi_encode_adapter_declines_on_unsupported_and_propagates_other_statuses() {
     let produced = backend_stream();
     assert_ne!(produced, builtin);
     let mut enc = JpegEncoder::new();
-    enc.push_backend(AbiStreamEncoder::new(AbiEnc {
+    enc = enc.with_backend(AbiJpegEncoder::new(AbiEnc {
         supports: false,
         status: Status::OK,
         out: produced,
@@ -1448,19 +1445,25 @@ fn abi_encode_adapter_declines_on_unsupported_and_propagates_other_statuses() {
         "a declined backend must never be asked to encode"
     );
 
-    // A *late* UNSUPPORTED (after `supports` accepted) also reaches the built-in tail.
+    // A *late* UNSUPPORTED (after `supports` accepted) is terminal: the built-in tail does not
+    // run.
     let mut enc = JpegEncoder::new();
-    enc.push_backend(AbiStreamEncoder::new(AbiEnc {
+    enc = enc.with_backend(AbiJpegEncoder::new(AbiEnc {
         supports: true,
         status: Status::UNSUPPORTED,
         out: Vec::new(),
         seen: seen.clone(),
     }));
-    assert_eq!(enc.encode_to_vec(gi).unwrap(), builtin);
+    let late = enc.encode_to_vec(gi).unwrap_err();
+    assert_eq!(
+        late.static_message(),
+        Some("JPEG: codec-abi encode backend returned a failure status")
+    );
+    assert_eq!(late.detail(), Some("codec-abi status -1"));
     assert!(seen.lock().unwrap().is_some());
 
     let mut enc = JpegEncoder::new();
-    enc.push_backend(AbiStreamEncoder::new(AbiEnc {
+    enc = enc.with_backend(AbiJpegEncoder::new(AbiEnc {
         supports: true,
         status: Status(3),
         out: Vec::new(),
@@ -1482,7 +1485,7 @@ fn abi_decode_adapter_rejects_component_counts_it_cannot_lay_out() {
     assert_eq!(info.components(), 2);
 
     let mut dec = JpegDecoder::new();
-    dec.push_backend(AbiStreamDecoder::new(AbiDec {
+    dec = dec.with_backend(AbiJpegDecoder::new(AbiDec {
         supports: true,
         status: Status::OK,
         fill: 0,
@@ -1498,20 +1501,6 @@ fn abi_decode_adapter_rejects_component_counts_it_cannot_lay_out() {
 }
 
 #[test]
-fn the_declined_sentinel_is_public_and_recognised() {
-    let err = backend_declined();
-    assert!(is_backend_declined(&err));
-    assert!(!is_backend_declined(&Error::invalid_input(
-        env!("CARGO_PKG_NAME"),
-        "nope"
-    )));
-    assert!(!is_backend_declined(&Error::unsupported(
-        env!("CARGO_PKG_NAME"),
-        "nope"
-    )));
-}
-
-#[test]
 fn custom_quant_tables_pin_the_encode_to_the_built_in_path() {
     // A `JpegEncodeRequest` cannot carry caller-supplied tables, so an encoder configured with
     // `with_quant_tables` must not consult its registry at all — an always-accepting backend
@@ -1521,7 +1510,7 @@ fn custom_quant_tables_pin_the_encode_to_the_built_in_path() {
     let tables = QuantTables::new([9u8; 64], [13u8; 64]).unwrap();
     let log: Log = Arc::default();
     let mut enc = JpegEncoder::new().with_quant_tables(tables);
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "eager",
         act: Act::Accept,
         log: Arc::clone(&log),
@@ -1549,7 +1538,7 @@ fn rd_optimization_pins_the_encode_to_the_built_in_path() {
     use gamut_jpeg::RdOptimization;
     let log: Log = Arc::default();
     let mut enc = JpegEncoder::new().with_rd_optimization(RdOptimization::Trellis);
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "eager",
         act: Act::Accept,
         log: Arc::clone(&log),
@@ -1572,17 +1561,14 @@ fn rd_optimization_pins_the_encode_to_the_built_in_path() {
 
 #[test]
 fn progressive_script_pins_the_encode_to_the_built_in_path() {
-    // A `JpegEncodeRequest` carries `progressive` but not the scan script, so a non-default script
-    // must skip the registry rather than let a backend encode with its own.
+    // A request offered to a backend only ever carries the frozen scan script, so a non-default
+    // script must skip the registry rather than let a backend encode with its own.
     use gamut_jpeg::ProgressiveScript;
     let log: Log = Arc::default();
-    let configured = || {
-        JpegEncoder::new()
-            .with_progressive(true)
-            .with_progressive_script(ProgressiveScript::Mozjpeg)
-    };
+    let configured =
+        || JpegEncoder::new().with_process(Process::Progressive(ProgressiveScript::Mozjpeg));
     let mut enc = configured();
-    enc.push_backend(ScriptedEncoder {
+    enc = enc.with_backend(ScriptedEncoder {
         name: "eager",
         act: Act::Accept,
         log: Arc::clone(&log),

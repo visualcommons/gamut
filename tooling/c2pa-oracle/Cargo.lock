@@ -1016,6 +1016,7 @@ dependencies = [
  "gamut-core",
  "gamut-deflate",
  "gamut-ifd",
+ "gamut-jpeg",
  "gamut-jxl",
  "gamut-metadata",
 ]
@@ -1074,6 +1075,17 @@ name = "gamut-isobmff"
 version = "3.0.0"
 dependencies = [
  "gamut-core",
+]
+
+[[package]]
+name = "gamut-jpeg"
+version = "0.1.1"
+dependencies = [
+ "gamut-bitstream",
+ "gamut-codec-abi",
+ "gamut-color",
+ "gamut-core",
+ "gamut-dsp",
 ]
 
 [[package]]

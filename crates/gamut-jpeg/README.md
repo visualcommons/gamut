@@ -28,7 +28,7 @@ let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h)?)?;
 let mut jpeg = Vec::new();
 JpegEncoder::new()
     .with_quality(85)
-    .with_subsampling(ChromaSubsampling::Ycbcr420)
+    .with_subsampling(ChromaSubsampling::Cs420)
     .encode_image(image, &mut jpeg)?;
 # Ok::<(), gamut_core::Error>(())
 ```
@@ -42,7 +42,7 @@ use gamut_jpeg::JpegDecoder;
 
 # fn demo(jpeg: &[u8]) -> Result<(), gamut_core::Error> {
 let image: ImageBuf<Rgb8> = JpegDecoder::new().decode_image(jpeg)?;
-let info = gamut_jpeg::info(jpeg)?; // dimensions / components / process, without decoding
+let info = JpegDecoder::new().info(jpeg)?; // dimensions / components / process, without decoding
 # let _ = (image, info);
 # Ok(())
 # }
@@ -51,15 +51,19 @@ let info = gamut_jpeg::info(jpeg)?; // dimensions / components / process, withou
 `JpegDecoder::new()` bounds untrusted input by default: dimensions up to the format's 65535 × 65535
 ceiling and a 64 MiB native-raster budget. The byte cap counts the JPEG frame's own components,
 independently of the requested presentation type. Tighten either for your domain, or lift the
-budget with `with_max_image_bytes(usize::MAX)` for trusted input larger than 64 MiB:
+budget with `DecodeLimits::new().with_max_image_bytes(usize::MAX)` for trusted input larger than
+64 MiB:
 
 ```rust
 # use gamut_core::{DecodeImage, ImageBuf, Rgb8};
-# use gamut_jpeg::JpegDecoder;
+# use gamut_jpeg::{DecodeLimits, JpegDecoder};
 # fn demo(jpeg: &[u8]) -> Result<(), gamut_core::Error> {
-let decoder = JpegDecoder::new()
-    .with_max_dimensions(16_384, 16_384)
-    .with_max_image_bytes(16 * 1024 * 1024);
+let decoder = JpegDecoder::new().with_limits(
+    DecodeLimits::new()
+        .with_max_width(16_384)
+        .with_max_height(16_384)
+        .with_max_image_bytes(16 * 1024 * 1024),
+);
 let image: ImageBuf<Rgb8> = decoder.decode_image(jpeg)?;
 # let _ = image;
 # Ok(())
@@ -67,11 +71,11 @@ let image: ImageBuf<Rgb8> = decoder.decode_image(jpeg)?;
 ```
 
 Read and write embedded APP-segment metadata — APP1 EXIF, APP1 XMP, and multi-segment APP2 ICC
-(the payloads are raw bytes in exactly the form `gamut-metadata`'s `MetadataBlock` borrows):
+(the payloads are raw bytes, read back as the workspace's shared `RawMetadata`):
 
 ```rust
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
-use gamut_jpeg::JpegEncoder;
+use gamut_jpeg::{JpegDecoder, JpegEncoder};
 
 # fn demo(tiff: &[u8], icc: &[u8]) -> Result<(), gamut_core::Error> {
 let pixels = vec![0u8; 64];
@@ -81,7 +85,7 @@ let jpeg = JpegEncoder::new()
     .with_icc_profile(icc)    // APP2 ICC_PROFILE chunks (ICC.1 Annex B.4)
     .encode_to_vec(image)?;
 
-let meta = gamut_jpeg::metadata(&jpeg)?; // header-only walk, no pixel decode
+let meta = JpegDecoder::new().metadata(&jpeg)?; // header-only walk, no pixel decode
 assert_eq!(meta.exif.as_deref(), Some(tiff));
 assert_eq!(meta.icc.as_deref(), Some(icc));
 # Ok(())
@@ -95,9 +99,9 @@ Built incrementally; each phase is conformance-checked against libjpeg-turbo (se
 (SOF0) and **progressive (SOF2)** processes, and a **decoder for the sequential and progressive
 processes**. The encoder writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 / 4:4:0
 chroma subsampling, standard (Annex K) tables, and optional restart intervals;
-`JpegEncoder::with_optimized_tables(true)` swaps the fixed tables for ones built from the image's own
-symbol statistics (Annex K.2) — a few percent smaller, same decoded pixels;
-`JpegEncoder::with_progressive(true)` selects the progressive process — libjpeg's frozen
+`JpegEncoder::with_process(Process::Optimized)` swaps the fixed tables for ones built from the
+image's own symbol statistics (Annex K.2) — a few percent smaller, same decoded pixels;
+`Process::Progressive(ProgressiveScript::Libjpeg)` selects the progressive process — libjpeg's frozen
 `jpeg_simple_progression` scan script with optimized per-scan Huffman tables (Annex K.2), producing
 the same coefficients (and thus the same decoded image) as the baseline encoding. The decoder reads
 any spec-valid sequential or progressive stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via the JFIF
@@ -106,12 +110,13 @@ approximation, restart intervals, and (for sequential frames) DNL-defined height
 on malformed input. Progressive frames with a deferred (`Y = 0` / DNL) height are rejected as
 unsupported, and a partial progressive stream renders what it has (matching libjpeg).
 `JpegDecoder` bounds hostile input by default (65535 × 65535, 64 MiB native raster), and
-`with_max_dimensions` / `with_max_image_bytes` tighten or lift those guards; known SOF geometry is rejected before frame-sized allocation, and a sequential DNL-deferred height
-is bounded while its first scan grows.
+`with_limits(DecodeLimits)` tightens or lifts those guards; known SOF geometry is rejected before
+frame-sized allocation, and a sequential DNL-deferred height is bounded while its first scan grows.
 
-Embedded metadata ships both ways (P7): `metadata()` reads APP1 EXIF, APP1 XMP, and multi-segment
+Embedded metadata ships both ways (P7): `JpegDecoder::metadata` reads APP1 EXIF, APP1 XMP, and multi-segment
 APP2 `ICC_PROFILE` payloads without decoding pixels, and the encoder embeds them via
-`with_exif`/`with_xmp`/`with_icc_profile` — validated against libjpeg-turbo's own
+`with_exif`/`with_xmp`/`with_icc_profile` (and, with the `metadata` feature, as a `MetadataSink`)
+— validated against libjpeg-turbo's own
 `jpeg_read_icc_profile`/`jpeg_write_icc_profile` in both directions. `decode_image_into` reuses
 the destination's allocation when dimensions match.
 
@@ -123,18 +128,21 @@ included — to sRGB `Rgb8` by applying the embedded profile through `gamut-cmm`
 reading gamut's XYB streams, and `decode_srgb` reading jpegli's, are cross-checked against a
 vendored jpegli (dev-only).
 
-Both directions are **pluggable** (P8): `JpegDecoder::push_backend` / `JpegEncoder::push_backend`
-register `JpegStreamDecoder` / `JpegStreamEncoder` backends — or a `gamut-codec-abi` backend through
-the `AbiStreamDecoder` / `AbiStreamEncoder` adapters — tried in push order with the built-in codec as
-the implicit tail. The seam is the **whole SOI..EOI interchange stream**, the unit real JPEG engines
+Both directions are **pluggable** (P8): `JpegDecoder::with_backend` / `JpegEncoder::with_backend`
+register `JpegCodestreamDecoder` / `JpegCodestreamEncoder` backends — or a `gamut-codec-abi` backend
+through the `AbiJpegDecoder` / `AbiJpegEncoder` adapters — tried in push order with the built-in
+codec as the implicit tail; `supports() == false` is the only fall-through. The seam is the **whole SOI..EOI interchange stream**, the unit real JPEG engines
 (nvJPEG, V4L2 JPEG, libjpeg-turbo) consume, because JPEG's marker layer and entropy-coded data
 interleave and expose no useful sub-stream boundary. The stated consequence: for JPEG, "the crate
 owns the container" means the crate owns **metadata and validation** — APPn EXIF/XMP/ICC stays
 crate-owned in both directions, and the crate patches its metadata into a backend-produced stream.
 
+The **lossless process** (SOF3, T.81 Annex H) ships as the separate `lossless` module —
+`lossless::encode` / `lossless::decode` over 2- to 16-bit samples, the coder DNG's
+`Compression = 7` uses — differentially tested against the Adobe DNG SDK's codec.
+
 Out of scope (documented in [STATUS.md](STATUS.md)): a finer per-scan codestream seam, 12-bit
-precision, arithmetic coding
-(SOF9/10), lossless (SOF3), hierarchical (SOF5–7), SPIFF/T.84 extensions, T.872 printing
+DCT precision, arithmetic coding (SOF9/10), hierarchical (SOF5–7), SPIFF/T.84 extensions, T.872 printing
 conventions, ExtendedXMP continuation segments, and APP13 IPTC-IIM.
 
 ## Validation

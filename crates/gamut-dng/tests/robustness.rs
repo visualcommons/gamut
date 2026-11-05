@@ -203,6 +203,6 @@ fn a_lossless_jpeg_frame_larger_than_its_scan_is_rejected_without_a_header_sized
     jpeg.push(0);
     jpeg.extend_from_slice(&[0xFF, 0xDA, 0, 14, 4, 1, 0, 2, 0, 3, 0, 4, 0, 1, 0, 0]);
     jpeg.extend_from_slice(&[0xFF, 0xD9]);
-    let error = gamut_dng::lossless_jpeg::decode(&jpeg).expect_err("the scan holds 16 bits");
+    let error = gamut_jpeg::lossless::decode(&jpeg).expect_err("the scan holds 16 bits");
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
 }

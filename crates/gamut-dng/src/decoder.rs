@@ -31,7 +31,7 @@ use crate::values::{
     CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy,
     SampleFormat, dng_compression, dng_photometric,
 };
-use crate::{bitpack, compression, lossless_jpeg, tags};
+use crate::{bitpack, compression, tags};
 
 /// One IFD entry preserved verbatim: the tag number and its fully typed [`Value`].
 ///
@@ -1566,7 +1566,7 @@ fn decode_chunk_samples(
         // (DNG 1.7.1, "Compression": real CFA writers store a two-component stream at half
         // width).
         Compression::Jpeg => {
-            let jpeg = lossless_jpeg::decode(chunk)?;
+            let jpeg = gamut_jpeg::lossless::decode(chunk)?;
             if jpeg.samples.len() != want {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
@@ -2039,7 +2039,7 @@ mod tests {
     fn decode_raw_image_rejects_lossless_jpeg_sample_count_mismatch() {
         // A 4x2, single-component lossless-JPEG strip (8 samples)...
         let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
-        let jpeg = lossless_jpeg::encode(&samples, 4, 2, 1, 12).expect("encode");
+        let jpeg = gamut_jpeg::lossless::encode(&samples, 4, 2, 1, 12).expect("encode");
         // ...described by an IFD that claims a 2x2 image (4 samples). Per spec only the *total
         // sample count* must match the strip — the stream's internal width/components are free
         // (real CFA writers halve the width and double the components) — so this fails on the
@@ -2065,6 +2065,26 @@ mod tests {
         );
     }
 
+    /// A malformed lossless-JPEG strip fails with the coder's own error, unchanged: the SOF3 coder
+    /// is `gamut-jpeg`'s (issue #1083), so that is the error's origin.
+    #[test]
+    fn a_malformed_lossless_jpeg_strip_reports_the_coders_error() {
+        let strip = [0u8; 4]; // no SOI
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![1]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![16]));
+        ifd.set(tags::COMPRESSION, Value::Short(vec![7]));
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![4]));
+        let err =
+            decode_raw_image(&TrackedIfd::new(&ifd), &strip, ByteOrder::LittleEndian).unwrap_err();
+        assert_eq!(err.static_message(), Some("JPEG: missing SOI marker"));
+        assert_eq!(err.origin(), Some("gamut-jpeg"));
+    }
+
     /// A reshaped lossless-JPEG stream — half width, doubled components, same total sample
     /// count — decodes, per the spec's total-count rule (a width/components equality would
     /// wrongly reject it).
@@ -2072,7 +2092,7 @@ mod tests {
     fn decode_raw_image_accepts_reshaped_lossless_jpeg_stream() {
         // 8 samples encoded as a 2-wide, 2-component, 2-row stream for a 4x2 one-plane image.
         let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
-        let jpeg = lossless_jpeg::encode(&samples, 2, 2, 2, 12).expect("encode");
+        let jpeg = gamut_jpeg::lossless::encode(&samples, 2, 2, 2, 12).expect("encode");
         let mut ifd = Ifd::new();
         ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![4]));
         ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
@@ -2775,5 +2795,94 @@ mod tests {
         ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
         ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
         assert!(decode_raw_image(&TrackedIfd::new(&ifd), &[0; 8], ByteOrder::LittleEndian).is_ok());
+    }
+
+    /// End to end: a DNG whose raw strip is a *predictor-4* SOF3 stream — a shape gamut's
+    /// own encoder never writes — decodes to identical samples through gamut's DNG decoder
+    /// and the Adobe SDK's negative reader.
+    ///
+    /// The strip is the one `gamut-jpeg`'s lossless test-stream builder writes for these 8×6
+    /// 12-bit samples under predictor 4 (one table: 15 four-bit and 2 five-bit codes over the
+    /// categories in order); it is spelled out here because that builder is private to
+    /// `gamut-jpeg`, which owns the coder and differentially tests every predictor there.
+    #[test]
+    fn predictor4_strip_dng_decodes_identically_to_adobe() {
+        use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
+
+        use crate::tags;
+
+        let (w, h) = (8usize, 6usize);
+        let samples: Vec<u16> = (0..(w * h) as u32)
+            .map(|i| (i.wrapping_mul(40503).wrapping_add(17) % 4096) as u16)
+            .collect();
+        #[rustfmt::skip]
+        let strip: Vec<u8> = vec![
+            255, 216, 255, 195, 0, 11, 12, 0, 6, 0, 8, 1, 1, 17, 0, 255, 196, 0, 36, 0, 0, 0, 0,
+            15, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+            14, 15, 16, 255, 218, 0, 8, 1, 1, 0, 4, 0, 0, 176, 33, 156, 111, 35, 105, 27, 72, 218,
+            70, 210, 54, 145, 180, 238, 53, 255, 0, 251, 0, 0, 0, 0, 157, 192, 0, 0, 0, 78, 224,
+            53, 255, 0, 251, 0, 0, 0, 9, 220, 0, 107, 255, 0, 246, 0, 0, 1, 59, 128, 0, 215, 255,
+            0, 236, 0, 0, 63, 255, 217,
+        ];
+
+        let mut ifd = Ifd::new();
+        ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![0]));
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![w as u16]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![h as u16]));
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![12]));
+        ifd.set(tags::COMPRESSION, Value::Short(vec![7])); // lossless JPEG
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![h as u16]));
+        ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+        ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
+        ifd.set(tags::CFA_PLANE_COLOR, Value::Byte(vec![0, 1, 2]));
+        ifd.set(tags::DNG_VERSION, Value::Byte(vec![1, 4, 0, 0]));
+        ifd.set(
+            tags::UNIQUE_CAMERA_MODEL,
+            Value::Ascii("gamut TestCam".to_owned()),
+        );
+        ifd.set(
+            tags::COLOR_MATRIX1,
+            Value::SRational(vec![
+                (1, 1),
+                (0, 1),
+                (0, 1),
+                (0, 1),
+                (1, 1),
+                (0, 1),
+                (0, 1),
+                (0, 1),
+                (1, 1),
+            ]),
+        );
+        ifd.set(tags::CALIBRATION_ILLUMINANT1, Value::Short(vec![21])); // D65
+        ifd.set(
+            tags::AS_SHOT_NEUTRAL,
+            Value::Rational(vec![(1, 1), (1, 1), (1, 1)]),
+        );
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(
+            tags::STRIP_BYTE_COUNTS,
+            Value::Long(vec![strip.len() as u32]),
+        );
+
+        // Two-pass layout: size the container, then point the strip just past it.
+        let single = |ifd: Ifd| TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        };
+        let mut dng = write(&single(ifd.clone())).expect("write");
+        let strip_at = dng.len() as u32;
+        let mut placed = ifd;
+        placed.set(tags::STRIP_OFFSETS, Value::Long(vec![strip_at]));
+        dng = write(&single(placed)).expect("rewrite");
+        dng.extend_from_slice(&strip);
+
+        let ours = DngDecoder::new().decode(&dng).expect("gamut decode");
+        assert_eq!(ours.raw.samples(), samples.as_slice());
+        let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe decode");
+        assert_eq!(adobe.samples, samples);
     }
 }

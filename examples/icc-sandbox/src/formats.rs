@@ -94,8 +94,9 @@ pub fn decode(container: Container, bytes: &[u8]) -> gamut_core::Result<Decoded>
             (image, icc)
         }
         Container::Jpeg => {
-            let image: gamut_core::ImageBuf<Rgb8> = JpegDecoder::new().decode_image(bytes)?;
-            (image, gamut_jpeg::metadata(bytes)?.icc)
+            let decoder = JpegDecoder::new();
+            let image: gamut_core::ImageBuf<Rgb8> = decoder.decode_image(bytes)?;
+            (image, decoder.metadata(bytes)?.icc)
         }
     };
     Ok(Decoded {

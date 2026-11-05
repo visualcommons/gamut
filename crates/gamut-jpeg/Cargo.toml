@@ -18,10 +18,11 @@ workspace = true
 [dependencies]
 gamut-core.workspace = true
 # The shared codestream-backend seam (issue #272): the `Decoder`/`Encoder` twins and `repr(C)`
-# vtables the `backend` module's adapters bridge the JPEG whole-stream traits onto.
-gamut-codec-abi.workspace = true
+# vtables the `backend` module's adapters bridge the JPEG whole-stream traits onto, and (`std`) the
+# one `Registry` the codecs keep their pushed backends in.
+gamut-codec-abi = { workspace = true, features = ["std"] }
 # The T.81 Annex K.2 optimal Huffman table builder and Annex C canonical codes (issue #888), shared
-# with gamut-dng's lossless-JPEG encoder.
+# by the DCT encoders and the `lossless` (SOF3) encoder.
 gamut-bitstream.workspace = true
 # Full-range (JFIF) BT.601 RGB→YCbCr conversion (T.871 §7).
 gamut-color.workspace = true
@@ -42,8 +43,9 @@ gamut-icc = { workspace = true, optional = true }
 
 [features]
 default = []
-# Typed metadata wiring: `JpegMetadata::blocks` / `JpegMetadata::metadata` and
-# `JpegEncoder::with_metadata` / `with_encoded_metadata` over the `gamut-metadata` facade.
+# Typed metadata wiring: `JpegEncoder` as a `MetadataSink` (`with_metadata` /
+# `with_encoded_metadata`) over the `gamut-metadata` facade, and the facade re-exports a caller
+# needs to read `JpegDecoder::metadata`'s `RawMetadata` as a `Metadata`.
 metadata = ["dep:gamut-metadata"]
 # Colour-managed decoding to sRGB: `JpegDecoder::decode_srgb` over gamut-cmm + gamut-icc.
 cmm = ["dep:gamut-cmm", "dep:gamut-icc"]
@@ -62,6 +64,10 @@ jpegli-oracle = { path = "../../tooling/jpegli-oracle" }
 # The independent CMS that turns jpegli's (colour-unmanaged) XYB samples into sRGB in the XYB
 # tests: a vendored, statically-linked Little-CMS. Dev-only and excluded from the workspace.
 lcms2-oracle = { path = "../../tooling/lcms2-oracle" }
+# The `lossless` (SOF3) module's differential conformance oracle: the headless-built Adobe DNG SDK
+# 1.7.1's own lossless-JPEG codec (`DecodeLosslessJPEG`) and DNG reader. Dev-only and excluded from
+# the workspace; it came with the module from gamut-dng (issue #1083).
+gamut-dng-oracle = { path = "../../tooling/gamut-dng-oracle" }
 # Benchmark harness (issue #149) for `benches/decode.rs`.
 divan.workspace = true
 # The pure-Rust decoder issue #305 measures decode throughput against (bench + experiment arm only;

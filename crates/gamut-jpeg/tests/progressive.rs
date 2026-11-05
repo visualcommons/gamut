@@ -9,7 +9,8 @@
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
 use gamut_jpeg::{
-    ChromaSubsampling, JpegColorMode, JpegDecoder, JpegEncoder, JpegProcess, ProgressiveScript,
+    ChromaSubsampling, JpegColorMode, JpegDecoder, JpegEncoder, JpegProcess, Process,
+    ProgressiveScript,
 };
 
 /// A deterministic per-pixel-distinct pattern (varies on both axes) so every coordinate is
@@ -40,10 +41,10 @@ impl Mode {
 
     fn subsampling(self) -> ChromaSubsampling {
         match self {
-            Mode::Gray | Mode::C444 => ChromaSubsampling::Ycbcr444,
-            Mode::C422 => ChromaSubsampling::Ycbcr422,
-            Mode::C420 => ChromaSubsampling::Ycbcr420,
-            Mode::C440 => ChromaSubsampling::Ycbcr440,
+            Mode::Gray | Mode::C444 => ChromaSubsampling::Cs444,
+            Mode::C422 => ChromaSubsampling::Cs422,
+            Mode::C420 => ChromaSubsampling::Cs420,
+            Mode::C440 => ChromaSubsampling::Cs440,
         }
     }
 }
@@ -78,8 +79,11 @@ fn encode_with_script(
     let enc = JpegEncoder::new()
         .with_quality(q)
         .with_restart_interval(restart)
-        .with_progressive(progressive)
-        .with_progressive_script(script);
+        .with_process(if progressive {
+            Process::Progressive(script)
+        } else {
+            Process::Baseline
+        });
     match mode {
         Mode::Gray => enc
             .encode_to_vec(ImageRef::<Gray8>::new(src, dims).unwrap())
@@ -136,7 +140,7 @@ fn progressive_decodes_identically_to_baseline() {
                     let prog = encode(mode, &src, w, h, q, restart, true);
                     // The progressive stream really is SOF2.
                     assert_eq!(
-                        gamut_jpeg::info(&prog).unwrap().process,
+                        gamut_jpeg::JpegDecoder::new().info(&prog).unwrap().process,
                         JpegProcess::Progressive,
                         "{mode:?} {w}x{h} q{q} r{restart} not progressive"
                     );
@@ -366,14 +370,14 @@ fn stream_matches_the_frozen_scan_script() {
         let jpeg = if color {
             let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
             JpegEncoder::new()
-                .with_progressive(true)
-                .with_subsampling(ChromaSubsampling::Ycbcr420)
+                .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
+                .with_subsampling(ChromaSubsampling::Cs420)
                 .encode_to_vec(img)
                 .unwrap()
         } else {
             let img = ImageRef::<Gray8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
             JpegEncoder::new()
-                .with_progressive(true)
+                .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
                 .encode_to_vec(img)
                 .unwrap()
         };
@@ -436,9 +440,7 @@ fn stream_matches_the_mozjpeg_scan_script() {
     // custom script for YCbCr, and the 13-scan all-purpose script for the non-YCbCr XYB frame.
     let (w, h) = (24u32, 24u32);
     let dims = Dimensions::new(w, h).unwrap();
-    let enc = JpegEncoder::new()
-        .with_progressive(true)
-        .with_progressive_script(ProgressiveScript::Mozjpeg);
+    let enc = JpegEncoder::new().with_process(Process::Progressive(ProgressiveScript::Mozjpeg));
 
     let gray: Vec<u8> = (0..(w * h) as usize).map(pattern).collect();
     let jpeg = enc
@@ -450,7 +452,7 @@ fn stream_matches_the_mozjpeg_scan_script() {
     let rgb: Vec<u8> = (0..(w * h * 3) as usize).map(pattern).collect();
     let jpeg = enc
         .clone()
-        .with_subsampling(ChromaSubsampling::Ycbcr420)
+        .with_subsampling(ChromaSubsampling::Cs420)
         .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims).unwrap())
         .unwrap();
     assert_scan_list(&jpeg, &expected_mozjpeg_script(true, &[1, 2, 3]), "ycbcr");
@@ -469,15 +471,13 @@ fn mozjpeg_xyb_script_decodes_identically_to_baseline() {
     for &(w, h) in &[(17u32, 9u32), (33, 31)] {
         let dims = Dimensions::new(w, h).unwrap();
         let src: Vec<u8> = (0..(w * h * 3) as usize).map(pattern).collect();
-        let enc = JpegEncoder::new()
-            .with_color_mode(JpegColorMode::Xyb)
-            .with_progressive_script(ProgressiveScript::Mozjpeg);
+        let enc = JpegEncoder::new().with_color_mode(JpegColorMode::Xyb);
         let base = enc
             .clone()
             .encode_to_vec(ImageRef::<Rgb8>::new(&src, dims).unwrap())
             .unwrap();
         let prog = enc
-            .with_progressive(true)
+            .with_process(Process::Progressive(ProgressiveScript::Mozjpeg))
             .encode_to_vec(ImageRef::<Rgb8>::new(&src, dims).unwrap())
             .unwrap();
         assert_eq!(
@@ -497,8 +497,8 @@ fn each_scan_defines_exactly_the_table_it_references() {
     let src: Vec<u8> = (0..(w * h * 3) as usize).map(pattern).collect();
     let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
     let jpeg = JpegEncoder::new()
-        .with_progressive(true)
-        .with_subsampling(ChromaSubsampling::Ycbcr420)
+        .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
+        .with_subsampling(ChromaSubsampling::Cs420)
         .encode_to_vec(img)
         .unwrap();
     let walked = walk(&jpeg);
@@ -538,8 +538,8 @@ fn restart_markers_punctuate_each_scan_at_the_declared_cadence() {
     let src: Vec<u8> = (0..(w * h * 3) as usize).map(pattern).collect();
     let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
     let jpeg = JpegEncoder::new()
-        .with_progressive(true)
-        .with_subsampling(ChromaSubsampling::Ycbcr420) // hmax=vmax=2
+        .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
+        .with_subsampling(ChromaSubsampling::Cs420) // hmax=vmax=2
         .with_restart_interval(restart)
         .encode_to_vec(img)
         .unwrap();
@@ -619,7 +619,7 @@ fn flat_content_emits_a_nonzero_eob_run() {
     let src = vec![90u8; (w * h) as usize];
     let img = ImageRef::<Gray8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
     let jpeg = JpegEncoder::new()
-        .with_progressive(true)
+        .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
         .encode_to_vec(img)
         .unwrap();
     let walked = walk(&jpeg);
@@ -668,7 +668,7 @@ fn eob_run_caps_at_its_15_bit_maximum() {
     let img = ImageRef::<Gray8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
     let base = JpegEncoder::new().encode_to_vec(img).unwrap();
     let prog = JpegEncoder::new()
-        .with_progressive(true)
+        .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
         .encode_to_vec(img)
         .unwrap();
     let a: ImageBuf<Gray8> = JpegDecoder::new().decode_image(&base).unwrap();
@@ -690,7 +690,7 @@ fn eob_run_resets_at_restart_boundaries() {
         .unwrap();
     let prog = JpegEncoder::new()
         .with_restart_interval(2)
-        .with_progressive(true)
+        .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
         .encode_to_vec(img)
         .unwrap();
     let a: ImageBuf<Gray8> = JpegDecoder::new().decode_image(&base).unwrap();
@@ -723,7 +723,11 @@ fn custom_quant_tables_feed_baseline_and_progressive_identically() {
         let enc = |progressive: bool| {
             let e = JpegEncoder::new()
                 .with_quant_tables(tables)
-                .with_progressive(progressive);
+                .with_process(if progressive {
+                    Process::Progressive(ProgressiveScript::Libjpeg)
+                } else {
+                    Process::Baseline
+                });
             match mode {
                 Mode::Gray => e
                     .encode_to_vec(ImageRef::<Gray8>::new(&src, dims).unwrap())
@@ -737,7 +741,7 @@ fn custom_quant_tables_feed_baseline_and_progressive_identically() {
         let base = enc(false);
         let prog = enc(true);
         assert_eq!(
-            gamut_jpeg::info(&prog).unwrap().process,
+            gamut_jpeg::JpegDecoder::new().info(&prog).unwrap().process,
             JpegProcess::Progressive
         );
         assert_eq!(

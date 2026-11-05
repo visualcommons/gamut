@@ -83,10 +83,54 @@ pub trait TypedMetadata {
     }
 }
 
+/// The shared read-out every format crate whose payloads are already bytes returns (a JPEG
+/// decoder's `metadata`, say): each present carrier is handed over verbatim, in EXIF, XMP, ICC
+/// order. [`gamut_core::RawMetadata`] has no IPTC-IIM or C2PA field, so neither block is ever
+/// produced here.
+///
+/// # Errors
+///
+/// [`blocks`](TypedMetadata::blocks) never fails: every payload is already bytes.
+impl TypedMetadata for gamut_core::RawMetadata {
+    fn blocks(&self) -> Result<Vec<MetadataBlock<'_>>> {
+        Ok([
+            self.exif.as_deref().map(MetadataBlock::Exif),
+            self.xmp.as_deref().map(MetadataBlock::Xmp),
+            self.icc.as_deref().map(MetadataBlock::Icc),
+        ]
+        .into_iter()
+        .flatten()
+        .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use gamut_core::RawMetadata;
+
     use super::*;
     use crate::MetadataError;
+
+    #[test]
+    fn raw_metadata_hands_over_each_present_carrier_in_order() {
+        let mut raw = RawMetadata::default();
+        assert_eq!(raw.blocks().unwrap(), []);
+        raw.icc = Some(b"icc".to_vec());
+        raw.exif = Some(b"MM\0*".to_vec());
+        assert_eq!(
+            raw.blocks().unwrap(),
+            [MetadataBlock::Exif(b"MM\0*"), MetadataBlock::Icc(b"icc")]
+        );
+        raw.xmp = Some(b"<x/>".to_vec());
+        assert_eq!(
+            raw.blocks().unwrap(),
+            [
+                MetadataBlock::Exif(b"MM\0*"),
+                MetadataBlock::Xmp(b"<x/>"),
+                MetadataBlock::Icc(b"icc"),
+            ]
+        );
+    }
 
     /// Hands back a fixed block list, or a container failure.
     struct Fixed(core::result::Result<Vec<u8>, &'static str>);

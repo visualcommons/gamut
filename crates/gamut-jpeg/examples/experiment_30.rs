@@ -29,7 +29,7 @@
 use std::path::Path;
 
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8};
-use gamut_jpeg::{ChromaSubsampling, JpegEncoder};
+use gamut_jpeg::{ChromaSubsampling, JpegEncoder, Process, ProgressiveScript};
 
 #[allow(
     dead_code,
@@ -50,8 +50,8 @@ enum Config {
 }
 
 const CONFIGS: [(&str, Config); 3] = [
-    ("ycbcr420", Config::Ycbcr(ChromaSubsampling::Ycbcr420)),
-    ("ycbcr444", Config::Ycbcr(ChromaSubsampling::Ycbcr444)),
+    ("ycbcr420", Config::Ycbcr(ChromaSubsampling::Cs420)),
+    ("ycbcr444", Config::Ycbcr(ChromaSubsampling::Cs444)),
     ("gray", Config::Gray),
 ];
 
@@ -72,8 +72,11 @@ fn encode(config: Config, quality: u8, rgb: &[u8], w: u32, h: u32, progressive: 
     let dims = Dimensions::new(w, h).expect("dimensions");
     let enc = JpegEncoder::new()
         .with_quality(quality)
-        .with_optimized_tables(true)
-        .with_progressive(progressive);
+        .with_process(if progressive {
+            Process::Progressive(ProgressiveScript::Libjpeg)
+        } else {
+            Process::Optimized
+        });
     let mut out = Vec::new();
     match config {
         Config::Ycbcr(subsampling) => {

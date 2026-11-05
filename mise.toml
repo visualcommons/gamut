@@ -659,16 +659,18 @@ run = '''cbindgen --config crates/gamut-ffi/cbindgen.toml crates/gamut-ffi 2>/de
 
 # A format crate *gaining* a seam is the one drift class gamut-ffi cannot catch at compile
 # time (nothing there can reference an entry point that does not exist yet), so it is gated
-# here: the workspace's `pub fn push_backend` set is diffed against the committed manifest
+# here: the workspace's backend-insertion set — `pub fn push_backend`, and its by-value
+# `pub fn with_backend` successor (the pre-freeze builder convention) — is diffed against the
+# committed manifest
 # (crates/gamut-ffi/SEAMS.txt — pure data, no comments, so the diff is exact). Every manifest
 # line must have a C entry point in gamut-ffi or a documented exclusion in its DESIGN.md.
 # Losing or reshaping a seam already breaks gamut-ffi's living shims at compile time.
 [tasks.check-ffi-seams]
-description = "Verify the workspace push_backend seam set matches gamut-ffi's manifest"
-run = '''grep -rn --include='*.rs' 'pub fn push_backend' crates/*/src \
+description = "Verify the workspace push_backend/with_backend seam set matches gamut-ffi's manifest"
+run = '''grep -rnE --include='*.rs' 'pub fn (push|with)_backend' crates/*/src \
   | sed -E 's/:[0-9]+:/ /; s/[[:space:]]+/ /g; s/ $//' | sort \
   | diff -u crates/gamut-ffi/SEAMS.txt - \
-  || { echo "push_backend seam set changed: give the seam a C entry point (or a DESIGN.md exclusion) in gamut-ffi, then update crates/gamut-ffi/SEAMS.txt"; exit 1; }'''
+  || { echo "backend seam set changed: give the seam a C entry point (or a DESIGN.md exclusion) in gamut-ffi, then update crates/gamut-ffi/SEAMS.txt"; exit 1; }'''
 
 # Fast pre-push guard for the FFI living shims: gamut-ffi's entry points only compile when
 # their format features are on, and lint-quick runs default features — so without this, shim

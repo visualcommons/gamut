@@ -1,7 +1,7 @@
 //! Colour-managed decoding to sRGB (the `cmm` feature): [`JpegDecoder::decode_srgb`].
 //!
 //! A JPEG's pixels mean what its embedded ICC profile says they mean. The plain decode presents
-//! the stored samples and leaves the profile to the caller ([`crate::metadata`]); this module
+//! the stored samples and leaves the profile to the caller ([`JpegDecoder::metadata`]); this module
 //! closes the loop for the common destination — sRGB `Rgb8` — by handing the profile and
 //! the decoded samples to the workspace's transform engine, `gamut-cmm`, against
 //! `gamut-icc`'s built-in sRGB profile. Nothing colour-specific is computed here, so an
@@ -35,12 +35,12 @@ impl JpegDecoder {
     ///   inverse — gamut's [`XYB_ICC_PROFILE`](crate::XYB_ICC_PROFILE) and libjxl's alike.
     ///
     /// The decode itself is this decoder's [`DecodeImage<Rgb8>`] — its limits, backends and
-    /// [`convert_policy`](Self::convert_policy) all apply — and a one-component stream carrying
+    /// [`with_convert_policy`](Self::with_convert_policy) all apply — and a one-component stream carrying
     /// an RGB profile is transformed after grayscale replication.
     ///
     /// # Errors
     ///
-    /// Whatever the [`Rgb8`] decode or [`crate::metadata`] returns; an
+    /// Whatever the [`Rgb8`] decode or [`metadata`](Self::metadata) returns; an
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the embedded
     /// profile does not parse or `gamut-cmm` cannot build a transform from it; and an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a profile whose data colour space is not RGB (a GRAY profile on
@@ -65,7 +65,7 @@ impl JpegDecoder {
     pub fn decode_srgb(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
         // The profile is read and its transform built before any pixel is decoded, so a profile
         // this path cannot apply costs a header walk, not a decode.
-        let transform = match crate::metadata(data)?.icc {
+        let transform = match self.metadata(data)?.icc {
             Some(icc) => Some(srgb_transform(&icc)?),
             None => None,
         };

@@ -14,7 +14,7 @@ use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
 use crate::values::{Compression, PhotometricInterpretation};
 use crate::writer::{ImageBlocks, write_cfa_dng};
-use crate::{bitpack, compression, lossless_jpeg, preview, tags};
+use crate::{bitpack, compression, preview, tags};
 
 /// Encoder for DNG (Adobe Digital Negative) raw images.
 ///
@@ -696,7 +696,7 @@ impl DngEncoder {
         match self.compression {
             Compression::Jpeg => {
                 let (width, components) = lossless_jpeg_geometry(cols, spp, period);
-                lossless_jpeg::encode(samples, width, rows, components, bits)
+                gamut_jpeg::lossless::encode(samples, width, rows, components, bits)
             }
             Compression::JpegXl => {
                 #[cfg(all(
@@ -1378,7 +1378,7 @@ mod tests {
         let len = raw_ifd
             .get_u32_vec(tags::STRIP_BYTE_COUNTS)
             .expect("counts")[0] as usize;
-        let frame = lossless_jpeg::decode(&out[off..off + len]).expect("SOF3 strip");
+        let frame = gamut_jpeg::lossless::decode(&out[off..off + len]).expect("SOF3 strip");
         assert_eq!((frame.width, frame.height, frame.components), (4, 6, 2));
         assert_eq!(frame.samples, raw.samples());
     }

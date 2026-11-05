@@ -25,8 +25,8 @@
 //! This crate is a JPEG **encoder + decoder**. It ships a **baseline (SOF0) sequential and
 //! progressive (SOF2) 8-bit DCT Huffman encoder**, and a **decoder for the sequential and
 //! progressive processes**. The encoder writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0
-//! / 4:4:0 subsampling, standard (Annex K) tables — or, with
-//! [`JpegEncoder::with_optimized_tables`], tables fitted to the image's own symbol statistics
+//! / 4:4:0 subsampling (the shared [`ChromaSubsampling`]), standard (Annex K) tables — or, with
+//! [`Process::Optimized`], tables fitted to the image's own symbol statistics
 //! (Annex K.2), a few percent smaller for the same decoded pixels — a quality→quantization mapping
 //! (or caller-supplied [`QuantTables`] via [`JpegEncoder::with_quant_tables`]), opt-in
 //! rate–distortion optimized coefficient selection ([`JpegEncoder::with_rd_optimization`]:
@@ -34,28 +34,31 @@
 //! **XYB colour mode** ([`JpegEncoder::with_color_mode`]: scaled-XYB samples, no JFIF APP0, Adobe
 //! APP14 `transform = 0`, component ids `R`,`G`,`B`, and the embedded [`XYB_ICC_PROFILE`] so any
 //! ICC-aware decoder reproduces sRGB), and optional restart intervals;
-//! [`JpegEncoder::with_progressive`] selects the progressive process (Annex G), which uses
+//! [`Process::Progressive`] selects the progressive process (Annex G), which uses
 //! libjpeg's frozen `jpeg_simple_progression` scan script (or, opted into with
-//! [`JpegEncoder::with_progressive_script`], mozjpeg's maximum-compression one) with optimized
+//! [`ProgressiveScript::Mozjpeg`], mozjpeg's maximum-compression one) with optimized
 //! per-scan Huffman tables (Annex K.2) and produces the same quantized coefficients — hence the
 //! same decoded image — as the baseline encoding. The [`JpegDecoder`] reads any spec-valid
 //! sequential **or progressive** stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via the JFIF APP0 /
 //! Adobe APP14 hints), interleaved or non-interleaved scans, spectral selection and successive
 //! approximation, restart intervals, and (for sequential frames) DNL-defined heights — presenting
 //! it as `Rgb8`, `Gray8`, or `Cmyk8` (with [`gamut_core::DecodeImage::decode_image_into`] reusing
-//! the destination's allocation when dimensions match).
+//! the destination's allocation when dimensions match), within the workspace's shared
+//! [`DecodeLimits`] ([`JpegDecoder::with_limits`]). [`JpegDecoder::info`] reads the frame header
+//! alone.
 //!
-//! Embedded **APP-segment metadata** ships both ways: [`metadata`] reads APP1 EXIF, APP1 XMP, and
-//! multi-segment APP2 `ICC_PROFILE` payloads without decoding pixels, and
+//! Embedded **APP-segment metadata** ships both ways: [`JpegDecoder::metadata`] reads APP1 EXIF,
+//! APP1 XMP, and multi-segment APP2 `ICC_PROFILE` payloads into the shared [`RawMetadata`]
+//! without decoding pixels, and
 //! [`JpegEncoder::with_exif`] / [`JpegEncoder::with_xmp`] / [`JpegEncoder::with_icc_profile`]
 //! embed them. The payloads are raw bytes in exactly the form the `gamut-metadata` facade's
 //! `MetadataBlock` borrows.
 //!
 //! With the optional **`metadata`** Cargo feature the same payloads are wired to the facade's typed
-//! models through the facade's `TypedMetadata` trait: [`JpegMetadata::blocks`] hands them over as
-//! `MetadataBlock`s and [`JpegMetadata::metadata`] parses them into a unified `Metadata`, while
-//! [`JpegEncoder::with_metadata`] / [`JpegEncoder::with_encoded_metadata`] embed one, routing each
-//! carrier to the raw setter above. The feature is off by default so a plain JPEG consumer never
+//! models: the facade's `TypedMetadata` impl on [`RawMetadata`] parses what
+//! [`JpegDecoder::metadata`] read into a unified `Metadata`, and [`JpegEncoder`] is a
+//! `MetadataSink`, whose `with_metadata` / `with_encoded_metadata` route each carrier to the raw
+//! setters above. The feature is off by default so a plain JPEG consumer never
 //! builds the metadata crates; the dependency direction stays `gamut-jpeg → gamut-metadata`.
 //!
 //! With the optional **`cmm`** Cargo feature, `JpegDecoder::decode_srgb` decodes straight to sRGB
@@ -65,16 +68,29 @@
 //!
 //! # Pluggable backends
 //!
-//! Both directions are pluggable through the [`backend`] module: [`JpegStreamDecoder`] and
-//! [`JpegStreamEncoder`] hand a backend the **whole SOI..EOI interchange stream** — the unit real
-//! JPEG engines (nvJPEG, V4L2 JPEG, libjpeg-turbo) consume — because JPEG's marker layer and its
-//! entropy-coded data interleave and have no sub-stream boundary worth publicizing. The explicit
-//! consequence is that "the crate owns the container" degenerates, for JPEG, to the crate owning
-//! **metadata and validation**: APPn EXIF/XMP/ICC stays crate-owned in both directions, and the
-//! crate patches its metadata into a backend-produced stream. See the [`backend`] module docs.
+//! Both directions are pluggable: [`JpegCodestreamDecoder`] and [`JpegCodestreamEncoder`] hand a
+//! backend the **whole SOI..EOI interchange stream** — the unit real JPEG engines (nvJPEG, V4L2
+//! JPEG, libjpeg-turbo) consume — because JPEG's marker layer and its entropy-coded data interleave
+//! and have no sub-stream boundary worth publicizing. The explicit consequence is that "the crate
+//! owns the container" degenerates, for JPEG, to the crate owning **metadata and validation**: the
+//! crate parses the marker layer into a [`JpegStreamInfo`] before offering a decode, APPn
+//! EXIF/XMP/ICC stays crate-owned in both directions, and the crate patches its metadata into a
+//! backend-produced stream and checks its frame. Backends are added with
+//! [`JpegDecoder::with_backend`] / [`JpegEncoder::with_backend`] and tried in push order, the
+//! built-in codec last; `supports() == false` is the only fall-through, and a backend that accepts
+//! a job and then fails returns its error unchanged. [`AbiJpegDecoder`] / [`AbiJpegEncoder`] adapt
+//! a `gamut-codec-abi` backend (a C one included) to the two traits.
 //!
-//! Out of scope (see `STATUS.md`): 12-bit precision, arithmetic coding, the lossless and
-//! hierarchical processes, the SPIFF/T.84/T.872 layers, ExtendedXMP, and APP13 IPTC-IIM.
+//! # Lossless JPEG
+//!
+//! The [`lossless`] module is T.81's lossless process (Annex H, SOF3): the predictive,
+//! Huffman-coded coder DNG uses for its raw data, sharing this crate's entropy-coded-segment writer,
+//! marker writers and Huffman tables. It is a separate entry point
+//! ([`lossless::encode`] / [`lossless::decode`] over 2- to 16-bit samples) rather than a
+//! [`JpegDecoder`] path: its samples are not the 8-bit pixels the DCT decoder presents.
+//!
+//! Out of scope (see `STATUS.md`): 12-bit DCT precision, arithmetic coding, the hierarchical
+//! process, the SPIFF/T.84/T.872 layers, ExtendedXMP, and APP13 IPTC-IIM.
 //!
 //! # Oracle
 //!
@@ -97,7 +113,7 @@
 //! let mut jpeg = Vec::new();
 //! JpegEncoder::new()
 //!     .with_quality(85)
-//!     .with_subsampling(ChromaSubsampling::Ycbcr420)
+//!     .with_subsampling(ChromaSubsampling::Cs420)
 //!     .encode_image(image, &mut jpeg)?;
 //! assert_eq!(&jpeg[..2], &[0xFF, 0xD8]); // SOI
 //! assert_eq!(&jpeg[jpeg.len() - 2..], &[0xFF, 0xD9]); // EOI
@@ -112,9 +128,10 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
-pub mod backend;
+pub mod lossless;
 
 mod appmeta;
+mod backend;
 mod bitwriter;
 #[cfg(feature = "cmm")]
 mod cmm;
@@ -132,20 +149,21 @@ mod syntax;
 mod zigzag;
 
 pub use backend::{
-    AbiStreamDecoder, AbiStreamEncoder, DecodedJpeg, JPEG_CODEC_ID, JpegEncodeRequest,
-    JpegStreamDecoder, JpegStreamEncoder, JpegStreamInfo, RasterRef, backend_declined,
-    is_backend_declined,
+    AbiJpegDecoder, AbiJpegEncoder, DecodedJpeg, JPEG_CODEC_ID, JpegCodestreamDecoder,
+    JpegCodestreamEncoder, JpegEncodeRequest, JpegStreamInfo, RasterRef,
 };
-pub use decoder::{JpegDecoder, JpegInfo, JpegMetadata, JpegProcess, info, metadata};
+pub use decoder::{JpegDecoder, JpegInfo, JpegProcess};
 pub use encoder::{
-    ChromaSubsampling, JpegColorMode, JpegEncoder, ProgressiveScript, RdOptimization,
-    XYB_ICC_PROFILE,
+    JpegColorMode, JpegEncoder, Process, ProgressiveScript, RdOptimization, XYB_ICC_PROFILE,
 };
-pub use gamut_color::ChromaUpsampling;
-// The facade types named in the `metadata`-feature signatures, so a caller can spell
-// `JpegMetadata::metadata` / `JpegEncoder::with_metadata` without a direct dependency, and the
-// trait those accessors are methods of.
+// The shared vocabulary types this crate's signatures take and return, so a caller needs no direct
+// dependency on gamut-color or gamut-core to name them.
+pub use gamut_color::{ChromaSubsampling, ChromaUpsampling};
+pub use gamut_core::{DecodeLimits, RawMetadata};
+// The facade types named in the `metadata`-feature surface, so a caller can spell
+// `JpegEncoder::with_metadata` and read a `RawMetadata` as a `Metadata` without a direct
+// dependency, and the two traits those methods belong to.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataSink, TypedMetadata};
 pub use marker::DensityUnit;
 pub use quant::{CHROMINANCE, LUMINANCE, QuantTables};

@@ -82,9 +82,11 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
   MD5-over-raw-image computation (`RawImage::new_raw_image_digest`).
 - **`RawImage::to_linear`** — the spec's chapter-5 raw-to-linear-reference mapping, differentially
   gated (±1 of 16-bit) against the Adobe SDK's stage-2 image.
-- **Public `lossless_jpeg` module** — the SOF3 codec: decode covers the full T.81 process-14
-  reader envelope (predictors 1–7, point transform, per-component tables, restart markers;
-  SDK-differential), encode stays the predictor-1 subset every reader accepts.
+- **Lossless JPEG (`Compression = 7`)** through `gamut-jpeg`'s `lossless` module, which owns
+  all of T.81: decode covers the full process-14 reader envelope (predictors 1–7, point
+  transform, per-component tables, restart markers; SDK-differential), encode stays the
+  predictor-1 subset every reader accepts. Callers who want the SOF3 coder itself use
+  `gamut_jpeg::lossless` directly.
 - **Deferred** (ledger in `STATUS.md`): lossy JPEG (34892), floating-point samples (fp16 JXL
   rejects with a typed error), the standard opcode *processing* library, 4-colour CFA encoding,
   and writing mask/depth sub-images.

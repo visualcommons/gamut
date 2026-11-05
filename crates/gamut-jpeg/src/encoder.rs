@@ -7,7 +7,7 @@
 //!
 //! The entropy coder runs through [`BaselineCoder`], which either **emits** codes or merely
 //! **gathers** symbol frequencies. The fixed-table path runs one emit pass; the optimized-table path
-//! ([`JpegEncoder::with_optimized_tables`]) runs a gather pass first, builds the Annex K.2 tables
+//! ([`Process::Optimized`]) runs a gather pass first, builds the Annex K.2 tables
 //! from what it counted, and then emits — both passes driven by the same [`encode_scan`] walk, so a
 //! symbol can never be written without having been counted.
 
@@ -15,12 +15,12 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use gamut_color::transfer::srgb_eotf;
-use gamut_color::{ColorRange, bt601_rgb_to_ycbcr, xyb};
+use gamut_color::{ChromaSubsampling, ColorRange, bt601_rgb_to_ycbcr, xyb};
 use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, PixelFormat, Result, Rgb8};
 use gamut_dsp::jpeg::forward_dct8x8;
 use gamut_dsp::math::round_div_nearest;
 
-use crate::backend::{self, EncoderSlot, JpegEncodeRequest, JpegStreamEncoder, RasterRef};
+use crate::backend::{self, EncoderRegistry, JpegCodestreamEncoder, JpegEncodeRequest, RasterRef};
 use crate::bitwriter::BitWriter;
 use crate::huffman::{self, EncTable, TableSpec};
 use crate::marker::{self, DensityUnit};
@@ -33,42 +33,31 @@ use crate::{appmeta, progressive, quant, rd};
 /// (§B.2.2, Table B.2).
 const MAX_DIMENSION: u32 = u16::MAX as u32;
 
-/// Chroma subsampling mode for YCbCr (colour) encoding: the ratio at which the Cb/Cr planes are
-/// sampled relative to luma. Ignored for grayscale, which has a single component. In
-/// [`JpegColorMode::Xyb`] the same ratio subsamples the B channel alone, X and Y taking the luma
-/// role ([`JpegEncoder::with_color_mode`]).
+/// The luma sampling factors `(Hy, Vy)` the encoder writes for a [`ChromaSubsampling`]: `1×1`
+/// (4:4:4), `2×1` (4:2:2), `2×2` (4:2:0) or `1×2` (4:4:0), with chroma always `1×1`, so the factors
+/// double as the box-subsampling applied to each chroma plane. In [`JpegColorMode::Xyb`] the same
+/// ratio subsamples the B channel alone, X and Y taking the luma role.
 ///
-/// Named for the conventional `J:a:b` notation. The luma sampling factors `H×V` are `1×1` (4:4:4),
-/// `2×1` (4:2:2), `2×2` (4:2:0), or `1×2` (4:4:0); chroma is always `1×1`. T.81 §B.2.2 (Table B.2)
-/// admits any factor in `1..=4` per component, so each grid is a choice the format leaves to the
-/// encoder; all four fit the §B.2.3 limit of ten data units per MCU.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ChromaSubsampling {
-    /// 4:4:4 — no chroma subsampling; full-resolution Cb/Cr (largest files, best chroma fidelity).
-    Ycbcr444,
-    /// 4:2:2 — Cb/Cr subsampled 2:1 horizontally only.
-    Ycbcr422,
-    /// 4:2:0 — Cb/Cr subsampled 2:1 both horizontally and vertically (the common photographic
-    /// default; T.871 §9 NOTE 3 names it the most common form).
-    Ycbcr420,
-    /// 4:4:0 — Cb/Cr subsampled 2:1 vertically only (luma `1×2`): the transpose of 4:2:2, and
-    /// libjpeg-turbo's `TJSAMP_440`. T.871 §9 NOTE 3 discourages forms other than 4:2:0 for JFIF
-    /// because some applications may not support them; a T.81 decoder such as libjpeg-turbo reads
-    /// it.
-    Ycbcr440,
-}
-
-impl ChromaSubsampling {
-    /// The luma horizontal/vertical sampling factors `(Hy, Vy)`; chroma is fixed at `1×1`, so these
-    /// double as the box-subsampling factors applied to each chroma plane.
-    fn luma_factors(self) -> (u8, u8) {
-        match self {
-            ChromaSubsampling::Ycbcr444 => (1, 1),
-            ChromaSubsampling::Ycbcr422 => (2, 1),
-            ChromaSubsampling::Ycbcr420 => (2, 2),
-            ChromaSubsampling::Ycbcr440 => (1, 2),
-        }
+/// T.81 §B.2.2 (Table B.2) admits any factor in `1..=4` per component, so each grid is a choice the
+/// format leaves to the encoder; all four fit the §B.2.3 limit of ten data units per MCU. 4:4:0 is
+/// libjpeg-turbo's `TJSAMP_440`; T.871 §9 NOTE 3 discourages forms other than 4:2:0 for JFIF because
+/// some applications may not support them, but a T.81 decoder reads them.
+///
+/// # Errors
+///
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) for a layout with no three-component
+/// JPEG frame: 4:0:0 (encode a [`Gray8`] image for a single-component stream) and any layout the
+/// shared enum grows later.
+fn luma_factors(subsampling: ChromaSubsampling) -> Result<(u8, u8)> {
+    match subsampling {
+        ChromaSubsampling::Cs444 => Ok((1, 1)),
+        ChromaSubsampling::Cs422 => Ok((2, 1)),
+        ChromaSubsampling::Cs420 => Ok((2, 2)),
+        ChromaSubsampling::Cs440 => Ok((1, 2)),
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: colour subsampling must be 4:4:4, 4:2:2, 4:2:0 or 4:4:0",
+        )),
     }
 }
 
@@ -122,7 +111,7 @@ pub enum RdOptimization {
     TrellisAdaptive = 2,
 }
 
-/// The scan script a progressive stream is coded with ([`JpegEncoder::with_progressive_script`]).
+/// The scan script a progressive stream is coded with ([`Process::Progressive`]).
 ///
 /// Both scripts deliver every coefficient bit, so the decoded image is identical to the baseline
 /// encoding of the same input whichever is chosen; they differ only in how the coefficients are
@@ -147,6 +136,32 @@ pub enum ProgressiveScript {
     Mozjpeg = 1,
 }
 
+/// The coding process the encoder writes ([`JpegEncoder::with_process`]).
+///
+/// All three code the same quantized coefficients, so the decoded image is identical whichever is
+/// chosen; they differ in stream structure and size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Process {
+    /// Baseline sequential DCT (SOF0) with the fixed Annex K.3–K.6 "typical" Huffman tables — the
+    /// frozen default, whose byte stream is SemVer-stable.
+    #[default]
+    Baseline,
+    /// Baseline sequential DCT (SOF0) with Huffman tables fitted to the image's own symbol
+    /// statistics (T.81 Annex K.2): a few percent smaller for free — libjpeg's `optimize_coding`.
+    ///
+    /// **Cost:** the scan is walked twice — once to count symbols, once to write them — so the
+    /// forward DCT runs twice and encoding takes roughly twice as long. No coefficient buffer is
+    /// retained, so peak memory is unchanged. Only the DHT contents and the entropy bytes differ
+    /// from [`Self::Baseline`]; marker order and segment count are identical.
+    Optimized,
+    /// Progressive DCT (SOF2, T.81 Annex G) coded with the given [`ProgressiveScript`], with
+    /// optimized per-scan Huffman tables (Annex K.2; the typical AC tables cannot code an `EOBn`
+    /// symbol). A decoder can render a coarse whole-image preview from the first scans and refine
+    /// it as more arrive.
+    Progressive(ProgressiveScript),
+}
+
 /// A reusable JPEG encoder: baseline sequential (SOF0) by default, progressive (SOF2) on request.
 ///
 /// Configure it with the builder methods, then drive it through [`EncodeImage`]. It writes JFIF
@@ -158,7 +173,7 @@ pub enum ProgressiveScript {
 /// For a given `(quality, subsampling)` the quantization tables — and therefore the coefficient
 /// values — are SemVer-stable: quality 50 emits the T.81 Annex K tables verbatim, and the IJG
 /// quality→scale mapping is frozen. The byte stream is likewise stable for a given configuration;
-/// [`Self::with_optimized_tables`] changes the Huffman tables and hence the entropy bytes, but it
+/// [`Process::Optimized`] changes the Huffman tables and hence the entropy bytes, but it
 /// is opt-in and leaves the coefficients — and the decoded image — untouched. Caller-supplied
 /// tables ([`Self::with_quant_tables`]) bypass the frozen mapping without changing it.
 ///
@@ -183,9 +198,7 @@ pub struct JpegEncoder {
     density_unit: DensityUnit,
     x_density: u16,
     y_density: u16,
-    progressive: bool,
-    progressive_script: ProgressiveScript,
-    optimize_tables: bool,
+    process: Process,
     quant_tables: Option<QuantTables>,
     rd: RdOptimization,
     color_mode: JpegColorMode,
@@ -193,7 +206,7 @@ pub struct JpegEncoder {
     xmp: Option<Vec<u8>>,
     icc: Option<Vec<u8>>,
     /// Pluggable whole-stream backends, tried in push order ahead of the built-in encoder.
-    backends: Vec<EncoderSlot>,
+    backends: EncoderRegistry,
 }
 
 impl fmt::Debug for JpegEncoder {
@@ -207,9 +220,7 @@ impl fmt::Debug for JpegEncoder {
             .field("density_unit", &self.density_unit)
             .field("x_density", &self.x_density)
             .field("y_density", &self.y_density)
-            .field("progressive", &self.progressive)
-            .field("progressive_script", &self.progressive_script)
-            .field("optimize_tables", &self.optimize_tables)
+            .field("process", &self.process)
             .field("quant_tables", &self.quant_tables)
             .field("rd", &self.rd)
             .field("color_mode", &self.color_mode)
@@ -228,53 +239,55 @@ impl Default for JpegEncoder {
 }
 
 impl JpegEncoder {
-    /// Creates an encoder with quality 75, [`ChromaSubsampling::Ycbcr420`], no restart interval, and
-    /// a 1:1 aspect-ratio pixel density (JFIF `units = 0`).
+    /// Creates an encoder with quality 75, [`ChromaSubsampling::Cs420`], [`Process::Baseline`], no
+    /// restart interval, and a 1:1 aspect-ratio pixel density (JFIF `units = 0`).
     #[must_use]
     pub fn new() -> Self {
         Self {
             quality: 75,
-            subsampling: ChromaSubsampling::Ycbcr420,
+            subsampling: ChromaSubsampling::Cs420,
             restart_interval: 0,
             density_unit: DensityUnit::AspectRatio,
             x_density: 1,
             y_density: 1,
-            progressive: false,
-            progressive_script: ProgressiveScript::Libjpeg,
-            optimize_tables: false,
+            process: Process::Baseline,
             quant_tables: None,
             rd: RdOptimization::None,
             color_mode: JpegColorMode::Ycbcr,
             exif: None,
             xmp: None,
             icc: None,
-            backends: Vec::new(),
+            backends: EncoderRegistry::new(),
         }
     }
 
-    /// Appends a [`JpegStreamEncoder`] backend to this encoder's registry.
+    /// Appends a [`JpegCodestreamEncoder`] backend to this encoder's registry and returns the
+    /// encoder.
     ///
     /// Backends are consulted in **push order** for every encode; the first whose
-    /// [`JpegStreamEncoder::supports`] accepts the [`JpegEncodeRequest`] produces the whole JFIF
+    /// [`JpegCodestreamEncoder::supports`] accepts the [`JpegEncodeRequest`] produces the whole JFIF
     /// interchange stream. The built-in encoder is the implicit tail, used only when every backend
-    /// declines. An encoder configured with [`Self::with_quant_tables`] skips the registry
-    /// entirely — a [`JpegEncodeRequest`] cannot carry custom tables, so the job is pinned to the
-    /// built-in path. The crate then **patches its APPn metadata into the produced stream** — any
-    /// EXIF/XMP/`ICC_PROFILE` segment the backend emitted is replaced by this encoder's configured
+    /// declines; a backend that accepts and then fails returns its error unchanged. An encoder
+    /// configured with [`Self::with_quant_tables`], [`Self::with_rd_optimization`], the XYB colour
+    /// mode or a non-default [`ProgressiveScript`] skips the registry entirely — a
+    /// [`JpegEncodeRequest`] cannot carry them, so the job is pinned to the built-in path. The crate
+    /// then **patches its APPn metadata into the produced stream** — any EXIF/XMP/`ICC_PROFILE`
+    /// segment the backend emitted is replaced by this encoder's configured
     /// [`with_exif`](Self::with_exif) / [`with_xmp`](Self::with_xmp) /
     /// [`with_icc_profile`](Self::with_icc_profile) payloads (validated against their caps *before*
-    /// any backend runs). See the [`crate::backend`] module docs for the full contract.
+    /// any backend runs).
     ///
-    /// Unlike the `with_*` builders this takes `&mut self`, because a registry is not a `Copy`
-    /// setting.
+    /// `Send` is bound here, where the backend is inserted, rather than on the trait, so the
+    /// encoder stays `Send + Sync`.
     ///
     /// # Cloning shares backends
     ///
     /// Backends are stored behind `Arc<Mutex<..>>`, so **cloning a `JpegEncoder` shares them with
     /// the clone** rather than duplicating them: a stateful backend sees the encodes of every clone,
-    /// and its lock serializes concurrent ones. Build a fresh encoder when a clone needs its own
-    /// backend instances.
-    pub fn push_backend(&mut self, backend: impl JpegStreamEncoder + 'static) -> &mut Self {
+    /// and its lock serializes concurrent ones. A backend added to one encoder after the clone is
+    /// not seen by the other.
+    #[must_use]
+    pub fn with_backend(mut self, backend: impl JpegCodestreamEncoder + Send + 'static) -> Self {
         self.backends.push(Arc::new(Mutex::new(backend)));
         self
     }
@@ -301,7 +314,7 @@ impl JpegEncoder {
         if self.quant_tables.is_some()
             || self.rd != RdOptimization::None
             || self.color_mode != JpegColorMode::Ycbcr
-            || self.progressive_script != ProgressiveScript::Libjpeg
+            || matches!(self.process, Process::Progressive(script) if script != ProgressiveScript::Libjpeg)
         {
             return Ok(None);
         }
@@ -315,7 +328,7 @@ impl JpegEncoder {
             format,
             self.quality,
             self.subsampling,
-            self.progressive,
+            self.process,
             self.restart_interval,
         );
         let raster = RasterRef::new(w, h, format, samples)?;
@@ -333,7 +346,7 @@ impl JpegEncoder {
         // Validation ownership: the produced stream must declare a frame of exactly the image the
         // caller asked to encode, so a backend cannot quietly resize or drop it.
         let info = crate::JpegStreamInfo::parse(&patched)?;
-        if (info.width(), info.height()) != (w, h) {
+        if (info.width(), info.height()) != (w, Some(h)) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: backend stream declares different dimensions than the encoded image",
@@ -359,7 +372,7 @@ impl JpegEncoder {
     ///
     /// While set, `with_quality` has no effect on the emitted tables or coefficients, and the
     /// encode is pinned to the **built-in** encoder: pushed backends are not consulted, because a
-    /// [`crate::backend::JpegEncodeRequest`] cannot carry custom tables. Grayscale uses only the
+    /// [`JpegEncodeRequest`] cannot carry custom tables. Grayscale uses only the
     /// luma table. In [`JpegColorMode::Xyb`] a [`QuantTables::with_xyb_x`] table quantizes the X
     /// channel at its own destination (`Tq = 2`); other modes ignore it. The frozen quality
     /// contract is unaffected — it continues to govern the default path.
@@ -397,60 +410,20 @@ impl JpegEncoder {
         self
     }
 
-    /// Selects the **progressive DCT** process (SOF2, T.81 Annex G) when `true`, or the default
-    /// baseline sequential process (SOF0) when `false`.
+    /// Selects the coding [`Process`]: baseline with the typical tables (the default), baseline
+    /// with tables fitted to the image ([`Process::Optimized`]), or progressive with a
+    /// [`ProgressiveScript`] ([`Process::Progressive`]).
     ///
-    /// A progressive stream codes the image as several scans, each carrying one spectral band at one
-    /// successive-approximation precision, so a decoder can render a coarse whole-image preview from
-    /// the first scans and refine it as more arrive. By default gamut uses libjpeg's frozen
-    /// `jpeg_simple_progression` scan script (a 6-scan gray / 10-scan YCbCr layout;
-    /// [`Self::with_progressive_script`] selects another) with optimized per-scan Huffman tables
-    /// (Annex K.2). The quantized coefficients — and therefore the decoded image — are identical
-    /// to the baseline encoding of the same input at the same `(quality, subsampling)`; only the
-    /// stream structure differs.
+    /// The quantized coefficients — and therefore the decoded image — are identical whichever is
+    /// chosen at the same `(quality, subsampling)`; only the stream structure and size differ.
+    /// [`ProgressiveScript::Libjpeg`] is the frozen progressive script, whose byte stream is
+    /// stable; [`ProgressiveScript::Mozjpeg`] trades it for mozjpeg's maximum-compression script,
+    /// usually a little smaller, and pins the encode to the **built-in** encoder — a
+    /// [`JpegEncodeRequest`] offered to a backend never carries a script other than the frozen
+    /// one.
     #[must_use]
-    pub fn with_progressive(mut self, progressive: bool) -> Self {
-        self.progressive = progressive;
-        self
-    }
-
-    /// Selects the scan script a [`Self::with_progressive`] stream is coded with
-    /// ([`ProgressiveScript`]).
-    ///
-    /// The default [`ProgressiveScript::Libjpeg`] is the frozen script, whose byte stream is
-    /// unchanged. [`ProgressiveScript::Mozjpeg`] trades it for mozjpeg's maximum-compression
-    /// script, usually a little smaller; the decoded image is identical either way. Has no effect
-    /// on a baseline (non-progressive) stream. While set to a non-default script the encode is
-    /// pinned to the **built-in** encoder — a [`crate::backend::JpegEncodeRequest`] cannot carry
-    /// the script — even for a baseline stream, where the script itself is inert.
-    #[must_use]
-    pub fn with_progressive_script(mut self, script: ProgressiveScript) -> Self {
-        self.progressive_script = script;
-        self
-    }
-
-    /// Builds the baseline scan's Huffman tables from the image's own symbol statistics (T.81
-    /// Annex K.2) instead of writing the fixed Annex K.3–K.6 "typical" tables.
-    ///
-    /// The typical tables were tuned for a generic photographic mix, so a table matched to the
-    /// actual image is a few percent smaller for free — the same `optimize_coding` tradeoff
-    /// libjpeg offers, and the same one gamut's progressive encoder already takes unconditionally
-    /// (Annex K.5/K.6 cannot code a progressive AC scan at all).
-    ///
-    /// **Cost:** the scan is walked twice — once to count symbols, once to write them — so the
-    /// forward DCT runs twice and encoding takes roughly twice as long. No coefficient buffer is
-    /// retained, so peak memory is unchanged.
-    ///
-    /// **Not a quality change.** The quantized coefficients are untouched; only the DHT and the
-    /// entropy-coded bytes differ, so the decoded image is identical either way. Marker order and
-    /// segment count are identical too: one DHT segment, in the same position.
-    ///
-    /// Defaults to `false`, which keeps the byte stream of every previously-encodable
-    /// configuration exactly as it was. Has no effect on [`Self::with_progressive`] streams, whose
-    /// per-scan tables are always optimized.
-    #[must_use]
-    pub fn with_optimized_tables(mut self, optimize: bool) -> Self {
-        self.optimize_tables = optimize;
+    pub fn with_process(mut self, process: Process) -> Self {
+        self.process = process;
         self
     }
 
@@ -460,9 +433,9 @@ impl JpegEncoder {
     /// jpegli-style XYB samples with [`XYB_ICC_PROFILE`] embedded — a perceptual space that
     /// out-compresses YCbCr on an ICC-aware pipeline. In XYB mode: [`Self::with_subsampling`]
     /// subsamples the **B** channel alone (the stored B−Y) by the variant's ratio while X and Y
-    /// stay at full resolution, so the default [`ChromaSubsampling::Ycbcr420`] is jpegli's own
+    /// stay at full resolution, so the default [`ChromaSubsampling::Cs420`] is jpegli's own
     /// XYB default — sampling factors X 2×2, Y 2×2, B 1×1 (`jpegli_set_colorspace`, libjxl
-    /// `lib/jpegli/encode.cc`) — and [`ChromaSubsampling::Ycbcr444`] codes all three channels at
+    /// `lib/jpegli/encode.cc`) — and [`ChromaSubsampling::Cs444`] codes all three channels at
     /// full resolution (X carries opponent-colour detail jpegli never subsamples, so no variant
     /// touches it), [`Self::with_density`] is
     /// inert (no JFIF APP0 is written), [`Self::with_icc_profile`] is rejected at encode time (a
@@ -471,7 +444,7 @@ impl JpegEncoder {
     /// Progressive mode, restart intervals, optimized tables, custom quantization tables, and RD
     /// optimization all compose. Decoding an XYB stream (with this crate's decoder or any other)
     /// yields the scaled-XYB samples presented as RGB plus the embedded profile via
-    /// [`crate::metadata`]; applying the profile is a CMM's job — with the `cmm` feature,
+    /// [`JpegDecoder::metadata`](crate::JpegDecoder::metadata); applying the profile is a CMM's job — with the `cmm` feature,
     /// `JpegDecoder::decode_srgb` does it through `gamut-cmm`.
     ///
     /// The samples come from `f64` colour math, so — unlike the default path — XYB-mode output
@@ -490,12 +463,12 @@ impl JpegEncoder {
     /// Rate–distortion optimization changes the coefficients (that is its point), so it is opt-in
     /// and produces different — spec-valid — bytes; the frozen quality contract continues to bind
     /// only the default [`RdOptimization::None`] path. It composes with every other builder:
-    /// custom [`Self::with_quant_tables`], [`Self::with_optimized_tables`] (rates are still costed
+    /// custom [`Self::with_quant_tables`], [`Process::Optimized`] (rates are still costed
     /// against the typical-table proxy; the emitted tables then fit whatever the trellis chose),
-    /// and [`Self::with_progressive`] (the progressive stream carries the same trellis-chosen
+    /// and [`Process::Progressive`] (the progressive stream carries the same trellis-chosen
     /// coefficients as the baseline stream, preserving the exactness invariant). While set to a
     /// non-`None` mode the encode is pinned to the **built-in** encoder — a
-    /// [`crate::backend::JpegEncodeRequest`] cannot carry the RD configuration.
+    /// [`JpegEncodeRequest`] cannot carry the RD configuration.
     #[must_use]
     pub fn with_rd_optimization(mut self, rd: RdOptimization) -> Self {
         self.rd = rd;
@@ -506,7 +479,7 @@ impl JpegEncoder {
     ///
     /// `exif` is the TIFF stream beginning `II`/`MM` — e.g. `gamut-exif` output; a blob already
     /// carrying the `"Exif\0\0"` signature is accepted and not double-prefixed, so bytes read by
-    /// [`crate::metadata`] round-trip verbatim. Must fit the single APP1 segment (at most 65527
+    /// [`JpegDecoder::metadata`](crate::JpegDecoder::metadata) round-trip verbatim. Must fit the single APP1 segment (at most 65527
     /// bytes), checked at encode time.
     #[must_use]
     pub fn with_exif(mut self, exif: &[u8]) -> Self {
@@ -667,7 +640,7 @@ impl JpegEncoder {
     /// the scan header, and the entropy-coded scan. The caller has already written the SOI/APP0/DQT
     /// prologue and appends EOI afterward.
     ///
-    /// With [`Self::with_optimized_tables`] enabled the scan is walked **twice**: a gather pass
+    /// With [`Process::Optimized`] the scan is walked **twice**: a gather pass
     /// counts the symbols each entropy destination will code, those counts drive the Annex K.2
     /// optimal-table construction, and the emit pass writes the entropy data with the resulting
     /// tables. Marker order and segment count are identical either way — only the DHT contents and
@@ -684,7 +657,7 @@ impl JpegEncoder {
         let (w, h) = (u32::from(width), u32::from(height));
         marker::write_sof0(out, width, height, sof);
 
-        let tables = if self.optimize_tables {
+        let tables = if self.process == Process::Optimized {
             let mut freq = Histograms::default();
             let mut coder = BaselineCoder::gather(&mut freq);
             encode_scan(components, w, h, self.restart_interval, &mut coder);
@@ -708,14 +681,22 @@ impl JpegEncoder {
 
     /// Encodes `rgb` as an XYB stream ([`JpegColorMode::Xyb`]): sRGB → linear (EOTF LUT) → XYB →
     /// scaled-XYB bytes into three planes (X, Y, B−Y), the B−Y plane box-subsampled by the
-    /// configured [`ChromaSubsampling`] ratio (X and Y carry that ratio as their sampling factors,
+    /// configured [`ChromaSubsampling`] ratio, `(hx, vx)` from [`luma_factors`] (X and Y carry that
+    /// ratio as their sampling factors,
     /// B stays 1×1 — jpegli's B-only layout), coded with component
     /// ids `R`,`G`,`B` under a no-APP0 / APP14 `transform = 0` prologue that embeds
     /// [`XYB_ICC_PROFILE`]. X and Y quantize with the luminance table (destination 0), the stored
     /// B−Y with the chrominance table (destination 1) — Annex K tables are YCbCr-tuned, so this
     /// pairing is an honest placeholder, not XYB-tuned (see STATUS.md). A caller X table
     /// ([`QuantTables::with_xyb_x`]) moves X alone to destination 2. The caller writes EOI.
-    fn encode_xyb(&self, rgb: &[u8], width: u16, height: u16, out: &mut Vec<u8>) {
+    fn encode_xyb(
+        &self,
+        rgb: &[u8],
+        width: u16,
+        height: u16,
+        (hx, vx): (u8, u8),
+        out: &mut Vec<u8>,
+    ) {
         let (w, h) = (usize::from(width), usize::from(height));
 
         // 256-entry EOTF LUT: the only per-pixel float work left is the XYB transform itself.
@@ -754,7 +735,6 @@ impl JpegEncoder {
         };
         // Only B is subsampled: X and Y take the ratio as their sampling factors (`hx`, `vx`), B
         // stays 1×1 — the same frame shape the YCbCr path gives luma and chroma.
-        let (hx, vx) = self.subsampling.luma_factors();
         let b_plane = downsample(&b, w, h, usize::from(hx), usize::from(vx));
 
         let luma_quant = self.luma_quant();
@@ -792,7 +772,7 @@ impl JpegEncoder {
         // belt-and-braces beside the APP14: either signal alone keeps a decoder from applying a
         // YCbCr inverse.
         let ids: [u8; 3] = *b"RGB";
-        if self.progressive {
+        if let Process::Progressive(script) = self.process {
             let comps = [
                 progressive::ProgComponent {
                     id: ids[0],
@@ -829,7 +809,7 @@ impl JpegEncoder {
                 height,
                 &comps,
                 self.restart_interval,
-                self.progressive_script,
+                script,
                 false,
             );
         } else {
@@ -1236,7 +1216,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
         let luma_rd = self.rd_ctx(false);
 
         self.write_prologue(out, &[(0, &luma_quant)]);
-        if self.progressive {
+        if let Process::Progressive(script) = self.process {
             let comps = [progressive::ProgComponent {
                 id: 1,
                 h: 1,
@@ -1252,7 +1232,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
                 height,
                 &comps,
                 self.restart_interval,
-                self.progressive_script,
+                script,
                 false,
             );
         } else {
@@ -1279,6 +1259,9 @@ impl EncodeImage<Rgb8> for JpegEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         let (width, height) = Self::check_dimensions(image.dimensions())?;
         self.check_metadata()?;
+        // Checked before any backend runs, so a backend is never offered a layout the frame
+        // cannot carry.
+        let (yh, yv) = luma_factors(self.subsampling)?;
         if let Some(written) =
             self.encode_via_backend(width, height, PixelFormat::Rgb8, image.as_samples(), out)?
         {
@@ -1288,7 +1271,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
         let (w, h) = (usize::from(width), usize::from(height));
 
         if self.color_mode == JpegColorMode::Xyb {
-            self.encode_xyb(image.as_samples(), width, height, out);
+            self.encode_xyb(image.as_samples(), width, height, (yh, yv), out);
             marker::write_marker(out, marker::code::EOI);
             return Ok(out.len() - start);
         }
@@ -1305,7 +1288,6 @@ impl EncodeImage<Rgb8> for JpegEncoder {
             cb[i] = u;
             cr[i] = v;
         }
-        let (yh, yv) = self.subsampling.luma_factors();
         let (sx, sy) = (usize::from(yh), usize::from(yv));
         let luma_plane = Plane {
             data: y,
@@ -1321,7 +1303,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
         let chroma_rd = self.rd_ctx(true);
 
         self.write_prologue(out, &[(0, &luma_quant), (1, &chroma_quant)]);
-        if self.progressive {
+        if let Process::Progressive(script) = self.process {
             let comps = [
                 progressive::ProgComponent {
                     id: 1,
@@ -1357,7 +1339,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                 height,
                 &comps,
                 self.restart_interval,
-                self.progressive_script,
+                script,
                 true,
             );
         } else {
@@ -1484,13 +1466,12 @@ mod tests {
         // `Default` must equal `new()`'s configuration: quality 75, 4:2:0, no restart, 1:1 aspect.
         let d = JpegEncoder::default();
         assert_eq!(d.quality, 75);
-        assert_eq!(d.subsampling, ChromaSubsampling::Ycbcr420);
+        assert_eq!(d.subsampling, ChromaSubsampling::Cs420);
         assert_eq!(d.restart_interval, 0);
         assert_eq!(d.density_unit, DensityUnit::AspectRatio);
         assert_eq!((d.x_density, d.y_density), (1, 1));
-        assert!(!d.progressive);
-        assert_eq!(d.progressive_script, ProgressiveScript::Libjpeg);
-        assert!(!d.optimize_tables);
+        assert_eq!(d.process, Process::Baseline);
+        assert_eq!(Process::default(), Process::Baseline);
         assert_eq!(d.quant_tables, None);
         assert_eq!(d.rd, RdOptimization::None);
         assert_eq!(d.color_mode, JpegColorMode::Ycbcr);
@@ -1519,28 +1500,32 @@ mod tests {
     }
 
     #[test]
-    fn with_progressive_toggles_the_flag() {
-        assert!(JpegEncoder::new().with_progressive(true).progressive);
-        assert!(
-            !JpegEncoder::new()
-                .with_progressive(true)
-                .with_progressive(false)
-                .progressive
+    fn with_process_sets_the_process() {
+        let progressive = Process::Progressive(ProgressiveScript::Mozjpeg);
+        assert_eq!(
+            JpegEncoder::new().with_process(progressive).process,
+            progressive
+        );
+        assert_eq!(
+            JpegEncoder::new()
+                .with_process(progressive)
+                .with_process(Process::Optimized)
+                .process,
+            Process::Optimized
         );
     }
 
     #[test]
-    fn with_optimized_tables_toggles_the_flag() {
-        assert!(
-            JpegEncoder::new()
-                .with_optimized_tables(true)
-                .optimize_tables
-        );
-        assert!(
-            !JpegEncoder::new()
-                .with_optimized_tables(true)
-                .with_optimized_tables(false)
-                .optimize_tables
+    fn luma_factors_cover_the_four_jpeg_grids_and_refuse_the_rest() {
+        assert_eq!(luma_factors(ChromaSubsampling::Cs444).unwrap(), (1, 1));
+        assert_eq!(luma_factors(ChromaSubsampling::Cs422).unwrap(), (2, 1));
+        assert_eq!(luma_factors(ChromaSubsampling::Cs420).unwrap(), (2, 2));
+        assert_eq!(luma_factors(ChromaSubsampling::Cs440).unwrap(), (1, 2));
+        assert_eq!(
+            luma_factors(ChromaSubsampling::Cs400)
+                .unwrap_err()
+                .to_string(),
+            "unsupported: JPEG: colour subsampling must be 4:4:4, 4:2:2, 4:2:0 or 4:4:0 [origin: gamut-jpeg]"
         );
     }
 
@@ -2135,7 +2120,7 @@ mod tests {
         let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap();
         let jpeg = JpegEncoder::new()
             .with_quality(50)
-            .with_subsampling(ChromaSubsampling::Ycbcr444)
+            .with_subsampling(ChromaSubsampling::Cs444)
             .encode_to_vec(img)
             .unwrap();
         let entropy = entropy_of(&jpeg);
@@ -2205,7 +2190,7 @@ mod tests {
         let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(32, 32).unwrap()).unwrap();
         let jpeg = JpegEncoder::new()
             .with_quality(50)
-            .with_subsampling(ChromaSubsampling::Ycbcr420)
+            .with_subsampling(ChromaSubsampling::Cs420)
             .encode_to_vec(img)
             .unwrap();
         let entropy = entropy_of(&jpeg);

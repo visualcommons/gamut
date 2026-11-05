@@ -39,6 +39,9 @@ gamut-bitstream.workspace = true
 # directory type this crate already speaks. The XMP/IPTC-IIM/ICC payloads stay verbatim bytes and
 # are handed over as the facade's `MetadataBlock`s.
 gamut-metadata.workspace = true
+# Lossless JPEG (Compression = 7): the T.81 SOF3 coder is gamut-jpeg's, which owns all of T.81
+# (issue #1083), rather than a second copy of the JPEG entropy layer here.
+gamut-jpeg.workspace = true
 # JPEG XL (Compression = 52546, DNG 1.7): decode is the pure-Rust jxl-rs path (wasm-safe, keeps
 # the default build C-free); encode is opt-in via the `jxl-encode` feature above.
 gamut-jxl = { workspace = true, features = ["decode"] }

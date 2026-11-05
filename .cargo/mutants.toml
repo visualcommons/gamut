@@ -577,14 +577,15 @@ exclude_re = [
     # (row_step == 0). The mutant therefore does strictly more work and writes exactly the same
     # bytes. An early return for speed, not for behaviour -- same shape as the `pt > 0` skip below.
     '^crates/gamut-dng/src/predictor\.rs:106:22: replace \|\| with && in undo$',
-    # gamut-dng lossless JPEG `decode`: `if pt > 0` guarding the point-transform upshift.
+    # gamut-jpeg lossless JPEG `decode` (moved from gamut-dng's `lossless_jpeg` by #1083): `if
+    # pt > 0` guarding the point-transform upshift.
     # `pt` is a `u16`, so `pt >= 0` is unconditionally true and the loop it guards runs with a
     # shift of zero -- `*sample <<= 0` leaves every sample exactly as it was. The mutant does
     # strictly more work and produces byte-identical output, so no test can separate them: the
     # guard is an optimisation, not a behaviour. Equivalent. (This one comparison only: the bare
     # name used to reach every `>` in every function whose name begins `decode`, nineteen others
     # across gamut-dng, gamut-icc, gamut-jpeg and gamut-webp that nobody argued for.)
-    '^crates/gamut-dng/src/lossless_jpeg\.rs:911:11: replace > with >= in decode$',
+    '^crates/gamut-jpeg/src/lossless\.rs:841:11: replace > with >= in decode$',
     # gamut-dng predictor `x_factor`: deleting the `Predictor::None => Some(0)` arm drops it to
     # `_ => None`, and neither caller can tell the two apart.
     #
@@ -605,8 +606,8 @@ exclude_re = [
     # `cy = ⌊py·v/vmax⌋ ≤ ⌊(Y·v−1)/vmax⌋ ≤ ⌈Y·v/vmax⌉−1 = comp_h−1` (v ≥ 1, v ≤ vmax), so both
     # mutations only ENLARGE a bound the no-op clamp never reaches — equivalent. The clamp itself
     # stays, per the never-panic-on-untrusted-input policy.
-    '^crates/gamut-jpeg/src/decoder\.rs:632:77: replace - with \+ in DecodedImage::sample_row$',
-    '^crates/gamut-jpeg/src/decoder\.rs:632:77: replace - with / in DecodedImage::sample_row$',
+    '^crates/gamut-jpeg/src/decoder\.rs:608:77: replace - with \+ in DecodedImage::sample_row$',
+    '^crates/gamut-jpeg/src/decoder\.rs:608:77: replace - with / in DecodedImage::sample_row$',
     # (gamut-jpeg's `refine` and `ProgCoder::ac_refine` sign tests, `coeff > 0` on a coefficient
     # that is never zero, used to be excluded here as equivalent; #924 rewrote both as
     # `is_positive()`, which has no comparison to mutate. `ac_refine`'s `eob_pos` search, excluded

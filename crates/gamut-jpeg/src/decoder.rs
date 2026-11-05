@@ -3,8 +3,8 @@
 //! Decoding is where the codec is generous (T.81 Annex F §F.2, Annex G §G.2, Annex A §A.2): it
 //! accepts any spec-valid baseline (SOF0), extended-sequential (SOF1) **or progressive (SOF2)** 8-bit
 //! stream, resolves the colour space from the JFIF/Adobe application segments, and rejects malformed
-//! input with a typed [`Error`] rather than panicking. Opt-in dimension and native-raster byte caps
-//! reject hostile frame geometry before the built-in decoder allocates from it. The pipeline is:
+//! input with a typed [`Error`] rather than panicking. Its [`DecodeLimits`] reject hostile frame
+//! geometry before the built-in decoder allocates from it. The pipeline is:
 //! walk the marker segments
 //! (SOI → tables → frame → scans → EOI, [`crate::syntax`]); decode each scan's entropy data into
 //! per-component sample planes ([`crate::scan`]); upsample the chroma planes to full resolution
@@ -65,12 +65,13 @@ use std::sync::{Arc, Mutex};
 use gamut_color::{ChromaUpsampling, ColorRange, bt601_ycbcr_to_rgb};
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw, convert_from_raw_into};
 use gamut_core::{
-    Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Pixel, PixelFormat, Result, Rgb8,
+    Cmyk8, DecodeImage, DecodeLimits, Dimensions, Error, Gray8, ImageBuf, Pixel, PixelFormat,
+    RawMetadata, Result, Rgb8,
 };
 use gamut_dsp::upsample::{libjpeg, taps};
 
 use crate::appmeta;
-use crate::backend::{self, DecodedJpeg, DecoderSlot, JpegStreamDecoder, JpegStreamInfo};
+use crate::backend::{self, DecodedJpeg, DecoderRegistry, JpegCodestreamDecoder, JpegStreamInfo};
 use crate::marker::code;
 use crate::scan::{McuRowLimit, Plane, ProgComp, decode_progressive_scan, decode_scan};
 use crate::syntax::{
@@ -78,13 +79,13 @@ use crate::syntax::{
     parse_sof, parse_sos,
 };
 
-/// Default cap on the native interleaved raster (`width × height × frame components`): 64 MiB,
-/// matching `gamut-png`'s default decoded-sample budget.
-const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
-/// Default dimension cap: the format's own 16-bit ceiling (T.81 Table B.2, `X` and `Y` ≤ 65535),
-/// so the default admits every dimension a frame header can declare and leaves the byte budget as
-/// the guard.
-const DEFAULT_MAX_DIMENSION: u32 = u16::MAX as u32;
+/// The default [`DecodeLimits`]: each side capped at the format's own 16-bit ceiling (T.81 Table
+/// B.2, `X` and `Y` ≤ 65535), so the default admits every dimension a frame header can declare and
+/// leaves the workspace's 64 MiB byte budget
+/// ([`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`]) as the guard.
+const DEFAULT_LIMITS: DecodeLimits = DecodeLimits::new()
+    .with_max_width(u16::MAX as u32)
+    .with_max_height(u16::MAX as u32);
 
 /// A decoder for sequential (baseline SOF0 / extended SOF1) 8-bit Huffman JPEG streams.
 ///
@@ -96,9 +97,9 @@ const DEFAULT_MAX_DIMENSION: u32 = u16::MAX as u32;
 /// the format's own 16-bit ceiling (T.81 Table B.2: `X`, `Y` ≤ 65535) and the native interleaved
 /// raster is capped at 64 MiB — the byte budget, not the dimension caps, is the real guard, since a
 /// few-byte SOF declaring 65535 × 65535 × 3 would otherwise ask for ~12.9 GB before any scan is
-/// read. Tighten either with [`with_max_dimensions`](Self::with_max_dimensions) and
-/// [`with_max_image_bytes`](Self::with_max_image_bytes); a caller that trusts its input and needs a
-/// larger raster loosens the budget with `with_max_image_bytes(usize::MAX)`.
+/// read. Tighten either with [`with_limits`](Self::with_limits); a caller that trusts its input and
+/// needs a larger raster loosens the budget with
+/// `DecodeLimits::new().with_max_image_bytes(usize::MAX)`.
 ///
 /// # Example
 ///
@@ -117,14 +118,10 @@ const DEFAULT_MAX_DIMENSION: u32 = u16::MAX as u32;
 /// ```
 #[derive(Clone)]
 pub struct JpegDecoder {
-    /// Maximum accepted width.
-    max_width: u32,
-    /// Maximum accepted height.
-    max_height: u32,
-    /// Maximum native interleaved raster length.
-    max_image_bytes: usize,
+    /// The dimension and native-raster byte bounds.
+    limits: DecodeLimits,
     /// Pluggable whole-stream backends, tried in push order ahead of the built-in decoder.
-    backends: Vec<DecoderSlot>,
+    backends: DecoderRegistry,
     /// Which lossy layout conversions a typed decode may perform.
     policy: ConvertPolicy,
     /// How the built-in decoder reconstructs subsampled components.
@@ -135,9 +132,7 @@ impl fmt::Debug for JpegDecoder {
     /// The backends are opaque `dyn` objects, so only their count is shown.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JpegDecoder")
-            .field("max_width", &self.max_width)
-            .field("max_height", &self.max_height)
-            .field("max_image_bytes", &self.max_image_bytes)
+            .field("limits", &self.limits)
             .field("backends", &self.backends.len())
             .field("upsampling", &self.upsampling)
             .finish()
@@ -158,35 +153,29 @@ impl JpegDecoder {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            max_width: DEFAULT_MAX_DIMENSION,
-            max_height: DEFAULT_MAX_DIMENSION,
-            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
-            backends: Vec::new(),
+            limits: DEFAULT_LIMITS,
+            backends: DecoderRegistry::new(),
             policy: ConvertPolicy::lossless(),
             upsampling: ChromaUpsampling::Interpolated,
         }
     }
 
-    /// Caps the accepted image dimensions. A wider SOF or a known taller SOF is refused before any
-    /// frame-sized allocation; a DNL-deferred height is bounded while its first scan is decoded and
-    /// checked exactly when the DNL arrives.
-    #[must_use]
-    pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
-        self.max_width = width;
-        self.max_height = height;
-        self
-    }
-
-    /// Caps the image's native interleaved 8-bit raster in bytes: `width × height × frame
-    /// components`.
+    /// Sets the resource bounds ([`DecodeLimits`]) the decoder enforces.
     ///
-    /// The cap is independent of the requested presentation type: for example, a one-component
-    /// grayscale JPEG costs one byte per pixel even when decoded as [`Rgb8`]. For a DNL-deferred
-    /// height, the decoder derives a safe MCU-row ceiling from this budget before growing its sample
-    /// planes. The default is 64 MiB; `usize::MAX` lifts the budget for trusted input.
+    /// The width and height bounds refuse a wider SOF, or a known taller one, before any
+    /// frame-sized allocation; a DNL-deferred height is bounded while its first scan is decoded and
+    /// checked exactly when the DNL arrives. The byte bound caps the image's **native** interleaved
+    /// 8-bit raster, `width × height × frame components`, independently of the requested
+    /// presentation type: a one-component grayscale JPEG costs one byte per pixel even when decoded
+    /// as [`Rgb8`]. For a DNL-deferred height the decoder derives a safe MCU-row ceiling from that
+    /// budget before growing its sample planes. A breach is an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
+    ///
+    /// The default caps each side at 65535, the most a frame header can declare, and the raster at
+    /// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`] (64 MiB).
     #[must_use]
-    pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
-        self.max_image_bytes = bytes;
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -196,7 +185,7 @@ impl JpegDecoder {
     /// since inventing a luminance from colour is a choice only the caller can make. Grayscale
     /// still replicates into RGB, which loses nothing.
     #[must_use]
-    pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
+    pub fn with_convert_policy(mut self, policy: ConvertPolicy) -> Self {
         self.policy = policy;
         self
     }
@@ -213,20 +202,26 @@ impl JpegDecoder {
         self
     }
 
-    /// Appends a [`JpegStreamDecoder`] backend to this decoder's registry.
+    /// Appends a [`JpegCodestreamDecoder`] backend to this decoder's registry and returns the
+    /// decoder.
     ///
     /// Backends are consulted in **push order** for every decode, each being offered the
-    /// crate-parsed [`JpegStreamInfo`] through [`JpegStreamDecoder::supports`]; the first to accept
-    /// receives the **whole** SOI..EOI stream. The built-in decoder is the implicit tail, used only
-    /// when every backend declines. See the [`crate::backend`] module docs for the full contract.
+    /// crate-parsed [`JpegStreamInfo`] through [`JpegCodestreamDecoder::supports`]; the first to
+    /// accept receives the **whole** SOI..EOI stream. The built-in decoder is the implicit tail,
+    /// used only when every backend declines; a backend that accepts and then fails returns its
+    /// error unchanged. APPn metadata ([`Self::metadata`]) is always read crate-side.
+    ///
+    /// `Send` is bound here, where the backend is inserted, rather than on the trait, so the
+    /// decoder stays `Send + Sync`.
     ///
     /// # Cloning shares backends
     ///
     /// Backends are stored behind `Arc<Mutex<..>>`, so **cloning a `JpegDecoder` shares them with
     /// the clone** rather than duplicating them: a stateful backend sees the decodes of every clone,
-    /// and its lock serializes concurrent ones. Build a fresh decoder when a clone needs its own
-    /// backend instances.
-    pub fn push_backend(&mut self, backend: impl JpegStreamDecoder + 'static) -> &mut Self {
+    /// and its lock serializes concurrent ones. A backend added to one decoder after the clone is
+    /// not seen by the other.
+    #[must_use]
+    pub fn with_backend(mut self, backend: impl JpegCodestreamDecoder + Send + 'static) -> Self {
         self.backends.push(Arc::new(Mutex::new(backend)));
         self
     }
@@ -240,7 +235,11 @@ impl JpegDecoder {
             return Ok(None);
         }
         let info = JpegStreamInfo::parse(data)?;
-        self.check_limits(info.width(), info.height(), usize::from(info.components()))?;
+        self.check_limits(
+            info.width(),
+            info.height().unwrap_or(0),
+            usize::from(info.components()),
+        )?;
         let decoded = backend::decode_with_backends(&self.backends, &info, data)?;
         if let Some(img) = &decoded {
             self.check_limits(img.width(), img.height(), img.format().channels())?;
@@ -251,7 +250,7 @@ impl JpegDecoder {
     /// Checks dimensions and native raster bytes. A zero `height` is a DNL-deferred SOF: width and
     /// the minimum possible one-row raster are still checked immediately.
     fn check_limits(&self, width: u32, height: u32, components: usize) -> Result<()> {
-        if width > self.max_width || (height != 0 && height > self.max_height) {
+        if width > self.limits.max_width() || (height != 0 && height > self.limits.max_height()) {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: image exceeds the dimension limit",
@@ -274,7 +273,7 @@ impl JpegDecoder {
                     Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: image dimensions overflow")
                 })?
         };
-        if native_bytes > self.max_image_bytes {
+        if native_bytes > self.limits.max_image_bytes() {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: image exceeds the size limit",
@@ -294,7 +293,7 @@ impl JpegDecoder {
             rows: scan_mcu_rows(
                 frame,
                 scan,
-                usize::try_from(self.max_height).unwrap_or(usize::MAX),
+                usize::try_from(self.limits.max_height()).unwrap_or(usize::MAX),
             ),
             message: "JPEG: image exceeds the dimension limit",
         };
@@ -304,7 +303,7 @@ impl JpegDecoder {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: image dimensions overflow")
             })?;
         let size_limit = McuRowLimit {
-            rows: scan_mcu_rows(frame, scan, self.max_image_bytes / row_bytes),
+            rows: scan_mcu_rows(frame, scan, self.limits.max_image_bytes() / row_bytes),
             message: "JPEG: image exceeds the size limit",
         };
         Ok(if size_limit.rows < dimension_limit.rows {
@@ -330,7 +329,7 @@ fn scan_mcu_rows(frame: &Frame, scan: &crate::syntax::ScanHeader, height: usize)
     }
 }
 
-/// The DCT process a JPEG stream uses, as reported by [`info`].
+/// The DCT process a JPEG stream uses, as reported by [`JpegDecoder::info`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JpegProcess {
@@ -342,7 +341,7 @@ pub enum JpegProcess {
     Progressive,
 }
 
-/// A lightweight summary of a JPEG stream's frame header, from [`info`].
+/// A lightweight summary of a JPEG stream's frame header, from [`JpegDecoder::info`].
 ///
 /// Reads only the marker segments up to and including the frame header — no entropy decoding — so it
 /// is cheap to call before committing to a full decode. Marked `#[non_exhaustive]` so fields can be
@@ -352,8 +351,9 @@ pub enum JpegProcess {
 pub struct JpegInfo {
     /// Samples per line `X` (§B.2.2).
     pub width: u32,
-    /// Number of lines `Y`; `0` if the frame defers its height to a DNL segment.
-    pub height: u32,
+    /// Number of lines `Y`; `None` when the frame defers its height to a DNL segment (§B.2.5) —
+    /// the frame header's `Y = 0` is that deferral, never an empty image.
+    pub height: Option<u32>,
     /// Number of components `Nf`.
     pub components: u8,
     /// Sample precision `P` in bits.
@@ -362,38 +362,115 @@ pub struct JpegInfo {
     pub process: JpegProcess,
 }
 
-/// Reads a JPEG stream's frame header without decoding it, returning its [`JpegInfo`].
-///
-/// # Errors
-///
-/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream
-/// is malformed or has no frame header, or an
-/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the frame uses a process
-/// other than baseline / extended-sequential / progressive DCT.
-pub fn info(data: &[u8]) -> Result<JpegInfo> {
-    let (process, payload) = frame_header(data)?;
-    // Frame header layout (§B.2.2): P, Y(2), X(2), Nf, then components.
-    let precision = *payload.first().ok_or_else(trunc_sof)?;
-    let y = u16::from_be_bytes([
-        *payload.get(1).ok_or_else(trunc_sof)?,
-        *payload.get(2).ok_or_else(trunc_sof)?,
-    ]);
-    let x = u16::from_be_bytes([
-        *payload.get(3).ok_or_else(trunc_sof)?,
-        *payload.get(4).ok_or_else(trunc_sof)?,
-    ]);
-    let nf = *payload.get(5).ok_or_else(trunc_sof)?;
-    Ok(JpegInfo {
-        width: u32::from(x),
-        height: u32::from(y),
-        components: nf,
-        precision,
-        process,
-    })
+impl JpegDecoder {
+    /// Reads a JPEG stream's frame header without decoding it, returning its [`JpegInfo`].
+    ///
+    /// No configuration of the decoder affects the answer: it reads only the marker segments up to
+    /// and including the frame header, and enforces no [`DecodeLimits`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// stream is malformed or has no frame header, or an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the frame uses a
+    /// process other than baseline / extended-sequential / progressive DCT.
+    pub fn info(&self, data: &[u8]) -> Result<JpegInfo> {
+        let (process, payload) = frame_header(data)?;
+        // Frame header layout (§B.2.2): P, Y(2), X(2), Nf, then components.
+        let precision = *payload.first().ok_or_else(trunc_sof)?;
+        let y = u16::from_be_bytes([
+            *payload.get(1).ok_or_else(trunc_sof)?,
+            *payload.get(2).ok_or_else(trunc_sof)?,
+        ]);
+        let x = u16::from_be_bytes([
+            *payload.get(3).ok_or_else(trunc_sof)?,
+            *payload.get(4).ok_or_else(trunc_sof)?,
+        ]);
+        let nf = *payload.get(5).ok_or_else(trunc_sof)?;
+        Ok(JpegInfo {
+            width: u32::from(x),
+            height: (y != 0).then_some(u32::from(y)),
+            components: nf,
+            precision,
+            process,
+        })
+    }
+
+    /// Reads a JPEG stream's embedded APP1/APP2 metadata without decoding any pixels.
+    ///
+    /// Walks the marker segments up to the first SOS (or EOI) — metadata segments precede the scan
+    /// data, so no entropy decoding happens — and collects the three de-facto payloads into a
+    /// [`RawMetadata`]: APP1 EXIF (Exif 3.0 §4.7.2) as the TIFF stream with its `"Exif\0\0"`
+    /// signature stripped, APP1 XMP (XMP Part 3 §1.1.3) as the `xpacket` with its namespace-URI
+    /// signature stripped, and the APP2 `ICC_PROFILE` chunk sequence (ICC.1:2001-04 Annex B.4),
+    /// reassembled by chunk index regardless of segment order. For a duplicated EXIF or XMP APP1
+    /// the first segment wins (the libjpeg-family convention); ExtendedXMP continuation segments
+    /// and unrecognized APP1/APP2 payloads are skipped. Metadata is always read crate-side: no
+    /// pushed backend is consulted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// stream is malformed before the first scan, or if the `ICC_PROFILE` chunk sequence is
+    /// inconsistent (index/count out of range, duplicated, mismatched, or missing chunks).
+    ///
+    /// # Example
+    ///
+    /// The extracted payload is byte-for-byte identical to the one given to the encoder:
+    ///
+    /// ```
+    /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, RawMetadata};
+    /// use gamut_jpeg::{JpegDecoder, JpegEncoder};
+    ///
+    /// let icc = b"opaque ICC profile bytes";
+    /// let pixels = vec![0u8; 64];
+    /// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
+    /// let jpeg = JpegEncoder::new().with_icc_profile(icc).encode_to_vec(image)?;
+    /// let meta = JpegDecoder::new().metadata(&jpeg)?;
+    /// assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()));
+    ///
+    /// let bare = JpegEncoder::new().encode_to_vec(image)?;
+    /// assert_eq!(JpegDecoder::new().metadata(&bare)?, RawMetadata::default());
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    pub fn metadata(&self, data: &[u8]) -> Result<RawMetadata> {
+        expect_soi(data)?;
+        let mut meta = RawMetadata::default();
+        let mut icc = appmeta::IccAssembler::default();
+        let mut pos = 2;
+        loop {
+            let (marker, after) = read_marker(data, pos)?;
+            match marker {
+                code::SOS | code::EOI_CODE => break,
+                code::SOI | code::TEM | code::RST0..=code::RST7 => {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "JPEG: unexpected standalone marker",
+                    ));
+                }
+                _ => {}
+            }
+            let (payload, next) = read_segment(data, after)?;
+            match marker {
+                code::APP1 => {
+                    if let Some(tiff) = appmeta::exif_payload(payload) {
+                        meta.exif.get_or_insert_with(|| tiff.to_vec());
+                    } else if let Some(packet) = appmeta::xmp_payload(payload) {
+                        meta.xmp.get_or_insert_with(|| packet.to_vec());
+                    }
+                }
+                code::APP2 => icc.add(payload)?,
+                _ => {}
+            }
+            pos = next;
+        }
+        meta.icc = icc.finish()?;
+        Ok(meta)
+    }
 }
 
 /// Walks the marker layer to the frame header, returning its process and raw SOFn payload without
-/// entropy decoding. Shared by [`info`] and [`crate::JpegStreamInfo::parse`], which read different
+/// entropy decoding. Shared by [`JpegDecoder::info`] and [`crate::JpegStreamInfo::parse`], which read different
 /// field subsets out of the same payload.
 ///
 /// # Errors
@@ -439,107 +516,6 @@ pub(crate) fn frame_header(data: &[u8]) -> Result<(JpegProcess, &[u8])> {
         let (payload, _) = read_segment(data, after)?;
         return Ok((process, payload));
     }
-}
-
-/// Embedded APP-segment metadata read from a JPEG stream by [`metadata`].
-///
-/// Each payload is stored with its APPn signature header stripped, in the form the dedicated
-/// metadata crates parse (and [`gamut-metadata`](https://crates.io/crates/gamut-metadata)'s
-/// `MetadataBlock` borrows) directly. Marked `#[non_exhaustive]` so carriers (e.g. APP13 IPTC) can
-/// be added without a breaking change.
-///
-/// # Example
-///
-/// The extracted payload is byte-for-byte identical to the one given to the encoder. It can then
-/// be borrowed directly by a typed metadata facade without re-framing:
-///
-/// ```
-/// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
-/// use gamut_jpeg::JpegEncoder;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let icc = b"opaque ICC profile bytes";
-/// let pixels = vec![0u8; 64];
-/// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
-/// let jpeg = JpegEncoder::new().with_icc_profile(icc).encode_to_vec(image)?;
-///
-/// let meta = gamut_jpeg::metadata(&jpeg)?;
-/// assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()));
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct JpegMetadata {
-    /// The EXIF TIFF stream (APP1, `"Exif\0\0"` signature stripped; starts `II`/`MM`).
-    pub exif: Option<Vec<u8>>,
-    /// The XMP `xpacket` (APP1, namespace-URI signature stripped).
-    pub xmp: Option<Vec<u8>>,
-    /// The ICC profile, reassembled from its APP2 `ICC_PROFILE` chunks.
-    pub icc: Option<Vec<u8>>,
-}
-
-/// Reads a JPEG stream's embedded APP1/APP2 metadata without decoding any pixels.
-///
-/// Walks the marker segments up to the first SOS (or EOI) — metadata segments precede the scan
-/// data, so no entropy decoding happens — and collects the three de-facto payloads: APP1 EXIF
-/// (Exif 3.0 §4.7.2), APP1 XMP (XMP Part 3 §1.1.3), and the APP2 `ICC_PROFILE` chunk sequence
-/// (ICC.1:2001-04 Annex B.4), reassembled by chunk index regardless of segment order. For a
-/// duplicated EXIF or XMP APP1 the first segment wins (the libjpeg-family convention); ExtendedXMP
-/// continuation segments and unrecognized APP1/APP2 payloads are skipped.
-///
-/// # Errors
-///
-/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream
-/// is malformed before the first scan, or if the
-/// `ICC_PROFILE` chunk sequence is inconsistent (index/count out of range, duplicated, mismatched,
-/// or missing chunks).
-///
-/// # Example
-///
-/// ```
-/// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
-/// use gamut_jpeg::JpegEncoder;
-///
-/// let pixels = vec![128u8; 64];
-/// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
-/// let jpeg = JpegEncoder::new().encode_to_vec(image)?;
-/// assert_eq!(gamut_jpeg::metadata(&jpeg)?, gamut_jpeg::JpegMetadata::default());
-/// # Ok::<(), gamut_core::Error>(())
-/// ```
-pub fn metadata(data: &[u8]) -> Result<JpegMetadata> {
-    expect_soi(data)?;
-    let mut meta = JpegMetadata::default();
-    let mut icc = appmeta::IccAssembler::default();
-    let mut pos = 2;
-    loop {
-        let (marker, after) = read_marker(data, pos)?;
-        match marker {
-            code::SOS | code::EOI_CODE => break,
-            code::SOI | code::TEM | code::RST0..=code::RST7 => {
-                return Err(Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "JPEG: unexpected standalone marker",
-                ));
-            }
-            _ => {}
-        }
-        let (payload, next) = read_segment(data, after)?;
-        match marker {
-            code::APP1 => {
-                if let Some(tiff) = appmeta::exif_payload(payload) {
-                    meta.exif.get_or_insert_with(|| tiff.to_vec());
-                } else if let Some(packet) = appmeta::xmp_payload(payload) {
-                    meta.xmp.get_or_insert_with(|| packet.to_vec());
-                }
-            }
-            code::APP2 => icc.add(payload)?,
-            _ => {}
-        }
-        pos = next;
-    }
-    meta.icc = icc.finish()?;
-    Ok(meta)
 }
 
 /// Shared truncated-frame-header error.
@@ -2085,28 +2061,31 @@ mod tests {
         let resolved = gray_stream(8, 0, &[flat(5), flat(6)], Some((4, 16)));
         assert!(
             DecodeImage::<Gray8>::decode_image(
-                &JpegDecoder::new().with_max_dimensions(8, 16),
+                &JpegDecoder::new()
+                    .with_limits(DecodeLimits::new().with_max_width(8).with_max_height(16)),
                 &resolved,
             )
             .is_ok()
         );
         assert_eq!(
             err_msg(DecodeImage::<Gray8>::decode_image(
-                &JpegDecoder::new().with_max_dimensions(8, 15),
+                &JpegDecoder::new()
+                    .with_limits(DecodeLimits::new().with_max_width(8).with_max_height(15)),
                 &resolved,
             )),
             "JPEG: image exceeds the dimension limit"
         );
         assert!(
             DecodeImage::<Gray8>::decode_image(
-                &JpegDecoder::new().with_max_image_bytes(8 * 16),
+                &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 16)),
                 &resolved,
             )
             .is_ok()
         );
         assert_eq!(
             err_msg(DecodeImage::<Gray8>::decode_image(
-                &JpegDecoder::new().with_max_image_bytes(8 * 16 - 1),
+                &JpegDecoder::new()
+                    .with_limits(DecodeLimits::new().with_max_image_bytes(8 * 16 - 1)),
                 &resolved,
             )),
             "JPEG: image exceeds the size limit"
@@ -2117,14 +2096,15 @@ mod tests {
         let no_dnl = gray_stream(8, 0, &[flat(1), flat(2), flat(3)], None);
         assert_eq!(
             err_msg(DecodeImage::<Gray8>::decode_image(
-                &JpegDecoder::new().with_max_dimensions(8, 8),
+                &JpegDecoder::new()
+                    .with_limits(DecodeLimits::new().with_max_width(8).with_max_height(8)),
                 &no_dnl,
             )),
             "JPEG: image exceeds the dimension limit"
         );
         assert_eq!(
             err_msg(DecodeImage::<Gray8>::decode_image(
-                &JpegDecoder::new().with_max_image_bytes(8 * 8),
+                &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 8)),
                 &no_dnl,
             )),
             "JPEG: image exceeds the size limit"
@@ -2216,25 +2196,34 @@ mod tests {
 
         assert_eq!(
             selected(
-                JpegDecoder::new()
-                    .with_max_dimensions(8, 24)
-                    .with_max_image_bytes(8 * 8),
+                JpegDecoder::new().with_limits(
+                    DecodeLimits::new()
+                        .with_max_width(8)
+                        .with_max_height(24)
+                        .with_max_image_bytes(8 * 8)
+                ),
             ),
             (1, "JPEG: image exceeds the size limit")
         );
         assert_eq!(
             selected(
-                JpegDecoder::new()
-                    .with_max_dimensions(8, 8)
-                    .with_max_image_bytes(8 * 24),
+                JpegDecoder::new().with_limits(
+                    DecodeLimits::new()
+                        .with_max_width(8)
+                        .with_max_height(8)
+                        .with_max_image_bytes(8 * 24)
+                ),
             ),
             (1, "JPEG: image exceeds the dimension limit")
         );
         assert_eq!(
             selected(
-                JpegDecoder::new()
-                    .with_max_dimensions(8, 8)
-                    .with_max_image_bytes(8 * 8),
+                JpegDecoder::new().with_limits(
+                    DecodeLimits::new()
+                        .with_max_width(8)
+                        .with_max_height(8)
+                        .with_max_image_bytes(8 * 8)
+                ),
             ),
             (1, "JPEG: image exceeds the dimension limit")
         );
@@ -2279,6 +2268,21 @@ mod tests {
         );
     }
 
+    /// A frame header's `Y = 0` defers the height to a DNL segment (§B.2.5): `info` reports it as
+    /// no height, and any other `Y` as that height.
+    #[test]
+    fn info_reports_a_dnl_deferred_height_as_none() {
+        let sof = |y: u8| {
+            vec![
+                0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 8, 0x00, y, 0x00, 0x08, 1, 1, 0x11, 0, 0xFF,
+                0xD9,
+            ]
+        };
+        let decoder = JpegDecoder::new();
+        assert_eq!(decoder.info(&sof(0)).unwrap().height, None);
+        assert_eq!(decoder.info(&sof(1)).unwrap().height, Some(1));
+    }
+
     #[test]
     fn unsupported_and_structural_markers_are_classified() {
         let base = gray_stream(8, 8, &[flat(3)], None);
@@ -2289,12 +2293,18 @@ mod tests {
             m
         };
         // info() distinguishes each supported process by its SOFn marker.
-        assert_eq!(info(&base).unwrap().process, JpegProcess::Baseline);
         assert_eq!(
-            info(&flip(0xC1)).unwrap().process,
+            JpegDecoder::new().info(&base).unwrap().process,
+            JpegProcess::Baseline
+        );
+        assert_eq!(
+            JpegDecoder::new().info(&flip(0xC1)).unwrap().process,
             JpegProcess::ExtendedSequential
         );
-        assert_eq!(info(&flip(0xC2)).unwrap().process, JpegProcess::Progressive);
+        assert_eq!(
+            JpegDecoder::new().info(&flip(0xC2)).unwrap().process,
+            JpegProcess::Progressive
+        );
         // The unsupported processes (lossless, hierarchical, arithmetic) decode to a specific
         // `Unsupported` error (not merely any error). SOF2 (0xC2) is now a supported process, so it
         // is excluded here: a baseline SOS under a SOF2 header fails the progressive DC-scan check
@@ -2312,12 +2322,12 @@ mod tests {
         // info() reports Unsupported for an unsupported process, InvalidInput for a scan-before-frame
         // stream (SOS with no preceding SOF).
         assert!(matches!(
-            info(&flip(0xC3)),
+            JpegDecoder::new().info(&flip(0xC3)),
             Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
         ));
         let early = [0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x08, 1, 1, 0x00, 0, 63, 0];
         assert!(matches!(
-            info(&early),
+            JpegDecoder::new().info(&early),
             Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
 
@@ -2614,12 +2624,12 @@ mod tests {
         // info() on SOI+EOI (no frame header): the SOS/EOI arm's own message — a deleted arm would
         // fall into the skip-segment path and misreport a truncated segment.
         assert_eq!(
-            err_msg(info(&[0xFF, 0xD8, 0xFF, 0xD9])),
+            err_msg(JpegDecoder::new().info(&[0xFF, 0xD8, 0xFF, 0xD9])),
             "JPEG: no frame header before scan/end"
         );
         // info() on a standalone TEM after SOI: the standalone-marker arm's own message.
         assert_eq!(
-            err_msg(info(&[0xFF, 0xD8, 0xFF, 0x01, 0xFF, 0xD9])),
+            err_msg(JpegDecoder::new().info(&[0xFF, 0xD8, 0xFF, 0x01, 0xFF, 0xD9])),
             "JPEG: unexpected standalone marker"
         );
         // Decode: a TEM outside a scan is the decode loop's own standalone-marker message.

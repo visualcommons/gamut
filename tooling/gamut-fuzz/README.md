@@ -158,7 +158,7 @@ defect, not a restatement of a documented default:
 | target | crate | entry points | configuration |
 |---|---|---|---|
 | `png_decode` | `gamut-png` | `PngDecoder::decode` (the rich path: every ancillary payload inflated) | default — 64 MiB sample budget, 16 MiB metadata budget |
-| `jpeg_decode` | `gamut-jpeg` | `metadata`, `DecodeImage<Rgb8>` | default (#1024): a 64 MiB raster budget with dimensions at the format's 16-bit ceiling. The target restates it explicitly through `with_max_image_bytes` and `with_max_dimensions`. `permissive` policy, so CMYK/YCCK converts |
+| `jpeg_decode` | `gamut-jpeg` | `JpegDecoder::metadata`, `DecodeImage<Rgb8>` | default (#1024): a 64 MiB raster budget with dimensions at the format's 16-bit ceiling. The target restates it explicitly through `with_limits`. `permissive` policy, so CMYK/YCCK converts |
 | `webp_decode` | `gamut-webp` | `DecodeImage<Rgba8>` | default — no configurable limit (#1025); the 14-bit frame dimensions bound it, but not inside libFuzzer's 2048 MB RSS limit: a conformant 16 384 × 16 384 lossless frame peaks above it, so an OOM report needs the triage the target's doc gives |
 | `riff_chunks` | `gamut-riff` | `RiffReader` (to `None`), `MetadataChunks::read`, `WebpLayout::parse`, `c2pa_summary` | — |
 | `jxl_decode` | `gamut-jxl` | `info`, `embedded_icc_profile`, `metadata_boxes`, `DecodeImage<Rgba8>`, and `decode_partial_image` where the full decode fails | `decode` feature only (no libjxl build); `permissive` policy |

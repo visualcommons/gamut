@@ -76,7 +76,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
 - **gamut-jpeg** — JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec: baseline sequential DCT
   Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0/4:4:0, JFIF; opt-in jpegli-style XYB colour mode
   with a static vendored ICC profile), sequential/progressive decoder and progressive encoder
-  phased in per its STATUS.md.
+  phased in per its STATUS.md, plus the T.81 lossless process (SOF3, the `lossless` module) that
+  gamut-dng's `Compression = 7` codes with.
   ← core, bitstream (the T.81 Annex K.2 optimal-table builder and Annex C canonical codes),
   codec-abi, color, dsp, cmm (optional, `cmm` feature: `decode_srgb` applies the embedded ICC
   profile), icc (optional, `cmm` feature), metadata (optional, `metadata` feature).
@@ -136,7 +137,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw
   photometry, uncompressed/Deflate/lossless-JPEG/JPEG XL, colour-calibration profile,
   EXIF/XMP/ICC metadata. ← ifd, bitstream, color, metadata, core, deflate (Deflate encode, and
-  decode via its `inflate` feature), jxl (JPEG XL, `Compression = 52546`). MSB-first sub-byte packing reuses
+  decode via its `inflate` feature), jpeg (lossless JPEG, `Compression = 7`: gamut-jpeg's SOF3
+  coder), jxl (JPEG XL, `Compression = 52546`). MSB-first sub-byte packing reuses
   `gamut-bitstream`; the DNG §6 `AsShotWhiteXY` → camera-neutral conversion reuses
   `gamut-color`'s chromaticity/3×3/CCT math; `DngMetadata` carries the facade's own models — a
   DNG `ExifIFD` *is* an EXIF sub-IFD, so it is `gamut-exif`'s `Exif` over the same `gamut-ifd`
