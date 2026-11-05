@@ -1650,10 +1650,15 @@ mod tests {
         let comment = "zlib-compressed comment body";
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_gamma(1.0 / 2.2)
+            .with_gamma(45_455)
             .with_srgb(SrgbIntent::Perceptual)
             .with_cicp(crate::Cicp::new(9, 16, true))
-            .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
+            .with_chromaticities(crate::Chromaticities::new(
+                (31_270, 32_900),
+                (64_000, 33_000),
+                (30_000, 60_000),
+                (15_000, 6_000),
+            ))
             .with_exif(&exif)
             .with_icc_profile_name("prof")
             .with_icc_profile(b"not-a-real-profile-but-bytes")

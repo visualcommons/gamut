@@ -33,7 +33,8 @@ use crate::backend::{Deflaters, IdatInfo, ZlibDeflater, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
 use crate::decoded::{
-    Background, Cicp, ModificationTime, PhysicalDimensions, PngMetadata, TextChunkKind,
+    Background, Chromaticities, Cicp, ModificationTime, PhysicalDimensions, PngMetadata,
+    TextChunkKind,
 };
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::{PaletteOrder, Plte};
@@ -775,10 +776,12 @@ impl PngEncoder {
         self
     }
 
-    /// Records an image gamma (gAMA chunk). `gamma` is the encoding gamma, e.g. `1.0 / 2.2`.
+    /// Records an image gamma (gAMA chunk, §11.3.2.2) in the unit the chunk stores: the encoding
+    /// gamma × 100 000, so `45_455` for `1 / 2.2` — the value [`PngMetadata::gamma`] reads back,
+    /// written byte for byte.
     #[must_use]
-    pub fn with_gamma(mut self, gamma: f64) -> Self {
-        self.ancillary.gamma = Some((gamma * 100_000.0).round().max(0.0) as u32);
+    pub fn with_gamma(mut self, gamma: u32) -> Self {
+        self.ancillary.gamma = Some(gamma);
         self
     }
 
@@ -818,25 +821,21 @@ impl PngEncoder {
         self
     }
 
-    /// Records the white point and RGB primary chromaticities (cHRM chunk), each as `(x, y)`.
+    /// Records the white point and RGB primary chromaticities (cHRM chunk, §11.3.2.1), each
+    /// coordinate × 100 000 as the chunk stores it — the value [`PngMetadata::chromaticities`]
+    /// reads back, written byte for byte. Build one with [`Chromaticities::new`].
+    ///
+    /// [`Chromaticities::new`]: crate::Chromaticities::new
     #[must_use]
-    pub fn with_chromaticities(
-        mut self,
-        white: (f64, f64),
-        red: (f64, f64),
-        green: (f64, f64),
-        blue: (f64, f64),
-    ) -> Self {
-        let q = |v: f64| (v * 100_000.0).round().max(0.0) as u32;
+    pub fn with_chromaticities(mut self, chromaticities: Chromaticities) -> Self {
+        let Chromaticities {
+            white,
+            red,
+            green,
+            blue,
+        } = chromaticities;
         self.ancillary.chrm = Some([
-            q(white.0),
-            q(white.1),
-            q(red.0),
-            q(red.1),
-            q(green.0),
-            q(green.1),
-            q(blue.0),
-            q(blue.1),
+            white.0, white.1, red.0, red.1, green.0, green.1, blue.0, blue.1,
         ]);
         self
     }
@@ -1099,23 +1098,11 @@ impl PngEncoder {
         if metadata.c2pa.is_some() {
             self.carry_notices.push(MetadataNotice::C2paManifestStore);
         }
-        // Set in the stored ×100 000 fixed-point units rather than through `with_gamma` /
-        // `with_chromaticities`, whose `f64` arguments would round-trip the value through a
-        // division and a `round()`: preservation must be byte-exact.
         if let Some(gamma) = metadata.gamma {
-            self.ancillary.gamma = Some(gamma);
+            self = self.with_gamma(gamma);
         }
-        if let Some(chrm) = metadata.chromaticities {
-            self.ancillary.chrm = Some([
-                chrm.white.0,
-                chrm.white.1,
-                chrm.red.0,
-                chrm.red.1,
-                chrm.green.0,
-                chrm.green.1,
-                chrm.blue.0,
-                chrm.blue.1,
-            ]);
+        if let Some(chromaticities) = metadata.chromaticities {
+            self = self.with_chromaticities(chromaticities);
         }
         // Through the same setters a caller uses, so each is emitted for the header actually
         // written exactly as a caller-set one is (`ancillary::sbit_for` / `bkgd_for`). The read

@@ -261,7 +261,7 @@ pub struct DecodedPng {
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let pixels = vec![0u8; 3 * 4];
 /// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
-/// let png = PngEncoder::new().with_gamma(1.0 / 2.2).encode_to_vec(image)?;
+/// let png = PngEncoder::new().with_gamma(45_455).encode_to_vec(image)?;
 ///
 /// // gAMA stores the encoding gamma × 100 000, uncompressed — so a probe can read a PNG's
 /// // colour information without inflating anything.
@@ -344,6 +344,25 @@ impl Cicp {
             transfer_function,
             matrix_coefficients: 0,
             full_range,
+        }
+    }
+}
+
+impl Chromaticities {
+    /// The white point and the red, green and blue primaries, each `(x, y)` coordinate × 100 000
+    /// as cHRM stores it (§11.3.2.1): D65 is `(31_270, 32_900)`.
+    #[must_use]
+    pub const fn new(
+        white: (u32, u32),
+        red: (u32, u32),
+        green: (u32, u32),
+        blue: (u32, u32),
+    ) -> Self {
+        Self {
+            white,
+            red,
+            green,
+            blue,
         }
     }
 }

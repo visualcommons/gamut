@@ -54,15 +54,15 @@ fn every_carrier_round_trips_byte_exact() {
             .with_text("Author", "nobody")
             .with_compressed_text("Comment", "compressed comment")
             .with_international_text("Title", "international title")
-            .with_gamma(1.0 / 2.2)
+            .with_gamma(45_455)
             .with_srgb(SrgbIntent::RelativeColorimetric)
             .with_cicp(Cicp::new(9, 16, true))
-            .with_chromaticities(
-                (0.3127, 0.3290),
-                (0.6400, 0.3300),
-                (0.3000, 0.6000),
-                (0.1500, 0.0600),
-            )
+            .with_chromaticities(gamut_png::Chromaticities::new(
+                (31_270, 32_900),
+                (64_000, 33_000),
+                (30_000, 60_000),
+                (15_000, 6_000),
+            ))
     });
 
     let meta = gamut_png::metadata(&png).unwrap();
@@ -113,13 +113,13 @@ fn metadata_agrees_with_decode_field_for_field() {
             .unwrap()
             .with_c2pa(b"\0\0\0\x10jumbc2pa")
             .with_text("Author", "nobody")
-            .with_gamma(1.0 / 2.2)
-            .with_chromaticities(
-                (0.3127, 0.3290),
-                (0.6400, 0.3300),
-                (0.3000, 0.6000),
-                (0.1500, 0.0600),
-            )
+            .with_gamma(45_455)
+            .with_chromaticities(gamut_png::Chromaticities::new(
+                (31_270, 32_900),
+                (64_000, 33_000),
+                (30_000, 60_000),
+                (15_000, 6_000),
+            ))
             // Every colour chunk at once, including the sRGB/iCCP pair §4.3 Table 1 ranks: a
             // comparison of two `None`s would not see a chunk wired into one walk and not the
             // other.
@@ -244,7 +244,7 @@ fn the_decoder_entry_point_honours_the_metadata_budget() {
     let png = encode(|e| {
         e.with_icc_profile_name("Tiny")
             .with_icc_profile(&icc)
-            .with_gamma(1.0 / 2.2)
+            .with_gamma(45_455)
     });
 
     let generous = PngDecoder::new().with_max_metadata_bytes(1 << 20);
