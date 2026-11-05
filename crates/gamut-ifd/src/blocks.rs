@@ -8,7 +8,7 @@
 //! *values* change afterwards), writes them to learn where the value pool ends, places every run
 //! of blocks contiguously from the next word boundary, and writes again with the real offsets.
 
-use gamut_core::Result;
+use gamut_core::{Error, Result};
 
 use crate::writer::write;
 use crate::{ByteOrder, Ifd, TiffFile, Value, Variant, align_word};
@@ -99,10 +99,26 @@ fn place(
                 offsets: Value::offset_array(variant, &offsets)?,
                 // A `LONG` per block, whatever the variant: the byte counts' width is not the
                 // offsets' (TIFF 6.0 §3 types them `SHORT` or `LONG`).
-                counts: Value::Long(run.blocks.iter().map(|b| b.len() as u32).collect()),
+                counts: Value::Long(
+                    run.blocks
+                        .iter()
+                        .map(|b| byte_count(b.len()))
+                        .collect::<Result<_>>()?,
+                ),
             })
         })
         .collect()
+}
+
+/// A block's length as the `LONG` its byte-count field stores, refused rather than truncated
+/// when the block is 4 GiB or longer.
+fn byte_count(len: usize) -> Result<u32> {
+    u32::try_from(len).map_err(|_| {
+        Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: block length exceeds the 4 GiB a LONG byte count holds",
+        )
+    })
 }
 
 /// Serialises the directories `tree` builds, followed by the data of every run in `runs`.
@@ -118,8 +134,10 @@ fn place(
 ///
 /// # Errors
 ///
-/// Returns an error when [`write`](crate::write()) refuses the tree, or when a classic-TIFF file
-/// would place a block past the 4 GiB its 32-bit offsets address.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when
+/// [`write`](crate::write()) refuses the tree, when a classic-TIFF file would place a block past
+/// the 4 GiB its 32-bit offsets address, or when any block is 4 GiB or longer — in a BigTIFF too,
+/// because the byte counts are stored as `LONG` in both variants.
 pub fn write_with_blocks(
     order: ByteOrder,
     variant: Variant,
@@ -271,5 +289,21 @@ mod tests {
             u64::from(u32::MAX) + 1
         });
         assert!(got.is_err(), "{got:?}");
+    }
+
+    /// A byte count is the block's length up to the largest `LONG`, and a 4 GiB block is refused,
+    /// not truncated. Asserted on the length alone: no test allocates a 4 GiB block.
+    #[test]
+    fn a_byte_count_past_a_long_is_refused() {
+        assert_eq!(byte_count(5).expect("small"), 5);
+        assert_eq!(
+            byte_count(u32::MAX as usize).expect("largest LONG"),
+            u32::MAX
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let err = byte_count(u32::MAX as usize + 1).expect_err("4 GiB");
+            assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+        }
     }
 }
