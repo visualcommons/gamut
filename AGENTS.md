@@ -92,6 +92,12 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   `hvcC`/NAL layer, pluggable `HevcDecoder` hook for platform HEVC decoders (HEVC bitstream
   decode itself is out of scope here). ← isobmff, core, codec-abi, color, metadata (optional,
   `metadata` feature).
+- **gamut-heif** — the shared HEIF/MIAF still-image layer (issue #1078) under gamut-avif and
+  gamut-heic: the role-typed item model, the `iden`/`grid` derivation walk, `DecodeLimits` /
+  `DecodeOptions`, planar-to-RGBA presentation (with `iovl`, alpha and `clap`/`irot`/`imir`) and
+  the C2PA locator and summary, generic over a per-codec `Codestream` binding whose backends sit in
+  a `gamut-codec-abi` `Registry`. ← core, codec-abi, color, dsp (libavif's bilinear chroma
+  upsampling), isobmff. The codec crates move onto it in their own issues.
 - **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png,
   gamut-tiff and gamut-dng, and their one shared bounded inflate (`inflate_zlib`, behind the
   optional `inflate` feature, over `miniz_oxide`; no in-house decoder by design). ← core

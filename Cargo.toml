@@ -166,6 +166,8 @@ gamut-jxl = { path = "crates/gamut-jxl", version = "0.5.0", default-features = f
 gamut-jxl-sys = { path = "crates/gamut-jxl-sys", version = "0.1.1" }
 gamut-webp = { path = "crates/gamut-webp", version = "0.4.0" }
 gamut-heic = { path = "crates/gamut-heic", version = "0.3.0" }
+# The shared HEIF/MIAF item and decode layer under gamut-avif and gamut-heic (issue #1078).
+gamut-heif = { path = "crates/gamut-heif", version = "0.1.0" }
 gamut-vvc = { path = "crates/gamut-vvc", version = "0.2.2" }
 gamut-tonemap = { path = "crates/gamut-tonemap", version = "1.1.0" }
 # Image metadata primitives (issue #34): the shared TIFF/IFD core plus per-format crates.
