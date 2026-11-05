@@ -272,8 +272,8 @@ impl Planar16 {
         }
         let (width, height) = (full.width as usize, full.height as usize);
         let (cw, ch) = subsampling.chroma_dimensions(full.width, full.height);
-        let (sx, sy) = subsampling.factors();
-        let (sx, sy) = (sx as usize, sy as usize);
+        let f = subsampling.factors();
+        let (sx, sy) = (f.width() as usize, f.height() as usize);
         let [y, u, v] = full.planes;
         let chroma = |p: &[u16]| downsample_box(p, width, height, cw as usize, ch as usize, sx, sy);
         Ok(Self {

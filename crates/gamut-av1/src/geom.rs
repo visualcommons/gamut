@@ -73,8 +73,8 @@ impl PlaneGeom {
             };
             return [luma, none, none];
         }
-        let (fx, fy) = subsampling.factors();
-        let (sx, sy) = (fx.trailing_zeros(), fy.trailing_zeros());
+        let f = subsampling.factors();
+        let (sx, sy) = (f.width().trailing_zeros(), f.height().trailing_zeros());
         let plane = |ss_x: u32, ss_y: u32| PlaneGeom {
             // Ceiling on the visible axes: a 5-sample-wide luma plane has 3 chroma samples.
             w: width.div_ceil(1 << ss_x),
@@ -220,8 +220,8 @@ pub(crate) fn has_chroma(
     if matches!(ss, ChromaSubsampling::Cs400) {
         return false; // NumPlanes == 1
     }
-    let (fx, fy) = ss.factors();
-    let (ss_x, ss_y) = (fx.trailing_zeros(), fy.trailing_zeros());
+    let f = ss.factors();
+    let (ss_x, ss_y) = (f.width().trailing_zeros(), f.height().trailing_zeros());
     // The spec writes this as two sequential tests that both yield 0; since neither branch has a
     // side effect, the disjunction below is equivalent and the evaluation order is immaterial. A
     // `bw`/`bh` of 4 is the spec's `bw4 == 1` / `bh4 == 1`: only a single-MI-cell extent can be

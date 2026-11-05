@@ -15,7 +15,8 @@ use crate::convert::RawImage;
 use crate::{Dimensions, Error, Pixel, Result};
 
 /// The required sample count for `dims` at `P`'s channel count, rejecting overflowing
-/// dimensions (`dims` is never empty: [`Dimensions::new`] is its only constructor). The single
+/// dimensions (`dims` is never empty: both of its constructors, [`Dimensions::new`] and
+/// [`Dimensions::from_nonzero`], rule out zero). The single
 /// validation shared by every buffer constructor.
 fn expected_len<P: Pixel>(dims: Dimensions) -> Result<usize> {
     dims.sample_count(P::CHANNELS).ok_or_else(|| {

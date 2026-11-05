@@ -373,8 +373,8 @@ pub(crate) fn still_from_backend_obus(
     let (color_primaries, transfer_characteristics, matrix_coefficients, full_range) =
         header.colour;
     // Each factor is 1 or 2, so `factor > 1` is its AV1 `subsampling_*` flag.
-    let (fx, fy) = chroma.factors();
-    let (chroma_x, chroma_y) = (u8::from(fx > 1), u8::from(fy > 1));
+    let f = chroma.factors();
+    let (chroma_x, chroma_y) = (u8::from(f.width() > 1), u8::from(f.height() > 1));
     let config = Av1StillConfig {
         seq_profile: header.seq_profile,
         seq_level_idx_0: header.seq_level_idx_0,
