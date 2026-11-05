@@ -534,7 +534,7 @@ pub(crate) fn sequence_header_payload(
 
     // trailing_bits: a 1 then zero-pad to byte alignment.
     w.put_bit(1);
-    w.byte_align();
+    w.align();
     w.into_bytes()
 }
 
@@ -723,12 +723,12 @@ pub(crate) fn frame_header_payload(
     w.put_bit(1); // reduced_tx_set = 1
     // global_motion_params / film_grain_params (intra, not present) ⇒ no bits.
 
-    w.byte_align(); // byte_alignment after frame_header_obu (§5.10)
+    w.align(); // byte_alignment after frame_header_obu (§5.10)
     // tile_group_obu prefix (§5.11.1): for more than one tile, tile_start_and_end_present_flag = 0,
     // then re-align so the tile_size fields / tile data begin on a byte boundary.
     if layout.num_tiles() > 1 {
         w.put_bit(0); // tile_start_and_end_present_flag
-        w.byte_align();
+        w.align();
     }
     w.into_bytes()
 }

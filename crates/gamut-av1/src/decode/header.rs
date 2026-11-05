@@ -1131,10 +1131,10 @@ mod tests {
         // `tile_start_and_end_present_flag` (0) when there is more than one tile: the parser must
         // end on its zero alignment padding, so a field coded that the syntax does not read —
         // which would leave its bits for the fields after it — cannot pass unnoticed.
-        r.byte_alignment().unwrap();
+        r.align().unwrap();
         if fh.tile_info.tile_cols * fh.tile_info.tile_rows > 1 {
             assert!(!r.flag().unwrap(), "tile_start_and_end_present_flag");
-            r.byte_alignment().unwrap();
+            r.align().unwrap();
         }
         assert!(r.remaining_bytes().is_empty(), "unread header bytes");
         (seq, fh)

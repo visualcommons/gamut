@@ -240,8 +240,8 @@ fn update_cdf(cdf: &mut [u16], symbol: usize, count: &mut u16) {
 ///
 /// This is the normative side of the pair: [`SymbolEncoder`] exists to produce bytes this maps
 /// back to symbols. Construct with [`SymbolDecoder::new`] over one tile's coded bytes
-/// (`init_symbol(sz)`, §8.2.2), then read with [`SymbolDecoder::read_symbol`] (static CDFs,
-/// `disable_cdf_update = 1`) or [`SymbolDecoder::read_symbol_adapt`] (§8.2.6 adaptation,
+/// (`init_symbol(sz)`, §8.2.2), then read with [`SymbolDecoder::decode_symbol`] (static CDFs,
+/// `disable_cdf_update = 1`) or [`SymbolDecoder::decode_symbol_adapt`] (§8.2.6 adaptation,
 /// `disable_cdf_update = 0`), matching whatever the encoder did.
 ///
 /// Reads past the end of `data` yield zero bits, exactly as §8.2.2 specifies — a tile's final
@@ -259,8 +259,8 @@ fn update_cdf(cdf: &mut [u16], symbol: usize, count: &mut u16) {
 /// let bytes = enc.finish();
 ///
 /// let mut dec = SymbolDecoder::new(&bytes);
-/// assert_eq!(dec.read_symbol(&cdf), 1);
-/// assert_eq!(dec.read_symbol(&cdf), 0);
+/// assert_eq!(dec.decode_symbol(&cdf), 1);
+/// assert_eq!(dec.decode_symbol(&cdf), 0);
 /// ```
 #[derive(Debug, Clone)]
 pub struct SymbolDecoder<'a> {
@@ -306,7 +306,10 @@ impl<'a> SymbolDecoder<'a> {
             } else {
                 0
             };
-            x = (x << 1) | u32::from(bit);
+            // `+`, not `|`: the shift vacates exactly the bit added, so the two agree on every
+            // input, and `|` carried an equivalent `| -> ^` mutant (removed rather than excluded;
+            // the `+` mutants are each killable).
+            x = (x << 1) + u32::from(bit);
             self.bit_pos += 1;
         }
         x
@@ -316,12 +319,12 @@ impl<'a> SymbolDecoder<'a> {
     ///
     /// `cdf` is the gamut `N`-entry cumulative form (`cdf[N - 1] == 32768`); the adaptation
     /// counter the spec keeps as a trailing `cdf[N]` is **not** part of it, and must not be
-    /// appended. Use [`SymbolDecoder::read_symbol_adapt`] when `disable_cdf_update` is 0.
+    /// appended. Use [`SymbolDecoder::decode_symbol_adapt`] when `disable_cdf_update` is 0.
     ///
     /// The returned symbol is always below `cdf.len()`, and an empty `cdf` decodes nothing and
     /// returns 0: a CDF that breaks the convention yields a meaningless symbol, never a panic or a
     /// read past the slice.
-    pub fn read_symbol(&mut self, cdf: &[u16]) -> usize {
+    pub fn decode_symbol(&mut self, cdf: &[u16]) -> usize {
         // The search is bounded by the alphabet, not by the CDF's contents: `cdf[N - 1] == 32768`
         // is what would otherwise force the last bracket to 0 and end the loop, and a caller can
         // hand over a CDF that does not honour it — the spec's §8.2.6 form, for one, carries the
@@ -370,31 +373,33 @@ impl<'a> SymbolDecoder<'a> {
     /// `count` is the spec's trailing `cdf[N]` adaptation counter; start it at 0 for a freshly
     /// initialised context and keep it beside the CDF so the decoder's contexts evolve in
     /// lockstep with the encoder's.
-    pub fn read_symbol_adapt(&mut self, cdf: &mut [u16], count: &mut u16) -> usize {
-        let s = self.read_symbol(cdf);
+    pub fn decode_symbol_adapt(&mut self, cdf: &mut [u16], count: &mut u16) -> usize {
+        let s = self.decode_symbol(cdf);
         update_cdf(cdf, s, count);
         s
     }
 
     /// Decodes one equiprobable bit (`read_bool()`, AV1 §8.2.3).
-    pub fn read_bool(&mut self) -> bool {
-        self.read_symbol(&BOOL_CDF) != 0
+    pub fn decode_bool(&mut self) -> bool {
+        self.decode_symbol(&BOOL_CDF) != 0
     }
 
     /// Decodes `n` equiprobable bits, most-significant first (`read_literal(n)`, AV1 §8.2.5).
-    pub fn read_literal(&mut self, n: u32) -> u32 {
+    pub fn decode_literal(&mut self, n: u32) -> u32 {
         let mut x = 0;
         for _ in 0..n {
-            x = (x << 1) | u32::from(self.read_bool());
+            // `+`, not `|`, as in `read_f`: the operands are disjoint, so `|` carried an
+            // equivalent `| -> ^` mutant (removed rather than excluded).
+            x = (x << 1) + u32::from(self.decode_bool());
         }
         x
     }
 
-    /// Decodes `read_ns(n)`: an unsigned value in `0..n` (AV1 §4.10.7, symbol-coded form).
+    /// Decodes an unsigned value in `0..n`: the symbol-coded form of `ns(n)` (AV1 §4.10.7).
     ///
     /// Returns 0 for `n == 0` rather than reading anything, so a caller that derives `n` from
     /// other syntax cannot spin on a degenerate range.
-    pub fn read_ns(&mut self, n: u32) -> u32 {
+    pub fn decode_ns(&mut self, n: u32) -> u32 {
         if n == 0 {
             return 0;
         }
@@ -402,11 +407,11 @@ impl<'a> SymbolDecoder<'a> {
         // As in [`crate::BitReader::ns`]: `w` reaches 32 once `n >= 2^31`, so the spec arithmetic
         // is evaluated in u64 to keep `1 << w` off the u32 type width. Every result is `< n`.
         let m = (1u64 << w) - u64::from(n);
-        let v = u64::from(self.read_literal(w - 1));
+        let v = u64::from(self.decode_literal(w - 1));
         if v < m {
             return v as u32;
         }
-        ((v << 1) - m + u64::from(self.read_literal(1))) as u32
+        ((v << 1) - m + u64::from(self.decode_literal(1))) as u32
     }
 
     /// Decodes `L(n)`-style unsigned data whose width is itself coded — the `decode_unsigned`
@@ -424,15 +429,15 @@ impl<'a> SymbolDecoder<'a> {
     /// (release builds mask the shift instead). No saturating behaviour is defined for that
     /// case — AV1 gives this helper no bound to saturate against, so the domain is left to the
     /// caller rather than invented here.
-    pub fn read_golomb(&mut self, max_bits: u32) -> u32 {
+    pub fn decode_golomb(&mut self, max_bits: u32) -> u32 {
         let mut length = 0u32;
-        while length < max_bits && !self.read_bool() {
+        while length < max_bits && !self.decode_bool() {
             length += 1;
         }
         if length == 0 {
             return 1;
         }
-        let rest = self.read_literal(length);
+        let rest = self.decode_literal(length);
         (1u32 << length) + rest
     }
 
@@ -532,42 +537,42 @@ mod tests {
     }
 
     /// Round-trips one `(value, n)` pair through the symbol coder.
-    fn check_read_ns(value: u32, n: u32) {
+    fn check_decode_ns(value: u32, n: u32) {
         let mut enc = SymbolEncoder::new();
         encode_ns(&mut enc, value, n);
         let bytes = enc.finish();
         let mut dec = SymbolDecoder::new(&bytes);
-        assert_eq!(dec.read_ns(n), value, "read_ns n={n} v={value}");
+        assert_eq!(dec.decode_ns(n), value, "decode_ns n={n} v={value}");
     }
 
     #[test]
-    fn read_ns_matches_the_spec_definition() {
+    fn decode_ns_matches_the_spec_definition() {
         // Every value in 0..n for a range that exercises both branches.
         for n in 1u32..=17 {
             for value in 0..n {
-                check_read_ns(value, n);
+                check_decode_ns(value, n);
             }
         }
 
         // `n == 0` reads nothing and yields 0 rather than deriving a width from an empty range.
         let bytes = SymbolEncoder::new().finish();
         let mut dec = SymbolDecoder::new(&bytes);
-        assert_eq!(dec.read_ns(0), 0);
+        assert_eq!(dec.decode_ns(0), 0);
     }
 
     #[test]
-    fn read_ns_spans_the_whole_u32_range() {
+    fn decode_ns_spans_the_whole_u32_range() {
         // `n >= 2^31` drives `w` to 32, where `(1 << w)` is a full-width u32 shift. Same
         // boundary probes as `BitReader::ns`: the short branch, the crossing at `m`, and the
         // maximum value.
         for value in [0, 1, (1u32 << 31) - 1] {
-            check_read_ns(value, 1u32 << 31);
+            check_decode_ns(value, 1u32 << 31);
         }
         for value in [0, (1u32 << 31) - 2, (1u32 << 31) - 1, 1u32 << 31] {
-            check_read_ns(value, (1u32 << 31) + 1);
+            check_decode_ns(value, (1u32 << 31) + 1);
         }
         for value in [0, 1, 2, u32::MAX - 1] {
-            check_read_ns(value, u32::MAX);
+            check_decode_ns(value, u32::MAX);
         }
     }
 
@@ -590,7 +595,7 @@ mod tests {
                 enc.encode_symbol(s, &cdf);
                 let bytes = enc.finish();
                 let mut dec = SymbolDecoder::new(&bytes);
-                assert_eq!(dec.read_symbol(&cdf), s, "nsyms={nsyms} s={s}");
+                assert_eq!(dec.decode_symbol(&cdf), s, "nsyms={nsyms} s={s}");
             }
         }
     }
@@ -611,18 +616,18 @@ mod tests {
         let bytes = enc.finish();
         let mut dec = SymbolDecoder::new(&bytes);
         for (i, (s, cdf)) in events.iter().enumerate() {
-            assert_eq!(dec.read_symbol(cdf), *s, "event {i}");
+            assert_eq!(dec.decode_symbol(cdf), *s, "event {i}");
         }
     }
 
-    /// Writes the bit pattern `read_golomb` consumes for `value`: a unary prefix of
+    /// Writes the bit pattern `decode_golomb` consumes for `value`: a unary prefix of
     /// `length` zero bools, a terminating one bool, then the `length`-bit remainder.
     ///
     /// The prefix is written out explicitly rather than by calling a `write_golomb` helper --
     /// there is no such helper, and inventing one would make the tests below a round trip against
     /// my own encoder instead of against the layout AV1 section 5.9.13 defines.
     fn encode_golomb(enc: &mut SymbolEncoder, value: u32) {
-        assert!(value >= 1, "read_golomb never returns 0");
+        assert!(value >= 1, "decode_golomb never returns 0");
         let length = 31 - value.leading_zeros();
         for _ in 0..length {
             enc.encode_symbol(0, &BOOL_CDF);
@@ -664,12 +669,12 @@ mod tests {
         let mut zeros = SymbolDecoder::new(&[0u8; 32]);
 
         for _ in 0..64 {
-            assert_eq!(empty.read_literal(4), zeros.read_literal(4));
+            assert_eq!(empty.decode_literal(4), zeros.decode_literal(4));
         }
     }
 
     #[test]
-    fn read_golomb_returns_one_when_the_prefix_stops_immediately() {
+    fn decode_golomb_returns_one_when_the_prefix_stops_immediately() {
         // A terminating bool with no preceding zeros is length 0, which the decoder shortcuts to
         // 1 rather than reading a zero-width remainder.
         let mut enc = SymbolEncoder::new();
@@ -677,11 +682,11 @@ mod tests {
         let bytes = enc.finish();
 
         let mut dec = SymbolDecoder::new(&bytes);
-        assert_eq!(dec.read_golomb(8), 1);
+        assert_eq!(dec.decode_golomb(8), 1);
     }
 
     #[test]
-    fn read_golomb_reconstructs_the_value_from_its_prefix_and_remainder() {
+    fn decode_golomb_reconstructs_the_value_from_its_prefix_and_remainder() {
         // Every value whose prefix fits in max_bits, including both ends of each prefix length --
         // 2^k is a zero remainder, 2^(k+1) - 1 an all-ones one, which is where a `+` mutated to
         // `*` or `-` and a `<<` mutated to `>>` diverge.
@@ -697,12 +702,12 @@ mod tests {
 
         let mut dec = SymbolDecoder::new(&bytes);
         for &v in &values {
-            assert_eq!(dec.read_golomb(16), v, "golomb round trip failed for {v}");
+            assert_eq!(dec.decode_golomb(16), v, "golomb round trip failed for {v}");
         }
     }
 
     #[test]
-    fn read_golomb_stops_counting_the_prefix_at_max_bits() {
+    fn decode_golomb_stops_counting_the_prefix_at_max_bits() {
         // A prefix longer than max_bits must be capped rather than counted on: the cap is what
         // stops a hostile stream driving the loop. With max_bits = 4 the decoder consumes exactly
         // four zero bools, never looks for a terminator, and reads a 4-bit remainder -- so the
@@ -716,16 +721,16 @@ mod tests {
         let bytes = enc.finish();
 
         let mut dec = SymbolDecoder::new(&bytes);
-        assert_eq!(dec.read_golomb(MAX_BITS), (1 << MAX_BITS) + 0b1011);
+        assert_eq!(dec.decode_golomb(MAX_BITS), (1 << MAX_BITS) + 0b1011);
     }
 
     #[test]
-    fn read_golomb_caps_the_prefix_even_when_the_stream_never_terminates_it() {
+    fn decode_golomb_caps_the_prefix_even_when_the_stream_never_terminates_it() {
         // The bound exists for a hostile stream. An all-zero buffer decodes to an endless run of
         // zero bools, and the decoder must still return: `length` stops at max_bits.
         let mut dec = SymbolDecoder::new(&[0u8; 16]);
 
-        let value = dec.read_golomb(4);
+        let value = dec.decode_golomb(4);
         assert!(
             value >= 1 << 4,
             "prefix was not counted to the cap: {value}"
@@ -747,7 +752,7 @@ mod tests {
         let bytes = enc.finish();
         let mut dec = SymbolDecoder::new(&bytes);
         for (v, n) in events {
-            assert_eq!(dec.read_literal(n), v);
+            assert_eq!(dec.decode_literal(n), v);
         }
     }
 
@@ -772,9 +777,9 @@ mod tests {
         let mut dec = SymbolDecoder::new(&bytes);
         for (is_lit, payload) in events {
             if is_lit {
-                assert_eq!(dec.read_literal(8), payload);
+                assert_eq!(dec.decode_literal(8), payload);
             } else {
-                assert_eq!(dec.read_symbol(&cdf) as u32, payload);
+                assert_eq!(dec.decode_symbol(&cdf) as u32, payload);
             }
         }
     }
@@ -841,7 +846,7 @@ mod tests {
         let mut dcount = 0u16;
         for (i, &s) in syms.iter().enumerate() {
             assert_eq!(
-                dec.read_symbol_adapt(&mut dcdf, &mut dcount),
+                dec.decode_symbol_adapt(&mut dcdf, &mut dcount),
                 s,
                 "event {i}"
             );
@@ -876,7 +881,7 @@ mod tests {
         let mut dcounts = vec![0u16; inits.len()];
         for (i, &(ctx, s)) in events.iter().enumerate() {
             assert_eq!(
-                dec.read_symbol_adapt(&mut dcdfs[ctx], &mut dcounts[ctx]),
+                dec.decode_symbol_adapt(&mut dcdfs[ctx], &mut dcounts[ctx]),
                 s,
                 "event {i} ctx {ctx}"
             );
@@ -904,7 +909,7 @@ mod tests {
         let bytes = enc.finish();
         let mut dec = SymbolDecoder::new(&bytes);
         for (i, &s) in stream.iter().enumerate() {
-            assert_eq!(dec.read_symbol(&cdf), s, "event {i}");
+            assert_eq!(dec.decode_symbol(&cdf), s, "event {i}");
         }
     }
 
@@ -917,23 +922,23 @@ mod tests {
         // initialises `SymbolValue` to 0, which is exactly that state.
         let spec_form = [16384u16, 32768, 0];
         let mut dec = SymbolDecoder::new(&[0xff, 0xff, 0xff, 0xff]);
-        let s = dec.read_symbol(&spec_form);
+        let s = dec.decode_symbol(&spec_form);
         assert!(s < spec_form.len(), "symbol {s} is past the end of the CDF");
         // Still usable afterwards: the bounded exit leaves a renormalised, non-degenerate state.
-        let _ = dec.read_symbol(&spec_form);
-        let _ = dec.read_bool();
+        let _ = dec.decode_symbol(&spec_form);
+        let _ = dec.decode_bool();
 
         // The adapting entry point funnels through the same search.
         let mut adapting = spec_form;
         let mut count = 0;
         let mut dec = SymbolDecoder::new(&[0xff, 0xff, 0xff, 0xff]);
-        let s = dec.read_symbol_adapt(&mut adapting, &mut count);
+        let s = dec.decode_symbol_adapt(&mut adapting, &mut count);
         assert!(s < spec_form.len(), "symbol {s} is past the end of the CDF");
     }
 
     #[test]
     fn an_empty_cdf_decodes_nothing_and_consumes_nothing() {
-        // `read_symbol(&[])` used to index `cdf[0]` unconditionally. There is no symbol to decode
+        // `decode_symbol(&[])` used to index `cdf[0]` unconditionally. There is no symbol to decode
         // over an empty alphabet, so it must return 0 without touching the decoder state — proven
         // by a second decoder that skips the empty read and stays in lockstep.
         let cdf = [16384u16, 32768];
@@ -946,15 +951,15 @@ mod tests {
         let mut with_empty = SymbolDecoder::new(&bytes);
         let mut without = SymbolDecoder::new(&bytes);
         for s in [1usize, 0, 1, 1, 0] {
-            assert_eq!(with_empty.read_symbol(&[]), 0);
-            assert_eq!(with_empty.read_symbol(&cdf), s);
-            assert_eq!(without.read_symbol(&cdf), s);
+            assert_eq!(with_empty.decode_symbol(&[]), 0);
+            assert_eq!(with_empty.decode_symbol(&cdf), s);
+            assert_eq!(without.decode_symbol(&cdf), s);
         }
 
         // The adapting path must survive it too: `update_cdf` has no top entry to hold and no
         // `FloorLog2(N)` to take.
         let mut count = 3u16;
-        assert_eq!(with_empty.read_symbol_adapt(&mut [], &mut count), 0);
+        assert_eq!(with_empty.decode_symbol_adapt(&mut [], &mut count), 0);
         assert_eq!(count, 3, "an empty CDF has nothing to adapt");
     }
 
@@ -978,7 +983,7 @@ mod tests {
                 let mut dec = SymbolDecoder::new(&bytes);
                 for (i, &s) in stream.iter().enumerate() {
                     assert_eq!(
-                        dec.read_symbol(&cdf),
+                        dec.decode_symbol(&cdf),
                         s,
                         "nsyms {nsyms}, len {len}, event {i}"
                     );
@@ -1025,14 +1030,14 @@ mod tests {
 
         let mut dec = SymbolDecoder::new(&bytes);
         for _ in 0..12 {
-            let _ = dec.read_symbol(&cdf);
+            let _ = dec.decode_symbol(&cdf);
         }
         assert!(dec.exit_symbol(), "the flush point exits cleanly");
 
         // Reading on drives SymbolMaxBits down through §8.2.4's -14 floor.
         let mut over = dec;
         for _ in 0..32 {
-            let _ = over.read_symbol(&cdf);
+            let _ = over.decode_symbol(&cdf);
         }
         assert!(
             !over.exit_symbol(),
@@ -1074,7 +1079,7 @@ mod tests {
             let mut dec = SymbolDecoder::new(&bytes);
             for i in 0..n {
                 assert_eq!(
-                    dec.read_literal(1),
+                    dec.decode_literal(1),
                     ((PAT >> (i % 64)) & 1) as u32,
                     "decode bit {i} of {n}"
                 );

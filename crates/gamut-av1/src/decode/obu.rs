@@ -368,8 +368,8 @@ impl SequenceHeader {
                 let tier = if level > 7 { r.f(1)? as u8 } else { 0 };
                 if decoder_model_info_present && r.flag()? {
                     // operating_parameters_info(i) (§5.5.5).
-                    let _ = r.f64(buffer_delay_length)?; // decoder_buffer_delay
-                    let _ = r.f64(buffer_delay_length)?; // encoder_buffer_delay
+                    let _ = r.f_u64(buffer_delay_length)?; // decoder_buffer_delay
+                    let _ = r.f_u64(buffer_delay_length)?; // encoder_buffer_delay
                     let _ = r.f(1)?; // low_delay_mode_flag
                 }
                 if initial_display_delay_present && r.flag()? {
@@ -665,7 +665,7 @@ mod tests {
         colour(&mut w);
         w.put_bit(0); // film_grain_params_present
         w.put_bit(1); // trailing_bits
-        w.byte_align();
+        w.align();
         w.into_bytes()
     }
 
@@ -855,7 +855,7 @@ mod tests {
             SequenceHeader::parse(&no_marker)
                 .unwrap_err()
                 .static_message(),
-            Some("AV1 trailing_bits(): missing marker bit")
+            Some("missing trailing-bits marker bit")
         );
 
         // Padding past the byte boundary is still padding: a zero byte is legal, a non-zero one is

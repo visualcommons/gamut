@@ -12,6 +12,24 @@
 //! categories (`0..=16`, T.81 Table H.2) both use it. Writing the lists into a marker segment is the
 //! format crate's business.
 
+/// A Huffman table in the two-list form of T.81 §B.2.4.2, as [`build_optimal_table`] returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HuffmanTable {
+    /// **BITS**: `bits[l - 1]` is the number of codes of length `l`, for `l` in `1..=16`.
+    pub bits: [u8; 16],
+    /// **HUFFVAL**: the symbol values, ordered by increasing code length; `sum(bits)` of them.
+    pub values: Vec<u8>,
+}
+
+/// One symbol's canonical code word, as [`CanonicalCodes::lookup`] returns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Code {
+    /// The code word, in the low [`Code::len`] bits; written most significant bit first.
+    pub code: u16,
+    /// The code length in bits, `1..=16`.
+    pub len: u8,
+}
+
 /// The canonical `(code, length)` of every symbol of a `(BITS, HUFFVAL)` table, assigned by the
 /// T.81 Annex C procedure (Figures C.1–C.3): consecutive code values in HUFFVAL order, the running
 /// value doubling each time the code length increases.
@@ -52,17 +70,21 @@ impl CanonicalCodes {
         Self { codes, lengths }
     }
 
-    /// The `(code, length)` an encoder emits for `symbol`, or `None` if the table does not code
-    /// `symbol`. The code occupies the low `length` bits, most significant bit first on the wire.
+    /// The [`Code`] an encoder emits for `symbol`, or `None` if the table does not code `symbol`.
+    /// The code occupies the low `len` bits, most significant bit first on the wire.
     #[must_use]
-    pub fn lookup(&self, symbol: u8) -> Option<(u16, u8)> {
-        let length = self.lengths[usize::from(symbol)];
-        (length != 0).then(|| (self.codes[usize::from(symbol)], length))
+    pub fn lookup(&self, symbol: u8) -> Option<Code> {
+        let len = self.lengths[usize::from(symbol)];
+        (len != 0).then(|| Code {
+            code: self.codes[usize::from(symbol)],
+            len,
+        })
     }
 }
 
 /// Builds the optimal 16-bit length-limited Huffman table (T.81 Annex K.2, Figures K.1–K.4) for
-/// the per-symbol frequency counts `freq`, returning the `(BITS, HUFFVAL)` pair (§B.2.4.2).
+/// the per-symbol frequency counts `freq`, returning its `(BITS, HUFFVAL)` lists (§B.2.4.2) as a
+/// [`HuffmanTable`].
 ///
 /// `freq[s]` is how many times symbol `s` is coded; the alphabet is `0..N`, at most 256 symbols
 /// (a larger `N` fails to compile, since HUFFVAL holds `u8`s). The procedure mirrors the reference
@@ -83,7 +105,7 @@ impl CanonicalCodes {
 /// The returned `sum(BITS)` equals the number of symbols with a non-zero count, and no code of any
 /// length is all-ones. An all-zero `freq` yields an empty table.
 #[must_use]
-pub fn build_optimal_table<const N: usize>(freq: &[u32; N]) -> ([u8; 16], Vec<u8>) {
+pub fn build_optimal_table<const N: usize>(freq: &[u32; N]) -> HuffmanTable {
     const { assert!(N <= 256, "a HUFFVAL symbol is a u8: at most 256 symbols") };
     // Sentinels chosen so a merged frequency (at most 256 · u32::MAX < 2^41) is always < LIVE_MAX and
     // a merged-away node (REMOVED) is always > LIVE_MAX, so neither is ever picked as a minimum.
@@ -206,7 +228,10 @@ pub fn build_optimal_table<const N: usize>(freq: &[u32; N]) -> ([u8; 16], Vec<u8
         }
         bit_pos[codesize[i] as usize] += 1;
     }
-    (out_bits, values)
+    HuffmanTable {
+        bits: out_bits,
+        values,
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +243,11 @@ mod tests {
     const K3_BITS: [u8; 16] = [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
     const K3_VALUES: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
+    /// The `lookup` result for a symbol coded `code` in `len` bits.
+    const fn code(code: u16, len: u8) -> Option<Code> {
+        Some(Code { code, len })
+    }
+
     #[test]
     fn canonical_codes_match_annex_c_for_table_k3() {
         // Hand-derived from Table K.3 via Figures C.1–C.3:
@@ -226,13 +256,13 @@ mod tests {
         //   category 6 → length 4, code 1110; category 7 → length 5, code 11110
         //   category 11 → length 9, code 111111110
         let t = CanonicalCodes::from_bits_values(&K3_BITS, &K3_VALUES);
-        assert_eq!(t.lookup(0), Some((0b00, 2)));
-        assert_eq!(t.lookup(1), Some((0b010, 3)));
-        assert_eq!(t.lookup(2), Some((0b011, 3)));
-        assert_eq!(t.lookup(5), Some((0b110, 3)));
-        assert_eq!(t.lookup(6), Some((0b1110, 4)));
-        assert_eq!(t.lookup(7), Some((0b11110, 5)));
-        assert_eq!(t.lookup(11), Some((0b1_1111_1110, 9)));
+        assert_eq!(t.lookup(0), code(0b00, 2));
+        assert_eq!(t.lookup(1), code(0b010, 3));
+        assert_eq!(t.lookup(2), code(0b011, 3));
+        assert_eq!(t.lookup(5), code(0b110, 3));
+        assert_eq!(t.lookup(6), code(0b1110, 4));
+        assert_eq!(t.lookup(7), code(0b11110, 5));
+        assert_eq!(t.lookup(11), code(0b1_1111_1110, 9));
     }
 
     #[test]
@@ -244,9 +274,9 @@ mod tests {
         bits[2] = 1;
         bits[15] = 1;
         let t = CanonicalCodes::from_bits_values(&bits, &[7, 9, 200]);
-        assert_eq!(t.lookup(7), Some((0b0, 1)));
-        assert_eq!(t.lookup(9), Some((0b100, 3)));
-        assert_eq!(t.lookup(200), Some((0b1010_0000_0000_0000, 16)));
+        assert_eq!(t.lookup(7), code(0b0, 1));
+        assert_eq!(t.lookup(9), code(0b100, 3));
+        assert_eq!(t.lookup(200), code(0b1010_0000_0000_0000, 16));
     }
 
     #[test]
@@ -261,7 +291,7 @@ mod tests {
         // BITS promises twelve codes but HUFFVAL names three: the three get the first three codes
         // and the rest are assigned to nobody — no panic, no stray code.
         let t = CanonicalCodes::from_bits_values(&K3_BITS, &[0, 1, 2]);
-        assert_eq!(t.lookup(2), Some((0b011, 3)));
+        assert_eq!(t.lookup(2), code(0b011, 3));
         assert_eq!(t.lookup(3), None);
     }
 
@@ -290,7 +320,8 @@ mod tests {
         let mut coded = Vec::new();
         for (s, &f) in freq.iter().enumerate() {
             if f != 0 {
-                let (code, len) = t.lookup(s as u8).expect("every counted symbol has a code");
+                let Code { code, len } =
+                    t.lookup(s as u8).expect("every counted symbol has a code");
                 assert_ne!(
                     u32::from(code),
                     (1u32 << len) - 1,
@@ -317,13 +348,13 @@ mod tests {
         // the lone real symbol gets the single-bit code 0 (the all-ones "1" is reserved).
         let mut freq = [0u32; 256];
         freq[5] = 10;
-        let (bits, values) = build_optimal_table(&freq);
+        let HuffmanTable { bits, values } = build_optimal_table(&freq);
         assert_eq!(bits[0], 1);
         assert_eq!(bits[1..], [0u8; 15]);
         assert_eq!(values, vec![5]);
         assert_eq!(
             CanonicalCodes::from_bits_values(&bits, &values).lookup(5),
-            Some((0, 1))
+            code(0, 1)
         );
         assert_optimal_invariants(&freq, &bits, &values);
     }
@@ -334,7 +365,7 @@ mod tests {
         // is also the value an unwritten HUFFVAL slot holds, so this pins that the symbol is placed.
         let mut freq = [0u32; 256];
         freq[0x00] = 7;
-        let (bits, values) = build_optimal_table(&freq);
+        let HuffmanTable { bits, values } = build_optimal_table(&freq);
         assert_eq!(values, vec![0x00]);
         assert_eq!(bits[0], 1);
         assert_optimal_invariants(&freq, &bits, &values);
@@ -349,13 +380,13 @@ mod tests {
         let mut freq = [0u32; 256];
         freq[1] = 1;
         freq[2] = 1;
-        let (bits, values) = build_optimal_table(&freq);
+        let HuffmanTable { bits, values } = build_optimal_table(&freq);
         assert_eq!(&bits[..2], &[1, 1]);
         assert_eq!(&bits[2..], &[0u8; 14]);
         assert_eq!(values, vec![1, 2]);
         let t = CanonicalCodes::from_bits_values(&bits, &values);
-        assert_eq!(t.lookup(1), Some((0, 1)));
-        assert_eq!(t.lookup(2), Some((0b10, 2)));
+        assert_eq!(t.lookup(1), code(0, 1));
+        assert_eq!(t.lookup(2), code(0b10, 2));
         assert_optimal_invariants(&freq, &bits, &values);
     }
 
@@ -368,7 +399,7 @@ mod tests {
         for (i, slot) in freq.iter_mut().take(20).enumerate() {
             *slot = 1u32 << i;
         }
-        let (bits, values) = build_optimal_table(&freq);
+        let HuffmanTable { bits, values } = build_optimal_table(&freq);
         // Exact golden (a regression pin over the whole reduction): the degenerate chain of 20
         // symbols + the reserved pseudo-symbol reduces to one code at each length 1..=13 and the
         // seven deepest pushed to length 16, with the symbols ordered least-frequent (deepest) last.
@@ -387,10 +418,10 @@ mod tests {
     fn optimal_empty_frequency_is_an_empty_table() {
         // No symbols at all yields an all-zero BITS and no HUFFVAL — never a panic. (The JPEG
         // encoders never call the builder with an empty multiset, but the primitive is total.)
-        let (bits, values) = build_optimal_table(&[0u32; 256]);
+        let HuffmanTable { bits, values } = build_optimal_table(&[0u32; 256]);
         assert_eq!(bits, [0u8; 16]);
         assert!(values.is_empty());
-        let (bits, values) = build_optimal_table(&[]);
+        let HuffmanTable { bits, values } = build_optimal_table(&[]);
         assert_eq!(bits, [0u8; 16]);
         assert!(values.is_empty());
     }
@@ -403,7 +434,7 @@ mod tests {
             *slot = (i as u32 % 13) + 1;
         }
         assert_eq!(freq.iter().filter(|&&f| f != 0).count(), 160);
-        let (bits, values) = build_optimal_table(&freq);
+        let HuffmanTable { bits, values } = build_optimal_table(&freq);
         assert_optimal_invariants(&freq, &bits, &values);
     }
 
@@ -416,7 +447,7 @@ mod tests {
         for (i, slot) in freq.iter_mut().enumerate() {
             *slot = 17 - i as u32;
         }
-        let (bits, values) = build_optimal_table(&freq);
+        let HuffmanTable { bits, values } = build_optimal_table(&freq);
         assert_eq!(bits, [0, 0, 3, 8, 3, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(values, (0..=16).collect::<Vec<u8>>());
         assert_optimal_invariants(&freq, &bits, &values);
@@ -427,6 +458,6 @@ mod tests {
         };
         // The alphabet size is not an input to the construction: padding with zero counts changes
         // nothing.
-        assert_eq!(build_optimal_table(&wide), (bits, values));
+        assert_eq!(build_optimal_table(&wide), HuffmanTable { bits, values });
     }
 }

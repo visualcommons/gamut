@@ -10,20 +10,22 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
 - **Provide the bit-level building blocks once.** The pieces here implement the parsing processes
   of the AV1 Bitstream & Decoding Process Specification
   ([`../../references/av1/`](../../references/av1)) and their encoder-side mirrors:
-  - [`BitWriter`] / [`BitReader`] — most-significant-bit-first fixed-width fields (`f(n)`) and
-    byte alignment, used by the AV1 uncompressed sequence/frame headers (AV1 §4, §8.1); the reader
-    also covers `su(n)`, `ns(n)`, `uvlc()`, `le(n)` and `leb128()`.
+  - [`BitWriter`] / [`BitReader`] — most-significant-bit-first fixed-width fields and byte
+    alignment under mirrored names (`put_bits`/`get_bits`, `align`/`align`, `put_leb128`/`leb128`),
+    used by the AV1 uncompressed sequence/frame headers (AV1 §4, §8.1); the reader keeps the spec's
+    descriptor names `f(n)` (an alias of `get_bits`), `su(n)`, `ns(n)`, `uvlc()`, `le(n)` and
+    `leb128()`.
   - [`write_leb128`] / [`leb128_len`] — unsigned LEB128 for OBU sizes (AV1 §4.10.5, Annex B).
   - [`SymbolDecoder`] / [`SymbolEncoder`] — the AV1 multi-symbol arithmetic (range) coder of
-    §8.2, the entropy back-end for coded tile data; the encoder is derived by inverting the
-    normative decoder.
+    §8.2, the entropy back-end for coded tile data, under mirrored `decode_*` / `encode_*` verbs;
+    the encoder is derived by inverting the normative decoder.
   - [`pack_msb_rows`] / [`unpack_msb_rows`] / [`row_bytes`] — MSB-first packing of fixed-width
     samples into byte-aligned rows, the sub-byte layout the TIFF-family raw formats share.
 - **Own the Huffman table construction the JPEG family shares.** [`build_optimal_table`] is the
   ITU-T T.81 Annex K.2 optimal 16-bit length-limited table over measured symbol frequencies, for
   any alphabet of at most 256 symbols (JPEG DC/AC symbols, the lossless-JPEG difference categories
-  DNG uses), and [`CanonicalCodes`] the Annex C canonical `(code, length)` assignment over a
-  `(BITS, HUFFVAL)` pair ([`../../references/jpeg/`](../../references/jpeg)).
+  DNG uses), returned as a [`HuffmanTable`], and [`CanonicalCodes`] the Annex C canonical [`Code`]
+  assignment over a `(BITS, HUFFVAL)` pair ([`../../references/jpeg/`](../../references/jpeg)).
 - **Stay byte-exact with decoders.** Each writer is validated to produce streams real decoders
   (`dav1d`, `avifdec`) accept, since it is derived directly from the decode process.
 - **Stay allocation-conscious.** Writers append into caller buffers and avoid per-symbol heap churn.

@@ -56,8 +56,10 @@ impl BitWriter {
         self.bit_pos == 0
     }
 
-    /// Pads with zero bits up to the next byte boundary (a no-op when already aligned).
-    pub fn byte_align(&mut self) {
+    /// Pads with zero bits up to the next byte boundary (a no-op when already aligned): the mirror
+    /// of [`BitReader::align`](crate::BitReader::align), which requires those bits to be zero.
+    /// This is AV1's `byte_alignment()` (§5.3.5).
+    pub fn align(&mut self) {
         while self.bit_pos != 0 {
             self.put_bit(0);
         }
@@ -71,6 +73,19 @@ impl BitWriter {
     pub fn put_bytes(&mut self, data: &[u8]) {
         debug_assert!(self.is_byte_aligned(), "put_bytes requires byte alignment");
         self.bytes.extend_from_slice(data);
+    }
+
+    /// Appends the minimal unsigned LEB128 encoding of `value` (AV1 §4.10.5): the mirror of
+    /// [`BitReader::leb128`](crate::BitReader::leb128). Requires the writer to be byte aligned,
+    /// as the reader does. The encoding is [`write_leb128`](crate::write_leb128)'s, which serves
+    /// a caller building a plain byte buffer.
+    ///
+    /// # Panics
+    ///
+    /// Debug builds assert byte alignment; misuse in release silently misaligns the stream.
+    pub fn put_leb128(&mut self, value: u64) {
+        debug_assert!(self.is_byte_aligned(), "put_leb128 requires byte alignment");
+        crate::write_leb128(&mut self.bytes, value);
     }
 
     /// Borrows the bytes written so far.
@@ -115,10 +130,10 @@ mod tests {
     }
 
     #[test]
-    fn byte_align_pads_with_zeros() {
+    fn align_pads_with_zeros() {
         let mut w = BitWriter::new();
         w.put_bit(1);
-        w.byte_align();
+        w.align();
         assert!(w.is_byte_aligned());
         assert_eq!(w.into_bytes(), &[0x80]);
     }
@@ -127,9 +142,18 @@ mod tests {
     fn put_bytes_after_alignment() {
         let mut w = BitWriter::new();
         w.put_bits(0xF, 4);
-        w.byte_align();
+        w.align();
         w.put_bytes(&[0x12, 0x34]);
         assert_eq!(w.into_bytes(), &[0xF0, 0x12, 0x34]);
+    }
+
+    #[test]
+    fn put_leb128_appends_the_minimal_encoding() {
+        let mut w = BitWriter::new();
+        w.put_bits(0xF, 4);
+        w.align();
+        w.put_leb128(300);
+        assert_eq!(w.into_bytes(), &[0xF0, 0xac, 0x02]);
     }
 
     #[test]

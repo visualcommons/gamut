@@ -255,21 +255,6 @@ exclude_re = [
     # the `n` it shifts is only consumed on an iteration that never executes, so `n >>= 8` is dead.
     # `>>= → <<=` is unobservable. (The loop-bound and `e`/`n` init mutants stay live and are caught.)
     '^crates/gamut-bitstream/src/symbol\.rs:190:19: replace >>= with <<= in SymbolEncoder::finish$',
-    # gamut-bitstream `BitReader::f`/`f64` accumulate a field by shifting then combining:
-    # `x = (x << 1) | u32::from(bit)` and `x = (x << take) | u64::from(f(take)?)`. The shift vacates
-    # exactly the bits the right operand occupies -- one bit, or `take` bits against a value `f(take)`
-    # bounds below `2^take` -- so the operands are disjoint and `|` == `^` for every input. Provably
-    # equivalent: the same shape as `BoolDecoder::get_literal` below.
-    # (`| -> &` in the same lines IS killed by `f_reads_back_what_the_writer_wrote`, which reads
-    # fields with bits set, so only the `^` mutant is excluded.)
-    '^crates/gamut-bitstream/src/bitreader\.rs:107:26: replace \| with \^ in BitReader<.a>::f$',
-    '^crates/gamut-bitstream/src/bitreader\.rs:130:29: replace \| with \^ in BitReader<.a>::f64$',
-    # gamut-bitstream `SymbolDecoder::read_f`/`read_literal` accumulate the same way --
-    # `x = (x << 1) | u32::from(bit)` -- so the shift vacates exactly the bit the right operand
-    # occupies and `|` == `^`. Provably equivalent, as above. (`read_golomb`'s own mutants are
-    # killed by the golomb tests; only these two accumulator ORs are unkillable.)
-    '^crates/gamut-bitstream/src/symbol\.rs:309:26: replace \| with \^ in SymbolDecoder<.a>::read_f$',
-    '^crates/gamut-bitstream/src/symbol\.rs:388:26: replace \| with \^ in SymbolDecoder<.a>::read_literal$',
     # gamut-tiff `within_size_limit` is the shared *allocation* guard behind `stored_total`
     # (decode_page_samples) and `tile_size` (decode_tiles): relaxing `>` to `==`/`>=` only changes
     # whether a 64 MiB+ buffer is reserved before the (still inevitable) decode error — the malformed
@@ -611,7 +596,7 @@ exclude_re = [
     # guard is an optimisation, not a behaviour. Equivalent. (This one comparison only: the bare
     # name used to reach every `>` in every function whose name begins `decode`, nineteen others
     # across gamut-dng, gamut-icc, gamut-jpeg and gamut-webp that nobody argued for.)
-    '^crates/gamut-dng/src/lossless_jpeg\.rs:907:11: replace > with >= in decode$',
+    '^crates/gamut-dng/src/lossless_jpeg\.rs:911:11: replace > with >= in decode$',
     # gamut-dng predictor `x_factor`: deleting the `Predictor::None => Some(0)` arm drops it to
     # `_ => None`, and neither caller can tell the two apart.
     #
@@ -862,23 +847,15 @@ exclude_re = [
     # example (issue #110), and nothing from that crate is left in this group. What remains is
     # where no such rewrite exists.
     # -----------------------------------------------------------------------------------------
-    # gamut-bitstream `BitReader::f64` — a non-terminating mutant, not a behavioural escape.
-    # `while left > 0` over a `u32` mutated to `>= 0` is always true; `take` becomes
-    # `0.min(32) == 0`, `f(0)` returns 0 and `left -= 0` never advances, so the loop spins and the
-    # scenario is reportable only as a TIMEOUT. Line- and column-anchored so it matches exactly
-    # this hang and leaves the sibling `n > 64` guard mutants — which DO terminate and ARE caught
-    # by `f_rejects_oversized_and_truncated_fields` — in the survey. Same shape as the
-    # gamut-jpeg `Reader::u8` hang exclusion below.
-    '^crates/gamut-bitstream/src/bitreader\.rs:128:20: replace > with >= in BitReader<.a>::f64$',
-    # gamut-bitstream `SymbolDecoder::read_golomb` — the other non-terminating mutant.
+    # gamut-bitstream `SymbolDecoder::decode_golomb` — a non-terminating mutant.
     # `length += 1` mutated to `*= 1` pins `length` at 0, so `length < max_bits` never stops the
     # unary-prefix loop; against a stream that never terminates the prefix (the all-zero buffer
-    # `read_golomb_caps_the_prefix_even_when_the_stream_never_terminates_it` feeds it, and the
-    # zero padding past the end keeps `read_bool` returning false) the loop spins. It is *detected*
-    # — the suite does not pass — but only ever as a TIMEOUT, at 60s a scenario. Line- and
-    # column-anchored: the `-=` sibling on the same line underflows `length` into a panic and IS
-    # caught, as are every other mutant in this function now that the golomb tests exist.
-    '^crates/gamut-bitstream/src/symbol\.rs:430:20: replace \+= with \*= in SymbolDecoder<.a>::read_golomb$',
+    # `decode_golomb_caps_the_prefix_even_when_the_stream_never_terminates_it` feeds it, and the
+    # zero padding past the end keeps `decode_bool` returning false) the loop spins. It is
+    # *detected* — the suite does not pass — but only ever as a TIMEOUT, at 60s a scenario. Line-
+    # and column-anchored: the `-=` sibling on the same line underflows `length` into a panic and
+    # IS caught, as are every other mutant in this function now that the golomb tests exist.
+    '^crates/gamut-bitstream/src/symbol\.rs:435:20: replace \+= with \*= in SymbolDecoder<.a>::decode_golomb$',
     # gamut-webp `BoolDecoder::get_bool` renormalisation: `self.range *= 2` under
     # `while self.range < 128`. Reversed to `/= 2` the range shrinks toward zero, never reaches
     # 128, and the loop never returns -- reportable only as a TIMEOUT.

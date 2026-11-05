@@ -1451,7 +1451,8 @@ fn optimized_tables(out: &mut Vec<u8>, freq: &Histograms) -> ScanTables {
             if hist.iter().all(|&n| n == 0) {
                 continue;
             }
-            let (bits, values) = gamut_bitstream::build_optimal_table(hist);
+            let gamut_bitstream::HuffmanTable { bits, values } =
+                gamut_bitstream::build_optimal_table(hist);
             built.push((class, dest as u8, bits, values));
         }
     }
