@@ -520,7 +520,7 @@ impl Preset {
             // this function arranges.
             Self::Balanced => PresetKnobs {
                 level: Level::Default,
-                effort: DeflateEncoder::DEFAULT_EFFORT,
+                effort: DeflateEncoder::DEFAULT_DEFLATE_PASSES,
                 filter: FilterStrategy::MinSumAbs,
                 optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
                 auto_reduce: false,
@@ -529,7 +529,7 @@ impl Preset {
             // whole-image filter search, which costs one full DEFLATE per candidate.
             Self::Small => PresetKnobs {
                 level: Level::Best,
-                effort: DeflateEncoder::DEFAULT_EFFORT,
+                effort: DeflateEncoder::DEFAULT_DEFLATE_PASSES,
                 filter: FilterStrategy::MinSumAbs,
                 optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
                 auto_reduce: true,
@@ -580,7 +580,7 @@ impl PngEncoder {
     pub fn new() -> Self {
         Self {
             level: Level::Default,
-            effort: DeflateEncoder::DEFAULT_EFFORT,
+            effort: DeflateEncoder::DEFAULT_DEFLATE_PASSES,
             optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
             filter: FilterStrategy::MinSumAbs,
             ancillary: Ancillary::default(),
@@ -675,11 +675,11 @@ impl PngEncoder {
     }
 
     /// Sets the [`Level::Best`] effort budget: the maximum number of optimal-parse refinement
-    /// passes (see [`DeflateEncoder::with_effort`]) applied to every zlib stream this encoder emits
-    /// — the IDAT image data and compressed ancillary payloads (`iCCP`, `zTXt`).
+    /// passes (see [`DeflateEncoder::with_deflate_passes`]) applied to every zlib stream this
+    /// encoder emits — the IDAT image data and compressed ancillary payloads (`iCCP`, `zTXt`).
     ///
-    /// Defaults to [`DeflateEncoder::DEFAULT_EFFORT`]; `0` keeps the lazy seed parse only, and
-    /// `zopfli`'s default budget is 15. Ignored at every other [`Level`] and by any pushed
+    /// Defaults to [`DeflateEncoder::DEFAULT_DEFLATE_PASSES`]; `0` keeps the lazy seed parse only,
+    /// and `zopfli`'s default budget is 15. Ignored at every other [`Level`] and by any pushed
     /// [`IdatDeflater`] backend that accepts a stream.
     #[must_use]
     pub fn with_effort(mut self, effort: u8) -> Self {
@@ -1775,7 +1775,7 @@ impl PngEncoder {
     ) -> Result<Vec<u8>> {
         let deflate = DeflateEncoder::new()
             .with_level(self.level)
-            .with_effort(self.effort)
+            .with_deflate_passes(self.effort)
             .with_optimal_parse_limit(self.optimal_parse_limit);
         // Every candidate stream goes through the same seam: a pushed backend that accepts sees
         // each brute-force candidate, and the smallest result still wins.

@@ -7,9 +7,11 @@ use crate::{block, dynamic, lz77, zlib};
 /// Compression effort, trading encode time for output size. Every level produces a correct stream;
 /// they differ only in ratio.
 ///
-/// The discriminants are permanent and append-only, so the enum maps directly onto a C ABI.
+/// The discriminants are permanent and append-only, so the enum maps directly onto a C ABI;
+/// `#[non_exhaustive]` holds callers to that, so a level appended later is not a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Level {
     /// Stored (uncompressed) blocks only — the always-correct floor and an upper bound on size.
     Store = 0,
@@ -23,11 +25,12 @@ pub enum Level {
     Best = 3,
 }
 
-/// A reusable DEFLATE / zlib encoder configured by a [`Level`].
-#[derive(Debug, Clone)]
+/// A reusable DEFLATE / zlib encoder configured by a [`Level`]. Plain `Copy` configuration: it
+/// owns no buffers, so passing it by value costs nothing.
+#[derive(Debug, Clone, Copy)]
 pub struct DeflateEncoder {
     level: Level,
-    effort: u8,
+    deflate_passes: u8,
     optimal_parse_limit: usize,
 }
 
@@ -38,9 +41,9 @@ impl Default for DeflateEncoder {
 }
 
 impl DeflateEncoder {
-    /// The default [`Level::Best`] effort: the number of cost-model refinement passes the optimal
-    /// parse runs unless overridden by [`DeflateEncoder::with_effort`].
-    pub const DEFAULT_EFFORT: u8 = 6;
+    /// The default [`Level::Best`] pass budget: the number of cost-model refinement passes the
+    /// optimal parse runs unless overridden by [`DeflateEncoder::with_deflate_passes`].
+    pub const DEFAULT_DEFLATE_PASSES: u8 = 6;
 
     /// The default [`Level::Best`] optimal-parse limit: the largest span the shortest-path parse
     /// handles in one piece, unless overridden by [`DeflateEncoder::with_optimal_parse_limit`].
@@ -56,7 +59,7 @@ impl DeflateEncoder {
     pub fn new() -> Self {
         Self {
             level: Level::Default,
-            effort: Self::DEFAULT_EFFORT,
+            deflate_passes: Self::DEFAULT_DEFLATE_PASSES,
             optimal_parse_limit: Self::DEFAULT_OPTIMAL_PARSE_LIMIT,
         }
     }
@@ -68,17 +71,17 @@ impl DeflateEncoder {
         self
     }
 
-    /// Sets the [`Level::Best`] effort: the maximum number of cost-model refinement passes the
-    /// zopfli-style optimal parse runs (default [`DeflateEncoder::DEFAULT_EFFORT`]; `zopfli`'s own
-    /// default budget is 15).
+    /// Sets the [`Level::Best`] pass budget: the maximum number of cost-model refinement passes the
+    /// zopfli-style optimal parse runs (default [`DeflateEncoder::DEFAULT_DEFLATE_PASSES`];
+    /// `zopfli`'s own default budget is 15).
     ///
     /// `0` skips refinement entirely and emits the lazy seed parse — still with `Best`'s full
     /// match-finder depth and block splitting, and always a correct stream. Higher values only cost
     /// time: passes stop early once the parse reaches a fixed point. The knob is ignored at every
     /// other level.
     #[must_use]
-    pub fn with_effort(mut self, effort: u8) -> Self {
-        self.effort = effort;
+    pub fn with_deflate_passes(mut self, passes: u8) -> Self {
+        self.deflate_passes = passes;
         self
     }
 
@@ -104,10 +107,10 @@ impl DeflateEncoder {
     /// `min(max(limit, 32 KiB), input length)`. The limit is the only bound on it: set it past
     /// the input's length (`usize::MAX`) and one encode's peak memory grows linearly and without
     /// bound in the input. The parse's work is linear in the input whatever the span, so wall
-    /// time at a fixed [`with_effort`](Self::with_effort) budget stays roughly flat as the limit
-    /// rises — `gamut-png` measured peak resident set 177.9 → 701.8 MiB against 133.9 → 132.7 s
-    /// on a 4096x4096 RGB photograph, default limit against none, before the match results were
-    /// kept (#959) — though a wider span can take more refinement passes to converge on some
+    /// time at a fixed [`with_deflate_passes`](Self::with_deflate_passes) budget stays roughly
+    /// flat as the limit rises — `gamut-png` measured peak resident set 177.9 → 701.8 MiB
+    /// against 133.9 → 132.7 s on a 4096x4096 RGB photograph, default limit against none, before
+    /// the match results were kept (#959) — though a wider span can take more refinement passes to converge on some
     /// material, so time is data-dependent rather than strictly flat.
     ///
     /// The knob is ignored at every other level.
@@ -120,9 +123,9 @@ impl DeflateEncoder {
     /// Encodes `data` as a raw DEFLATE stream (RFC 1951), appending to `out` and returning the
     /// number of bytes written. Any input — including empty — produces a valid stream.
     pub fn compress(&self, data: &[u8], out: &mut Vec<u8>) -> usize {
-        let body = self.deflate_body(data);
-        out.extend_from_slice(&body);
-        body.len()
+        let start = out.len();
+        self.write_body(data, out);
+        out.len() - start
     }
 
     /// Encodes `data` as a zlib stream (RFC 1950): a 2-byte header, the DEFLATE body, and a
@@ -131,14 +134,16 @@ impl DeflateEncoder {
     pub fn zlib_compress(&self, data: &[u8], out: &mut Vec<u8>) -> usize {
         let start = out.len();
         out.extend_from_slice(&zlib::header(self.level));
-        out.extend_from_slice(&self.deflate_body(data));
+        self.write_body(data, out);
         out.extend_from_slice(&adler32(1, data).to_be_bytes());
         out.len() - start
     }
 
-    /// Builds the DEFLATE body for `data`, choosing the smallest block encoding the level offers.
-    fn deflate_body(&self, data: &[u8]) -> Vec<u8> {
-        match self.level {
+    /// Appends the DEFLATE body for `data` to `out`, choosing the smallest block encoding the
+    /// level offers. The winner is chosen among complete candidates, so it is built in its own
+    /// buffer and appended once; no further intermediate copy is made.
+    fn write_body(&self, data: &[u8], out: &mut Vec<u8>) {
+        let body = match self.level {
             // The uncompressed floor.
             Level::Store => block::stored(data),
             // LZ77 parse, then keep the smallest of stored / fixed-Huffman / dynamic-Huffman.
@@ -149,7 +154,7 @@ impl DeflateEncoder {
                     lz77::parse_optimal(
                         data,
                         chain,
-                        u32::from(self.effort),
+                        u32::from(self.deflate_passes),
                         self.optimal_parse_limit,
                     )
                 } else {
@@ -173,7 +178,8 @@ impl DeflateEncoder {
                 }
                 best
             }
-        }
+        };
+        out.extend_from_slice(&body);
     }
 
     /// LZ77 match-finder search depth for this level — the time/ratio knob.
@@ -190,6 +196,13 @@ impl DeflateEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The body `write_body` appends to an empty buffer.
+    fn body_of(encoder: DeflateEncoder, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        encoder.write_body(data, &mut out);
+        out
+    }
 
     #[test]
     fn compress_appends_and_reports_length() {
@@ -248,13 +261,13 @@ mod tests {
         assert_eq!(n, out.len() - 3);
     }
 
-    /// When the fixed-Huffman body is exactly as long as the stored one, `deflate_body` keeps the
+    /// When the fixed-Huffman body is exactly as long as the stored one, `write_body` keeps the
     /// stored body: a candidate replaces the incumbent only when strictly shorter. Every fourth
     /// byte value is 64 distinct bytes, so there is no match: 36 below 144 at 8 fixed bits and 28
     /// above at 9, a fixed body of `3 + 36 * 8 + 28 * 9 + 7 = 550` bits, 69 bytes — the stored
     /// body's `5 + 64`. Spread that thinly, the alphabet makes a dynamic header far too dear.
     #[test]
-    fn deflate_body_keeps_stored_over_an_equally_long_fixed_body() {
+    fn write_body_keeps_stored_over_an_equally_long_fixed_body() {
         let data: Vec<u8> = (0..=255).step_by(4).collect();
         let encoder = DeflateEncoder::new().with_level(Level::Fast);
         let tokens = lz77::parse(&data, encoder.max_chain(), false);
@@ -268,13 +281,13 @@ mod tests {
             dynamic::body(&tokens).len() > stored.len(),
             "dynamic must not win"
         );
-        assert_eq!(encoder.deflate_body(&data), stored);
+        assert_eq!(body_of(encoder, &data), stored);
     }
 
-    /// When the dynamic body is exactly as long as the best so far, `deflate_body` keeps the
+    /// When the dynamic body is exactly as long as the best so far, `write_body` keeps the
     /// incumbent — here the fixed body, both 20 bytes against the stored body's 23.
     #[test]
-    fn deflate_body_keeps_fixed_over_an_equally_long_dynamic_body() {
+    fn write_body_keeps_fixed_over_an_equally_long_dynamic_body() {
         let data = b"ecbbcbeabebbdabadb";
         let encoder = DeflateEncoder::new().with_level(Level::Default);
         let tokens = lz77::parse(data, encoder.max_chain(), true);
@@ -288,6 +301,6 @@ mod tests {
             fixed.len() < block::stored(data).len(),
             "fixed must beat stored"
         );
-        assert_eq!(encoder.deflate_body(data), fixed);
+        assert_eq!(body_of(encoder, data), fixed);
     }
 }

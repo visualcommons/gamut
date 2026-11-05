@@ -10,12 +10,15 @@ through the reference inflater, every later phase swaps in a smarter block coder
 same framing and Adler-32/FCHECK spine, with the oracle proving each step still decodes.
 
 **Oracle:** differential vs the canonical C **zlib** (`tooling/zlib-oracle` + `third_party/zlib`,
-dev-only FFI). gamut ships no inflater, so the gate is: inflate the encoder's output → byte-exact
-with the input. The suite also asserts the ratio contract (`Level::Best ≤ zlib -9`, and
+dev-only FFI). gamut implements no inflater of its own, so the gate is: inflate the encoder's
+output → byte-exact with the input. The suite also asserts the ratio contract (`Level::Best ≤ zlib -9`, and
 `Best ≤ Default`); `cargo bench` reports size + throughput against `miniz_oxide` and `zopfli`.
 
-**Decoding is out of scope:** inflating DEFLATE is solved and security-sensitive; workspace decoders
-that need it use `miniz_oxide`. See the crate docs' *Encoder only* / *Scope* sections.
+**An in-house decoder is out of scope:** inflating DEFLATE is solved and security-sensitive. The
+optional `inflate` feature wraps `miniz_oxide` as `inflate_zlib`, the one bounded inflate the
+PNG, TIFF and DNG decoders share (cap and caller origin in, `gamut-core` error out; the
+short-output check stays with each caller). See the crate docs' *Encoder in-house, inflate
+delegated* / *Scope* sections.
 
 ## Phases
 
@@ -153,7 +156,10 @@ never the problem: the nearest candidate already reaches the maximal match and e
   only improve the ratio, never change behaviour observable through the inflater. #337 grew it
   additively: `with_effort(u8)` exposes the optimal-parse pass budget (`DEFAULT_EFFORT = 6` keeps
   the default output byte-identical), and `Level` gained `#[repr(u8)]` with permanent
-  discriminants per the workspace C-portability convention.
+  discriminants per the workspace C-portability convention. #1064 reshaped it before the freeze:
+  the pass budget is `with_deflate_passes` / `DEFAULT_DEFLATE_PASSES`, `Level` is
+  `#[non_exhaustive]`, `DeflateEncoder` is `Copy`, and the optional `inflate` feature adds
+  `inflate_zlib`.
 - `gamut-dng` now encodes its Deflate (`Compression = 8`) chunks with this crate and inflates with
   `miniz_oxide`, matching `gamut-tiff` and `gamut-png` (issue #196). Its whole-image-strip benchmark
   was the concrete case that motivated #343: a DNG written with `RowsPerStrip = ImageLength` hands

@@ -136,6 +136,6 @@ fn corrupt_segment_is_a_typed_error() {
     tiff[offset + count - 1] ^= 0xFF; // corrupt the zlib Adler-32 trailer
     let result: gamut_core::Result<ImageBuf<Rgb8>> = TiffDecoder::new().decode_image(&tiff);
     let error = result.unwrap_err();
-    assert_eq!(error.static_message(), Some("TIFF: corrupt Deflate stream"));
+    assert_eq!(error.static_message(), Some("corrupt zlib stream"));
     assert!(error.detail().is_some());
 }

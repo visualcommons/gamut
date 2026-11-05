@@ -19,9 +19,8 @@ workspace = true
 gamut-core.workspace = true
 gamut-bitstream.workspace = true
 # Adobe Deflate (`Compression = 8`) encode uses the shared space-optimising zlib encoder; decode
-# uses the same bounded, pure-Rust inflater as gamut-png.
-gamut-deflate.workspace = true
-miniz_oxide = "0.8"
+# uses its `inflate` feature, the same bounded, pure-Rust inflate as gamut-png and gamut-dng.
+gamut-deflate = { workspace = true, features = ["inflate"] }
 # The IFD container core (byte order, field types, IFD chain, two-pass offset writer). `bigtiff`
 # enables the 64-bit BigTIFF variant the codec writes/reads.
 gamut-ifd = { workspace = true, features = ["bigtiff"] }

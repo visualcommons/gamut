@@ -32,12 +32,10 @@ gamut-core.workspace = true
 # The shared codestream-backend seam (issue #272): the `repr(C)` vtable + fallback contract the
 # `AbiInflater`/`AbiDeflater` adapters bridge onto PNG's own IDAT traits (issue #278).
 gamut-codec-abi.workspace = true
-# DEFLATE/zlib compression for the IDAT datastream and zTXt/iCCP.
-gamut-deflate.workspace = true
-# zlib *inflation* for the decoder (IDAT, iCCP, zTXt, compressed iTXt). The in-house gamut-deflate
-# is deliberately encoder-only, and its docs bless miniz_oxide as the decode-side inflate (the same
-# choice gamut-dng made); revisiting an in-house inflater is tracked by issue #196.
-miniz_oxide = "0.8"
+# DEFLATE/zlib compression for the IDAT datastream and zTXt/iCCP, and — through its `inflate`
+# feature — the workspace's one bounded zlib inflate (over `miniz_oxide`) for the decoder's IDAT,
+# iCCP, zTXt and compressed iTXt, shared with gamut-tiff and gamut-dng.
+gamut-deflate = { workspace = true, features = ["inflate"] }
 # CRC-32 (ISO-HDLC) for every chunk, IDAT included, so it is on the critical path of every encode.
 # Hardware-accelerated (x86-64 PCLMULQDQ/AVX-512, aarch64 `crc32`) with a table fallback elsewhere,
 # including wasm32. MIT/Apache-2.0, pure Rust, and it keeps its `unsafe` to itself -- gamut-png
@@ -50,6 +48,9 @@ crc32fast = "1.5"
 gamut-metadata = { workspace = true, optional = true }
 
 [dev-dependencies]
+# `tests/backends.rs` only: its registry-pushed test inflaters do real work by calling
+# `miniz_oxide` directly, independent of the built-in tail (`gamut_deflate::inflate_zlib`).
+miniz_oxide = "0.8"
 # Differential cross-check oracle: a vendored, statically-linked libpng (built from the
 # `third_party/libpng` submodule). Dev-only and excluded from the workspace. libpng proves both
 # directions: it decodes the gamut encoder's output, and it generates the fixture corpus (and the

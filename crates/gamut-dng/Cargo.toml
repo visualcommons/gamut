@@ -43,11 +43,10 @@ gamut-metadata.workspace = true
 # the default build C-free); encode is opt-in via the `jxl-encode` feature above.
 gamut-jxl = { workspace = true, features = ["decode"] }
 # DNG ZIP (Compression = 8, zlib RFC 1950). Encoding uses the workspace's space-optimising zlib
-# encoder; bounded inflation delegates the security-sensitive decode surface to `miniz_oxide`,
-# which `gamut-deflate` (encoder-only by design) blesses for exactly this. Both are pure Rust, so
-# the shipped crate stays C-free.
-gamut-deflate.workspace = true
-miniz_oxide = "0.8"
+# encoder; bounded inflation is its `inflate` feature, the workspace's one bounded inflate over
+# `miniz_oxide`, shared with gamut-png and gamut-tiff. Both are pure Rust, so the shipped crate
+# stays C-free.
+gamut-deflate = { workspace = true, features = ["inflate"] }
 
 [dev-dependencies]
 # Authoritative conformance oracle: the headless-built Adobe DNG SDK 1.7.1 (gamut encode →
@@ -62,6 +61,9 @@ libtiff-oracle = { path = "../../tooling/libtiff-oracle" }
 # cells run under a plain `cargo bench`.
 gamut-dng = { path = ".", features = ["jxl-encode"] }
 divan.workspace = true
+# `benches/compression.rs` only: the `miniz_oxide` level 6 encoder this crate used before issue
+# #196, kept as the size and speed baseline `gamut-deflate` is measured against.
+miniz_oxide = "0.8"
 
 [[bench]]
 name = "compression"

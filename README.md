@@ -153,7 +153,7 @@ rather than restating it. A status of **stable** means the crate is at 1.0 or la
 | `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | stable; orchestration only. A C2PA manifest store is extracted verbatim but never re-embedded: embedding drops it, or refuses, because its hard binding cannot survive the rewrite |
 | `gamut-tiff`      | TIFF 6.0 encoder/decoder — on the shared `gamut-ifd` container core     | stable (1.0 was #107); YCbCr/Lab and JPEG-in-TIFF deferred |
 | `gamut-dng`       | DNG 1.7.1 raw encoder + decoder — a TIFF/EP profile over `gamut-ifd`   | encoder + decoder (1.0 was #109), Adobe DNG SDK-gated |
-| `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut's own writers | encoder (#195); encoder-only by design — workspace decoders inflate elsewhere |
+| `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut's own writers | encoder (#195); no in-house decoder by design — optional `inflate` feature bounds `miniz_oxide` for workspace decoders |
 | `gamut-png`       | PNG (W3C 3rd edition) encoder + decoder, over the still-image subset   | encoder (#24) + decoder (#249); APNG out of scope, so an animated PNG decodes as its default image |
 | `gamut-cli`       | `gamut` CLI sandbox: `convert` (decode PNG/JPEG/PPM/WebP/JXL, re-encode AVIF/WebP/TIFF/PNG/JXL/JPEG), `inspect` (TIFF/DNG byte accounting), `icc`, `isobmff`, `av1`, and the `color`, `dsp` and `bitstream` primitive inspectors | ready for use |
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
