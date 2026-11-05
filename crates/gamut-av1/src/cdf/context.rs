@@ -13,8 +13,8 @@ const BR_TX_SZ_CTX: usize = TX_SZ_CTX - 1;
 /// One adapting CDF: the `N` cumulative values plus the spec's trailing `cdf[N]` element, which
 /// counts how many times the symbol has been coded (saturating at 32) and sets the adaptation rate.
 ///
-/// The [`super::defaults`] tables drop that trailing element, so a freshly initialised context starts
-/// every counter at 0 — exactly the value the spec's `Default_*_Cdf` arrays carry.
+/// The [`super::defaults`] tables drop that trailing element, so a freshly initialised context
+/// starts every counter at 0 — exactly the value the spec's `Default_*_Cdf` arrays carry.
 #[derive(Clone, Copy, Debug)]
 pub struct Cdf<const N: usize> {
     /// Cumulative probabilities rising to 32768 (`cdf[N - 1] == 32768`).

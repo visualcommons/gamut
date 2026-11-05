@@ -12,8 +12,8 @@ use std::num::NonZeroUsize;
 
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16};
 use gamut_core::Result;
-use pipeline::{encode_with, encode16_with};
 
+use self::pipeline::{encode_with, encode16_with};
 use crate::headers::{Av1Color, Av1StillConfig, Tiling};
 use crate::tile::BlockVariation;
 
@@ -136,11 +136,12 @@ pub struct Av1EncodeConfig {
     pub qindex: u8,
     /// The colour signalling the sequence header declares (see [`Av1Color`]). The planes must
     /// already be in the layout its matrix describes — GBR for
-    /// [`MatrixCoefficients::Identity`], `Y/Cb/Cr` for a luma–chroma matrix (see
-    /// [`gamut_color::Planar8::from_rgb8_matrix`]). The coding tools are matrix-agnostic.
+    /// [`MatrixCoefficients::Identity`](gamut_color::cicp::MatrixCoefficients::Identity), `Y/Cb/Cr`
+    /// for a luma–chroma matrix (see [`gamut_color::Planar8::from_rgb8_matrix`]). The coding tools
+    /// are matrix-agnostic.
     ///
     /// A **monochrome** still is a
-    /// [`ChromaSubsampling::Cs400`](gamut_color::ChromaSubsampling::Cs400) buffer together with
+    /// [`ChromaSubsampling::Cs400`] buffer together with
     /// [`Av1Color::monochrome`]: `mono_chrome = 1`, and no chroma is coded at all.
     pub color: Av1Color,
     /// How much mode-decision search to run (see [`Effort`]). It moves lossy encodes only.

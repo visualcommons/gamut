@@ -169,8 +169,8 @@ fn append_tiles(frame_payload: &mut Vec<u8>, tile_bytes: &[Vec<u8>]) {
     }
 }
 
-/// The high-bit-depth encode behind [`encode_still16_with_recon`], with the block variation as
-/// [`encode_with`] takes it.
+/// The high-bit-depth encode behind [`super::encode_still16_with_recon`], with the block variation
+/// as [`encode_with`] takes it.
 pub(super) fn encode16_with(
     planes: &Planar16,
     config: &Av1EncodeConfig,

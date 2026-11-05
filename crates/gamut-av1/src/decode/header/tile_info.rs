@@ -184,12 +184,9 @@ pub(crate) fn tile_log2(blk_size: u32, target: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use gamut_bitstream::BitReader;
-
     use super::*;
     use crate::decode::header::FrameHeader;
     use crate::decode::header::tests::parse_built;
-    use crate::decode::obu::SequenceHeader;
 
     #[test]
     fn tile_info_uses_the_128x128_superblock_geometry() {

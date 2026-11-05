@@ -26,20 +26,20 @@ mod restoration;
 mod segmentation;
 mod tile_info;
 
-pub use cdef::CdefParams;
 use gamut_bitstream::BitReader;
 use gamut_color::{BitDepth, ChromaSubsampling};
 use gamut_core::{Error, Result};
-pub use loop_filter::LoopFilterParams;
-pub use quantization::QuantizationParams;
-pub use restoration::{LrParams, RestorationType};
-pub use segmentation::SegmentationParams;
-use segmentation::{MAX_SEGMENTS, get_qindex_ignoring_delta};
-pub use tile_info::TileInfo;
+
+pub use self::cdef::CdefParams;
+pub use self::loop_filter::LoopFilterParams;
+pub use self::quantization::QuantizationParams;
+pub use self::restoration::{LrParams, RestorationType};
+pub use self::segmentation::SegmentationParams;
+use self::segmentation::{MAX_SEGMENTS, get_qindex_ignoring_delta};
+pub use self::tile_info::TileInfo;
 // The decode test fixtures size a synthetic tile grid with the parser's own `tile_log2`.
 #[cfg(test)]
-pub(crate) use tile_info::tile_log2;
-
+pub(crate) use self::tile_info::tile_log2;
 use super::ORIGIN;
 use super::obu::{SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS, SequenceHeader};
 

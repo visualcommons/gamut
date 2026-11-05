@@ -88,8 +88,8 @@ pub static PALETTE_UV_MODE: [[u16; 2]; 2] = [[32461, 32768], [21488, 32768]];
 ///
 /// This one uniform row is the default for all 13 intra directions at both `TX_4X4` and `TX_8X8`
 /// (only `TX_16X16` differs per direction — see [`INTRA_TX_TYPE_SET2_16X16`]). The *contexts* are
-/// still per `(Tx_Size_Sqr, intraDir)` and adapt independently, so [`super::CdfContext`] replicates this
-/// row across them rather than sharing one; sharing would be invisible with static CDFs and would
+/// still per `(Tx_Size_Sqr, intraDir)` and adapt independently, so [`super::CdfContext`]
+/// replicates this row across them rather than sharing one; sharing would be invisible with static CDFs and would
 /// desync a decoder once adaptation is on.
 pub static INTRA_TX_TYPE_SET2: [u16; 5] = [6554, 13107, 19661, 26214, 32768];
 
@@ -201,8 +201,8 @@ pub static TX_SIZE_64X64: [[u16; 3]; 3] = [
 pub static DELTA_Q: [u16; 4] = [28160, 32120, 32677, 32768];
 
 /// `Default_Delta_Lf_Cdf` (§9.4): the 4-symbol `delta_lf_abs` CDF (identical default values to
-/// `Default_Delta_Q_Cdf`, but a distinct table — [`super::CdfContext`] keeps them apart so they adapt
-/// independently). The
+/// `Default_Delta_Q_Cdf`, but a distinct table — [`super::CdfContext`] keeps them apart so they
+/// adapt independently). The
 /// encoder keeps `|delta| <= 2`, so the `DELTA_LF_SMALL` escape is never coded.
 pub static DELTA_LF: [u16; 4] = [28160, 32120, 32677, 32768];
 
