@@ -155,7 +155,7 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
         // gamut-avif STATUS.md M4: Exif / XMP items with a `cdsc` reference and `colr` `prof` ICC,
         // written by `AvifEncoder::with_exif` / `with_xmp` / `with_icc_profile` and read back.
         // gamut-jxl STATUS.md "Exif / XMP container boxes" (written by `with_exif` / `with_xmp`,
-        // read back by `JxlDecoder::metadata`) and "Colour signalling" (`ColorSpec::Icc` written,
+        // read back by `JxlDecoder::metadata`) and "Colour signalling" (`with_icc_profile` written,
         // `embedded_icc_profile` read).
         (
             Format::Jpeg | Format::Png | Format::WebP | Format::Avif | Format::Jxl,

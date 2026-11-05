@@ -21,7 +21,7 @@
 //!   boxes (`Exif`, `xml `, and the `brob` wrapper it refuses), which never touches the codestream;
 //! - `decode_image` to `Rgba8`, with the `permissive` policy so every coded layout converts rather
 //!   than being refused at the layout check — and, only where that full decode **fails**,
-//!   [`DecodePartialImage::decode_partial_image`], the truncation-tolerant path, which is
+//!   [`JxlDecoder::decode_partial`], the truncation-tolerant path, which is
 //!   reached by exactly the inputs the full decode refuses.
 //!
 //! This target lists **no check beyond the crash oracle**, like `dng_decode`.
@@ -30,7 +30,7 @@
 
 use gamut_core::convert::ConvertPolicy;
 use gamut_core::{DecodeImage, Rgba8};
-use gamut_jxl::{DecodePartialImage, JxlDecoder};
+use gamut_jxl::JxlDecoder;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -39,6 +39,6 @@ fuzz_target!(|data: &[u8]| {
     let _ = decoder.embedded_icc_profile(data);
     let _ = decoder.metadata_boxes(data);
     if DecodeImage::<Rgba8>::decode_image(&decoder, data).is_err() {
-        let _ = DecodePartialImage::<Rgba8>::decode_partial_image(&decoder, data);
+        let _ = decoder.decode_partial::<Rgba8>(data);
     }
 });

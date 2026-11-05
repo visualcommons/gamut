@@ -23,8 +23,11 @@ use gamut_core::{PixelFormat, Sample};
 
 /// A decoded-sample primitive that can be rebuilt from jxl-rs's native-endian output bytes.
 ///
-/// Sealed in practice to `u8` and `u16` by its [`Sample`] supertrait — the only sample widths gamut
-/// and jxl-rs exchange.
+/// Implemented once for every [`Sample`] — `u8` and `u16`, the only widths gamut and jxl-rs
+/// exchange — so any [`Pixel`](gamut_core::Pixel)'s sample satisfies it without a bound a caller
+/// would have to repeat: a generic caller of
+/// [`JxlDecoder::decode_partial`](crate::JxlDecoder::decode_partial) needs only
+/// `JxlDecoder: DecodeImage<P>`.
 pub(crate) trait ConvSample: Sample {
     /// Bytes per sample in the raw jxl-rs output buffer.
     const BYTES: usize;
@@ -34,19 +37,15 @@ pub(crate) trait ConvSample: Sample {
     fn from_ne_bytes(bytes: &[u8]) -> Self;
 }
 
-impl ConvSample for u8 {
-    const BYTES: usize = 1;
+impl<S: Sample> ConvSample for S {
+    const BYTES: usize = core::mem::size_of::<S>();
 
     fn from_ne_bytes(bytes: &[u8]) -> Self {
-        bytes[0]
-    }
-}
-
-impl ConvSample for u16 {
-    const BYTES: usize = 2;
-
-    fn from_ne_bytes(bytes: &[u8]) -> Self {
-        u16::from_ne_bytes([bytes[0], bytes[1]])
+        // Onto the full-range 16-bit scale and back: a 2-byte sample is read in native order and
+        // passes through unchanged; a 1-byte one is replicated into both bytes (`b · 0x101`, the
+        // same value in either byte order), which `from_full_range_u16` narrows back to `b`
+        // exactly. One multiply-shift per sample, against a whole JPEG XL decode per sample.
+        S::from_full_range_u16(u16::from_ne_bytes([bytes[0], bytes[Self::BYTES - 1]]))
     }
 }
 
@@ -89,6 +88,10 @@ mod tests {
     fn u8_from_ne_bytes_reads_first_byte() {
         assert_eq!(<u8 as ConvSample>::from_ne_bytes(&[0xAB, 0xCD]), 0xAB);
         assert_eq!(<u8 as ConvSample>::BYTES, 1);
+        // Every byte value survives the full-range round trip exactly.
+        for b in 0..=u8::MAX {
+            assert_eq!(<u8 as ConvSample>::from_ne_bytes(&[b]), b);
+        }
     }
 
     #[test]

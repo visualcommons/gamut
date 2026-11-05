@@ -132,10 +132,10 @@ let image = ImageRef::<Rgb16>::new(&pixels, dims).expect("buffer length matches 
 
 // HDR-coded u16 samples signalled as BT.2100 PQ, displayed rotated, with an XMP packet.
 let encoder = JxlEncoder::lossless()
-    .with_color(ColorSpec::Pq)                   // also: LinearSrgb, Hlg, Icc(profile bytes)
+    .with_color(ColorSpec::Pq)                   // also: LinearSrgb, Hlg; or with_icc_profile(bytes)
     .with_orientation(Orientation::Rotate90Cw)   // the eight EXIF orientations
     .with_container(Container::IsoBmff)          // metadata boxes need the container
-    .with_xmp(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#);
+    .with_xmp(br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#);
 let stream = encoder.encode_to_vec(image).expect("encode");
 
 // jbrd: reversibly transcode a JPEG — the original .jpg is reconstructible bit-for-bit.
@@ -157,15 +157,17 @@ transform (see [STATUS.md](STATUS.md) for the decode-side CMS deferral).
 ### Pluggable codestream backends
 
 Neither half is a fixed implementation. The seam is the **bare JPEG XL codestream** (signature
-`FF 0A`): `JxlEncoder::push_backend` / `JxlDecoder::push_backend` insert a `JxlCodestreamEncoder` /
+`FF 0A`): `JxlEncoder::with_backend` / `JxlDecoder::with_backend` insert a `JxlCodestreamEncoder` /
 `JxlCodestreamDecoder` — a platform codec, an alternate library, or a C backend reached through the
-shared [`gamut-codec-abi`](../gamut-codec-abi) vtables via `AbiEncodeBackend` / `AbiDecodeBackend`.
-Backends are tried in push order and the built-in wrapper is tried **last**, so pushing one is
-additive. `supports() == false` (or a late `ErrorKind::Unsupported` error) is the only fall-through; a backend
-that accepts a job and then fails propagates its error rather than being silently retried.
+shared [`gamut-codec-abi`](../gamut-codec-abi) vtables via `AbiJxlEncoder` / `AbiJxlDecoder`.
+Backends are tried in push order through `gamut-codec-abi`'s one `Registry`, and the built-in wrapper
+is tried **last**, so adding one is additive. `supports() == false` is the only fall-through; a
+backend that accepts a job and then fails — whatever the error, a late `Unsupported` included —
+propagates its error rather than being silently retried. `Send` is bound where a backend is added,
+not on the traits, and cloning a host copies its backend list while sharing the instances.
 
 This is also how the encode direction works where libjxl cannot be built: on
-`wasm32-unknown-unknown` there is no tail, so a pushed backend *is* the encoder. With neither, the
+`wasm32-unknown-unknown` there is no tail, so an added backend *is* the encoder. With neither, the
 direction returns an `ErrorKind::Unsupported` error.
 
 Container-dependent features — ISO BMFF output, `with_exif`/`with_xmp`, and `recompress_jpeg` — are
@@ -177,10 +179,10 @@ a backend. Giving gamut-jxl its own container writer is a recorded follow-up ([S
 | Feature  | Default | What it pulls in | Toolchain / targets |
 | -------- | ------- | ---------------- | ------------------- |
 | `encode` | yes | the built-in **libjxl 0.12.0** encode tail (`gamut-jxl-sys`) | needs **cmake + a C++ toolchain** (emsdk on `wasm32-unknown-emscripten`); inert — not a build error — on other `wasm32` targets |
-| `decode` | yes | the built-in **jxl-rs** decode tail (the pure-Rust `jxl` crate), plus the header-only accessors `JxlDecoder::info` / `embedded_icc_profile` and the best-effort `DecodePartialImage` surface | pure safe Rust; builds **everywhere**, every `wasm32` target included |
+| `decode` | yes | the built-in **jxl-rs** decode tail (the pure-Rust `jxl` crate), plus the header-only accessors `JxlDecoder::info` / `embedded_icc_profile` and the best-effort `JxlDecoder::decode_partial` | pure safe Rust; builds **everywhere**, every `wasm32` target included |
 
 Each feature means "**include the built-in tail**", not "enable the direction": without `encode`,
-`JxlEncoder` still exists and still encodes through any backend pushed with `push_backend`; without
+`JxlEncoder` still exists and still encodes through any backend added with `with_backend`; without
 `decode`, likewise for `JxlDecoder`. With neither a tail nor a backend, that direction returns an
 `ErrorKind::Unsupported` error.
 
@@ -200,24 +202,25 @@ alpha is dropped. It refuses to *guess*, returning an `ErrorKind::Unsupported` e
 - **Colour-as-grayscale** — a colour stream cannot be decoded into a grayscale layout (no luminance
   is invented).
 
-Oversized streams are bounded by a fixed pixel limit (`1 << 28` samples). A caller with a smaller
-budget tightens it with `JxlDecoder::with_max_dimensions` / `with_max_image_bytes`, which are
-unbounded by default and checked against the parsed header before any pixel buffer is sized
-(and against a pushed backend's raster). The header-only `info` / `embedded_icc_profile` /
+Oversized streams are bounded by the workspace's `DecodeLimits`, set with `JxlDecoder::with_limits`:
+by default 64 MiB of decoded samples and any width and height, checked against the parsed header
+before any pixel buffer is sized (and against an added backend's raster), beneath a fixed jxl-rs
+pixel limit of `1 << 28` samples that no setting raises. The header-only `info` / `embedded_icc_profile` /
 `metadata` accessors do not apply them. Truncated or malformed input returns a typed `Error`,
 never a panic.
 
 ### Truncated and partial decode
 
-`DecodeImage` rejects every truncated stream. `DecodePartialImage` is the opt-in alternative for a
-partly-downloaded, still-arriving or damaged file — it returns the best-effort image plus a
-`JxlPartialReport` carrying the completeness flag:
+`DecodeImage` rejects every truncated stream. `JxlDecoder::decode_partial` is the opt-in alternative
+for a partly-downloaded, still-arriving or damaged file — it returns a `JxlPartialImage`: the
+best-effort image plus a `JxlPartialReport` carrying the completeness flag:
 
 ```rust,ignore
-use gamut_jxl::{DecodePartialImage, JxlDecoder};
-use gamut_core::{ImageBuf, Rgba8};
+use gamut_jxl::JxlDecoder;
+use gamut_core::Rgba8;
 
-let (image, report): (ImageBuf<Rgba8>, _) = JxlDecoder::new().decode_partial_image(&bytes)?;
+let partial = JxlDecoder::new().decode_partial::<Rgba8>(&bytes)?;
+let (image, report) = (partial.image, partial.report);
 if !report.is_complete() {
     // `image` is a preview: correctly sized, but only partly drawn.
 }
@@ -238,7 +241,7 @@ arrived exactly and leaves the rest zero. But an image small enough to be coded 
 some cut points are indistinguishable from corruption to the decoder and still return an
 `ErrorKind::InvalidInput` error. Always check `report.is_complete()`; never assume pixels are present.
 
-This path is always answered by the built-in jxl-rs tail — a pushed backend is not consulted,
+This path is always answered by the built-in jxl-rs tail — an added backend is not consulted,
 because the shared codec-abi seam has no way to express a partial result. It relaxes *truncation
 only*: the animation, premultiplied-alpha, colour-as-grayscale and pixel-limit refusals above are
 unchanged.

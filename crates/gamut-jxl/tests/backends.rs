@@ -22,7 +22,7 @@ use gamut_core::{
     DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, ImageBuf, ImageRef, Rgb8, Rgba8,
 };
 use gamut_jxl::{
-    AbiDecodeBackend, AbiEncodeBackend, Container, Distance, Effort, JXL_CODEC_ID,
+    AbiJxlDecoder, AbiJxlEncoder, BitDepth, Container, Distance, Effort, JXL_CODEC_ID,
     JxlCodestreamDecoder, JxlCodestreamEncoder, JxlDecoded, JxlDecoder, JxlEncodeRequest,
     JxlEncoder, JxlImageRef, JxlOwnedSamples, JxlStreamInfo, ModularMode,
 };
@@ -67,7 +67,7 @@ impl Counting {
 }
 
 impl JxlCodestreamEncoder for Counting {
-    fn supports(&mut self, _req: &JxlEncodeRequest) -> bool {
+    fn supports(&mut self, _req: &JxlEncodeRequest<'_>) -> bool {
         self.supports_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         false
@@ -75,7 +75,7 @@ impl JxlCodestreamEncoder for Counting {
 
     fn encode(
         &mut self,
-        _req: &JxlEncodeRequest,
+        _req: &JxlEncodeRequest<'_>,
         _image: &JxlImageRef<'_>,
     ) -> gamut_core::Result<Vec<u8>> {
         unreachable!("a declining backend is never asked to encode")
@@ -105,13 +105,12 @@ fn default_encode_output_is_byte_identical_with_a_declining_backend() {
     for configured in [
         JxlEncoder::lossless(),
         JxlEncoder::lossy(Distance::new(2.0).unwrap()).with_effort(Effort::Falcon),
-        JxlEncoder::lossless().with_bit_depth(8),
+        JxlEncoder::lossless().with_bit_depth(BitDepth::Eight),
     ] {
         let baseline = encode_fixture(&configured);
 
-        let mut with_backend = configured.clone();
         let (backend, counter) = Counting::new();
-        with_backend.push_backend(backend);
+        let with_backend = configured.clone().with_backend(backend);
         let observed = encode_fixture(&with_backend);
 
         assert_eq!(
@@ -132,9 +131,8 @@ fn default_decode_output_is_byte_identical_with_a_declining_backend() {
     assert_eq!(baseline.as_samples(), pixels.as_slice());
     assert_eq!(baseline.dimensions(), dims);
 
-    let mut with_backend = JxlDecoder::new();
     let (backend, counter) = Counting::new();
-    with_backend.push_backend(backend);
+    let with_backend = JxlDecoder::new().with_backend(backend);
     let observed: ImageBuf<Rgb8> = with_backend.decode_image(&stream).expect("decode");
 
     assert_eq!(observed.as_samples(), baseline.as_samples());
@@ -153,13 +151,13 @@ struct Canned {
 }
 
 impl JxlCodestreamEncoder for Canned {
-    fn supports(&mut self, _req: &JxlEncodeRequest) -> bool {
+    fn supports(&mut self, _req: &JxlEncodeRequest<'_>) -> bool {
         true
     }
 
     fn encode(
         &mut self,
-        req: &JxlEncodeRequest,
+        req: &JxlEncodeRequest<'_>,
         image: &JxlImageRef<'_>,
     ) -> gamut_core::Result<Vec<u8>> {
         assert_eq!(image.dimensions(), Dimensions::new(16, 16).unwrap());
@@ -181,13 +179,13 @@ fn a_pushed_encode_backend_supplies_the_codestream_and_sees_the_request() {
     let real = encode_fixture(&JxlEncoder::lossless());
     let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-    let mut encoder = JxlEncoder::lossy(Distance::new(3.0).unwrap())
+    let encoder = JxlEncoder::lossy(Distance::new(3.0).unwrap())
         .with_effort(Effort::Tortoise)
-        .with_modular(ModularMode::Modular);
-    encoder.push_backend(Canned {
-        stream: real.clone(),
-        seen: std::sync::Arc::clone(&seen),
-    });
+        .with_modular(ModularMode::Modular)
+        .with_backend(Canned {
+            stream: real.clone(),
+            seen: std::sync::Arc::clone(&seen),
+        });
 
     let produced = encode_fixture(&encoder);
     assert_eq!(
@@ -225,15 +223,14 @@ fn container_requests_never_reach_a_backend() {
         (
             JxlEncoder::lossless()
                 .with_container(Container::IsoBmff)
-                .with_xmp("<x:xmpmeta xmlns:x='adobe:ns:meta/'/>"),
+                .with_xmp(b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>"),
             &[0x00, 0x00, 0x00, 0x0C],
         ),
     ];
 
     for (encoder, signature) in cases {
-        let mut encoder = encoder;
         let (backend, counter) = Counting::new();
-        encoder.push_backend(backend);
+        let encoder = encoder.with_backend(backend);
         let stream = encode_fixture(&encoder);
         assert_eq!(
             Counting::calls(&counter),
@@ -246,9 +243,8 @@ fn container_requests_never_reach_a_backend() {
 
 #[test]
 fn jpeg_recompression_never_reaches_a_backend() {
-    let mut encoder = JxlEncoder::lossless();
     let (backend, counter) = Counting::new();
-    encoder.push_backend(backend);
+    let encoder = JxlEncoder::lossless().with_backend(backend);
     let mut out = Vec::new();
     // An empty JPEG is rejected by the built-in path; what matters is that the registry was skipped.
     let error = encoder.recompress_jpeg(&[], &mut out).unwrap_err();
@@ -290,8 +286,7 @@ fn a_pushed_decode_backend_supplies_the_raster_and_sees_the_stream_dimensions() 
     )
     .expect("raster");
 
-    let mut decoder = JxlDecoder::new();
-    decoder.push_backend(CannedDecode {
+    let decoder = JxlDecoder::new().with_backend(CannedDecode {
         raster,
         seen: std::sync::Arc::clone(&seen),
     });
@@ -337,11 +332,12 @@ fn a_codec_abi_encode_backend_plugs_in_through_the_adapter() {
     let real = encode_fixture(&JxlEncoder::lossless());
     let quality = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    let mut encoder = JxlEncoder::lossy(Distance::new(1.0).unwrap());
-    encoder.push_backend(AbiEncodeBackend::new(AbiFixture {
-        stream: real.clone(),
-        seen_quality: std::sync::Arc::clone(&quality),
-    }));
+    let encoder = JxlEncoder::lossy(Distance::new(1.0).unwrap()).with_backend(AbiJxlEncoder::new(
+        AbiFixture {
+            stream: real.clone(),
+            seen_quality: std::sync::Arc::clone(&quality),
+        },
+    ));
 
     let produced = encode_fixture(&encoder);
     assert_eq!(produced, real);
@@ -361,11 +357,12 @@ fn a_codec_abi_encode_backend_declines_a_pinned_coding_tool() {
         JxlEncoder::lossy(Distance::new(1.0).unwrap()).with_modular(ModularMode::Modular);
     let baseline = encode_fixture(&configured);
 
-    let mut encoder = configured.clone();
-    encoder.push_backend(AbiEncodeBackend::new(AbiFixture {
-        stream: stream.clone(),
-        seen_quality: std::sync::Arc::clone(&quality),
-    }));
+    let encoder = configured
+        .clone()
+        .with_backend(AbiJxlEncoder::new(AbiFixture {
+            stream: stream.clone(),
+            seen_quality: std::sync::Arc::clone(&quality),
+        }));
 
     let produced = encode_fixture(&encoder);
     assert_ne!(produced, stream, "the ABI backend must not have run");
@@ -380,11 +377,12 @@ fn a_codec_abi_encode_backend_declines_a_pinned_coding_tool() {
     );
 
     // The same backend does accept the otherwise-identical job with the coding tool left to libjxl.
-    let mut auto = JxlEncoder::lossy(Distance::new(1.0).unwrap());
-    auto.push_backend(AbiEncodeBackend::new(AbiFixture {
-        stream: stream.clone(),
-        seen_quality: std::sync::Arc::clone(&quality),
-    }));
+    let auto = JxlEncoder::lossy(Distance::new(1.0).unwrap()).with_backend(AbiJxlEncoder::new(
+        AbiFixture {
+            stream: stream.clone(),
+            seen_quality: std::sync::Arc::clone(&quality),
+        },
+    ));
     assert_eq!(encode_fixture(&auto), stream);
 }
 
@@ -402,27 +400,24 @@ impl AbiDecoderTrait for AbiDecodeFixture {
 }
 
 #[test]
-fn a_codec_abi_decode_backend_declines_on_unsupported_and_propagates_otherwise() {
+fn a_codec_abi_decode_backend_s_failure_status_is_terminal() {
+    // Declining is `supports`' job alone: once the backend accepted, every non-OK status — a late
+    // UNSUPPORTED included — propagates instead of falling through to the built-in tail.
     let stream = encode_fixture(&JxlEncoder::lossless());
-    let (pixels, _) = fixture();
-
-    // UNSUPPORTED is a decline, so the built-in jxl-rs tail decodes the stream correctly.
-    let mut declining = JxlDecoder::new();
-    declining.push_backend(AbiDecodeBackend::new(AbiDecodeFixture(Status::UNSUPPORTED)));
-    let decoded: ImageBuf<Rgb8> = declining.decode_image(&stream).expect("tail decodes");
-    assert_eq!(decoded.as_samples(), pixels.as_slice());
-
-    // Any other non-OK status is terminal and propagates instead of falling through.
-    let mut failing = JxlDecoder::new();
-    failing.push_backend(AbiDecodeBackend::new(AbiDecodeFixture(Status(-99))));
-    let result: gamut_core::Result<ImageBuf<Rgb8>> = failing.decode_image(&stream);
-    let error = result.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::InvalidInput);
-    assert_eq!(
-        error.static_message(),
-        Some("JXL: codec-abi decode backend failed")
-    );
-    assert_eq!(error.detail(), Some("codec-abi status -99"));
+    for (status, detail) in [
+        (Status::UNSUPPORTED, "codec-abi status -1"),
+        (Status(-99), "codec-abi status -99"),
+    ] {
+        let failing = JxlDecoder::new().with_backend(AbiJxlDecoder::new(AbiDecodeFixture(status)));
+        let result: gamut_core::Result<ImageBuf<Rgb8>> = failing.decode_image(&stream);
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: codec-abi decode backend failed")
+        );
+        assert_eq!(error.detail(), Some(detail));
+    }
 }
 
 #[test]
@@ -430,8 +425,7 @@ fn a_codec_abi_decode_backend_round_trips_a_zeroed_raster() {
     // An OK status with an untouched (host-zeroed) buffer still round-trips the layout contract:
     // the host returns exactly what the backend was asked to fill.
     let stream = encode_fixture(&JxlEncoder::lossless());
-    let mut decoder = JxlDecoder::new();
-    decoder.push_backend(AbiDecodeBackend::new(AbiDecodeFixture(Status::OK)));
+    let decoder = JxlDecoder::new().with_backend(AbiJxlDecoder::new(AbiDecodeFixture(Status::OK)));
     let decoded: ImageBuf<Gray8> = decoder.decode_image(&stream).expect("decode");
     assert_eq!(decoded.dimensions(), Dimensions::new(16, 16).unwrap());
     assert_eq!(decoded.as_samples(), vec![0u8; 16 * 16].as_slice());
@@ -452,13 +446,13 @@ fn the_public_surface_composes_for_alpha_layouts_too() {
 
     struct Echo(Vec<u8>);
     impl JxlCodestreamEncoder for Echo {
-        fn supports(&mut self, _req: &JxlEncodeRequest) -> bool {
+        fn supports(&mut self, _req: &JxlEncodeRequest<'_>) -> bool {
             true
         }
 
         fn encode(
             &mut self,
-            _req: &JxlEncodeRequest,
+            _req: &JxlEncodeRequest<'_>,
             image: &JxlImageRef<'_>,
         ) -> gamut_core::Result<Vec<u8>> {
             assert_eq!(image.channels(), 4);
@@ -467,8 +461,7 @@ fn the_public_surface_composes_for_alpha_layouts_too() {
         }
     }
 
-    let mut encoder = JxlEncoder::lossless();
-    encoder.push_backend(Echo(baseline.clone()));
+    let encoder = JxlEncoder::lossless().with_backend(Echo(baseline.clone()));
     let mut produced = Vec::new();
     encoder
         .encode_image(image, &mut produced)

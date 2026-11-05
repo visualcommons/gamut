@@ -19,8 +19,11 @@ workspace = true
 # The shared codestream-backend seam (issue #272): the `repr(C)` vtables and their Rust twin traits
 # that `crate::abi` adapts onto gamut-jxl's typed `JxlCodestreamEncoder`/`JxlCodestreamDecoder`.
 # Unconditional and feature-independent: the seam is pure interface (no_std, dependency-free), and
-# pushing a backend is exactly what supplies a direction whose built-in tail is compiled out.
-gamut-codec-abi.workspace = true
+# pushing a backend is exactly what supplies a direction whose built-in tail is compiled out. The
+# `std` feature supplies the workspace's one backend `Registry`.
+gamut-codec-abi = { workspace = true, features = ["std"] }
+# `BitDepth`, the shared coded-depth vocabulary `JxlEncoder::with_bit_depth` takes.
+gamut-color.workspace = true
 gamut-core.workspace = true
 
 # The pure-Rust JPEG XL decoder (jxl-rs). Not target-gated: it is 100% safe Rust and compiles for
@@ -57,7 +60,7 @@ encode = ["dep:gamut-jxl-sys"]
 # The pure-Rust JPEG XL decoder wrapping the `jxl` crate (jxl-rs). Pure safe Rust with no native
 # build, so — unlike `encode` — it is available on every target, wasm32 included.
 decode = ["dep:jxl"]
-# Typed metadata wiring: `JxlMetadata::blocks` / `JxlMetadata::metadata` and
-# `JxlEncoder::with_metadata` / `with_encoded_metadata` over the `gamut-metadata` facade. Pure Rust,
-# target-independent; reading the boxes back (`JxlDecoder::metadata`) needs `decode`.
+# Typed metadata wiring: `JxlEncoder` as a `gamut_metadata::MetadataSink` (`with_metadata` /
+# `with_encoded_metadata`) and the facade re-exports that read a `RawMetadata` as a `Metadata`. Pure
+# Rust, target-independent; reading the boxes back (`JxlDecoder::metadata`) needs `decode`.
 metadata = ["dep:gamut-metadata"]

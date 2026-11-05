@@ -178,9 +178,13 @@ pub(crate) fn encode(
     // SAFETY: `enc.0` is valid; `info` is fully initialised and copied internally.
     enc.check(unsafe { sys_enc::JxlEncoderSetBasicInfo(enc.0, &info) })?;
 
-    // Colour signalling: the configured ColorSpec, gray or colour to match the channel count. Must
-    // follow SetBasicInfo.
-    set_color(&enc, cfg.color(), image.color_channels() == 1)?;
+    // Colour signalling: the ICC profile when one is set, else the configured ColorSpec, gray or
+    // colour to match the channel count. Must follow SetBasicInfo.
+    let gray = image.color_channels() == 1;
+    match cfg.icc_profile() {
+        Some(icc) => set_icc(&enc, icc, gray)?,
+        None => set_color(&enc, cfg.color(), gray)?,
+    }
 
     // Frame settings are owned by the encoder (freed on destroy), so they need no separate RAII.
     // SAFETY: `enc.0` is valid; a null source means "copy from defaults".
@@ -406,10 +410,17 @@ pub(crate) fn recompress(cfg: &JxlEncoder, jpeg: &[u8], out: &mut Vec<u8>) -> Re
     drain(&enc, out)
 }
 
-/// Signals the frame's colour interpretation to libjxl: a structured encoding for the built-in
-/// [`ColorSpec`] variants, or the verbatim ICC profile bytes for [`ColorSpec::Icc`]. Must be called
-/// after `JxlEncoderSetBasicInfo`.
-fn set_color(enc: &Encoder, spec: &ColorSpec, gray: bool) -> Result<()> {
+/// Signals the frame's colour encoding to libjxl as the verbatim ICC profile bytes, after checking
+/// the profile's colour family against the image. Must be called after `JxlEncoderSetBasicInfo`.
+fn set_icc(enc: &Encoder, icc: &[u8], gray: bool) -> Result<()> {
+    validate_icc(icc, gray)?;
+    // SAFETY: `enc.0` is valid; `icc` points to `icc.len()` readable bytes, copied internally.
+    enc.check(unsafe { sys_enc::JxlEncoderSetICCProfile(enc.0, icc.as_ptr(), icc.len()) })
+}
+
+/// Signals the frame's colour interpretation to libjxl as the structured encoding of a
+/// [`ColorSpec`]. Must be called after `JxlEncoderSetBasicInfo`.
+fn set_color(enc: &Encoder, spec: ColorSpec, gray: bool) -> Result<()> {
     let is_gray = if gray {
         sys_ty::JxlBool::TRUE
     } else {
@@ -424,7 +435,7 @@ fn set_color(enc: &Encoder, spec: &ColorSpec, gray: bool) -> Result<()> {
             // SAFETY: the storage is zeroed (a valid value), and the libjxl helper then writes the
             // requested sRGB/linear-sRGB profile through the pointer.
             unsafe {
-                if *spec == ColorSpec::Srgb {
+                if spec == ColorSpec::Srgb {
                     sys_enc::JxlColorEncodingSetToSRGB(color.as_mut_ptr(), is_gray);
                 } else {
                     sys_enc::JxlColorEncodingSetToLinearSRGB(color.as_mut_ptr(), is_gray);
@@ -447,7 +458,7 @@ fn set_color(enc: &Encoder, spec: &ColorSpec, gray: bool) -> Result<()> {
                 primaries_red_xy: [0.0; 2],
                 primaries_green_xy: [0.0; 2],
                 primaries_blue_xy: [0.0; 2],
-                transfer_function: if *spec == ColorSpec::Pq {
+                transfer_function: if spec == ColorSpec::Pq {
                     sys_ty::JxlTransferFunction::PQ
                 } else {
                     sys_ty::JxlTransferFunction::HLG
@@ -455,14 +466,6 @@ fn set_color(enc: &Encoder, spec: &ColorSpec, gray: bool) -> Result<()> {
                 gamma: 0.0,
                 rendering_intent: sys_ty::JxlRenderingIntent::RELATIVE,
             }
-        }
-        ColorSpec::Icc(icc) => {
-            validate_icc(icc, gray)?;
-            // SAFETY: `enc.0` is valid; `icc` points to `icc.len()` readable bytes, copied
-            // internally.
-            return enc.check(unsafe {
-                sys_enc::JxlEncoderSetICCProfile(enc.0, icc.as_ptr(), icc.len())
-            });
         }
     };
 

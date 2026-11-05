@@ -16,7 +16,7 @@
 //! typed error — float sample support is deferred crate-wide (see `STATUS.md`).
 
 use gamut_core::{DecodeImage, Error, Gray16, Result, Rgb16};
-use gamut_jxl::JxlDecoder;
+use gamut_jxl::{DecodeLimits, JxlDecoder};
 
 /// Decodes one JPEG XL chunk of `cols × rows` pixels at `spp` samples each, returning exactly
 /// `cols * rows * spp` full-range 16-bit code values (see the module docs).
@@ -24,7 +24,14 @@ use gamut_jxl::JxlDecoder;
 /// The stream's declared geometry and channel count must agree with the IFD's — a disagreement
 /// means the file is lying about its own contents.
 pub(crate) fn decode_chunk(bytes: &[u8], cols: usize, rows: usize, spp: usize) -> Result<Vec<u16>> {
-    let decoder = JxlDecoder::new();
+    // The chunk's size is the IFD's tile/strip geometry, which the header is checked against
+    // below, so the decoder is budgeted exactly that raster rather than gamut-jxl's general 64 MiB
+    // default: a single-strip raw can legitimately exceed it, and nothing beyond it is ever asked.
+    let budget = cols
+        .saturating_mul(rows)
+        .saturating_mul(spp)
+        .saturating_mul(2);
+    let decoder = JxlDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(budget));
     let info = decoder.info(bytes)?;
     if info.is_float {
         return Err(Error::unsupported(

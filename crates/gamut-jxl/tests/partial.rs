@@ -1,4 +1,4 @@
-//! The best-effort decode path (`DecodePartialImage`, issue #256): a truncated codestream returns
+//! The best-effort decode path (`JxlDecoder::decode_partial`, issue #256): a truncated codestream returns
 //! whatever pixels it supports plus a `JxlPartialReport`, instead of the flat `InvalidInput` the
 //! `DecodeImage` path still gives.
 //!
@@ -36,8 +36,7 @@ use gamut_core::{
     ImageBuf, ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_jxl::{
-    Container, DecodePartialImage, Distance, Effort, JxlDecoder, JxlEncoder, JxlPartialReport,
-    JxlRender,
+    BitDepth, Container, Distance, Effort, JxlDecoder, JxlEncoder, JxlPartialImage, JxlRender,
 };
 
 /// The identity fixture's size: small and odd, matching `features.rs` — identity does not depend on
@@ -97,12 +96,14 @@ fn assert_identical<P>(dec: &JxlDecoder, bytes: &[u8], source: &[P::Sample])
 where
     P: Pixel,
     P::Sample: PartialEq + core::fmt::Debug,
-    JxlDecoder: DecodePartialImage<P> + DecodeImage<P>,
+    JxlDecoder: DecodeImage<P>,
 {
     let plain: ImageBuf<P> = dec.decode_image(bytes).expect("decode_image");
-    let (partial, report): (ImageBuf<P>, JxlPartialReport) = dec
-        .decode_partial_image(bytes)
-        .expect("decode_partial_image");
+    let JxlPartialImage {
+        image: partial,
+        report,
+        ..
+    } = dec.decode_partial::<P>(bytes).expect("decode_partial");
 
     assert!(report.is_complete(), "a whole stream must report complete");
     assert_eq!(report.render, JxlRender::Complete);
@@ -141,7 +142,7 @@ fn the_codestream_bit_depth_policy_flows_through_the_partial_path() {
     let dims = Dimensions::new(w, h).unwrap();
     let img = ImageRef::<Rgb16>::new(&px, dims).unwrap();
     let bytes = JxlEncoder::lossless()
-        .with_bit_depth(10)
+        .with_bit_depth(BitDepth::Ten)
         .encode_to_vec(img)
         .unwrap();
 
@@ -149,9 +150,10 @@ fn the_codestream_bit_depth_policy_flows_through_the_partial_path() {
     assert_identical::<Rgb16>(&dec, &bytes, &px);
 
     // And the knob genuinely changes the answer, so the assertion above is not vacuous.
-    let (scaled, _): (ImageBuf<Rgb16>, _) = JxlDecoder::new()
-        .decode_partial_image(&bytes)
-        .expect("full-range decode");
+    let scaled = JxlDecoder::new()
+        .decode_partial::<Rgb16>(&bytes)
+        .expect("full-range decode")
+        .image;
     assert_ne!(
         scaled.as_samples(),
         px.as_slice(),
@@ -177,7 +179,7 @@ fn prefixes(len: usize) -> Vec<usize> {
 fn sweep<P>(stream: &[u8], full: &ImageBuf<P>) -> usize
 where
     P: Pixel<Sample = u8>,
-    JxlDecoder: DecodePartialImage<P> + DecodeImage<P>,
+    JxlDecoder: DecodeImage<P>,
 {
     let dec = JxlDecoder::new();
     let mut rendered = 0usize;
@@ -190,7 +192,7 @@ where
         // readable header does not guarantee a best-effort decode succeeds.)
         let header_ok = dec.info(prefix).is_ok();
 
-        let Ok((image, report)) = dec.decode_partial_image(prefix) else {
+        let Ok(JxlPartialImage { image, report, .. }) = dec.decode_partial::<P>(prefix) else {
             assert!(
                 !header_ok || len < stream.len(),
                 "the whole stream must decode"
@@ -285,8 +287,7 @@ fn truncation_before_the_image_headers_is_still_an_error() {
     // permissive than the rejecting one. This is the one stage that cannot be relaxed.
     let dec = JxlDecoder::new();
     for prefix in [&[][..], &[0xFF][..], &[0xFF, 0x0A][..]] {
-        let result: gamut_core::Result<(ImageBuf<Rgb8>, JxlPartialReport)> =
-            dec.decode_partial_image(prefix);
+        let result = dec.decode_partial::<Rgb8>(prefix);
         let error = result.expect_err("no image headers, no image");
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }

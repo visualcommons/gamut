@@ -1,25 +1,23 @@
 //! Adapters between the shared [`gamut_codec_abi`] seam and gamut-jxl's typed codestream traits.
 //!
 //! [`gamut-codec-abi`](gamut_codec_abi) is the workspace-wide door a foreign (C / `-sys`) or
-//! alternate codestream backend enters by; [`crate::backend`] is the JPEG-XL-shaped trait pair the
-//! host actually calls. These two adapters bridge them, so a C backend reached through
-//! [`gamut_codec_abi::bridge::ForeignEncoder`] and a pure-Rust one implementing
-//! [`gamut_codec_abi::Encoder`] both plug into
-//! [`JxlEncoder::push_backend`](crate::JxlEncoder::push_backend) unchanged:
+//! alternate codestream backend enters by; [`JxlCodestreamEncoder`] / [`JxlCodestreamDecoder`] are
+//! the JPEG-XL-shaped trait pair the host actually calls. These two adapters bridge them, so a C
+//! backend reached through [`gamut_codec_abi::bridge::ForeignEncoder`] and a pure-Rust one
+//! implementing [`gamut_codec_abi::Encoder`] both plug into
+//! [`JxlEncoder::with_backend`](crate::JxlEncoder::with_backend) unchanged:
 //!
 //! ```text
-//! C vtable ──bridge::ForeignEncoder──▶ gamut_codec_abi::Encoder ──AbiEncodeBackend──▶ JxlCodestreamEncoder
+//! C vtable ──bridge::ForeignEncoder──▶ gamut_codec_abi::Encoder ──AbiJxlEncoder──▶ JxlCodestreamEncoder
 //! ```
 //!
 //! # Status translation
 //!
-//! [`Status::OK`] is success. A late [`Status::UNSUPPORTED`] — the backend accepted the job at
-//! `supports` time and then declined — becomes an
-//! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, which the host treats as a
-//! decline and falls through to the next backend. **Every other non-OK status is terminal** and
-//! becomes an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error that
-//! propagates to the caller, per the seam's fallback
-//! contract: a backend that may have produced a partial result is never silently retried.
+//! [`Status::OK`] is success. **Every non-OK status is terminal** — a late
+//! [`Status::UNSUPPORTED`] included, since declining is `supports`' job alone — and becomes an
+//! [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error that propagates to the
+//! caller with the numeric status as its detail: a backend that may have produced a partial result
+//! is never silently retried.
 //!
 //! # What the ABI can and cannot carry
 //!
@@ -27,9 +25,9 @@
 //! format, dimensions, coded depth, and plane pointers. That covers the raster, the coded bit depth
 //! and the lossless/lossy target, but **not** JPEG XL's [`Effort`](crate::Effort) dial,
 //! [`ModularMode`] coding-tool selection, [`FrameSettings`] progression and decoding-speed
-//! overrides, [`ColorSpec`] signalling or [`Orientation`] metadata.
-//! Rather than emit a stream that silently ignores a request, [`AbiEncodeBackend::supports`]
-//! **declines** any job whose colour signalling, orientation, coding tool or frame settings are
+//! overrides, colour encoding ([`ColorSpec`] or ICC profile) or [`Orientation`] metadata.
+//! Rather than emit a stream that silently ignores a request, [`AbiJxlEncoder`]'s `supports`
+//! **declines** any job whose colour encoding, orientation, coding tool or frame settings are
 //! non-default. Effort is the one exception: it is a search-time dial every encoder interprets its own
 //! way (libjxl's levels have no meaning to another implementation), so it is simply not conveyed and
 //! an ABI backend picks its own. A pinned [`ModularMode`] is a property of the produced stream — it
@@ -42,13 +40,13 @@ use gamut_codec_abi::{
     Decoder as AbiDecoder, EncodeConfig, Encoder as AbiEncoder, ImageDesc, MAX_PLANES, Status,
     StreamConfig, codec_id,
 };
-use gamut_core::{Error, Result};
+use gamut_core::{Error, Orientation, Result};
 
 use crate::backend::{
     JxlCodestreamDecoder, JxlCodestreamEncoder, JxlDecoded, JxlEncodeRequest, JxlImageRef,
     JxlOwnedSamples, JxlSamples, JxlStreamInfo, layout_of,
 };
-use crate::config::{ColorSpec, FrameSettings, ModularMode, Orientation};
+use crate::config::{ColorSpec, FrameSettings, ModularMode};
 
 /// The codec identifier gamut-jxl puts in every [`StreamConfig`] / [`EncodeConfig`] it builds: the
 /// four-character code `"jxl "` read big-endian (`0x6A_78_6C_20`).
@@ -70,7 +68,7 @@ const LOSSLESS_QUALITY: u32 = 100;
 /// The scale is therefore monotonically decreasing in distance (a larger distance is lower
 /// quality), it spans the whole lossy range (`d = 25` → `0`), and no lossy job can ever collide with
 /// the lossless sentinel.
-fn quality_for(req: &JxlEncodeRequest) -> u32 {
+fn quality_for(req: &JxlEncodeRequest<'_>) -> u32 {
     match req.distance() {
         None => LOSSLESS_QUALITY,
         Some(d) => {
@@ -85,12 +83,13 @@ fn quality_for(req: &JxlEncodeRequest) -> u32 {
 
 /// Whether the ABI descriptors can faithfully carry `req`.
 ///
-/// Colour signalling, orientation, the coding-tool selection and the frame settings have no
+/// The colour encoding, orientation, the coding-tool selection and the frame settings have no
 /// [`EncodeConfig`] field, so a non-default request for any of them is declined rather than dropped
 /// (see the [module docs](self#what-the-abi-can-and-cannot-carry)). The frame settings are compared
 /// as a whole, so a field added to [`FrameSettings`] later is declined here without a change.
-fn is_conveyable(req: &JxlEncodeRequest) -> bool {
-    *req.color() == ColorSpec::Srgb
+fn is_conveyable(req: &JxlEncodeRequest<'_>) -> bool {
+    req.icc_profile().is_none()
+        && req.color() == ColorSpec::Srgb
         && req.orientation() == Orientation::Identity
         && req.modular() == ModularMode::Auto
         && req.frame_settings() == FrameSettings::default()
@@ -125,63 +124,64 @@ fn image_desc(image: &JxlImageRef<'_>, coded_depth: u32) -> ImageDesc {
     )
 }
 
-/// Translates a terminal (non-OK) [`Status`] into a typed error.
-///
-/// [`Status::UNSUPPORTED`] is the fall-through code and becomes an
-/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error — a late decline the host
-/// converts back into "try the next backend". Anything else is a backend failure and becomes an
-/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error, which propagates.
-fn status_error(status: Status, declined: &'static str, failed: &'static str) -> Error {
-    let classified = if status.is_unsupported() {
-        Error::unsupported(env!("CARGO_PKG_NAME"), declined)
-    } else {
-        Error::invalid_input(env!("CARGO_PKG_NAME"), failed)
-    };
-    classified.with_detail(format!("codec-abi status {}", status.0))
+/// Translates a terminal (non-OK) [`Status`] into a typed error: every non-OK status, a late
+/// [`Status::UNSUPPORTED`] included, is an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error carrying the numeric
+/// status as its detail.
+fn status_error(status: Status, failed: &'static str) -> Error {
+    Error::invalid_input(env!("CARGO_PKG_NAME"), failed)
+        .with_detail(format!("codec-abi status {}", status.0))
 }
 
-/// Adapts a [`gamut_codec_abi::Encoder`] into a [`JxlCodestreamEncoder`] that can be pushed onto a
+/// Adapts a [`gamut_codec_abi::Encoder`] into a [`JxlCodestreamEncoder`] that can be added to a
 /// [`JxlEncoder`](crate::JxlEncoder).
 ///
 /// The wrapped backend must produce a **bare JPEG XL codestream** (signature `FF 0A`) — the seam's
 /// boundary — streamed through the ABI's write callback.
-pub struct AbiEncodeBackend<E> {
+#[derive(Debug, Clone)]
+pub struct AbiJxlEncoder<E> {
     /// The wrapped ABI backend.
     inner: E,
 }
 
-impl<E: AbiEncoder + Send> AbiEncodeBackend<E> {
+impl<E> AbiJxlEncoder<E> {
     /// Wraps an ABI encoder as a gamut-jxl codestream backend.
     #[must_use]
     pub fn new(inner: E) -> Self {
         Self { inner }
     }
 
-    /// Borrows the wrapped ABI backend.
+    /// The wrapped backend.
     #[must_use]
     pub fn get_ref(&self) -> &E {
         &self.inner
     }
 
-    /// Unwraps the adapter, returning the ABI backend.
+    /// The wrapped backend, mutably.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut E {
+        &mut self.inner
+    }
+
+    /// Unwraps the backend.
     #[must_use]
     pub fn into_inner(self) -> E {
         self.inner
     }
 }
 
-impl<E: AbiEncoder + Send> JxlCodestreamEncoder for AbiEncodeBackend<E> {
-    fn supports(&mut self, req: &JxlEncodeRequest) -> bool {
+impl<E: AbiEncoder> JxlCodestreamEncoder for AbiJxlEncoder<E> {
+    fn supports(&mut self, req: &JxlEncodeRequest<'_>) -> bool {
         is_conveyable(req)
             && self
                 .inner
                 .supports(&EncodeConfig::new(JXL_CODEC_ID, quality_for(req)))
     }
 
-    fn encode(&mut self, req: &JxlEncodeRequest, image: &JxlImageRef<'_>) -> Result<Vec<u8>> {
+    fn encode(&mut self, req: &JxlEncodeRequest<'_>, image: &JxlImageRef<'_>) -> Result<Vec<u8>> {
         if !is_conveyable(req) {
-            // A late decline mirroring `supports`: the host falls through to the next backend
-            // rather than letting an unconveyable request be silently dropped.
+            // Reached only by a caller that skipped `supports`: refusing keeps an unconveyable
+            // request from being silently dropped.
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "JXL: codec-abi encode cannot carry this request",
@@ -198,47 +198,50 @@ impl<E: AbiEncoder + Send> JxlCodestreamEncoder for AbiEncodeBackend<E> {
         if status.is_ok() {
             Ok(out)
         } else {
-            Err(status_error(
-                status,
-                "JXL: codec-abi encode backend declined the job",
-                "JXL: codec-abi encode backend failed",
-            ))
+            Err(status_error(status, "JXL: codec-abi encode backend failed"))
         }
     }
 }
 
-/// Adapts a [`gamut_codec_abi::Decoder`] into a [`JxlCodestreamDecoder`] that can be pushed onto a
+/// Adapts a [`gamut_codec_abi::Decoder`] into a [`JxlCodestreamDecoder`] that can be added to a
 /// [`JxlDecoder`](crate::JxlDecoder).
 ///
 /// The ABI decodes into a **caller-allocated** buffer, so the adapter must know the output
 /// dimensions before the call. It takes them from [`JxlStreamInfo::dimensions`] and **declines** when
 /// the host could not determine them (no built-in header parser compiled in), rather than guessing.
-pub struct AbiDecodeBackend<D> {
+#[derive(Debug, Clone)]
+pub struct AbiJxlDecoder<D> {
     /// The wrapped ABI backend.
     inner: D,
 }
 
-impl<D: AbiDecoder + Send> AbiDecodeBackend<D> {
+impl<D> AbiJxlDecoder<D> {
     /// Wraps an ABI decoder as a gamut-jxl codestream backend.
     #[must_use]
     pub fn new(inner: D) -> Self {
         Self { inner }
     }
 
-    /// Borrows the wrapped ABI backend.
+    /// The wrapped backend.
     #[must_use]
     pub fn get_ref(&self) -> &D {
         &self.inner
     }
 
-    /// Unwraps the adapter, returning the ABI backend.
+    /// The wrapped backend, mutably.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut D {
+        &mut self.inner
+    }
+
+    /// Unwraps the backend.
     #[must_use]
     pub fn into_inner(self) -> D {
         self.inner
     }
 }
 
-impl<D: AbiDecoder + Send> JxlCodestreamDecoder for AbiDecodeBackend<D> {
+impl<D: AbiDecoder> JxlCodestreamDecoder for AbiJxlDecoder<D> {
     fn supports(&mut self, info: &JxlStreamInfo) -> bool {
         let (Some(dims), Some((_, _, bits))) = (info.dimensions(), layout_of(info.format())) else {
             return false;
@@ -253,7 +256,8 @@ impl<D: AbiDecoder + Send> JxlCodestreamDecoder for AbiDecodeBackend<D> {
 
     fn decode(&mut self, info: &JxlStreamInfo, codestream: &[u8]) -> Result<JxlDecoded> {
         let Some(dims) = info.dimensions() else {
-            // A late decline: without dimensions there is no buffer to decode into.
+            // Reached only by a caller that skipped `supports`: without dimensions there is no
+            // buffer to decode into.
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "JXL: codec-abi decode needs stream dimensions the host could not determine",
@@ -330,11 +334,7 @@ fn run_decode<D: AbiDecoder>(
     if status.is_ok() {
         Ok(())
     } else {
-        Err(status_error(
-            status,
-            "JXL: codec-abi decode backend declined the job",
-            "JXL: codec-abi decode backend failed",
-        ))
+        Err(status_error(status, "JXL: codec-abi decode backend failed"))
     }
 }
 
@@ -347,7 +347,7 @@ mod tests {
     use crate::config::{DecodingSpeed, Distance, Effort, ProgressiveDc, Toggle};
 
     /// A request with the given distance and otherwise ABI-conveyable settings.
-    fn request(distance: Option<Distance>) -> JxlEncodeRequest {
+    fn request(distance: Option<Distance>) -> JxlEncodeRequest<'static> {
         JxlEncodeRequest::new(
             distance,
             Effort::Squirrel,
@@ -355,6 +355,7 @@ mod tests {
             FrameSettings::default(),
             8,
             ColorSpec::Srgb,
+            None,
             Orientation::Identity,
         )
     }
@@ -399,6 +400,7 @@ mod tests {
             FrameSettings::default(),
             8,
             ColorSpec::Pq,
+            None,
             Orientation::Identity
         )));
         assert!(!is_conveyable(&JxlEncodeRequest::new(
@@ -408,7 +410,19 @@ mod tests {
             FrameSettings::default(),
             8,
             ColorSpec::Srgb,
+            None,
             Orientation::Rotate180
+        )));
+        // An embedded ICC profile has no EncodeConfig field either.
+        assert!(!is_conveyable(&JxlEncodeRequest::new(
+            None,
+            Effort::Squirrel,
+            ModularMode::Auto,
+            FrameSettings::default(),
+            8,
+            ColorSpec::Srgb,
+            Some(&[0u8; 128]),
+            Orientation::Identity
         )));
         // A pinned coding tool has no EncodeConfig field either, so both non-default modes decline.
         for modular in [ModularMode::Modular, ModularMode::VarDct] {
@@ -420,6 +434,7 @@ mod tests {
                     FrameSettings::default(),
                     8,
                     ColorSpec::Srgb,
+                    None,
                     Orientation::Identity
                 )),
                 "{modular:?} should not be conveyable"
@@ -446,6 +461,7 @@ mod tests {
                     settings,
                     8,
                     ColorSpec::Srgb,
+                    None,
                     Orientation::Identity
                 )),
                 "{settings:?} should not be conveyable"
@@ -454,18 +470,17 @@ mod tests {
     }
 
     #[test]
-    fn status_error_separates_decline_from_failure() {
-        let declined = status_error(Status::UNSUPPORTED, "declined", "failed");
-        assert_eq!(declined.kind(), gamut_core::ErrorKind::Unsupported);
-        assert_eq!(declined.static_message(), Some("declined"));
-        assert_eq!(declined.detail(), Some("codec-abi status -1"));
-
-        for status in [Status(-7), Status(1)] {
-            let failed = status_error(status, "declined", "failed");
+    fn status_error_is_terminal_for_every_status() {
+        // A late UNSUPPORTED is no decline: declining is `supports`' job alone.
+        for status in [Status::UNSUPPORTED, Status(-7), Status(1)] {
+            let failed = status_error(status, "failed");
             assert_eq!(failed.kind(), gamut_core::ErrorKind::InvalidInput);
             assert_eq!(failed.static_message(), Some("failed"));
-            assert!(failed.detail().is_some());
         }
+        assert_eq!(
+            status_error(Status::UNSUPPORTED, "failed").detail(),
+            Some("codec-abi status -1")
+        );
     }
 
     #[test]
@@ -534,7 +549,7 @@ mod tests {
 
     #[test]
     fn abi_encode_backend_round_trips_bytes_and_forwards_quality() {
-        let mut backend = AbiEncodeBackend::new(FakeAbiEncoder {
+        let mut backend = AbiJxlEncoder::new(FakeAbiEncoder {
             supported: true,
             status: Status::OK,
             payload: vec![0xFF, 0x0A, 0xAB, 0xCD],
@@ -548,6 +563,7 @@ mod tests {
         let bytes = backend.encode(&req, &image).expect("encode");
         assert_eq!(bytes, vec![0xFF, 0x0A, 0xAB, 0xCD]);
         assert_eq!(backend.get_ref().seen_quality, Some(92));
+        assert_eq!(backend.get_mut().seen_quality, Some(92));
         assert_eq!(backend.into_inner().seen_quality, Some(92));
     }
 
@@ -558,7 +574,7 @@ mod tests {
         let req = request(None);
 
         // supports=false is an early decline.
-        let mut declining = AbiEncodeBackend::new(FakeAbiEncoder {
+        let mut declining = AbiJxlEncoder::new(FakeAbiEncoder {
             supported: false,
             status: Status::OK,
             payload: Vec::new(),
@@ -566,33 +582,21 @@ mod tests {
         });
         assert!(!declining.supports(&req));
 
-        // A late UNSUPPORTED is a decline expressed as an ErrorKind::Unsupported error.
-        let mut late = AbiEncodeBackend::new(FakeAbiEncoder {
-            supported: true,
-            status: Status::UNSUPPORTED,
-            payload: Vec::new(),
-            seen_quality: None,
-        });
-        let error = late.encode(&req, &image).unwrap_err();
-        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
-        assert_eq!(
-            error.static_message(),
-            Some("JXL: codec-abi encode backend declined the job")
-        );
-
-        // Any other status is a terminal failure.
-        let mut failing = AbiEncodeBackend::new(FakeAbiEncoder {
-            supported: true,
-            status: Status(-42),
-            payload: Vec::new(),
-            seen_quality: None,
-        });
-        let error = failing.encode(&req, &image).unwrap_err();
-        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
-        assert_eq!(
-            error.static_message(),
-            Some("JXL: codec-abi encode backend failed")
-        );
+        // Every non-OK status after acceptance is a terminal failure, a late UNSUPPORTED included.
+        for status in [Status::UNSUPPORTED, Status(-42)] {
+            let mut failing = AbiJxlEncoder::new(FakeAbiEncoder {
+                supported: true,
+                status,
+                payload: Vec::new(),
+                seen_quality: None,
+            });
+            let error = failing.encode(&req, &image).unwrap_err();
+            assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.static_message(),
+                Some("JXL: codec-abi encode backend failed")
+            );
+        }
     }
 
     #[test]
@@ -606,9 +610,10 @@ mod tests {
             FrameSettings::default(),
             8,
             ColorSpec::Srgb,
+            None,
             Orientation::Rotate90Cw,
         );
-        let mut backend = AbiEncodeBackend::new(FakeAbiEncoder {
+        let mut backend = AbiJxlEncoder::new(FakeAbiEncoder {
             supported: true,
             status: Status::OK,
             payload: vec![0xFF, 0x0A],
@@ -674,7 +679,7 @@ mod tests {
             Some(dims),
             false,
         );
-        let mut backend = AbiDecodeBackend::new(FakeAbiDecoder {
+        let mut backend = AbiJxlDecoder::new(FakeAbiDecoder {
             supported: true,
             status: Status::OK,
             fill: 0x5A,
@@ -682,6 +687,7 @@ mod tests {
         });
         assert!(backend.supports(&info));
         assert_eq!(backend.get_ref().seen_size, Some((2, 2, 8)));
+        assert_eq!(backend.get_mut().seen_size, Some((2, 2, 8)));
 
         let decoded = backend.decode(&info, &[0xFF, 0x0A]).expect("decode");
         assert_eq!(decoded.format(), PixelFormat::Gray8);
@@ -698,7 +704,7 @@ mod tests {
             Some(dims),
             true,
         );
-        let mut backend = AbiDecodeBackend::new(FakeAbiDecoder {
+        let mut backend = AbiJxlDecoder::new(FakeAbiDecoder {
             supported: true,
             status: Status::OK,
             fill: 0x11,
@@ -717,13 +723,13 @@ mod tests {
     #[test]
     fn abi_decode_backend_declines_without_dimensions() {
         let info = JxlStreamInfo::new(PixelFormat::Gray8, JxlFraming::Codestream, None, false);
-        let mut backend = AbiDecodeBackend::new(FakeAbiDecoder {
+        let mut backend = AbiJxlDecoder::new(FakeAbiDecoder {
             supported: true,
             status: Status::OK,
             fill: 0,
             seen_size: None,
         });
-        // `supports` declines outright, and the late path is an Unsupported decline too.
+        // `supports` declines outright, and a caller that skips it gets an Unsupported refusal.
         assert!(!backend.supports(&info));
         let error = backend.decode(&info, &[0xFF, 0x0A]).unwrap_err();
         assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
@@ -742,34 +748,24 @@ mod tests {
             Some(dims),
             false,
         );
-        let mut late = AbiDecodeBackend::new(FakeAbiDecoder {
-            supported: true,
-            status: Status::UNSUPPORTED,
-            fill: 0,
-            seen_size: None,
-        });
-        let error = late.decode(&info, &[0xFF, 0x0A]).unwrap_err();
-        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
-        assert_eq!(
-            error.static_message(),
-            Some("JXL: codec-abi decode backend declined the job")
-        );
-
-        let mut failing = AbiDecodeBackend::new(FakeAbiDecoder {
-            supported: true,
-            status: Status(9),
-            fill: 0,
-            seen_size: None,
-        });
-        let error = failing.decode(&info, &[0xFF, 0x0A]).unwrap_err();
-        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
-        assert_eq!(
-            error.static_message(),
-            Some("JXL: codec-abi decode backend failed")
-        );
+        // Every non-OK status after acceptance is a terminal failure, a late UNSUPPORTED included.
+        for status in [Status::UNSUPPORTED, Status(9)] {
+            let mut failing = AbiJxlDecoder::new(FakeAbiDecoder {
+                supported: true,
+                status,
+                fill: 0,
+                seen_size: None,
+            });
+            let error = failing.decode(&info, &[0xFF, 0x0A]).unwrap_err();
+            assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.static_message(),
+                Some("JXL: codec-abi decode backend failed")
+            );
+        }
 
         // supports=false is the early decline.
-        let mut declining = AbiDecodeBackend::new(FakeAbiDecoder {
+        let mut declining = AbiJxlDecoder::new(FakeAbiDecoder {
             supported: false,
             status: Status::OK,
             fill: 0,

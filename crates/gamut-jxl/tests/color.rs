@@ -4,7 +4,7 @@
 //!   (verified field-by-field via `JxlDecoderGetColorAsEncodedProfile`);
 //! - lossless streams stay **bit-exact** through gamut's pure-Rust decoder for every built-in
 //!   colour spec (colour signalling never touches the samples);
-//! - an [`ColorSpec::Icc`] profile is carried verbatim (byte-exact ICC round-trip through the
+//! - an ICC profile set with `with_icc_profile` is carried verbatim (byte-exact ICC round-trip through the
 //!   oracle) and replaces the structured encoding;
 //! - structural ICC mismatches (wrong colour family, truncated profile) are typed errors.
 //!
@@ -26,12 +26,16 @@ use gamut_jxl_sys::types as ty;
 
 /// Encodes a deterministic 24x17 RGB8 image losslessly with the given colour spec.
 fn encode_rgb8(color: ColorSpec) -> Vec<u8> {
+    encode_rgb8_with(JxlEncoder::lossless().with_color(color))
+}
+
+/// Encodes the same deterministic 24x17 RGB8 image with `encoder`.
+fn encode_rgb8_with(encoder: JxlEncoder) -> Vec<u8> {
     let dims = Dimensions::new(24, 17).unwrap();
     let samples = gen_u8(24, 17, 3);
     let image = ImageRef::<Rgb8>::new(&samples, dims).unwrap();
     let mut out = Vec::new();
-    JxlEncoder::lossless()
-        .with_color(color)
+    encoder
         .encode_image(image, &mut out)
         .expect("encode failed");
     out
@@ -150,7 +154,7 @@ fn lossless_is_bit_exact_for_every_built_in_color_spec() {
         ColorSpec::Pq,
         ColorSpec::Hlg,
     ] {
-        let (samples, jxl) = encode_rgb16(color.clone());
+        let (samples, jxl) = encode_rgb16(color);
 
         let image: ImageBuf<Rgb16> = JxlDecoder::new()
             .decode_image(&jxl)
@@ -174,7 +178,7 @@ fn srgb_icc() -> Vec<u8> {
 #[test]
 fn icc_profile_is_carried_verbatim() {
     let icc = srgb_icc();
-    let jxl = encode_rgb8(ColorSpec::Icc(icc.clone()));
+    let jxl = encode_rgb8_with(JxlEncoder::lossless().with_icc_profile(&icc));
 
     // An attached ICC profile replaces the structured encoding...
     assert!(
@@ -211,7 +215,7 @@ fn gray_icc_on_gray_image_roundtrips() {
     let image = ImageRef::<Gray8>::new(&samples, dims).unwrap();
     let mut jxl = Vec::new();
     JxlEncoder::lossless()
-        .with_color(ColorSpec::Icc(gray_icc.clone()))
+        .with_icc_profile(&gray_icc)
         .encode_image(image, &mut jxl)
         .expect("gray ICC encode failed");
     assert_eq!(icc_profile(&jxl).expect("ICC must be readable"), gray_icc);
@@ -225,7 +229,7 @@ fn icc_color_family_mismatch_is_rejected() {
     let image = ImageRef::<Gray8>::new(&samples, dims).unwrap();
     let mut out = Vec::new();
     let err = JxlEncoder::lossless()
-        .with_color(ColorSpec::Icc(rgb_icc))
+        .with_icc_profile(&rgb_icc)
         .encode_image(image, &mut out)
         .expect_err("an RGB profile on a grayscale image must be rejected");
     assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err:?}");
@@ -239,7 +243,7 @@ fn truncated_icc_is_rejected() {
     let image = ImageRef::<Rgb8>::new(&samples, dims).unwrap();
     let mut out = Vec::new();
     let err = JxlEncoder::lossless()
-        .with_color(ColorSpec::Icc(vec![0u8; 64]))
+        .with_icc_profile(&[0u8; 64])
         .encode_image(image, &mut out)
         .expect_err("a truncated ICC profile must be rejected");
     assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err:?}");
@@ -248,7 +252,7 @@ fn truncated_icc_is_rejected() {
 #[test]
 fn decoder_surfaces_the_embedded_icc_profile() {
     let icc = srgb_icc();
-    let jxl = encode_rgb8(ColorSpec::Icc(icc.clone()));
+    let jxl = encode_rgb8_with(JxlEncoder::lossless().with_icc_profile(&icc));
     let embedded = JxlDecoder::new()
         .embedded_icc_profile(&jxl)
         .expect("metadata parse failed")
@@ -264,7 +268,7 @@ fn info_reports_whether_pixels_decode_into_the_embedded_profile() {
     // Lossless keeps the original colour space; lossy codes XYB, which decodes to sRGB rather
     // than into the embedded ICC profile.
     let icc = srgb_icc();
-    let lossless = encode_rgb8(ColorSpec::Icc(icc.clone()));
+    let lossless = encode_rgb8_with(JxlEncoder::lossless().with_icc_profile(&icc));
     assert!(
         JxlDecoder::new()
             .info(&lossless)
@@ -276,7 +280,7 @@ fn info_reports_whether_pixels_decode_into_the_embedded_profile() {
     let image = ImageRef::<Rgb8>::new(&samples, Dimensions::new(24, 17).unwrap()).unwrap();
     let mut lossy = Vec::new();
     JxlEncoder::lossy(Distance::new(1.0).unwrap())
-        .with_color(ColorSpec::Icc(icc))
+        .with_icc_profile(&icc)
         .encode_image(image, &mut lossy)
         .expect("lossy ICC encode failed");
     assert!(
@@ -291,7 +295,7 @@ fn info_reports_whether_pixels_decode_into_the_embedded_profile() {
 fn decoder_reports_no_embedded_icc_for_structured_encodings() {
     // Structured encodings (sRGB, PQ, ...) carry no profile bytes: `None`, not a synthesized ICC.
     for color in [ColorSpec::Srgb, ColorSpec::Pq] {
-        let jxl = encode_rgb8(color.clone());
+        let jxl = encode_rgb8(color);
         assert_eq!(
             JxlDecoder::new()
                 .embedded_icc_profile(&jxl)

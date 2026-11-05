@@ -32,7 +32,8 @@ on a hand-written golden bitstream.
   **bit-for-bit** (proven against the libjxl oracle) and the stream still decodes as ordinary
   pixels. Output is always container-framed (the `jbrd` box requires it); only `Effort` applies.
 - **Effort dial.** `Effort` `Lightning..=Glacier`, mapping libjxl effort `1..=10` (default
-  `Squirrel` = 7). Level 11 ("tectonic plate") is expert-gated and out of scope.
+  `Squirrel` = 7); `repr(u8)` with the level as discriminant, `#[non_exhaustive]`, and `const`
+  `level` / `from_level` (issue #1080). Level 11 ("tectonic plate") is expert-gated and out of scope.
 - **No `quality` dial, by design.** The rate knobs are `lossless()`, `lossy(Distance)`,
   `with_effort` and `with_bit_depth` — there is deliberately no `0..=100` quality setting. Distance
   is JPEG XL's native dial and expresses the whole lossy range exactly; a quality scale would be a
@@ -64,17 +65,18 @@ on a hand-written golden bitstream.
 - **Pixel layouts.** 8- and 16-bit **Gray / GrayAlpha / RGB / RGBA** (eight `EncodeImage` /
   `DecodeImage` impls); 16-bit samples handed to libjxl as native-endian bytes.
 - **Container framing.** Bare codestream (default, signature `FF 0A`) and the ISO BMFF `.jxl`
-  container (`Container`).
-- **Colour signalling (`ColorSpec`).** sRGB (default), linear sRGB, **PQ** and **HLG** (BT.2100/D65
-  structured encodings, HDR-coded `u16` samples), and a verbatim embedded **ICC profile**
-  (`SetICCProfile`, with a structural gray/RGB pre-check). Signalling only — the encoder never
+  container (`Container`, `repr(u8)`).
+- **Colour signalling.** A fieldless `ColorSpec` (`repr(u8)`, `#[non_exhaustive]`): sRGB (default),
+  linear sRGB, **PQ** and **HLG** (BT.2100/D65 structured encodings, HDR-coded `u16` samples); or a
+  verbatim embedded **ICC profile** through `with_icc_profile(&[u8])` (`SetICCProfile`, with a
+  structural gray/RGB pre-check), which replaces the `ColorSpec` while set (issue #1080). Signalling only — the encoder never
   converts pixels. The decoder surfaces embedded ICC bytes via `JxlDecoder::embedded_icc_profile`.
-- **Orientation.** `Orientation` (all eight EXIF values) via `with_orientation`; metadata-only
+- **Orientation.** `gamut_core::Orientation` (all eight EXIF values) via `with_orientation`; metadata-only
   (samples stay in coded order, decoders apply the transform).
 - **Exif / XMP container boxes.** `with_exif` (raw EXIF; the 4-byte tiff-offset prefix is added
-  automatically) and `with_xmp`, written as uncompressed `Exif` / `xml ` boxes; requires
+  automatically) and `with_xmp(&[u8])`, written as uncompressed `Exif` / `xml ` boxes; requires
   `Container::IsoBmff` (a typed error otherwise). **Read back** by `JxlDecoder::metadata` →
-  `JxlMetadata { exif, xmp, icc }` (issue #420): the crate walks the container's top-level box
+  the shared `gamut_core::RawMetadata { exif, xmp, icc }` (issue #420; #1080): the crate walks the container's top-level box
   sequence itself (jxl-rs does not expose auxiliary boxes — ledger below), applies the `Exif`
   payload's tiff-header offset, takes the first box of a kind, refuses a Brotli-compressed
   (`brob`) `Exif`/`xml ` box as `Unsupported`, and reports the codestream ICC profile alongside.
@@ -83,12 +85,12 @@ on a hand-written golden bitstream.
   parses the codestream, leaves `icc` as `None` (not consulted), and still returns the `Exif` /
   `xml ` boxes of a file whose codestream is damaged, truncated, or refused.
 - **Typed metadata** (issue #420) behind the opt-in **`metadata`** feature (a normal, optional
-  dependency on `gamut-metadata`): `JxlMetadata` implements the facade's `TypedMetadata` trait
-  (#628) — `blocks` / `metadata` (the facade's `MetadataBlock`s / `Metadata`, both returning
-  `gamut_metadata::MetadataError`; `blocks` never fails here),
-  `JxlEncoder::with_metadata(&Metadata)` (default `MetadataEmbedder`) and `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies),
-  routing EXIF (`Exif\0\0` stripped) and XMP to the boxes and the ICC profile to `ColorSpec::Icc`.
-  IPTC-IIM and C2PA blocks are typed `Unsupported`; a C2PA store is never copied forward (facade
+  dependency on `gamut-metadata`): the facade's own `TypedMetadata` impl on `RawMetadata` reads what
+  `JxlDecoder::metadata` located as a `Metadata`, and `JxlEncoder` is a `MetadataSink` (#1080), so
+  `with_metadata(&Metadata)` / `with_encoded_metadata(&EncodedMetadata)` and their precedence are the
+  facade's, routing EXIF (`Exif\0\0` stripped) and XMP to the boxes and the ICC profile to the
+  codestream colour encoding (refused against an explicit `with_color` / `with_icc_profile`, #626;
+  a non-UTF-8 XMP packet is refused). IPTC-IIM and C2PA blocks are typed `Unsupported`; a C2PA store is never copied forward (facade
   policy). **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no
   JPEG XL reader), so "exiv2 reads the boxes out of the `.jxl`" is untested; the box payloads are
   pinned byte-exact by the raw box scan of libjxl's output (below), and the leaf crates pin the
@@ -99,8 +101,8 @@ on a hand-written golden bitstream.
   requested layout through `gamut_core::convert` (issue #268). `crate::convert` now keeps only the
   jxl-specific half — reassembling jxl-rs's native-endian output *bytes* into typed samples — at the
   cost of one extra pass and allocation the previously fused loop avoided.
-- **Best-effort decode of truncated streams (issue #256).** `DecodePartialImage` decodes an
-  incomplete codestream to the best image it supports plus a `JxlPartialReport` — the
+- **Best-effort decode of truncated streams (issue #256).** `JxlDecoder::decode_partial` decodes an
+  incomplete codestream to a `JxlPartialImage`: the best image it supports plus a `JxlPartialReport` — the
   `is_complete()` flag, a `JxlRender` (`HeaderOnly` / `BestEffort` / `Complete`), jxl-rs's completed
   -pass count and its further-bytes hint. Implemented over jxl-rs `flush_pixels`, at the end of the
   buffer, in the default `JxlProgressiveMode::Pass`. What it yields is bounded by JPEG XL's own
@@ -115,23 +117,25 @@ on a hand-written golden bitstream.
   for `info` / `embedded_icc_profile`. It presents through the same `gamut_core::convert` seam, so
   it answers to the same `ConvertPolicy`. The default `DecodeImage` path is unchanged.
 - **Decode policies.** Pixel-limit bound (`1 << 28` samples), the fixed ceiling in the built-in
-  tail; beneath it, caller caps `JxlDecoder::with_max_dimensions` / `with_max_image_bytes` (issue
-  #1026; unbounded by default, so nothing the ceiling admits is refused) are checked against the
-  parsed header before any pixel buffer is sized, on both `DecodeImage` and `DecodePartialImage`,
-  and against the raster a pushed backend returns. Over a cap → `Unsupported`. The header-only
+  tail; beneath it, the workspace's `DecodeLimits` set with `JxlDecoder::with_limits` (issue #1026;
+  #1080 made the default the workspace's 64 MiB of decoded samples, where it was unbounded) are
+  checked against the parsed header before any pixel buffer is sized, on both `DecodeImage` and
+  `decode_partial`, and against the raster an added backend returns. Over a cap → `Unsupported`. The header-only
   accessors `info` / `embedded_icc_profile` / `metadata` do not apply them, since they allocate
   nothing proportional to the dimensions; truncated → `InvalidInput` on the
-  default `DecodeImage` path (`DecodePartialImage` above is the opt-in relaxation, and relaxes
+  default `DecodeImage` path (`decode_partial` above is the opt-in relaxation, and relaxes
   *only* truncation); animation and premultiplied (associated) alpha → `Unsupported` (deliberate
   refusals to guess, additive to relax later). Layout loss (dropping a present alpha channel,
   reducing colour to grayscale) is refused by default and enabled per decoder with
   `JxlDecoder::with_convert_policy` — the refusal is no longer unconditional.
 - **Pluggable codestream backends (issue #276).** Both directions are registries over the shared
-  `gamut-codec-abi` seam, cut at the **bare `FF 0A` codestream**: `JxlEncoder::push_backend` /
-  `JxlDecoder::push_backend` insert a `JxlCodestreamEncoder` / `JxlCodestreamDecoder` ahead of the
-  built-in wrappers, which are the implicit **tails**. Push order; `supports() == false` (or a late
-  `ErrorKind::Unsupported` error, the typed mirror of `Status::UNSUPPORTED`) is the only fall-through, and an
-  accepted-then-failed backend propagates. `AbiEncodeBackend` / `AbiDecodeBackend` adapt a
+  `gamut-codec-abi` seam, cut at the **bare `FF 0A` codestream**: `JxlEncoder::with_backend` /
+  `JxlDecoder::with_backend` insert a `JxlCodestreamEncoder` / `JxlCodestreamDecoder` ahead of the
+  built-in wrappers, which are the implicit **tails**. Push order through `gamut-codec-abi`'s one
+  `Registry` (#1080: clones copy the list, a poisoned lock is an error, `Send` is bound at
+  insertion); `supports() == false` is the only fall-through, and an accepted-then-failed backend
+  propagates whatever its error, a late `Unsupported` or `Status::UNSUPPORTED` included.
+  `AbiJxlEncoder` / `AbiJxlDecoder` adapt a
   `gamut_codec_abi::Encoder` / `Decoder` (including a C vtable via `bridge::Foreign*`) onto the same
   door under `JXL_CODEC_ID` (`"jxl "`). Container-dependent features — ISO BMFF output,
   `with_exif`/`with_xmp`, and `recompress_jpeg` — are pinned to the built-in path by a **host-side
@@ -178,7 +182,7 @@ unlocks it.
   the `.jxl` container over *any* backend's codestream, most naturally on `gamut-isobmff` — would let
   a pushed backend serve container output and metadata embedding too. Recorded, **not implemented**;
   it is purely additive to the seam (the traits and the fallback contract do not change).
-- **Chunked / streaming decode input.** Partial *output* ships (`DecodePartialImage`, above), but the
+- **Chunked / streaming decode input.** Partial *output* ships (`decode_partial`, above), but the
   decoder still consumes a whole buffer per call: there is no `feed(&[u8])` entry point that keeps a
   decoder alive across chunks and re-renders as bytes arrive. Unlocks by holding jxl-rs's typestate
   decoder across calls rather than driving it once. Progressive-mode control
@@ -225,7 +229,7 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   LfFrame-with-alpha ([#730](https://github.com/libjxl/jxl-rs/issues/730)); `flush_pixels` bugs
   ([#783](https://github.com/libjxl/jxl-rs/issues/783),
   [#771](https://github.com/libjxl/jxl-rs/issues/771)); high memory on progressive lossless
-  ([#782](https://github.com/libjxl/jxl-rs/issues/782)). `DecodePartialImage` (issue #256) now
+  ([#782](https://github.com/libjxl/jxl-rs/issues/782)). `JxlDecoder::decode_partial` (issue #256) now
   reaches the flush path, so the exposure is worth stating precisely: gamut calls `flush_pixels`
   **exactly once, at end of input**, on a single visible frame, in the default
   `JxlProgressiveMode::Pass`. It does not feed input in chunks, does not use `Eager`, and neither
@@ -261,7 +265,7 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   16-bit, alpha, grayscale, gray+alpha) plus a large hostile-input corpus (empty,
   short prefixes, systematic truncations, garbage bodies, and bit-flips across the first 256 bytes,
   and the pixel-limit trigger): every case returns a typed `Err`, never a panic. The whole corpus is
-  additionally driven through `DecodePartialImage`, where `Ok` is a legitimate outcome and the
+  additionally driven through `decode_partial`, where `Ok` is a legitimate outcome and the
   invariant is only *no panic*, plus an all-lengths (step 1) truncation sweep of both framings.
 - **Partial decode — anchored on identity, asserted existentially.** There is deliberately **no**
   libjxl differential for truncated renders. libjxl and jxl-rs do not agree on a partial render —
@@ -270,7 +274,7 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   bit-exactness nor a bounded difference would survive, and `JxlDecoderFlushImage` is not even
   declared in `gamut-jxl-sys`. Instead `tests/partial.rs` pins **identity**: on a complete stream,
   all eight layouts (and the `codestream_bit_depth` knob) must decode *bit-identically* through
-  `DecodePartialImage` and `DecodeImage`, which inherits the three-way oracle chain above without
+  `decode_partial` and `DecodeImage`, which inherits the three-way oracle chain above without
   duplicating it. Truncation is then asserted only as strongly as jxl-rs promises: dimensions never
   vary, the byte hint is present exactly when incomplete, a header-only render is blank, and — over
   a **whole sweep**, never per-prefix — some truncation renders a real sample. Fixtures are 1024×768
@@ -304,7 +308,7 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
 - **Metadata boxes.** Exact `Exif` (tiff-offset prefix included) and `xml ` box payloads pinned by
   a raw box scan; pixels stay bit-exact with boxes present; Codestream+metadata and empty payloads
   are typed errors. Read-back: `JxlDecoder::metadata` returns what `with_exif` / `with_xmp` /
-  `ColorSpec::Icc` wrote (`tests/metadata.rs`), the box walk's size forms and hostile-input
+  `with_icc_profile` wrote (`tests/metadata.rs`), the box walk's size forms and hostile-input
   refusals are unit-tested beside it (as is `metadata_boxes` returning the boxes past a codestream
   `metadata` refuses, and an empty result for a bare codestream), and with the `metadata` feature
   the facade's typed extract → embed → extract equality holds through the container

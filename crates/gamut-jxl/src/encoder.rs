@@ -1,5 +1,5 @@
 //! The [`JxlEncoder`]: a typed front end over a stack of JPEG XL codestream encoders — any backend
-//! pushed with [`JxlEncoder::push_backend`], and, last, the built-in libjxl wrapper
+//! added with [`JxlEncoder::with_backend`], and, last, the built-in libjxl wrapper
 //! ([`crate::ffi`]).
 //!
 //! Construct one with a mode — [`JxlEncoder::lossless`] (the default) or [`JxlEncoder::lossy`] — then
@@ -7,15 +7,18 @@
 //! [`JxlEncoder::with_frame_settings`] / [`JxlEncoder::with_container`] builders, and drive it
 //! through the [`EncodeImage`] trait for any of the eight supported pixel layouts.
 
+use std::sync::{Arc, Mutex};
+
+use gamut_color::BitDepth;
 use gamut_core::{
-    EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Pixel, Result, Rgb8,
-    Rgb16, Rgba8, Rgba16,
+    EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Orientation, Pixel,
+    Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
-use crate::backend::{JxlCodestreamEncoder, JxlEncodeRequest, JxlImageRef, JxlSamples, Registry};
-use crate::config::{
-    ColorSpec, Container, Distance, Effort, FrameSettings, Mode, ModularMode, Orientation,
+use crate::backend::{
+    self, EncoderRegistry, JxlCodestreamEncoder, JxlEncodeRequest, JxlImageRef, JxlSamples,
 };
+use crate::config::{ColorSpec, Container, Distance, Effort, FrameSettings, Mode, ModularMode};
 
 /// The refusal returned when no backend can encode: nothing was pushed, and the built-in libjxl
 /// tail is not compiled into this build (no `encode` feature, or a `wasm32` target it cannot be
@@ -45,16 +48,16 @@ pub(crate) fn no_encode_backend() -> Error {
 /// # Errors
 ///
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
-/// override is `0` or wider than the storage width — neither can mean anything coherent.
+/// override is wider than the storage width, which cannot mean anything coherent.
 pub(crate) fn resolve_coded_bits(cfg: &JxlEncoder, bits_per_sample: u32) -> Result<u32> {
     match cfg.bit_depth() {
         None => Ok(bits_per_sample),
-        Some(bits) => {
-            let bits = u32::from(bits);
-            if bits == 0 || bits > bits_per_sample {
+        Some(depth) => {
+            let bits = u32::from(depth.bits());
+            if bits > bits_per_sample {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
-                    "JXL: coded bit depth must be 1..= the sample width",
+                    "JXL: coded bit depth must not exceed the sample width",
                 ));
             }
             Ok(bits)
@@ -75,14 +78,14 @@ pub(crate) fn resolve_coded_bits(cfg: &JxlEncoder, bits_per_sample: u32) -> Resu
 ///
 /// The codestream itself is produced by a [`JxlCodestreamEncoder`]. With the `encode` feature (and
 /// an encoder-capable target) the reference libjxl wrapper is the implicit **last** backend, so the
-/// default encoder needs no wiring at all. [`JxlEncoder::push_backend`] inserts a platform or
+/// default encoder needs no wiring at all. [`JxlEncoder::with_backend`] inserts a platform or
 /// alternate encoder *ahead* of it — and is what supplies the encode direction on `wasm32`, where
-/// the libjxl tail cannot be built. See [`crate::backend`] for the fallback contract and the
-/// container-feature veto.
+/// the libjxl tail cannot be built. See [the crate docs](crate#backends) for the fallback contract
+/// and the container-feature veto.
 ///
-/// The type is `Clone` but deliberately not `Copy`: a [`ColorSpec::Icc`] configuration owns the
-/// profile bytes, and the backend registry is shared. Cloning shares one registry: a backend pushed
-/// onto a clone is visible through the original.
+/// The type is `Clone` but deliberately not `Copy`: it owns the metadata and ICC profile bytes and
+/// a backend list. Cloning copies the list, sharing the backend instances themselves (see
+/// [`with_backend`](Self::with_backend)).
 ///
 /// `PartialEq` compares the **configuration** only — backends are opaque and have no equality.
 #[derive(Debug, Clone)]
@@ -97,12 +100,15 @@ pub struct JxlEncoder {
     frame_settings: FrameSettings,
     /// Codestream vs. ISO BMFF container framing.
     container: Container,
-    /// The colour interpretation signalled for the pixel samples.
+    /// The structured colour encoding, signalled while no ICC profile is set.
     color: ColorSpec,
-    /// Whether `color` is the caller's explicit choice through [`JxlEncoder::with_color`], as
-    /// against the default or a profile routed in from metadata. A metadata ICC profile that
-    /// differs from an explicit choice is refused rather than allowed to replace it (issue #626).
-    /// Provenance, not configuration: it does not take part in `PartialEq`.
+    /// The embedded ICC profile, which is the colour encoding while set.
+    icc_profile: Option<Vec<u8>>,
+    /// Whether the colour encoding is the caller's explicit choice through
+    /// [`JxlEncoder::with_color`] or [`JxlEncoder::with_icc_profile`], as against the default or a
+    /// profile routed in from metadata. A metadata ICC profile that differs from an explicit choice
+    /// is refused rather than allowed to replace it (issue #626). Provenance, not configuration: it
+    /// does not take part in `PartialEq`.
     color_explicit: bool,
     /// The display orientation signalled for the coded samples.
     orientation: Orientation,
@@ -111,9 +117,9 @@ pub struct JxlEncoder {
     /// XMP (XML) payload for an `xml ` container box, if any.
     xmp: Option<Vec<u8>>,
     /// The declared coded bit depth override, if any (see [`JxlEncoder::with_bit_depth`]).
-    bit_depth: Option<u8>,
-    /// Pushed codestream backends, tried in push order ahead of the built-in libjxl tail.
-    backends: Registry<dyn JxlCodestreamEncoder>,
+    bit_depth: Option<BitDepth>,
+    /// Added codestream backends, tried in push order ahead of the built-in libjxl tail.
+    backends: EncoderRegistry,
 }
 
 impl PartialEq for JxlEncoder {
@@ -126,6 +132,7 @@ impl PartialEq for JxlEncoder {
             && self.frame_settings == other.frame_settings
             && self.container == other.container
             && self.color == other.color
+            && self.icc_profile == other.icc_profile
             && self.orientation == other.orientation
             && self.exif == other.exif
             && self.xmp == other.xmp
@@ -144,12 +151,13 @@ impl Default for JxlEncoder {
             frame_settings: FrameSettings::default(),
             container: Container::default(),
             color: ColorSpec::default(),
+            icc_profile: None,
             color_explicit: false,
             orientation: Orientation::default(),
             exif: None,
             xmp: None,
             bit_depth: None,
-            backends: Registry::default(),
+            backends: EncoderRegistry::new(),
         }
     }
 }
@@ -221,20 +229,35 @@ impl JxlEncoder {
         self
     }
 
-    /// Sets the [`ColorSpec`] signalled for the pixel samples (sRGB by default). Returns the
-    /// updated encoder for chaining.
+    /// Sets the structured [`ColorSpec`] signalled for the pixel samples (sRGB by default), and
+    /// clears any ICC profile set earlier. Returns the updated encoder for chaining.
     ///
     /// The encoder never converts pixels between colour spaces — this only declares how the
-    /// caller's samples are to be interpreted. An [`ColorSpec::Icc`] profile is validated against
-    /// the image's colour family when encoding.
+    /// caller's samples are to be interpreted.
     ///
-    /// The choice is **explicit**: a later [`with_metadata`](Self::with_metadata) whose model
-    /// carries a different ICC profile is refused rather than allowed to replace it (see the
-    /// precedence note there). Calling this *after* `with_metadata` is the deliberate override —
-    /// like every other builder, the later call wins.
+    /// The choice is **explicit**: with the `metadata` feature, a later `with_metadata` whose model
+    /// carries an ICC profile is refused rather than allowed to replace it (see the encoder's
+    /// `MetadataSink` impl). Calling this *after* `with_metadata` is the deliberate override — like
+    /// every other builder, the later call wins.
     #[must_use]
     pub fn with_color(mut self, color: ColorSpec) -> Self {
         self.color = color;
+        self.icc_profile = None;
+        self.color_explicit = true;
+        self
+    }
+
+    /// Embeds an ICC profile, carried verbatim in the codestream as the stream's colour encoding
+    /// in place of the [`ColorSpec`]. Returns the updated encoder for chaining.
+    ///
+    /// In JPEG XL the profile *is* the codestream's colour encoding, not a container box, so it
+    /// works with either [`Container`]. Its data colour space must match the image (`RGB ` for a
+    /// 3-channel, `GRAY` for a 1-channel layout), which encoding validates with a typed error. Like
+    /// [`with_color`](Self::with_color) the choice is explicit, and a later
+    /// [`with_color`](Self::with_color) replaces it.
+    #[must_use]
+    pub fn with_icc_profile(mut self, icc: &[u8]) -> Self {
+        self.icc_profile = Some(icc.to_vec());
         self.color_explicit = true;
         self
     }
@@ -264,134 +287,14 @@ impl JxlEncoder {
         self
     }
 
-    /// Attaches an XMP (XML) packet, stored as an `xml ` box in the ISO BMFF container. Returns
+    /// Attaches an XMP packet, stored verbatim as an `xml ` box in the ISO BMFF container. Returns
     /// the updated encoder for chaining.
     ///
     /// As with [`JxlEncoder::with_exif`], encoding then requires [`Container::IsoBmff`].
     #[must_use]
-    pub fn with_xmp(mut self, xmp: &str) -> Self {
-        self.xmp = Some(xmp.as_bytes().to_vec());
+    pub fn with_xmp(mut self, xmp: &[u8]) -> Self {
+        self.xmp = Some(xmp.to_vec());
         self
-    }
-
-    /// Embeds a unified [`Metadata`](gamut_metadata::Metadata) model: serializes it with the
-    /// default [`MetadataEmbedder`](gamut_metadata::MetadataEmbedder) and routes each carrier to
-    /// the matching setter — EXIF to [`with_exif`](Self::with_exif) (the facade's `Exif\0\0`
-    /// signature stripped, since the `Exif` box carries the TIFF stream), XMP to
-    /// [`with_xmp`](Self::with_xmp), and the ICC profile to the encoder's colour encoding as
-    /// [`ColorSpec::Icc`] (without making it an explicit [`with_color`](Self::with_color) choice) —
-    /// in JPEG XL the profile *is* the codestream's colour encoding, not a
-    /// container box, and it is validated against the image's colour family at encode time. Returns
-    /// the updated encoder for chaining.
-    ///
-    /// Encoding then requires [`Container::IsoBmff`](crate::Container::IsoBmff) whenever an EXIF or
-    /// XMP carrier was present, exactly as for the raw setters. The default embedder emits no legacy
-    /// IPTC-IIM block and **drops** a C2PA manifest store (a store is signed over the file it came
-    /// from; see [`gamut_metadata::C2paPolicy`]); a caller that must be told about either
-    /// configures the embedder itself and calls
-    /// [`with_encoded_metadata`](Self::with_encoded_metadata).
-    ///
-    /// # Precedence
-    ///
-    /// A carrier **absent** from the model leaves any earlier setting untouched. A present EXIF or
-    /// XMP carrier overwrites an earlier one, because each is routed to its raw setter — a
-    /// container box, so only a previous payload is replaced.
-    ///
-    /// ICC is different: in JPEG XL the profile *is* the codestream's colour encoding, so routing
-    /// it would replace a [`ColorSpec`] the caller chose through another API. A present profile
-    /// therefore **refuses to override an explicit choice**: when [`with_color`](Self::with_color)
-    /// was called earlier with anything other than this very profile, this returns
-    /// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error instead of
-    /// discarding the choice. Absent an explicit choice (the
-    /// sRGB default, or a profile an earlier metadata call routed in) the profile is applied. To
-    /// encode with a colour encoding other than the model's profile, call
-    /// [`with_color`](Self::with_color) *after* this method — the later explicit call wins — or
-    /// clear the model's ICC field.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the
-    /// model does not serialize (the facade's message is carried as [`Error::detail`]) or when its ICC profile conflicts with an explicit
-    /// [`ColorSpec`] (see Precedence), and whatever
-    /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
-    #[cfg(feature = "metadata")]
-    pub fn with_metadata(self, meta: &gamut_metadata::Metadata) -> Result<Self> {
-        let encoded = gamut_metadata::MetadataEmbedder::new()
-            .embed(meta)
-            .map_err(|e| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: metadata does not serialize")
-                    .with_detail(e.to_string())
-            })?;
-        self.with_encoded_metadata(&encoded)
-    }
-
-    /// Embeds already-serialized facade blocks — the output of a
-    /// [`MetadataEmbedder`](gamut_metadata::MetadataEmbedder) configured by the caller — routing
-    /// each present carrier as [`with_metadata`](Self::with_metadata) does. Returns the updated
-    /// encoder for chaining.
-    ///
-    /// Only the carriers JPEG XL can write are accepted: EXIF (`Exif` box), XMP (`xml ` box) and
-    /// ICC (the codestream colour encoding). Fields that are `None` leave any earlier setting
-    /// untouched; an EXIF or XMP field that is `Some` overwrites one, while an ICC field that is
-    /// `Some` sets the encoder's [`ColorSpec`] only when no different explicit choice was made —
-    /// see the precedence note on [`with_metadata`](Self::with_metadata).
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the
-    /// blocks carry a legacy IPTC-IIM stream (JPEG XL has no carrier for it) or a C2PA manifest
-    /// store (the `jumb` box is not written by this crate, and a store must not be copied forward
-    /// in any case), and an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error
-    /// when the
-    /// XMP packet is not UTF-8 (the `xml ` box holds text) or when the ICC profile differs from a
-    /// [`ColorSpec`] set explicitly through [`with_color`](Self::with_color). Nothing is applied
-    /// when an error is returned.
-    #[cfg(feature = "metadata")]
-    pub fn with_encoded_metadata(
-        mut self,
-        encoded: &gamut_metadata::EncodedMetadata,
-    ) -> Result<Self> {
-        if encoded.iptc_iim.is_some() {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "JXL: IPTC-IIM has no container carrier",
-            ));
-        }
-        if encoded.c2pa.is_some() {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "JXL: C2PA manifest store (jumb box) embedding is not supported",
-            ));
-        }
-        if let Some(icc) = &encoded.icc
-            && self.color_explicit
-            && !matches!(&self.color, ColorSpec::Icc(chosen) if chosen == icc)
-        {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "JXL: metadata ICC profile conflicts with the explicit ColorSpec",
-            ));
-        }
-        let xmp = encoded
-            .xmp
-            .as_deref()
-            .map(std::str::from_utf8)
-            .transpose()
-            .map_err(|_| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: XMP packet is not UTF-8")
-            })?;
-        if let Some(exif) = &encoded.exif {
-            self = self.with_exif(exif.strip_prefix(b"Exif\0\0").unwrap_or(exif));
-        }
-        if let Some(xmp) = xmp {
-            self = self.with_xmp(xmp);
-        }
-        if let Some(icc) = &encoded.icc {
-            // Assigned directly, not through `with_color`: a routed profile is not an explicit
-            // choice, so a later metadata call may replace it (last write wins).
-            self.color = ColorSpec::Icc(icc.clone());
-        }
-        Ok(self)
     }
 
     /// Declares the samples' **coded bit depth** N, making a 16-bit pixel buffer carry N-bit code
@@ -400,19 +303,19 @@ impl JxlEncoder {
     ///
     /// The stream's header then declares N bits per sample and libjxl reads the buffer at that
     /// depth (`JxlEncoderSetFrameBitDepth`, from-codestream semantics) — the framing an N-bit raw
-    /// consumer (e.g. a 10/12/14-bit DNG tile) round-trips exactly with
+    /// consumer round-trips exactly with
     /// [`JxlDecoder::with_codestream_bit_depth`](crate::JxlDecoder::with_codestream_bit_depth).
-    /// `bits` must be `1..=16` and no wider than the pixel layout's sample width; encoding
-    /// validates this with a typed error.
+    /// The depth must be no wider than the pixel layout's sample width; encoding validates this
+    /// with a typed error.
     #[must_use]
-    pub fn with_bit_depth(mut self, bits: u8) -> Self {
-        self.bit_depth = Some(bits);
+    pub fn with_bit_depth(mut self, bit_depth: BitDepth) -> Self {
+        self.bit_depth = Some(bit_depth);
         self
     }
 
     /// The declared coded bit depth override, if any (see [`JxlEncoder::with_bit_depth`]).
     #[must_use]
-    pub fn bit_depth(&self) -> Option<u8> {
+    pub fn bit_depth(&self) -> Option<BitDepth> {
         self.bit_depth
     }
 
@@ -455,10 +358,16 @@ impl JxlEncoder {
         self.container
     }
 
-    /// The configured [`ColorSpec`].
+    /// The configured structured [`ColorSpec`], signalled while no ICC profile is set.
     #[must_use]
-    pub fn color(&self) -> &ColorSpec {
-        &self.color
+    pub fn color(&self) -> ColorSpec {
+        self.color
+    }
+
+    /// The embedded ICC profile, if one is set (see [`JxlEncoder::with_icc_profile`]).
+    #[must_use]
+    pub fn icc_profile(&self) -> Option<&[u8]> {
+        self.icc_profile.as_deref()
     }
 
     /// The configured [`Orientation`].
@@ -488,27 +397,36 @@ impl JxlEncoder {
         self.mode
     }
 
-    /// Pushes a [`JxlCodestreamEncoder`] onto the end of this encoder's backend list, ahead of the
-    /// built-in libjxl tail. Returns `&mut self` for chaining.
+    /// Adds a [`JxlCodestreamEncoder`] to the end of this encoder's backend list, ahead of the
+    /// built-in libjxl tail. Returns the updated encoder for chaining.
     ///
     /// Backends are tried in push order; the first whose
     /// [`supports`](JxlCodestreamEncoder::supports) returns `true` produces the codestream, and the
-    /// built-in wrapper (when compiled in) is tried last. A backend that accepts a job and then
-    /// fails propagates its error rather than falling through — see [`crate::backend`] for the full
-    /// contract.
+    /// built-in wrapper (when compiled in) is tried last. `supports` is the only fall-through: a
+    /// backend that accepts a job and then fails propagates its error — see
+    /// [the crate docs](crate#backends) for the full contract. `Send` is bound here, where the
+    /// backend is inserted, rather than on the trait, so the encoder stays `Send + Sync`.
     ///
-    /// Two things a pushed backend never sees, because the host vetoes them **before** consulting
+    /// Two things an added backend never sees, because the host vetoes them **before** consulting
     /// the registry: [`Container::IsoBmff`] output and
     /// [`with_exif`](JxlEncoder::with_exif)/[`with_xmp`](JxlEncoder::with_xmp) metadata (both
     /// container-level, outside the codestream seam), and
     /// [`recompress_jpeg`](JxlEncoder::recompress_jpeg) (jbrd reconstruction metadata, likewise a
     /// container box). Those requests always go to the built-in path.
     ///
-    /// On `wasm32` targets without emscripten there is no built-in tail, so a pushed backend is the
+    /// On `wasm32` targets without emscripten there is no built-in tail, so an added backend is the
     /// **only** way to encode; with neither, encoding reports
     /// an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
-    pub fn push_backend(&mut self, backend: impl JxlCodestreamEncoder + 'static) -> &mut Self {
-        self.backends.push(Box::new(backend));
+    ///
+    /// # Cloning shares backends
+    ///
+    /// Backends are stored behind `Arc<Mutex<..>>`, so **cloning a `JxlEncoder` shares them with
+    /// the clone** rather than duplicating them: a stateful backend sees the encodes of every clone,
+    /// and its lock serializes concurrent ones. A backend added to one encoder after the clone is
+    /// not seen by the other.
+    #[must_use]
+    pub fn with_backend(mut self, backend: impl JxlCodestreamEncoder + Send + 'static) -> Self {
+        self.backends.push(Arc::new(Mutex::new(backend)));
         self
     }
 
@@ -523,14 +441,15 @@ impl JxlEncoder {
     }
 
     /// Builds the plain-data [`JxlEncodeRequest`] a backend sees for `image`.
-    fn encode_request(&self, image: &JxlImageRef<'_>) -> Result<JxlEncodeRequest> {
+    fn encode_request(&self, image: &JxlImageRef<'_>) -> Result<JxlEncodeRequest<'_>> {
         Ok(JxlEncodeRequest::new(
             self.distance(),
             self.effort,
             self.modular,
             self.frame_settings,
             resolve_coded_bits(self, image.bits_per_sample())?,
-            self.color.clone(),
+            self.color,
+            self.icc_profile(),
             self.orientation,
         ))
     }
@@ -555,29 +474,19 @@ impl JxlEncoder {
 
     /// Encodes `image` through the backend registry, falling back to the built-in tail.
     ///
-    /// The registry is consulted only when a backend has actually been pushed *and* no
-    /// container-level feature is requested, so a default encoder takes exactly the same code path —
-    /// and produces exactly the same bytes — as before backends existed.
+    /// The registry is skipped when a container-level feature is requested; an empty registry
+    /// declines every job, so a default encoder reaches the built-in tail and produces exactly the
+    /// bytes it did before backends existed.
     fn dispatch_encode(&self, image: &JxlImageRef<'_>, out: &mut Vec<u8>) -> Result<usize> {
         // Ahead of the registry *and* the tail, so every target and every backend sees one refusal.
         self.validate_modular()?;
-        if !self.uses_container_features() && !self.backends.is_empty() {
+        if !self.uses_container_features() {
             let request = self.encode_request(image)?;
-            let mut backends = self.backends.lock();
-            for backend in backends.iter_mut() {
-                if !backend.supports(&request) {
-                    continue;
-                }
-                match backend.encode(&request, image) {
-                    Ok(codestream) => {
-                        out.extend_from_slice(&codestream);
-                        return Ok(codestream.len());
-                    }
-                    // A late decline: fall through exactly as `supports() == false` would.
-                    Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported => continue,
-                    // Terminal: the backend accepted the job and failed, so propagate.
-                    Err(error) => return Err(error),
-                }
+            if let Some(codestream) =
+                backend::encode_with_backends(&self.backends, &request, image)?
+            {
+                out.extend_from_slice(&codestream);
+                return Ok(codestream.len());
             }
         }
         self.builtin_encode(image, out)
@@ -646,6 +555,58 @@ impl JxlEncoder {
     }
 }
 
+/// The `metadata` feature: writes the three carriers JPEG XL holds — EXIF to
+/// [`with_exif`](JxlEncoder::with_exif) (`Exif` box), XMP to [`with_xmp`](JxlEncoder::with_xmp)
+/// (`xml ` box) and ICC as the codestream's colour encoding — so `with_metadata` /
+/// `with_encoded_metadata` and their precedence are the facade's. Encoding then requires
+/// [`Container::IsoBmff`] whenever an EXIF or XMP carrier was present, exactly as for the raw
+/// setters. A legacy IPTC-IIM stream (no JPEG XL carrier) and a C2PA manifest store (the `jumb`
+/// box is not written by this crate) are refused.
+///
+/// Two refusals are this encoder's own:
+///
+/// - an XMP packet that is not UTF-8 — the `xml ` box holds text;
+/// - an ICC profile that differs from a colour encoding the caller chose **explicitly** through
+///   [`with_color`](JxlEncoder::with_color) or [`with_icc_profile`](JxlEncoder::with_icc_profile):
+///   in JPEG XL the profile *is* the codestream's colour encoding, so routing it would discard
+///   that choice. Absent an explicit choice (the sRGB default, or a profile an earlier metadata
+///   call routed in) the profile is applied, and a later explicit call still wins.
+#[cfg(feature = "metadata")]
+impl gamut_metadata::MetadataSink for JxlEncoder {
+    const CARRIERS: &'static [gamut_metadata::Carrier] = &[
+        gamut_metadata::Carrier::Exif,
+        gamut_metadata::Carrier::Xmp,
+        gamut_metadata::Carrier::Icc,
+    ];
+
+    fn write_exif(self, tiff: &[u8]) -> Result<Self> {
+        Ok(self.with_exif(tiff))
+    }
+
+    fn write_xmp(self, packet: &[u8]) -> Result<Self> {
+        if std::str::from_utf8(packet).is_err() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: XMP packet is not UTF-8",
+            ));
+        }
+        Ok(self.with_xmp(packet))
+    }
+
+    fn write_icc(mut self, profile: &[u8]) -> Result<Self> {
+        if self.color_explicit && self.icc_profile.as_deref() != Some(profile) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: metadata ICC profile conflicts with the explicit colour encoding",
+            ));
+        }
+        // Assigned directly, not through `with_icc_profile`: a routed profile is not an explicit
+        // choice, so a later metadata call may replace it (last write wins).
+        self.icc_profile = Some(profile.to_vec());
+        Ok(self)
+    }
+}
+
 /// Implements [`EncodeImage`] for each supported pixel layout by describing the raster as a
 /// [`JxlImageRef`] and handing it to the backend dispatcher. The channel layout is derived from the
 /// layout brand's [`Pixel::FORMAT`], so there is exactly one table of layout facts in the crate; the
@@ -686,132 +647,106 @@ mod tests {
 
     #[cfg(feature = "metadata")]
     #[test]
-    fn a_model_that_does_not_serialize_is_invalid_input_with_the_facade_detail() {
-        use gamut_metadata::Metadata;
-        use gamut_metadata::icc::{
-            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Tag, TagData,
-        };
-        // The facade's own serialization failure: an ICC model with a duplicate tag signature is
-        // rejected by `gamut-icc`'s writer (ICC.1:2022 §7.3), and the encoder reports it as this
-        // crate's error with the facade's message carried as detail.
-        let duplicate = Tag::new(*b"wtpt", TagData::Xyz(Vec::new()));
-        let bad_icc = IccProfile {
-            header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
-            tags: vec![duplicate.clone(), duplicate],
-        };
-        let model = Metadata::from_carriers(None, None, Some(bad_icc));
-        let err = JxlEncoder::new().with_metadata(&model).unwrap_err();
-        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
-        assert_eq!(
-            err.static_message(),
-            Some("JXL: metadata does not serialize")
-        );
-        assert_eq!(err.detail(), Some("icc: duplicate tag signature"));
-    }
-
-    #[cfg(feature = "metadata")]
-    #[test]
-    fn an_iptc_iim_stream_is_reported_before_a_manifest_store() {
-        // Both unwritable carriers present: the IPTC-IIM refusal is the one returned.
-        let mut both = gamut_metadata::EncodedMetadata::default();
-        both.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
-        both.c2pa = Some(vec![0u8; 4]);
-        let err = JxlEncoder::new().with_encoded_metadata(&both).unwrap_err();
-        assert_eq!(
-            err.static_message(),
-            Some("JXL: IPTC-IIM has no container carrier")
-        );
-    }
-
-    #[cfg(feature = "metadata")]
-    #[test]
-    fn a_writable_carrier_does_not_bypass_the_manifest_store_refusal() {
-        // An EXIF stream beside a C2PA store still fails the whole call: the refusal is decided
-        // before any carrier is routed, so no encoder with only the EXIF applied is handed back.
-        let mut both = gamut_metadata::EncodedMetadata::default();
-        both.exif = Some(b"Exif\0\0MM\0*\0\0\0\x08".to_vec());
-        both.c2pa = Some(vec![0u8; 4]);
-        let err = JxlEncoder::new().with_encoded_metadata(&both).unwrap_err();
-        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
-        assert_eq!(
-            err.static_message(),
-            Some("JXL: C2PA manifest store (jumb box) embedding is not supported")
-        );
+    fn the_carriers_jpeg_xl_cannot_hold_are_refused() {
+        use gamut_metadata::MetadataSink;
+        for (iptc_iim, c2pa) in [(true, false), (false, true)] {
+            let mut blocks = gamut_metadata::EncodedMetadata::default();
+            blocks.iptc_iim = iptc_iim.then(|| vec![0x1c, 0x02, 0x05]);
+            blocks.c2pa = c2pa.then(|| vec![0u8; 4]);
+            let err = JxlEncoder::new()
+                .with_encoded_metadata(&blocks)
+                .unwrap_err();
+            assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+        }
     }
 
     #[cfg(feature = "metadata")]
     #[test]
     fn a_bare_exif_stream_is_routed_unchanged() {
-        // `strip_prefix` must not eat a stream that never carried the `Exif\0\0` signature.
+        use gamut_metadata::MetadataSink;
+        // The marker strip must not eat a stream that never carried the `Exif\0\0` signature.
         let mut bare = gamut_metadata::EncodedMetadata::default();
         bare.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
         let enc = JxlEncoder::new().with_encoded_metadata(&bare).unwrap();
         assert_eq!(enc.exif(), bare.exif.as_deref());
     }
 
-    /// Facade blocks carrying only the ICC profile `icc`.
     #[cfg(feature = "metadata")]
-    fn icc_blocks(icc: &[u8]) -> gamut_metadata::EncodedMetadata {
-        let mut encoded = gamut_metadata::EncodedMetadata::default();
-        encoded.icc = Some(icc.to_vec());
-        encoded
+    #[test]
+    fn an_xmp_packet_that_is_not_utf8_is_refused() {
+        use gamut_metadata::MetadataSink;
+        let err = JxlEncoder::new().write_xmp(&[0xFF, 0xFE]).unwrap_err();
+        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(err.static_message(), Some("JXL: XMP packet is not UTF-8"));
+        let enc = JxlEncoder::new().write_xmp(b"<x/>").unwrap();
+        assert_eq!(enc.xmp(), Some(&b"<x/>"[..]));
+    }
+
+    /// Routes the ICC profile `icc` into `encoder` as the metadata facade would.
+    #[cfg(feature = "metadata")]
+    fn route_icc(encoder: JxlEncoder, icc: &[u8]) -> Result<JxlEncoder> {
+        gamut_metadata::MetadataSink::write_icc(encoder, icc)
     }
 
     #[cfg(feature = "metadata")]
     #[test]
-    fn a_metadata_profile_refuses_to_replace_an_explicit_color_spec() {
+    fn a_metadata_profile_refuses_to_replace_an_explicit_colour_encoding() {
         // Issue #626: an explicit choice — even the default's own value — is not overwritten.
-        for chosen in [ColorSpec::Srgb, ColorSpec::Icc(b"other".to_vec())] {
-            let err = JxlEncoder::new()
-                .with_color(chosen)
-                .with_encoded_metadata(&icc_blocks(b"profile"))
-                .unwrap_err();
+        for chosen in [
+            JxlEncoder::new().with_color(ColorSpec::Srgb),
+            JxlEncoder::new().with_icc_profile(b"other"),
+        ] {
+            let err = route_icc(chosen, b"profile").unwrap_err();
             assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
             assert_eq!(
                 err.static_message(),
-                Some("JXL: metadata ICC profile conflicts with the explicit ColorSpec")
+                Some("JXL: metadata ICC profile conflicts with the explicit colour encoding")
             );
         }
     }
 
     #[cfg(feature = "metadata")]
     #[test]
-    fn a_metadata_profile_applies_when_no_color_spec_was_chosen() {
-        let enc = JxlEncoder::new()
-            .with_encoded_metadata(&icc_blocks(b"profile"))
-            .unwrap();
-        assert_eq!(enc.color(), &ColorSpec::Icc(b"profile".to_vec()));
+    fn a_metadata_profile_applies_when_no_colour_encoding_was_chosen() {
+        let enc = route_icc(JxlEncoder::new(), b"profile").unwrap();
+        assert_eq!(enc.icc_profile(), Some(&b"profile"[..]));
     }
 
     #[cfg(feature = "metadata")]
     #[test]
     fn a_metadata_profile_equal_to_the_explicit_one_is_no_conflict() {
-        let enc = JxlEncoder::new()
-            .with_color(ColorSpec::Icc(b"profile".to_vec()))
-            .with_encoded_metadata(&icc_blocks(b"profile"))
-            .unwrap();
-        assert_eq!(enc.color(), &ColorSpec::Icc(b"profile".to_vec()));
+        let enc = route_icc(JxlEncoder::new().with_icc_profile(b"profile"), b"profile").unwrap();
+        assert_eq!(enc.icc_profile(), Some(&b"profile"[..]));
     }
 
     #[cfg(feature = "metadata")]
     #[test]
     fn a_second_metadata_profile_replaces_one_routed_in_by_metadata() {
-        let enc = JxlEncoder::new()
-            .with_encoded_metadata(&icc_blocks(b"first"))
-            .unwrap()
-            .with_encoded_metadata(&icc_blocks(b"second"))
-            .unwrap();
-        assert_eq!(enc.color(), &ColorSpec::Icc(b"second".to_vec()));
+        let first = route_icc(JxlEncoder::new(), b"first").unwrap();
+        let enc = route_icc(first, b"second").unwrap();
+        assert_eq!(enc.icc_profile(), Some(&b"second"[..]));
     }
 
     #[cfg(feature = "metadata")]
     #[test]
     fn an_explicit_color_spec_after_the_metadata_overrides_its_profile() {
-        let enc = JxlEncoder::new()
-            .with_encoded_metadata(&icc_blocks(b"profile"))
+        let enc = route_icc(JxlEncoder::new(), b"profile")
             .unwrap()
             .with_color(ColorSpec::Pq);
-        assert_eq!(enc.color(), &ColorSpec::Pq);
+        assert_eq!(enc.color(), ColorSpec::Pq);
+        assert_eq!(enc.icc_profile(), None);
+    }
+
+    #[test]
+    fn with_color_and_with_icc_profile_replace_each_other() {
+        let icc = JxlEncoder::new()
+            .with_color(ColorSpec::Hlg)
+            .with_icc_profile(b"profile");
+        assert_eq!(icc.icc_profile(), Some(&b"profile"[..]));
+        assert_ne!(icc, JxlEncoder::new().with_color(ColorSpec::Hlg));
+        let spec = icc.with_color(ColorSpec::Pq);
+        assert_eq!(spec.color(), ColorSpec::Pq);
+        assert_eq!(spec.icc_profile(), None);
     }
 
     #[test]
@@ -968,8 +903,7 @@ mod tests {
         // jbrd recompression is never delegated to a pushed backend, so with no built-in tail it is
         // unsupported regardless of the registry.
         let mut out = Vec::new();
-        let mut enc = JxlEncoder::new();
-        enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x01]));
+        let enc = JxlEncoder::new().with_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x01]));
         assert!(matches!(
             enc.recompress_jpeg(&[0xFF, 0xD8], &mut out),
             Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
@@ -999,27 +933,26 @@ mod tests {
     #[test]
     fn resolve_coded_bits_honours_and_bounds_the_override() {
         assert_eq!(
-            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(10), 16).unwrap(),
+            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(BitDepth::Ten), 16).unwrap(),
             10
         );
-        // The storage width itself is the inclusive upper bound; 1 is the inclusive lower bound.
+        // The storage width itself is the inclusive upper bound.
         assert_eq!(
-            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(16), 16).unwrap(),
+            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(BitDepth::Sixteen), 16).unwrap(),
             16
         );
         assert_eq!(
-            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(1), 8).unwrap(),
-            1
+            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(BitDepth::Eight), 8).unwrap(),
+            8
         );
-        // Zero, and anything wider than the buffer, are rejected.
-        let error = resolve_coded_bits(&JxlEncoder::new().with_bit_depth(0), 16).unwrap_err();
+        // Anything wider than the buffer is rejected.
+        let error =
+            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(BitDepth::Ten), 8).unwrap_err();
         assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
         assert_eq!(
             error.static_message(),
-            Some("JXL: coded bit depth must be 1..= the sample width")
+            Some("JXL: coded bit depth must not exceed the sample width")
         );
-        assert!(resolve_coded_bits(&JxlEncoder::new().with_bit_depth(17), 16).is_err());
-        assert!(resolve_coded_bits(&JxlEncoder::new().with_bit_depth(9), 8).is_err());
     }
 
     #[test]
@@ -1040,13 +973,17 @@ mod tests {
                 .with_exif(&[1, 2, 3])
                 .uses_container_features()
         );
-        assert!(JxlEncoder::new().with_xmp("<x/>").uses_container_features());
+        assert!(
+            JxlEncoder::new()
+                .with_xmp(b"<x/>")
+                .uses_container_features()
+        );
         // Codestream-level knobs do not trigger the veto.
         assert!(
             !JxlEncoder::new()
                 .with_effort(Effort::Glacier)
                 .with_modular(ModularMode::Modular)
-                .with_bit_depth(10)
+                .with_bit_depth(BitDepth::Ten)
                 .with_color(ColorSpec::Pq)
                 .with_orientation(Orientation::Rotate180)
                 .uses_container_features()
@@ -1065,7 +1002,7 @@ mod tests {
             )
             .with_color(ColorSpec::Hlg)
             .with_orientation(Orientation::FlipVertical)
-            .with_bit_depth(12);
+            .with_bit_depth(BitDepth::Twelve);
         let pixels = [0u16; 4];
         let image = JxlImageRef::new(
             gamut_core::PixelFormat::Gray16,
@@ -1085,11 +1022,12 @@ mod tests {
                 .with_progressive_dc(ProgressiveDc::TwoLevels)
         );
         assert_eq!(req.coded_bit_depth(), 12);
-        assert_eq!(req.color(), &ColorSpec::Hlg);
+        assert_eq!(req.color(), ColorSpec::Hlg);
         assert_eq!(req.orientation(), Orientation::FlipVertical);
 
         // A lossless encoder without an override reports no distance and the storage width.
-        let req = JxlEncoder::lossless().encode_request(&image).unwrap();
+        let lossless = JxlEncoder::lossless();
+        let req = lossless.encode_request(&image).unwrap();
         assert!(req.is_lossless());
         assert_eq!(req.distance(), None);
         assert_eq!(req.coded_bit_depth(), 16);
@@ -1108,7 +1046,7 @@ mod tests {
         .unwrap();
         assert!(
             JxlEncoder::new()
-                .with_bit_depth(9)
+                .with_bit_depth(BitDepth::Ten)
                 .encode_request(&image)
                 .is_err()
         );
@@ -1164,12 +1102,16 @@ mod tests {
     }
 
     impl JxlCodestreamEncoder for FixedBackend {
-        fn supports(&mut self, _req: &JxlEncodeRequest) -> bool {
+        fn supports(&mut self, _req: &JxlEncodeRequest<'_>) -> bool {
             self.supports_calls.fetch_add(1, Ordering::SeqCst);
             self.supported
         }
 
-        fn encode(&mut self, _req: &JxlEncodeRequest, _image: &JxlImageRef<'_>) -> Result<Vec<u8>> {
+        fn encode(
+            &mut self,
+            _req: &JxlEncodeRequest<'_>,
+            _image: &JxlImageRef<'_>,
+        ) -> Result<Vec<u8>> {
             self.encode_calls.fetch_add(1, Ordering::SeqCst);
             match &self.outcome {
                 Ok(bytes) => Ok(bytes.clone()),
@@ -1217,8 +1159,7 @@ mod tests {
         let (_, first_encodes) = first.counters();
         let (second_supports, second_encodes) = second.counters();
 
-        let mut enc = JxlEncoder::new();
-        enc.push_backend(first).push_backend(second);
+        let enc = JxlEncoder::new().with_backend(first).with_backend(second);
 
         let mut out = vec![0xEE];
         let written = enc.dispatch_encode(&gray_image(), &mut out).unwrap();
@@ -1238,8 +1179,7 @@ mod tests {
         let (first_supports, first_encodes) = first.counters();
         let (second_supports, second_encodes) = second.counters();
 
-        let mut enc = JxlEncoder::new();
-        enc.push_backend(first).push_backend(second);
+        let enc = JxlEncoder::new().with_backend(first).with_backend(second);
 
         let mut out = Vec::new();
         assert_eq!(enc.dispatch_encode(&gray_image(), &mut out).unwrap(), 3);
@@ -1252,23 +1192,27 @@ mod tests {
     }
 
     #[test]
-    fn a_late_unsupported_falls_through_to_the_next_backend() {
+    fn a_late_unsupported_is_terminal() {
+        // `supports` is the only fall-through: an accepting backend's `Unsupported` is the
+        // caller's error, and neither a later backend nor the tail is tried.
         let first = FixedBackend::failing(Error::unsupported(
             env!("CARGO_PKG_NAME"),
             "backend changed its mind",
         ));
         let second = FixedBackend::new(vec![0xFF, 0x0A, 0x33]);
         let (_, first_encodes) = first.counters();
-        let (_, second_encodes) = second.counters();
+        let (second_supports, second_encodes) = second.counters();
 
-        let mut enc = JxlEncoder::new();
-        enc.push_backend(first).push_backend(second);
+        let enc = JxlEncoder::new().with_backend(first).with_backend(second);
 
         let mut out = Vec::new();
-        assert_eq!(enc.dispatch_encode(&gray_image(), &mut out).unwrap(), 3);
-        assert_eq!(out, vec![0xFF, 0x0A, 0x33]);
+        let error = enc.dispatch_encode(&gray_image(), &mut out).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(error.static_message(), Some("backend changed its mind"));
+        assert!(out.is_empty());
         assert_eq!(first_encodes.load(Ordering::SeqCst), 1);
-        assert_eq!(second_encodes.load(Ordering::SeqCst), 1);
+        assert_eq!(second_supports.load(Ordering::SeqCst), 0);
+        assert_eq!(second_encodes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1281,8 +1225,7 @@ mod tests {
         let (_, first_encodes) = first.counters();
         let (second_supports, second_encodes) = second.counters();
 
-        let mut enc = JxlEncoder::new();
-        enc.push_backend(first).push_backend(second);
+        let enc = JxlEncoder::new().with_backend(first).with_backend(second);
 
         let mut out = Vec::new();
         let error = enc.dispatch_encode(&gray_image(), &mut out).unwrap_err();
@@ -1306,15 +1249,14 @@ mod tests {
                 .with_exif(&[1, 2, 3]),
             JxlEncoder::new()
                 .with_container(Container::IsoBmff)
-                .with_xmp("<x/>"),
+                .with_xmp(b"<x/>"),
             // Metadata without the container is a typed error from the built-in path — but the
             // registry must still be skipped, so the error is the built-in's, not a backend's.
             JxlEncoder::new().with_exif(&[1, 2, 3]),
         ] {
             let backend = FixedBackend::new(vec![0xFF, 0x0A, 0x55]);
             let (supports, encodes) = backend.counters();
-            let mut enc = enc;
-            enc.push_backend(backend);
+            let enc = enc.with_backend(backend);
 
             let mut out = Vec::new();
             let _ = enc.dispatch_encode(&gray_image(), &mut out);
@@ -1331,18 +1273,17 @@ mod tests {
 
     #[test]
     fn all_backends_declining_falls_through_to_the_builtin_tail() {
-        let mut enc = JxlEncoder::new();
         let first = FixedBackend::declining();
-        let second =
-            FixedBackend::failing(Error::unsupported(env!("CARGO_PKG_NAME"), "late decline"));
+        let second = FixedBackend::declining();
         let (first_supports, _) = first.counters();
-        let (_, second_encodes) = second.counters();
-        enc.push_backend(first).push_backend(second);
+        let (second_supports, second_encodes) = second.counters();
+        let enc = JxlEncoder::new().with_backend(first).with_backend(second);
 
         let mut out = Vec::new();
         let result = enc.dispatch_encode(&gray_image(), &mut out);
         assert_eq!(first_supports.load(Ordering::SeqCst), 1);
-        assert_eq!(second_encodes.load(Ordering::SeqCst), 1);
+        assert_eq!(second_supports.load(Ordering::SeqCst), 1);
+        assert_eq!(second_encodes.load(Ordering::SeqCst), 0);
 
         if cfg!(all(
             feature = "encode",
@@ -1386,32 +1327,29 @@ mod tests {
     fn a_pushed_backend_supplies_encode_without_any_builtin() {
         // The other half of the wasm32 story: whatever the build, a pushed backend serves the
         // encode, so a target with no libjxl tail still encodes.
-        let mut enc = JxlEncoder::new();
-        enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x66]));
+        let enc = JxlEncoder::new().with_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x66]));
         let mut out = Vec::new();
         assert_eq!(enc.dispatch_encode(&gray_image(), &mut out).unwrap(), 3);
         assert_eq!(out, vec![0xFF, 0x0A, 0x66]);
     }
 
     #[test]
-    fn a_clone_shares_the_original_s_backend_registry() {
-        // The registry is shared, not copied: a backend pushed after cloning is visible through
-        // the clone. A deep copy here would silently give a cloned encoder a stale backend list.
-        let mut enc = JxlEncoder::new();
+    fn a_clone_keeps_its_own_backend_list() {
+        // Cloning copies the list (the instances are shared): a backend added after cloning is
+        // not seen by the clone.
+        let enc = JxlEncoder::new();
         let clone = enc.clone();
+        let enc = enc.with_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x77]));
 
-        enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x77]));
-
-        assert!(!clone.backends.is_empty());
+        assert!(clone.backends.is_empty());
+        assert_eq!(enc.backends.len(), 1);
     }
 
     #[test]
     fn equality_compares_configuration_and_ignores_backends() {
-        // Independent of the sharing above: `PartialEq` could compare backends while the registry
-        // is shared, or ignore them while it is copied. An encoder with a backend pushed must
-        // still equal a fresh one, because only configuration is compared.
-        let mut enc = JxlEncoder::new();
-        enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x77]));
+        // An encoder with a backend added must still equal a fresh one, because only
+        // configuration is compared.
+        let enc = JxlEncoder::new().with_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x77]));
 
         assert_eq!(enc, JxlEncoder::new());
         // ...but a configuration difference is still a difference, or the comparison would be
@@ -1421,9 +1359,9 @@ mod tests {
 
     #[test]
     fn debug_includes_the_backend_count() {
-        let mut enc = JxlEncoder::new();
+        let enc = JxlEncoder::new();
         assert!(format!("{enc:?}").contains("backends: 0"));
-        enc.push_backend(FixedBackend::new(Vec::new()));
+        let enc = enc.with_backend(FixedBackend::new(Vec::new()));
         assert!(format!("{enc:?}").contains("backends: 1"));
     }
 }

@@ -7,7 +7,7 @@
 //! that is 100% safe Rust: this module contains no `unsafe`.
 
 use gamut_core::convert::{ConvertPolicy, LumaPolicy, RawImage, convert_from_raw};
-use gamut_core::{Dimensions, Error, ImageBuf, Pixel, PixelFormat, Result};
+use gamut_core::{DecodeLimits, Dimensions, Error, ImageBuf, Pixel, PixelFormat, Result};
 use jxl::api::states::Initialized;
 use jxl::api::{
     Endianness, JxlBitDepth, JxlColorProfile, JxlColorType, JxlDataFormat,
@@ -18,7 +18,7 @@ use jxl::headers::extra_channels::ExtraChannel;
 
 use crate::backend::layout_of;
 use crate::convert::{ConvSample, native_format, reassemble};
-use crate::decoder::DecodeLimits;
+use crate::decoder::check_limits;
 use crate::error::map_decode_error;
 
 /// Upper bound on decoded size, in **pixels × channels**, enforced by jxl-rs's
@@ -161,7 +161,7 @@ pub enum JxlRender {
     Complete = 2,
 }
 
-/// What a [`DecodePartialImage`](crate::DecodePartialImage) decode managed to reconstruct.
+/// What a [`JxlDecoder::decode_partial`](crate::JxlDecoder::decode_partial) decode reconstructed.
 ///
 /// [`is_complete`](JxlPartialReport::is_complete) is the completeness flag; the remaining fields
 /// are diagnostics, and each carries a caveat worth reading before relying on it.
@@ -208,7 +208,7 @@ enum Truncation {
     /// Truncation is a typed error — the [`DecodeImage`](gamut_core::DecodeImage) contract.
     Reject,
     /// Render what jxl-rs has and report how far it got — the
-    /// [`DecodePartialImage`](crate::DecodePartialImage) contract.
+    /// [`JxlDecoder::decode_partial`](crate::JxlDecoder::decode_partial) contract.
     BestEffort,
 }
 
@@ -421,7 +421,8 @@ fn decode_raw<S: ConvSample>(
     // truncated after its headers comes back as, so it is the allocation a few hostile header bytes
     // can otherwise make arbitrarily large.
     let src_channels = src_color + usize::from(src_alpha);
-    options.limits.check(
+    check_limits(
+        options.limits,
         width,
         height,
         (src_channels * S::BYTES).max(options.dst_bytes_per_pixel),
