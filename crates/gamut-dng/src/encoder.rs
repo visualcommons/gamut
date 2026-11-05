@@ -265,7 +265,7 @@ impl DngEncoder {
         // Classic TIFF counts an `UNDEFINED` value with a 32-bit `LONG`; BigTIFF's count is
         // 64-bit. `append_c2pa_store` refuses such a store too, but only once the image has been
         // compressed and the reservation zero-filled. Necessary, not sufficient: the store's
-        // offset must also fit, and only `append_store` knows the size of the file before it.
+        // offset must also fit, and only `append_c2pa_store` knows the size of the file before it.
         if uncountable_store_len(self.variant(), len) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),

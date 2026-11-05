@@ -207,15 +207,16 @@ The C2PA manifest store is the one cross-format payload a TIFF-based file carrie
 (C2PA 2.4 §A.3.6: tag 52545 / `0xCD41`, type `UNDEFINED`), and its placement rule is unusual
 enough — one store per asset, its entry in the **last IFD of the main chain**, its bytes at the
 **end of the file** so a resize moves no other offset — that stating it once here, for both
-`gamut-dng` (#442) and `gamut-tiff` (#446), beats two derivations. The [`c2pa`](src/c2pa.rs)
-module is that one statement; `references/c2pa/README.md` is the clause map. The store stays
+`gamut-dng` (#442) and `gamut-tiff` (#446), beats two derivations. The private [`c2pa`](src/c2pa.rs)
+module, whose items are crate-root exports since #1132, is that one statement; `references/c2pa/README.md` is the clause map. The store stays
 opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
 
 - **Placement is a post-write relocation, not a new writer mode.** A codec that appends image
   data after `write`'s stream cannot get a value placed *after* that data from the value pool,
   and a pinned span would need the data's extent before the layout it depends on exists. So
-  `reserve_entry` puts a one-byte inline placeholder in the last main IFD (the directory layout
-  is final; the pool is untouched), the codec writes its whole file, and `append_store` lands
+  `reserve_c2pa_entry` puts a one-byte inline placeholder in the last main IFD (the directory
+  layout is final; the pool is untouched), the codec writes its whole file, and
+  `append_c2pa_store` lands
   the store at `align_word(len)`, patching only the entry's `count` and value/offset words. The
   alternative — a `WriteOptions` directive placing a tag's value at the end of the *stream* —
   would still sit before the codec's pixel data, which is not "the end of the file".
@@ -225,7 +226,7 @@ opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
   private, so a value cannot be edited out of the invariant — and reported as half-open
   `core::ops::Range<u64>`, the same measure the segment map uses (since #1132 its `Segment` is
   `gamut_core::segment::Segment<SpanKind, u64>`; the crate keeps no range type of its own).
-- **Read side.** `locate` walks the chain to its last directory over any `ReadAt` source and
+- **Read side.** `c2pa_exclusions` walks the chain to its last directory over any `ReadAt` source and
   reports the ranges for an out-of-line *or* inline store; a tag-52545 entry of another type, or
   one in a non-last directory, is "no store" (never an error), so a decoder can still surface
   it as an unmodelled field. A store declared past the end of the file is `InvalidInput`, the
@@ -238,18 +239,19 @@ opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
 - **Minimum length, and the bound that actually keeps a store out of line.** Nothing shorter
   than a JUMBF box header (8 bytes, `MIN_STORE_LEN`) can be a manifest store, and the two
   directions treat that differently, as `references/c2pa/README.md` prescribes for a reader:
-  `locate` reports **absence** for a shorter value (so a foreign file stays readable and a
-  decode → encode cycle over it does not trip the encoder's own minimum), while `append_store`
+  `c2pa_exclusions` reports **absence** for a shorter value (so a foreign file stays readable and
+  a decode → encode cycle over it does not trip the encoder's own minimum), while
+  `append_c2pa_store`
   **refuses** it (an encoder handed a store it cannot write must say so, not drop it).
   Out-of-line-ness is a *separate* bound and is not implied by that constant: classic TIFF's
   inline threshold is 4 bytes but **BigTIFF's is 8**, so a store of exactly `MIN_STORE_LEN`
-  packs inline in a BigTIFF entry. `append_store` therefore gates on the variant's own
+  packs inline in a BigTIFF entry. `append_c2pa_store` therefore gates on the variant's own
   `inline_threshold()` — the shortest writable BigTIFF store is nine bytes. Without that gate
   the bytes would be appended at the end of the file while the entry read back as the offset
   word pointing at them, leaving the store referenced by nothing and the exclusion ranges
   covering bytes no reader returns.
 - **One store per asset.** §A.3.6 admits exactly one, so a last IFD carrying *two* tag-52545
-  entries names none and `locate` reports absence. Reporting the first would be worse than
+  entries names none and `c2pa_exclusions` reports absence. Reporting the first would be worse than
   reporting nothing: the eager `Ifd` keeps the **last** duplicate, so a caller taking bytes from
   one path and ranges from this one would get two different byte runs under one name.
 - **Byte accounting.** The store is the entry's `Value` span and the alignment filler before
@@ -267,8 +269,8 @@ route unable to name the ranges §18.5.5 asks it to exclude, and extensible and 
 both available.
 
 **The read and write sides are deliberately asymmetric.** A BigTIFF store of exactly
-`MIN_STORE_LEN` bytes packs inline; `locate` reports it (the file is lawful and its ranges are
-well defined) while `append_store` refuses to *write* that shape, because an inline value is not
+`MIN_STORE_LEN` bytes packs inline; `c2pa_exclusions` reports it (the file is lawful and its
+ranges are well defined) while `append_c2pa_store` refuses to *write* that shape, because an inline value is not
 the run at the end of the file the placement rule is built on, and admitting it would give a
 store two placements to reason about for no gain. Liberal in, conservative out — stated at both
 functions so it reads as a decision rather than an oversight.

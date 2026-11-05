@@ -232,7 +232,7 @@ code**. What differs is only what each container can carry.
   size runs past the data fails the whole RIFF walk, which exits `1` with that error. Exit `0`
   otherwise.
 - **TIFF / DNG** (`gamut_tiff::c2pa_summary` / `gamut_dng::c2pa_summary`, both `gamut-ifd`'s
-  `c2pa::summarize`) — **additive**: the section prints after the byte-accounting report and before
+  `c2pa_summary`) — **additive**: the section prints after the byte-accounting report and before
   the verdict, which it never moves; a TIFF exits exactly as it would without the store. The store
   (§A.3.6: at most one, in the last IFD of the main chain) is reported with its size, its range and
   its entry's `count` field — the two §18.5.5 exclusion ranges. Every other tag-52545 entry of the

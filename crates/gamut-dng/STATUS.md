@@ -232,7 +232,7 @@ exclusion ranges. Now:
   first and the bytes are taken *only* if that succeeded, so one rule decides both. (Reading the
   bytes independently is what made them disagree — the eager `Ifd` keeps the last duplicate, so
   the bytes surface reported that entry while the ranges reported none, and re-encoding produced
-  a one-entry file carrying only the last duplicate.) On the write side, `append_store` names a
+  a one-entry file carrying only the last duplicate.) On the write side, `gamut_ifd::append_c2pa_store` names a
   duplicated entry as the problem instead of claiming the entry is missing.
 - **A declined field still reaches the caller.** A tag-52545 field the decoder declines to read
   as a store — wrong type, or too short — arrives verbatim. Where it lands depends on the

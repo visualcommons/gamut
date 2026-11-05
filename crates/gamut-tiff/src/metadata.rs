@@ -719,7 +719,7 @@ fn iptc_value(value: Option<&Value>, order: ByteOrder) -> Option<Vec<u8>> {
 ///
 /// Whether a tag-52545 entry *is* a manifest store is [`gamut_ifd::c2pa_exclusions`]'s decision, not
 /// a second opinion held here: this asks the locator first and reports the store only when it
-/// agrees. That matters because `locate` reports absence for an entry a caller could not use —
+/// agrees. That matters because `c2pa_exclusions` reports absence for an entry a caller could not use —
 /// one of the wrong type, one too short to be a JUMBF box, a duplicated one — and reporting such
 /// an entry as a store would hand the caller a [`TiffMetadata`] that
 /// [`TiffEncoder`](crate::TiffEncoder) then refuses to encode. `gamut-dng` gates its own decode
@@ -727,7 +727,7 @@ fn iptc_value(value: Option<&Value>, order: ByteOrder) -> Option<Vec<u8>> {
 ///
 /// Reader and locator agreeing is not the same as every readable store being writable, and this
 /// does not promise the latter — it cannot, because a reader does not know which container the
-/// caller will write. One case exists: `locate` accepts a store of exactly
+/// caller will write. One case exists: `c2pa_exclusions` accepts a store of exactly
 /// [`MIN_STORE_LEN`](gamut_core::c2pa::MIN_STORE_LEN) (8) bytes, while writing **BigTIFF** needs 9,
 /// since 8 bytes would pack into the entry's own value word instead of being placed out of line
 /// at the end of the file. So an 8-byte store read from any file cannot be written back to a
@@ -1525,7 +1525,7 @@ mod tests {
     fn the_reader_and_the_locator_agree_on_what_a_store_is() {
         // The two surfaces must never disagree: a `TiffMetadata` reporting a store that
         // `c2pa_exclusions` cannot find is one the encoder would refuse, turning a decode→encode
-        // round trip into a hard error. Each case below is an entry `locate` reports absent for a
+        // round trip into a hard error. Each case below is an entry `c2pa_exclusions` reports absent for a
         // *different* reason — wrong type (§A.3.6 fixes it at 7), and too short to be a JUMBF box
         // (below `MIN_STORE_LEN`) — so a fix that only handled one of them still fails here.
         for value in [

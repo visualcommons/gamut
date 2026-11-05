@@ -252,7 +252,7 @@ impl TiffEncoder {
         // limit rather than about the length the caller passed. Comparing two lengths costs
         // nothing, so the refusal is taken here as well. It is *necessary*, not sufficient: the
         // store's own offset must also fit, and that depends on the size of the file it lands
-        // after, which only `append_store` knows.
+        // after, which only `append_c2pa_store` knows.
         if uncountable_store_len(self.variant(), len) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -1115,7 +1115,7 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     fn a_classic_tiff_store_its_count_word_cannot_describe_is_refused_before_the_pixels() {
         // Classic TIFF counts an `UNDEFINED` value with a 32-bit `LONG`, so 4 GiB is the longest
-        // store the entry could describe. `append_store` does refuse it, but only after the image
+        // store the entry could describe. `append_c2pa_store` does refuse it, but only after the image
         // has been compressed and the reservation zero-filled — 4 GiB of it. Length alone settles
         // this, so it is settled first.
         //
