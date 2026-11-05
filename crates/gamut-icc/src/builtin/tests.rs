@@ -825,8 +825,7 @@ fn oracle_colorants_match_lcms_for_every_buildable_primaries() {
         assert!(codes.contains(&code), "primaries {code} build");
     }
     for code in codes {
-        let primaries =
-            ColorPrimaries::from_code_point(u16::from(code)).expect("a modelled code point");
+        let primaries = ColorPrimaries::from_code_point(code).expect("a modelled code point");
         let chromaticities = primaries.chromaticities().expect("a modelled code point");
         let profile = rgb_cicp(code, 13).expect("buildable");
         assert_colorants_match_lcms(&format!("primaries {code}"), &profile, chromaticities);
