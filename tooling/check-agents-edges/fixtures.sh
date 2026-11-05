@@ -76,7 +76,7 @@ check "a clause ends at a semicolon" 0 "" \
 # Edges.
 check "a missing edge is reported" 1 \
     "gamut-webp: cargo metadata has an edge to gamut-dsp (normal) that AGENTS.md does not list" \
-    sedx 's/← core, codec-abi, color, dsp, riff\./← core, codec-abi, color, riff./'
+    sedx 's/← core, codec-abi, color, dsp, riff, metadata/← core, codec-abi, color, riff, metadata/'
 check "a phantom edge is reported" 1 \
     "gamut-riff: AGENTS.md lists an edge to gamut-bitstream (normal) that cargo metadata does not have" \
     sedx 's/^\(- \*\*gamut-isobmff\*\* .*\) ← core\./\1 ← core, bitstream./'
