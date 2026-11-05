@@ -126,7 +126,7 @@ impl ExifReader {
     /// entries the kept directories lost — every one a repeated tag shadowed, and, under
     /// [`with_entry_recovery`](Self::with_entry_recovery), every one it skipped — and is complete over
     /// them. Its drop lists are **not** a byte-completeness verdict: an empty report says nothing
-    /// about source bytes no structure claims — see the [`report`](crate::report) module.
+    /// about source bytes no structure claims — see [`ReadReport`].
     /// [`with_byte_audit`](Self::with_byte_audit) adds that verdict.
     ///
     /// ```

@@ -4,7 +4,7 @@
 //! hundreds of megabytes whose EXIF is a few kilobytes near the front. [`gamut_ifd`]'s
 //! [`IfdReader`] already reads a TIFF stream through the positioned [`ReadAt`] trait, fetching only
 //! the directory bodies and the values they reference, so this module lifts
-//! [`ExifReader`](crate::ExifReader) onto the same source type: open a file, hand the reader a
+//! [`ExifReader`] onto the same source type: open a file, hand the reader a
 //! [`gamut_ifd::StreamSource`], and pull the EXIF out without loading the image.
 //!
 //! This is the crate's **one** parse engine — [`ExifReader::parse`](crate::ExifReader::parse) is

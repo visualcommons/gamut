@@ -1,25 +1,4 @@
 //! A read-only view of a Leica `MakerNote` (issue #978).
-//!
-//! Leica has written several note layouts, which [`MakerNoteLayout::detect`] tells apart by their
-//! leading bytes ([`MakerNoteDialect::Leica3`] … [`MakerNoteDialect::Leica10`], after ExifTool's
-//! `MakerNoteLeica*` entries). The view decodes the note's IFD through [`gamut_ifd`] at that layout
-//! for the five IFD dialects `Leica3`, `Leica4`, `Leica5`, `Leica8` and `Leica9`, keeps every entry
-//! as a [`Value`] ([`LeicaMakerNote::ifd`]), and adds typed accessors for the two tag tables the
-//! sample corpus holds, after ExifTool's `Panasonic.pm`, as staked in
-//! `references/exif/leica/README.md`:
-//!
-//! - **`Leica9`** (M10, S) — [`LeicaMakerNote::leica9`], [`Leica9Tags`].
-//! - **`Leica4`** (M9, M Monochrom) — [`LeicaMakerNote::leica4`], [`Leica4Tags`]. Its four
-//!   entries `0x3000`, `0x3100`, `0x3400` and `0x3900` each hold an IFD of their own whose offsets
-//!   count from the note's base; the view reads them too ([`LeicaMakerNote::subdirectory`]).
-//!
-//! `Leica10` (D-Lux 7) is a Panasonic-format note and a `Fujifilm`-signed Leica note follows
-//! Fujifilm's table, so neither is read here. Values are returned raw, as stored: ExifTool's value
-//! conversions (`LensType`'s split, `FNumber / 1000`, `MeasuredLV / 1e5`, …) are not applied.
-//!
-//! The view never writes. The block it was read from re-emits byte-identically, because nothing
-//! here changes it; see the [module docs](super) on how the writer keeps file-absolute offsets
-//! valid.
 
 use gamut_core::ErrorKind;
 use gamut_ifd::{Ifd, IfdReader, RawEntry, ReadAt, Value};
@@ -34,7 +13,27 @@ use crate::value::{Rational, SRational};
 const SUBDIRECTORIES: [u16; 4] = [0x3000, 0x3100, 0x3400, 0x3900];
 
 /// The decoded IFD of a Leica `MakerNote`: every entry, the `Leica4` subdirectories, and typed
-/// accessors for the tags the [module docs](self) name.
+/// accessors for the tags staked in `references/exif/leica/README.md` (issue #978).
+///
+/// Leica has written several note layouts, which [`MakerNoteLayout::detect`] tells apart by their
+/// leading bytes ([`MakerNoteDialect::Leica3`] … [`MakerNoteDialect::Leica10`], after ExifTool's
+/// `MakerNoteLeica*` entries). The view decodes the note's IFD through [`gamut_ifd`] at that layout
+/// for the five IFD dialects `Leica3`, `Leica4`, `Leica5`, `Leica8` and `Leica9`, keeps every entry
+/// as a [`Value`] ([`LeicaMakerNote::ifd`]), and adds typed accessors for the two tag tables the
+/// sample corpus holds, after ExifTool's `Panasonic.pm`:
+///
+/// - **`Leica9`** (M10, S) — [`LeicaMakerNote::leica9`], [`Leica9Tags`].
+/// - **`Leica4`** (M9, M Monochrom) — [`LeicaMakerNote::leica4`], [`Leica4Tags`]. Its four
+///   entries `0x3000`, `0x3100`, `0x3400` and `0x3900` each hold an IFD of their own whose offsets
+///   count from the note's base; the view reads them too ([`LeicaMakerNote::subdirectory`]).
+///
+/// `Leica10` (D-Lux 7) is a Panasonic-format note and a `Fujifilm`-signed Leica note follows
+/// Fujifilm's table, so neither is read here. Values are returned raw, as stored: ExifTool's value
+/// conversions (`LensType`'s split, `FNumber / 1000`, `MeasuredLV / 1e5`, …) are not applied.
+///
+/// The view never writes. The block it was read from re-emits byte-identically, because nothing
+/// here changes it; see [`MakerNote`](super::MakerNote) on how the writer keeps file-absolute
+/// offsets valid.
 ///
 /// Built by [`MakerNote::leica`](super::MakerNote::leica) from the note's own bytes, or by
 /// [`read`](Self::read) from the whole TIFF stream.

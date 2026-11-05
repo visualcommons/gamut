@@ -28,8 +28,9 @@
 #![cfg(feature = "describe")]
 
 use exiv2_oracle::exif_print;
-use gamut_exif::describe::described_values;
-use gamut_exif::{ByteOrder, Exif, ExifTag, ExifWriter, FieldType, IfdKind, Value};
+use gamut_exif::{
+    ByteOrder, Exif, ExifTag, ExifWriter, FieldType, IfdKind, Value, described_values,
+};
 
 /// The `Exif.<group>` prefix exiv2 keys a directory's tags under. Every described tag lives in
 /// the 0th IFD, the Exif sub-IFD or the GPS sub-IFD.

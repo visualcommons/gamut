@@ -1,45 +1,4 @@
 //! What a lenient parse discarded.
-//!
-//! [`ExifReader`](crate::ExifReader) is lenient by default: a malformed Exif/GPS/Interop sub-IFD or
-//! an unreadable thumbnail range or strip set is dropped so the rest of the blob still parses. That is the
-//! right default for real-world files, but on its own it is *silent* — a caller cannot tell a blob
-//! that never carried GPS from one whose GPS pointer was dangling.
-//!
-//! A [`ReadReport`], returned by
-//! [`ExifReader::parse_with_report`](crate::ExifReader::parse_with_report), names each discarded
-//! region: **where** it was (a [`DroppedRegion`] and the tag that addressed it), **what offset**
-//! addressed it, and **why** it went ([`DropReason`]).
-//!
-//! Two opt-in options on the reader deepen it:
-//!
-//! * [`with_entry_recovery`](crate::ExifReader::with_entry_recovery) makes the granularity the **entry**:
-//!   a directory with one unreadable entry survives minus that entry, named by a
-//!   [`DroppedEntry`] in [`dropped_entries`](ReadReport::dropped_entries), instead of failing whole;
-//! * [`with_byte_audit`](crate::ExifReader::with_byte_audit) adds a **byte-completeness verdict**,
-//!   [`byte_audit`](ReadReport::byte_audit): `gamut-ifd`'s audit engine classifying every byte of
-//!   the TIFF stream, or naming precisely the ones no structure claims.
-//!
-//! Whatever the options, a **duplicate tag** within a surviving directory is named too: the model
-//! keeps one value per tag — the last occurrence — so every earlier entry for that tag is a
-//! [`DroppedEntry`] whose [`reason`](DroppedEntry::reason) is [`EntryDropReason::Shadowed`]. TIFF
-//! 6.0 §2 gives a directory one entry per tag, so such a file is out of spec, but the signal is a
-//! report entry rather than a [`strict`](crate::ExifReader::with_strict)-mode rejection.
-//!
-//! # What this report does and does not claim
-//!
-//! It covers exactly the regions [`DroppedRegion`] enumerates — the three pointer-addressed
-//! sub-IFDs, the thumbnail's JPEG bytes and strips, and any top-level directory past the 1st IFD —
-//! and the
-//! entries of every directory the model keeps: each one a duplicate tag shadowed, and, under
-//! `with_entry_recovery`, each one whose value could not be read. Within that set it is complete:
-//! nothing in it is discarded without an entry.
-//!
-//! The drop lists are **not** a byte-completeness verdict, and [`is_empty`](ReadReport::is_empty)
-//! does not mean "every source byte reached the model": a gap between structures, a trailer, or a
-//! region no pointer reaches is not a *discard* of anything the parse read, so the drop lists have
-//! nothing to say about it. That is the byte audit's question. The converse holds too — the audit
-//! cannot stand in for the drop lists: a shadowed entry's record lies inside its directory's body,
-//! so its bytes count as claimed, and only [`EntryDropReason::Shadowed`] names it.
 
 use core::fmt;
 
@@ -445,8 +404,44 @@ impl fmt::Display for DroppedEntry {
 /// [`DroppedRegion::TrailingIfd`] is well-formed and merely unrepresentable, so strictness has no
 /// grounds to reject it and it is reported in both modes.
 ///
-/// Read the module documentation for what the drop lists deliberately do **not** cover: they are
-/// not a byte-completeness verdict — [`byte_audit`](Self::byte_audit) is.
+/// [`ExifReader`](crate::ExifReader) is lenient by default: a malformed Exif/GPS/Interop sub-IFD
+/// or an unreadable thumbnail range or strip set is dropped so the rest of the blob still parses.
+/// That is the right default for real-world files, but on its own it is *silent* — a caller cannot
+/// tell a blob that never carried GPS from one whose GPS pointer was dangling. The report names
+/// each discarded region: **where** it was (a [`DroppedRegion`] and the tag that addressed it),
+/// **what offset** addressed it, and **why** it went ([`DropReason`]).
+///
+/// Two opt-in options on the reader deepen it:
+///
+/// * [`with_entry_recovery`](crate::ExifReader::with_entry_recovery) makes the granularity the
+///   **entry**: a directory with one unreadable entry survives minus that entry, named by a
+///   [`DroppedEntry`] in [`dropped_entries`](ReadReport::dropped_entries), instead of failing
+///   whole;
+/// * [`with_byte_audit`](crate::ExifReader::with_byte_audit) adds a **byte-completeness verdict**,
+///   [`byte_audit`](ReadReport::byte_audit): `gamut-ifd`'s audit engine classifying every byte of
+///   the TIFF stream, or naming precisely the ones no structure claims.
+///
+/// Whatever the options, a **duplicate tag** within a surviving directory is named too: the model
+/// keeps one value per tag — the last occurrence — so every earlier entry for that tag is a
+/// [`DroppedEntry`] whose [`reason`](DroppedEntry::reason) is [`EntryDropReason::Shadowed`]. TIFF
+/// 6.0 §2 gives a directory one entry per tag, so such a file is out of spec, but the signal is a
+/// report entry rather than a [`strict`](crate::ExifReader::with_strict)-mode rejection.
+///
+/// # What this report does and does not claim
+///
+/// It covers exactly the regions [`DroppedRegion`] enumerates — the three pointer-addressed
+/// sub-IFDs, the thumbnail's JPEG bytes and strips, and any top-level directory past the 1st IFD —
+/// and the entries of every directory the model keeps: each one a duplicate tag shadowed, and,
+/// under `with_entry_recovery`, each one whose value could not be read. Within that set it is
+/// complete: nothing in it is discarded without an entry.
+///
+/// The drop lists are **not** a byte-completeness verdict, and [`is_empty`](ReadReport::is_empty)
+/// does not mean "every source byte reached the model": a gap between structures, a trailer, or a
+/// region no pointer reaches is not a *discard* of anything the parse read, so the drop lists have
+/// nothing to say about it. That is the byte audit's question — [`byte_audit`](Self::byte_audit).
+/// The converse holds too — the audit cannot stand in for the drop lists: a shadowed entry's
+/// record lies inside its directory's body, so its bytes count as claimed, and only
+/// [`EntryDropReason::Shadowed`] names it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadReport {
     dropped: Vec<Dropped>,
@@ -485,7 +480,7 @@ impl ReadReport {
     /// Whether anything this report's drop lists cover was discarded — a region of
     /// [`dropped`](Self::dropped) or an entry of [`dropped_entries`](Self::dropped_entries).
     ///
-    /// **Not** a byte-completeness verdict — see the module documentation. Source bytes no
+    /// **Not** a byte-completeness verdict — see [`ReadReport`]. Source bytes no
     /// structure claimed are [`byte_audit`](Self::byte_audit)'s question, and an audit is not a
     /// discard, so it never makes a report non-empty.
     #[must_use]

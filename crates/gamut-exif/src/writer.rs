@@ -35,8 +35,8 @@ use crate::thumbnail::Thumbnail;
 ///
 /// This is the **write-side** conformance check, deliberately absent from the read path: a parsed
 /// file is reported as it is, however non-conformant. A tag CIPA DC-008 does not itself define
-/// (empty [`ExifTag::field_types`]) constrains nothing and always passes — see the
-/// [tag module docs](crate::tag).
+/// (empty [`ExifTag::field_types`]) constrains nothing and always passes — see
+/// [`ExifTag`]'s documentation.
 ///
 /// # Errors
 ///
@@ -153,7 +153,7 @@ impl ExifWriter {
     ///
     /// # Errors
     ///
-    /// Returns [`ExifError::Core`](crate::ExifError::Core) if the model is not representable in
+    /// Returns [`ExifError::Core`] if the model is not representable in
     /// classic-TIFF widths (a directory of more than `u16::MAX` entries, or a stream past the
     /// 4 GiB offset limit) — far beyond what any EXIF carrier accepts.
     pub fn write(&self, exif: &Exif) -> Result<Vec<u8>> {

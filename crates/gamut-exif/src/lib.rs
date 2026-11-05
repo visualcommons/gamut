@@ -20,7 +20,7 @@
 //! so EXIF can be pulled out of a large raw file without loading it, and
 //! [`parse_with_report`](ExifReader::parse_with_report) returns a [`ReadReport`] naming the
 //! sub-IFDs, thumbnail ranges and trailing directories the lenient reader discarded — see
-//! [`report`] for what that covers and what it deliberately does not. `parse` is the `&[u8]` case
+//! [`ReadReport`] for what that covers and what it deliberately does not. `parse` is the `&[u8]` case
 //! of `parse_from` and stays silent.
 //!
 //! A 1st IFD carrying `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` is named in
@@ -28,7 +28,7 @@
 //! an offset with nothing to size it addresses bytes that cannot be read. That rule is structural,
 //! not a support level: Exif 3.0 §4.6.9.2 Table 21 states the pair's level only *per
 //! thumbnail-format column*, an axis that is not the two-valued `Compression` tag — which this
-//! reader does not consult, though [`Thumbnail::compression`](thumbnail::Thumbnail::compression)
+//! reader does not consult, though [`Thumbnail::compression`]
 //! exposes it to callers; why it stays unconditional is recorded on
 //! [`DropReason::ThumbnailLengthMissing`]. It refuses no conformant input: the table gives both tags
 //! the same level in all four columns — `M` under **Compressed**, `N` (not allowed to record) under
@@ -41,10 +41,10 @@
 //! mandates for it ([`ExifTag::field_types`], [`ExifTag::component_count`]), and
 //! [`set_tag_checked`] refuses a value that contradicts them. The three IFD-pointer tags DC-008
 //! defines in their own sections outside those tables are deliberately not catalogued — see
-//! [`tag`] for why.
+//! [`ExifTag`] for why.
 //! A handful of catalogued tags come from other specifications and are carried only for
 //! compatibility; DC-008 mandates nothing for them, their `field_types` is empty, and
-//! [`set_tag_checked`] claims no constraint — see [`tag`] for which they are.
+//! [`set_tag_checked`] claims no constraint — see [`ExifTag`] for which they are.
 //!
 //! Everything else on the write path is lenient on purpose, because a caller reproducing a
 //! non-conformant source file must be able to: [`Exif::set_tag`], [`Exif::set`],
@@ -52,11 +52,12 @@
 //! [`Exif::set_gps_ifd`] all write whatever they are given, as do their `image_mut` /
 //! `set_exif_ifd` / `set_interop_ifd` siblings. So does the entire read path.
 //!
-//! The optional `describe` feature (default **off**) adds the `describe` module: what the
-//! enumerated tags' values *mean*, in the specification's own wording, plus `describe::flash` for
-//! the `Flash` bitfield. It is a few kilobytes of static strings a consumer that only writes or
-//! round-trips metadata never reads, which is why it is opt-in. (Those names are not linked here:
-//! the module does not exist when the feature is off.) A consumer of the `gamut-metadata` facade
+//! The optional `describe` feature (default **off**) adds `describe`, `described_values`,
+//! `default_value` and `reference_code`: what the enumerated tags' values *mean*, in the
+//! specification's own wording, plus `flash` and `FlashDescription` for the `Flash` bitfield. It
+//! is a few kilobytes of static strings a consumer that only writes or round-trips metadata never
+//! reads, which is why it is opt-in. (Those names are not linked here: the items do not exist when
+//! the feature is off.) A consumer of the `gamut-metadata` facade
 //! or the `gamut` umbrella turns it on through their `exif-describe` feature, which forwards it.
 //!
 //! ```
@@ -80,18 +81,18 @@
 struct ReadmeDoctests;
 
 #[cfg(feature = "describe")]
-pub mod describe;
-pub mod error;
-pub mod exif;
-pub mod gps;
-pub mod maker_note;
-pub mod reader;
-pub mod report;
+mod describe;
+mod error;
+mod exif;
+mod gps;
+mod maker_note;
+mod reader;
+mod report;
 mod stream;
-pub mod tag;
-pub mod thumbnail;
-pub mod value;
-pub mod writer;
+mod tag;
+mod thumbnail;
+mod value;
+mod writer;
 
 // EXIF is a TIFF profile: reuse the container's value and directory types directly rather than
 // wrapping them in a parallel model.

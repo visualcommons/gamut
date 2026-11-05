@@ -1,54 +1,4 @@
 //! Human-readable descriptions of the enumerated tag values, in CIPA DC-008's own wording.
-//!
-//! Available under the **`describe`** Cargo feature, which is off by default: a display table is
-//! several kilobytes of strings a consumer that only writes metadata never reads.
-//!
-//! An EXIF tag such as `Orientation` or `MeteringMode` stores a small integer code whose meaning
-//! the specification fixes. [`describe`] maps `(tag, code)` to the text CIPA DC-008 gives for it,
-//! and [`described_values`] gives the whole domain the spec defines for a tag — which is also what
-//! makes a code *reserved*: a code outside that set has no defined meaning and [`describe`] returns
-//! `None`. [`default_value`] names the code in that domain the spec gives as the tag's default.
-//!
-//! ```
-//! use gamut_exif::{ExifTag, describe::{describe, described_values}};
-//!
-//! assert_eq!(describe(ExifTag::ResolutionUnit, 2), Some("inches"));
-//! assert_eq!(describe(ExifTag::ResolutionUnit, 4), None); // reserved
-//! assert_eq!(described_values(ExifTag::ExposureMode).len(), 3);
-//! ```
-//!
-//! # Reading a code out of a value
-//!
-//! The code is the tag's numeric value, with two shapes worth naming:
-//!
-//! * The GPS tags whose codes are **characters** — `GPSStatus`, `GPSMeasureMode` and the nine
-//!   ASCII reference tags (`GPSLatitudeRef`, `GPSLongitudeRef`, `GPSSpeedRef`, `GPSTrackRef`,
-//!   `GPSImgDirectionRef`, `GPSDestLatitudeRef`, `GPSDestLongitudeRef`, `GPSDestBearingRef`,
-//!   `GPSDestDistanceRef`) — are keyed by the character's byte, so
-//!   `describe(ExifTag::GpsStatus, u32::from(b'A'))`. Each is stored as a two-byte ASCII value,
-//!   the letter and its terminating NUL; the code is the letter, and [`reference_code`] takes it
-//!   out of the stored bytes:
-//!
-//!   ```
-//!   use gamut_exif::{ExifTag, Value, describe::{describe, reference_code}};
-//!
-//!   // A parsed `Value::Ascii` holds the letter without its NUL; the raw field holds both.
-//!   let stored = Value::Ascii("N".into());
-//!   let code = stored.as_str().and_then(|s| reference_code(s.as_bytes()));
-//!   assert_eq!(code, reference_code(b"N\0"));
-//!   assert_eq!(describe(ExifTag::GpsLatitudeRef, code.unwrap()), Some("North latitude"));
-//!   ```
-//!
-//!   Keying on the second byte (the NUL), or on both bytes taken together, would instead ask
-//!   about a code no table holds and get `None` — indistinguishable from a reserved code.
-//! * `ComponentsConfiguration` holds **four** codes, one per channel; describe each on its own.
-//!
-//! `Flash` is a bitfield rather than an enumeration, so it is not in these tables: use [`flash`].
-//! Four more tags for which the specification prints a table are absent for the same kind of
-//! reason — what it enumerates for them is not a single scalar code: `GPSVersionID` and
-//! `FlashpixVersion` are fixed multi-byte versions, `YCbCrSubSampling` is a pair whose meaning
-//! belongs to its two elements jointly, and `InteroperabilityIndex`'s codes are multi-character
-//! ASCII strings.
 
 use crate::tag::ExifTag;
 
@@ -310,7 +260,55 @@ pub fn described_values(tag: ExifTag) -> &'static [(u32, &'static str)] {
 /// The description CIPA DC-008 gives for `code` in `tag`, or `None` if the spec reserves that code
 /// — or does not enumerate the tag at all.
 ///
-/// See the [module docs](self) for how to read a code out of a value.
+/// Available under the **`describe`** Cargo feature, which is off by default: a display table is
+/// several kilobytes of strings a consumer that only writes metadata never reads.
+///
+/// An EXIF tag such as `Orientation` or `MeteringMode` stores a small integer code whose meaning
+/// the specification fixes. This maps `(tag, code)` to the text CIPA DC-008 gives for it, and
+/// [`described_values`] gives the whole domain the spec defines for a tag — which is also what
+/// makes a code *reserved*: a code outside that set has no defined meaning and this returns
+/// `None`. [`default_value`] names the code in that domain the spec gives as the tag's default.
+///
+/// ```
+/// use gamut_exif::{ExifTag, describe, described_values};
+///
+/// assert_eq!(describe(ExifTag::ResolutionUnit, 2), Some("inches"));
+/// assert_eq!(describe(ExifTag::ResolutionUnit, 4), None); // reserved
+/// assert_eq!(described_values(ExifTag::ExposureMode).len(), 3);
+/// ```
+///
+/// # Reading a code out of a value
+///
+/// The code is the tag's numeric value, with two shapes worth naming:
+///
+/// * The GPS tags whose codes are **characters** — `GPSStatus`, `GPSMeasureMode` and the nine
+///   ASCII reference tags (`GPSLatitudeRef`, `GPSLongitudeRef`, `GPSSpeedRef`, `GPSTrackRef`,
+///   `GPSImgDirectionRef`, `GPSDestLatitudeRef`, `GPSDestLongitudeRef`, `GPSDestBearingRef`,
+///   `GPSDestDistanceRef`) — are keyed by the character's byte, so
+///   `describe(ExifTag::GpsStatus, u32::from(b'A'))`. Each is stored as a two-byte ASCII value,
+///   the letter and its terminating NUL; the code is the letter, and [`reference_code`] takes it
+///   out of the stored bytes:
+///
+///   ```
+///   use gamut_exif::{ExifTag, Value, describe, reference_code};
+///
+///   // A parsed `Value::Ascii` holds the letter without its NUL; the raw field holds both.
+///   let stored = Value::Ascii("N".into());
+///   let code = stored.as_str().and_then(|s| reference_code(s.as_bytes()));
+///   assert_eq!(code, reference_code(b"N\0"));
+///   assert_eq!(describe(ExifTag::GpsLatitudeRef, code.unwrap()), Some("North latitude"));
+///   ```
+///
+///   Keying on the second byte (the NUL), or on both bytes taken together, would instead ask
+///   about a code no table holds and get `None` — indistinguishable from a reserved code.
+/// * `ComponentsConfiguration` holds **four** codes, one per channel; describe each on its own.
+///
+/// `Flash` is a bitfield rather than an enumeration, so it is not in these tables: use [`flash`].
+/// Four more tags for which the specification prints a table are absent for the same kind of
+/// reason — what it enumerates for them is not a single scalar code: `GPSVersionID` and
+/// `FlashpixVersion` are fixed multi-byte versions, `YCbCrSubSampling` is a pair whose meaning
+/// belongs to its two elements jointly, and `InteroperabilityIndex`'s codes are multi-character
+/// ASCII strings.
 #[must_use]
 pub fn describe(tag: ExifTag, code: u32) -> Option<&'static str> {
     described_values(tag)
@@ -333,7 +331,7 @@ pub fn describe(tag: ExifTag, code: u32) -> Option<&'static str> {
 /// uncompressed)` — is four codes under a condition rather than one code.
 ///
 /// ```
-/// use gamut_exif::{ExifTag, describe::{default_value, describe}};
+/// use gamut_exif::{ExifTag, default_value, describe};
 ///
 /// assert_eq!(default_value(ExifTag::Orientation), Some(1));
 /// assert_eq!(default_value(ExifTag::ColorSpace), None);
@@ -390,7 +388,7 @@ pub fn default_value(tag: ExifTag) -> Option<u32> {
 /// [`describe`]'s answer.
 ///
 /// ```
-/// use gamut_exif::{ExifTag, describe::{describe, reference_code}};
+/// use gamut_exif::{ExifTag, describe, reference_code};
 ///
 /// assert_eq!(reference_code(b"K\0"), Some(u32::from(b'K')));
 /// assert_eq!(reference_code(b"K"), Some(u32::from(b'K'))); // no terminator: still a letter
@@ -430,7 +428,7 @@ pub struct FlashDescription {
 /// Bits above bit 6 are not assigned by CIPA DC-008 and are ignored.
 ///
 /// ```
-/// use gamut_exif::describe::flash;
+/// use gamut_exif::flash;
 ///
 /// let f = flash(0x09); // fired, compulsory firing, no return detection
 /// assert!(f.fired);

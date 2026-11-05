@@ -1,19 +1,4 @@
 //! A read-only view of a Canon `MakerNote` (issue #977).
-//!
-//! A Canon note is a bare IFD at byte 0 of the block, in the outer stream's byte order, whose value
-//! offsets count from the outer TIFF header ([`MakerNoteDialect::Canon`]). The view decodes that IFD
-//! through [`gamut_ifd`] at the layout [`MakerNoteLayout::detect`] resolves, keeps every entry as a
-//! [`Value`] ([`CanonMakerNote::ifd`]), and adds typed accessors for the tags staked in
-//! `references/exif/canon/README.md`, after exiv2's `CanonMakerNote::tagInfo_[]`
-//! (`third_party/exiv2/src/canonmn_int.cpp`), which is also the differential oracle.
-//!
-//! Values are returned raw: `model_id` is the number exiv2 prints as a camera name, and the binary
-//! arrays (`camera_settings`, `shot_info`) are returned whole, not split into the per-element keys
-//! exiv2 gives them.
-//!
-//! The view never writes. The block it was read from re-emits byte-identically, because nothing
-//! here changes it; see the [module docs](super) on how the writer keeps Canon's file-absolute
-//! offsets valid.
 
 use gamut_ifd::{Ifd, ReadAt, Value};
 
@@ -43,8 +28,23 @@ const LENS_MODEL: u16 = 0x0095;
 /// `InternalSerialNumber`: text.
 const INTERNAL_SERIAL_NUMBER: u16 = 0x0096;
 
-/// The decoded IFD of a Canon `MakerNote`: every entry, plus typed accessors for the tags the
-/// [module docs](self) name.
+/// The decoded IFD of a Canon `MakerNote`: every entry, plus typed accessors for the tags staked
+/// in `references/exif/canon/README.md` (issue #977).
+///
+/// A Canon note is a bare IFD at byte 0 of the block, in the outer stream's byte order, whose value
+/// offsets count from the outer TIFF header ([`MakerNoteDialect::Canon`]). The view decodes that IFD
+/// through [`gamut_ifd`] at the layout [`MakerNoteLayout::detect`] resolves, keeps every entry as a
+/// [`Value`] ([`CanonMakerNote::ifd`]), and adds typed accessors for those tags, after exiv2's
+/// `CanonMakerNote::tagInfo_[]` (`third_party/exiv2/src/canonmn_int.cpp`), which is also the
+/// differential oracle.
+///
+/// Values are returned raw: `model_id` is the number exiv2 prints as a camera name, and the binary
+/// arrays (`camera_settings`, `shot_info`) are returned whole, not split into the per-element keys
+/// exiv2 gives them.
+///
+/// The view never writes. The block it was read from re-emits byte-identically, because nothing
+/// here changes it; see [`MakerNote`](super::MakerNote) on how the writer keeps Canon's
+/// file-absolute offsets valid.
 ///
 /// Built by [`MakerNote::canon`](super::MakerNote::canon) from the note's own bytes, or by
 /// [`read`](Self::read) from the whole TIFF stream.
