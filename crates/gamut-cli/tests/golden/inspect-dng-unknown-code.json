@@ -1,0 +1,5 @@
+exit: Some(1)
+--- stdout ---
+{"path":"<input>","format":"dng","format_source":"detected","accounting":{"file_len":136,"classified_bytes":136,"unclassified_bytes":0,"segment_count":3,"unclassified":[],"conflicts":[],"shared_values":0,"out_of_bounds":[],"unclaimed_reads":[],"unread_claims":[]},"unknown_field_types":[],"unknown_tags":[],"anomalies":[{"kind":"unknown_code","severity":"error","page":0,"tag":259,"code":999,"detail":"DNG: unrecognised Compression code"}],"fully_classified":true,"fully_accounted":false,"c2pa":{"not_validated":"gamut locates a C2PA manifest store and never validates it: it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.","store":null,"unread":[]}}
+--- stderr ---
+error: <input>: not fully accounted — 0 unclassified byte(s), 0 unknown tag(s), 0 unknown field type(s), 1 anomaly/ies
