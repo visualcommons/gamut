@@ -18,7 +18,8 @@ use crate::values::Compression;
 /// Every decodable scheme also encodes, with two caveats: [`Compression::JpegXl`] encoding needs
 /// the `jxl-encode` cargo feature, and [`Compression::Deflate`] encoding is limited to 8/16-bit
 /// samples.
-pub(crate) fn is_decodable(scheme: Compression) -> bool {
+#[must_use]
+pub fn is_decodable(scheme: Compression) -> bool {
     matches!(
         scheme,
         Compression::None | Compression::Jpeg | Compression::Deflate | Compression::JpegXl
@@ -33,7 +34,8 @@ pub(crate) fn is_decodable(scheme: Compression) -> bool {
 /// JPEG XL counts as lossy storage for digest purposes whether or not the codestream itself was
 /// encoded losslessly — the reference implementation routes every JXL image through the
 /// compressed-chunk path.
-pub(crate) fn is_lossy(scheme: Compression) -> bool {
+#[must_use]
+pub fn is_lossy(scheme: Compression) -> bool {
     matches!(scheme, Compression::LossyJpeg | Compression::JpegXl)
 }
 

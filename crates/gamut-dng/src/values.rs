@@ -10,9 +10,13 @@
 //! gamut-ifd's, shared with gamut-tiff and re-exported here: each is a `#[repr(u16)]` enum read
 //! with `TryFrom<u16>` and written with `u16::from`. Their union carries codes only TIFF assigns
 //! (CCITT, LZW and PackBits compression, the palette and CMYK photometries, …), and what stays
-//! here is which of them a DNG reader admits.
+//! here is which of them a DNG reader admits. What gamut-dng does with a `Compression` is asked
+//! through the free functions [`is_decodable`] and [`is_lossy`], which replace the inherent
+//! methods of the same names the crate-local enum carried.
 
 pub use gamut_ifd::tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat};
+
+pub use crate::compression::{is_decodable, is_lossy};
 
 /// Reads an on-disk `Compression` code (tag 259) as one of the five DNG 1.7.1.0 assigns —
 /// uncompressed, JPEG, Deflate, lossy JPEG and JPEG XL — or `None`.
