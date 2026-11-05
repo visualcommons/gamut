@@ -2,9 +2,10 @@
 //! AV1 sequence header `color_config` (AV1 §5.5.2 / §6.4.2).
 //!
 //! Each enum is `#[repr(u16)]` with discriminants equal to the spec code points, so
-//! [`MatrixCoefficients::code_point`] (and the siblings) is just the discriminant. M0 uses
-//! `MatrixCoefficients::Identity`, `ColourPrimaries::Bt709`, `TransferCharacteristics::Srgb`, and
-//! `ColorRange::Full`; the remaining named values are included for M2/M4 extension.
+//! [`MatrixCoefficients::code_point`] (and the siblings) is just the discriminant. Every named
+//! value is a code point a header can carry; which of them have a conversion behind them —
+//! identity and the `Bt709` / `Bt601` / `Bt470Bg` / `Bt2020Ncl` luma–chroma matrices at 8, 10 and
+//! 12 bits, with `YCgCo` modeled only — is listed under the crate root's *Implemented vs. modeled*.
 //!
 //! Naming follows each identifier's source spec: the H.273 types keep the spec's British
 //! spelling ([`ColourPrimaries`], as published), while AV1-derived names use the AV1 spec's
@@ -13,7 +14,7 @@
 /// Matrix coefficients (CICP `MatrixCoefficients`). `Identity` (0) carries RGB directly with no
 /// colour transform and requires 4:4:4 — the basis for lossless RGB AVIF.
 ///
-/// `#[non_exhaustive]`: H.273 defines further code points, added here as milestones need them.
+/// `#[non_exhaustive]`: H.273 defines further code points, added here as a gamut codec needs them.
 #[repr(u16)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,7 +70,7 @@ impl MatrixCoefficients {
 
 /// Colour primaries (CICP `ColourPrimaries`).
 ///
-/// `#[non_exhaustive]`: H.273 defines further code points, added here as milestones need them.
+/// `#[non_exhaustive]`: H.273 defines further code points, added here as a gamut codec needs them.
 #[doc(alias = "ColorPrimaries")]
 #[repr(u16)]
 #[non_exhaustive]
@@ -159,7 +160,7 @@ impl ColourPrimaries {
 
 /// Transfer characteristics (CICP `TransferCharacteristics`).
 ///
-/// `#[non_exhaustive]`: H.273 defines further code points, added here as milestones need them.
+/// `#[non_exhaustive]`: H.273 defines further code points, added here as a gamut codec needs them.
 #[repr(u16)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
