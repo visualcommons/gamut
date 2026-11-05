@@ -3,8 +3,8 @@
 //!
 //! Each law takes plain data, checks one claim, and returns a [`Violation`] naming what broke it.
 //! Nothing here panics on a well-formed input, so the same body runs under a pinned-seed
-//! property test in the per-PR gate (`decode.rs`) and, once a driver is wired, under the fuzz tier
-//! (`docs/testing.md`).
+//! property test in the per-PR gate (`decode.rs`) and under the fuzz tier's `heif_decode_limits`
+//! target (`tooling/gamut-fuzz`, `docs/testing.md`).
 //!
 //! **Decode limits:** [`decoding_stays_within_limits`] decodes every item of a file on all three
 //! surfaces twice — under the limits being tested and under a looser ceiling — with

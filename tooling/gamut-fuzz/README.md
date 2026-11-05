@@ -96,6 +96,7 @@ over normalised inputs, per the section above.
 | `tonemap_curves` | `gamut-tonemap` | `output_is_non_negative_and_never_nan`, `map_slice_is_elementwise_map`, `map_slice_is_order_independent`, `monotonic_non_decreasing` |
 | `avif_clean_alpha` | `gamut-avif` | `cleaning_8_bit_rgba_keeps_the_composite`, `cleaning_16_bit_rgba_keeps_the_composite` |
 | `avif_parse_decode` | `gamut-avif` | `decoding_stays_within_limits` |
+| `heif_decode_limits` | `gamut-heif` | `decoding_stays_within_limits` |
 | `color_gray8_view` | `gamut-color` | `gray8_view_is_lossless_widening_then_gray16_view` |
 
 One file per crate, deliberately, so adding a crate is an additive change — with two exceptions,
@@ -109,7 +110,10 @@ so it is also the crate's parser robustness target (`docs/testing.md`'s "Fuzz en
 `gamut-avif`). Its size limits come from the input's last four bytes, which an AVIF parser keeps as a trailer, so its
 seeds are unmodified AVIF files. The stub serves every decode it is asked for: how many a file can
 demand is bounded by the library's own work caps (#762), held at the target's ceiling, which the
-target therefore searches.
+target therefore searches. `heif_decode_limits` is the same driver one layer down: it parses with
+`IsoBmffImage::parse` and `HeifImage::new` and decodes every item through `gamut-heif`'s own stub
+codec binding (`hvc1` items, a four-byte `hvcC`), so the shared derivation walk is searched with no
+codec crate in front of it, under the same trailer-borne limits and the same ceiling.
 
 `Drago` is held to monotonicity only where `Drago::is_monotonic` says it claims it (#439); every
 other operator promises it unconditionally, and all of them are driven through the other three
@@ -423,6 +427,14 @@ a law target that parses nothing, so its two seeds are hand-built raw bytes in t
 input shape — a width selector byte, then RGBA samples — that put opaque, fully transparent and
 semi-transparent pixels side by side: `8bit-2x2-edge.bin` aimed at the 8-bit law, and
 `16bit-1x3-edge.bin` at the 16-bit one (its samples read as little-endian `u16` pairs).
+
+`corpus/heif_decode_limits/` (#1151) holds one seed, `coded-420-limits-8.heic`:
+`heic_container`'s `heic-single-item.heic` with its real `hvcC` replaced by the four-byte body
+`gamut-heif`'s stub binding reads (4:2:0, 8-bit), the `meta`/`iprp`/`ipco` sizes and the `iloc`
+extent offset that shrink moves rewritten to match, its `ispe` set to the 11 × 12 frame the stub
+decodes from the payload's first two bytes, and a four-byte limits trailer (an 8-pixel side, 100
+pixels) that refuses it. A real HEIC `hvcC` never passes the stub's configuration check, so without
+it the target would spend its budget rediscovering that body before reaching a decode.
 
 Beyond those, **a seed is added whenever a listed check turns out to have no witness in the
 corpus** — that is what the injection audit above is for, and a check whose only witness has to be

@@ -140,6 +140,7 @@ jobs:
           - avif_clean_alpha
           - color_gray8_view
           - avif_parse_decode
+          - heif_decode_limits
           # The parser entry points (#264): the untrusted-input surface `docs/testing.md`'s
           # per-crate table names, one target per entry point rather than per crate, because
           # gamut-heic's container walk and its `hvcC`/NAL layer are two independent surfaces.

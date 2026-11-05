@@ -62,6 +62,7 @@ tooling/gamut-fuzz/corpus/**
 !tooling/gamut-fuzz/corpus/heic_container/trailer.heic
 !tooling/gamut-fuzz/corpus/heic_hvcc/main-still-vps-sps-pps.bin
 !tooling/gamut-fuzz/corpus/heic_hvcc/truncated-payload-nal.bin
+!tooling/gamut-fuzz/corpus/heif_decode_limits/coded-420-limits-8.heic
 !tooling/gamut-fuzz/corpus/icc_parse/xyb-srgb.icc
 !tooling/gamut-fuzz/corpus/ifd_read/01-truncated-header.tif
 !tooling/gamut-fuzz/corpus/ifd_read/03-invalid-byte-order.tif
