@@ -69,8 +69,9 @@ The surface is intentionally minimal. The following are deliberate design decisi
   built with `Error::invalid_input`, `Error::unsupported` or `From<std::io::Error>`, and is one
   pointer wide, so `Result<T>` stays small on every success path; the allocation happens only when
   an error is constructed.
-- **Dimensions are never empty.** [`Dimensions`] has private fields and one constructor,
-  `Dimensions::new`, which rejects a zero width or height; `len == width * height * channels` is
+- **Dimensions are never empty.** [`Dimensions`] has private fields and two constructors,
+  `Dimensions::new`, which rejects a zero width or height, and the infallible `const`
+  `Dimensions::from_nonzero` over `NonZeroU32`; `len == width * height * channels` is
   then validated once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs never re-check.
 - **One vocabulary for what every format carries.** `DecodeLimits`, `Cicp`, `Orientation`,
   `Palette`, `RawMetadata` and the `c2pa` constants are defined here once, for the format crates to
