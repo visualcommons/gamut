@@ -19,7 +19,14 @@ The surface is one module per spec family, plus the shared integer vocabulary:
   shift, quantization and zig-zag ordering live with the codec, in `gamut-jpeg`.
 - **`math`** — the cross-codec integer primitives: the AV1 §4.7 rounding/clamp operations
   (`round2`, `round2_signed`, `clip3` — names every codec spec defines equivalents of) and the
-  forward-quantize rounding shared by the AV1 and VP8 encoders (`round_div_nearest`).
+  forward-quantize rounding shared by the AV1 and VP8 encoders (`round_div_nearest`), and the
+  pixel-range saturation every reconstruction ends with (`clip_pixel8`, `clip_pixel` — AV1
+  `Clip1`).
+- **`upsample`** — the reference decoders' chroma upsampling kernels, each a port with its
+  rounding exact: libjpeg-turbo's fancy upsampling (`libjpeg::h2v1`/`h2v2`/`h1v2`), libwebp's
+  fancy upsampler (`libwebp::fancy_row`) and libavif's bilinear filter in sixteenths
+  (`libavif::bilinear_row`), with the shared 2:1 row-tap geometry (`taps`) and nearest
+  replication (`replicate`). Which one a decoder runs is `gamut-color`'s `ChromaUpsampling`.
 
 ## Goals
 
@@ -54,7 +61,8 @@ assert_eq!(round_div_nearest(-10, 4), -3);
 ## Status
 
 **Stable at the current major.** The complete AV1 1-D kernel family (DCT 4–64, ADST
-4/8/16, identity 4–32, lossless WHT), the JPEG 8×8 DCT kernels, and the shared integer math ship
+4/8/16, identity 4–32, lossless WHT), the JPEG 8×8 DCT kernels, the reference chroma upsampling
+kernels (moved from `gamut-color` in #1066), and the shared integer math ship
 today and their signatures will not change; every future extension is additive — a new sibling
 module per spec family, or new functions in an existing one. See [`STATUS.md`](STATUS.md) for the
 frozen surface table, the settled design decisions, and the tracked deferrals.

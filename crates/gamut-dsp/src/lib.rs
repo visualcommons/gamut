@@ -6,7 +6,10 @@
 //! - [`jpeg`] — the JPEG-1 (ITU-T T.81 | ISO/IEC 10918-1) §A.3.3 8×8 forward and inverse DCT
 //!   primitives,
 //! - [`math`] — the small cross-codec integer arithmetic primitives: the AV1 §4.7 rounding and
-//!   clamp operations and the forward-quantize rounding shared by the AV1 and VP8 encoders.
+//!   clamp operations, the forward-quantize rounding shared by the AV1 and VP8 encoders, and the
+//!   pixel-range saturation (`clip_pixel8` / `clip_pixel`) every reconstruction ends with,
+//! - [`upsample`] — the reference decoders' chroma upsampling kernels, one family per reference
+//!   with its rounding ported exactly: libjpeg-turbo, libwebp and libavif.
 //!
 //! Nothing lives at the crate root, so each spec family is its own sibling module and future ones
 //! (JPEG XL, AV2, …) land the same way without ever colliding with an existing name.
@@ -47,3 +50,4 @@ mod testrng;
 pub mod av1;
 pub mod jpeg;
 pub mod math;
+pub mod upsample;
