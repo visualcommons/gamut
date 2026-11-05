@@ -25,10 +25,7 @@ use gamut_core::{
 };
 use gamut_deflate::{DeflateEncoder, Level};
 
-use crate::ancillary::{
-    Ancillary, C2paStore, PaletteOrigin, SrgbIntent, WrittenHeader, WrittenPalette,
-    background_entry,
-};
+use crate::ancillary::{Ancillary, C2paStore, SrgbIntent};
 use crate::backend::{Deflaters, IdatInfo, ZlibDeflater, run_deflaters};
 use crate::carry::MetadataNotice;
 use crate::chunk::{self, C2paSpan, SIGNATURE};
@@ -40,6 +37,7 @@ use crate::effort::{Effort, EffortKnobs};
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::{PaletteOrder, Plte};
 use crate::reduce::{self, Family, Reduced, Reductions};
+use crate::written::{PaletteOrigin, WrittenHeader, WrittenPalette, background_entry};
 use crate::{ihdr, pack};
 
 /// IDAT payload cap. A decoder concatenates consecutive IDATs, so the split is transparent; a
@@ -780,7 +778,7 @@ impl PngEncoder {
         let palette = Plte::from(palette);
         // Every entry the finished file still has to name. A pixel names one; so does the `bKGD`
         // background, in whichever of its three forms it was set — an index into this palette, a
-        // grey sample, an RGB triple. Which entry each form names is `ancillary::background_entry`
+        // grey sample, an RGB triple. Which entry each form names is `written::background_entry`
         // to answer, and it is asked rather than restated here, so no form can be missed.
         let mut used = [false; 256];
         for &index in indices {
@@ -1616,7 +1614,7 @@ mod tests {
     /// Each colour is one the written file can carry — a grey level inside the 8-bit depth, an
     /// index inside the palette `encode_indexed8` writes — because a background the written
     /// header cannot express is omitted rather than emitted for a reader to reject
-    /// (`ancillary::bkgd_for`), and that omission is pinned by its own tests.
+    /// (`written::bkgd_for`), and that omission is pinned by its own tests.
     #[test]
     fn background_builders_reach_the_bkgd_chunk() {
         let gray = vec![0u8; 4 * 4];
@@ -1723,7 +1721,7 @@ mod tests {
     ///
     /// Both halves are the same claim, and it fails for one reason: the background stopped meaning
     /// what the caller said. The chunk is kept verbatim on this path
-    /// (`ancillary::bkgd_for`, [`PaletteOrigin::Caller`]), so an index left pointing into the
+    /// (`written::bkgd_for`, [`PaletteOrigin::Caller`]), so an index left pointing into the
     /// caller's numbering would silently repaint the background — or, if its entry were dropped,
     /// name a colour the file no longer holds.
     #[test]
@@ -1797,7 +1795,7 @@ mod tests {
     /// that alpha.
     ///
     /// `bKGD` names a palette entry in three forms (§11.3.4.1) -- an index, a grey sample, an RGB
-    /// triple -- and `ancillary::background_entry` resolves all three against the caller's palette.
+    /// triple -- and `written::background_entry` resolves all three against the caller's palette.
     /// Marking only the index form's entry as used left the other two naming an entry cleaning was
     /// free to drop or to renumber under them, which is the repainting the index form's mark
     /// exists to prevent, one field over. It fails for one reason: the background stopped naming
@@ -1875,7 +1873,7 @@ mod tests {
     ///
     /// Cleaning maps an index it never marked to 0, which is a *valid* entry, so an out-of-range
     /// index that reached the renumbering would come back in range and be written — turning a
-    /// chunk `ancillary::bkgd_for` deliberately drops into a background the caller never asked
+    /// chunk `written::bkgd_for` deliberately drops into a background the caller never asked
     /// for.
     ///
     /// The first case is `palette.len()` itself, the smallest index that is out of range: the

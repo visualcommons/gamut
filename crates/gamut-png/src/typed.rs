@@ -107,8 +107,8 @@ mod tests {
     use gamut_metadata::{EncodedMetadata, Metadata};
 
     use super::*;
-    use crate::ancillary::DEFAULT_ICC_PROFILE_NAME;
     use crate::decoded::{TextChunk, TextChunkKind, XMP_KEYWORD};
+    use crate::text::DEFAULT_ICC_PROFILE_NAME;
 
     #[test]
     fn png_metadata_blocks_expose_each_located_payload_in_facade_form() {

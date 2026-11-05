@@ -526,7 +526,7 @@ exists, since a payload shaped for the wrong colour type is a chunk libpng rejec
 caller's palette *index* survives only on the `encode_indexed8` path, whose palette is the caller's;
 under an encoder-derived palette it names nothing and is omitted. On that path all three forms — the
 index, the grey sample and the RGB triple — name an entry of the caller's palette, one rule with one
-owner (`ancillary::background_entry`): the entry each names is kept even when no pixel names it, and
+owner (`written::background_entry`): the entry each names is kept even when no pixel names it, and
 the chunk is written as that entry's index in the cleaned palette. The alternative is a background
 silently repainted — including by the chunk resolving a second time against the cleaned palette and
 landing on a transparent twin of the triple it asked for. This holds across colour **types**

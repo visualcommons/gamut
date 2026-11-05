@@ -105,8 +105,10 @@ mod reduce;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod stages;
+mod text;
 #[cfg(feature = "metadata")]
 mod typed;
+mod written;
 
 pub use abi::{AbiZlibDeflater, AbiZlibInflater, PIXEL_FORMAT_FILTERED_BYTES, ZLIB_CODEC_ID};
 pub use ancillary::{PhysicalUnit, SrgbIntent};

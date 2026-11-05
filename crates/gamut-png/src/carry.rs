@@ -298,7 +298,7 @@ impl PngEncoder {
             self = self.with_chromaticities(chromaticities);
         }
         // Through the same setters a caller uses, so each is emitted for the header actually
-        // written exactly as a caller-set one is (`ancillary::sbit_for` / `bkgd_for`). The read
+        // written exactly as a caller-set one is (`written::sbit_for` / `bkgd_for`). The read
         // side surfaces the background in the decoded pixels' units, which are the units the
         // `with_background` takes.
         if let Some(bits) = &metadata.significant_bits {
