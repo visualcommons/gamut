@@ -18,7 +18,9 @@
 //! When the tile body lands, these cases gain a sample comparison against
 //! `aom_oracle::decode_av1`.
 
-use gamut_av1::{Av1Decoder, DecodeLimits, Subsampling};
+use gamut_av1::Av1Decoder;
+use gamut_color::ChromaSubsampling;
+use gamut_core::DecodeLimits;
 
 /// The `[Y, U, V]` planes `aom_oracle::encode_still_intra` takes, at full 4:4:4 resolution.
 type Planes = (Vec<u8>, Vec<u8>, Vec<u8>);
@@ -95,13 +97,13 @@ fn check(width: u32, height: u32, qindex: u8, content: &str, make: fn(u32, u32) 
         "height disagrees with libaom for {label}"
     );
     assert_eq!(
-        info.sequence.color.bit_depth,
+        u32::from(info.sequence.color.bit_depth.bits()),
         u32::from(reference.bit_depth),
         "bit depth disagrees with libaom for {label}"
     );
     assert_eq!(
         info.sequence.color.subsampling,
-        Subsampling::Yuv444,
+        ChromaSubsampling::Cs444,
         "the oracle encodes 4:4:4 for {label}"
     );
     assert_eq!(info.sequence.seq_profile, 1, "4:4:4 requires profile 1");
@@ -200,22 +202,17 @@ fn decode_limits_refuse_an_oversized_frame_before_allocating() {
     let (y, u, v) = gradient(128, 128);
     let stream = aom_oracle::encode_still_intra(128, 128, &y, &u, &v, 60).unwrap();
 
-    let tight = Av1Decoder::with_limits(DecodeLimits {
-        max_width: 64,
-        ..DecodeLimits::default()
-    });
+    let tight = Av1Decoder::new().with_limits(DecodeLimits::new().with_max_width(64));
     assert_eq!(
         tight.inspect(&stream).unwrap_err().static_message(),
         Some("AV1 decode: frame dimensions exceed the configured limit")
     );
 
-    let tight = Av1Decoder::with_limits(DecodeLimits {
-        max_pixels: 1024,
-        ..DecodeLimits::default()
-    });
+    // 128x128 8-bit 4:4:4 decodes to 3 * 16384 bytes, past a 1 KiB cap.
+    let tight = Av1Decoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(1024));
     assert_eq!(
         tight.inspect(&stream).unwrap_err().static_message(),
-        Some("AV1 decode: frame sample count exceeds the configured limit")
+        Some("AV1 decode: decoded frame size exceeds the configured limit")
     );
 
     // The default limits accept the same stream, so the refusals above are the caps talking.

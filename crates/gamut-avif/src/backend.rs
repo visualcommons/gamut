@@ -13,7 +13,7 @@
 //! - [`Av1StillEncoder::supports`] returning `false` — or, across the C seam,
 //!   [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) — is the **only** fall-through
 //!   signal.
-//! - `gamut-av1`'s [`encode_still_intra_with`](gamut_av1::encode_still_intra_with) is the
+//! - `gamut-av1`'s [`encode_still`](gamut_av1::encode_still) is the
 //!   **implicit tail**,
 //!   used when every pushed backend declines. `gamut-av1` itself is unaware of this seam.
 //! - A backend that *accepts* a job and then fails propagates its error; the tail is **not** retried,
@@ -35,7 +35,7 @@
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, SequenceHeader, Speed, Subsampling};
+use gamut_av1::{Av1Color, Av1StillConfig, Effort, EncodedStill, SequenceHeader};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status, codec_id, pixel_format};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients, Planar8, Planar16,
@@ -69,14 +69,14 @@ pub struct Av1EncodeRequest {
     /// The AV1 `base_q_idx` (AV1 §5.9.12), `0..=255`; `0` selects the lossless path.
     base_q_idx: u8,
     /// The colour signalling the returned stream must carry — and the layout `planes` is in.
-    colour: Av1Colour,
+    colour: Av1Color,
     /// The chroma sampling of `planes`, which the returned stream must also code.
     chroma: ChromaSubsampling,
     /// The depth the samples are coded at: 8, 10 or 12 bits.
     bit_depth: BitDepth,
     /// The search preset the caller chose with
-    /// [`AvifEncoder::with_speed`](crate::AvifEncoder::with_speed).
-    speed: Speed,
+    /// [`AvifEncoder::with_effort`](crate::AvifEncoder::with_effort).
+    effort: Effort,
     /// The share of [`AvifEncoder::with_threads`](crate::AvifEncoder::with_threads)'s budget this
     /// encode may use.
     threads: NonZeroUsize,
@@ -88,10 +88,10 @@ impl Av1EncodeRequest {
     pub(crate) fn new(
         dimensions: Dimensions,
         base_q_idx: u8,
-        colour: Av1Colour,
+        colour: Av1Color,
         chroma: ChromaSubsampling,
         bit_depth: BitDepth,
-        speed: Speed,
+        effort: Effort,
         threads: NonZeroUsize,
     ) -> Self {
         Self {
@@ -100,7 +100,7 @@ impl Av1EncodeRequest {
             base_q_idx,
             colour,
             bit_depth,
-            speed,
+            effort,
             threads,
         }
     }
@@ -110,7 +110,7 @@ impl Av1EncodeRequest {
     /// gets — all of it for an image without alpha, and the larger half when the alpha auxiliary
     /// is coded beside it on another thread. One unless the caller asked for more.
     ///
-    /// Like [`speed`](Self::speed) this is a **hint**: a backend may run on fewer threads or ignore
+    /// Like [`effort`](Self::effort) this is a **hint**: a backend may run on fewer threads or ignore
     /// it. The built-in encoder's output does not depend on it; whether a backend's does is the
     /// backend's own contract. It does not cross the C seam — [`AbiAv1StillEncoder`]'s `extra`
     /// blob is unchanged — since a C backend schedules its own threads.
@@ -119,17 +119,17 @@ impl Av1EncodeRequest {
         self.threads
     }
 
-    /// The encode-speed preset the caller chose with
-    /// [`AvifEncoder::with_speed`](crate::AvifEncoder::with_speed) — [`Speed::default`]
-    /// ([`Speed::Balanced`]) unless they chose another.
+    /// The encode-effort preset the caller chose with
+    /// [`AvifEncoder::with_effort`](crate::AvifEncoder::with_effort) — [`Effort::default`]
+    /// ([`Effort::Balanced`]) unless they chose another.
     ///
     /// Unlike [`colour`](Self::colour) and [`chroma`](Self::chroma) this is a **hint**, not an
     /// obligation: it names how much search time the caller is willing to spend, and a backend
     /// maps it onto its own effort scale or ignores it. Nothing in the returned stream is checked
     /// against it.
     #[must_use]
-    pub fn speed(&self) -> Speed {
-        self.speed
+    pub fn effort(&self) -> Effort {
+        self.effort
     }
 
     /// The display dimensions of the image to encode.
@@ -174,7 +174,7 @@ impl Av1EncodeRequest {
     /// container mirrors these values into `colr` and they must agree with the payload
     /// (AV1-ISOBMFF v1.3.0 §2.3.4). A mismatch is rejected.
     #[must_use]
-    pub fn colour(&self) -> Av1Colour {
+    pub fn colour(&self) -> Av1Color {
         self.colour
     }
 
@@ -332,7 +332,7 @@ pub(crate) fn run_backends(
 pub(crate) fn still_from_backend_obus(
     obus: Vec<u8>,
     dims: Dimensions,
-    colour: Av1Colour,
+    colour: Av1Color,
     chroma: ChromaSubsampling,
     bit_depth: BitDepth,
 ) -> Result<EncodedStill> {
@@ -370,41 +370,21 @@ pub(crate) fn still_from_backend_obus(
             "AVIF: AV1 backend stream signals a different chroma format than requested",
         ));
     }
-    let (color_primaries, transfer_characteristics, matrix_coefficients, full_range) =
-        header.colour;
-    // Each factor is 1 or 2, so `factor > 1` is its AV1 `subsampling_*` flag.
-    let f = chroma.factors();
-    let (chroma_x, chroma_y) = (u8::from(f.width() > 1), u8::from(f.height() > 1));
-    let config = Av1StillConfig {
-        seq_profile: header.seq_profile,
-        seq_level_idx_0: header.seq_level_idx_0,
-        seq_tier_0: 0,
-        high_bitdepth: bit_depth != BitDepth::Eight,
-        twelve_bit: bit_depth == BitDepth::Twelve,
-        monochrome: false,
-        chroma_subsampling_x: chroma_x,
-        chroma_subsampling_y: chroma_y,
-        // Mirrored, not required to match the request: §2.3.4 obliges `av1C` to agree with the
-        // sequence header, and a backend whose downsampler is co-sited may legitimately signal a
-        // position of its own.
-        chroma_sample_position: header.chroma_sample_position,
-        color_primaries,
-        transfer_characteristics,
-        matrix_coefficients,
-        full_range,
-    };
+    // Read back from the stream, not built from the request: §2.3.4 obliges `av1C` to agree with
+    // the sequence header, and a backend whose downsampler is co-sited may legitimately signal a
+    // `chroma_sample_position` of its own. Every other field was checked against the request
+    // above, and the header was refused unless it is a reduced still header (tier 0) carrying
+    // three planes.
+    let config = Av1StillConfig::from_sequence_header(&header.sequence);
     // Re-read the record we are about to stamp and validate the payload through the crate's own
     // reader, so a backend stream faces exactly the checks a third-party AVIF file would.
-    Av1Config::parse(&crate::encoder::av1c_record(&config))?.validate_still_payload(&obus)?;
-    Ok(EncodedStill { obus, config })
+    Av1Config::parse(&crate::encoder::av1c_record(&Av1Config::for_still(&config)))?
+        .validate_still_payload(&obus)?;
+    Ok(EncodedStill::new(obus, config))
 }
 
 /// The sequence-header fields the container needs from a backend-supplied stream.
 struct SeqHeaderParams {
-    /// `seq_profile` (3 bits).
-    seq_profile: u8,
-    /// `seq_level_idx[0]` (5 bits).
-    seq_level_idx_0: u8,
     /// `max_frame_width_minus_1 + 1`.
     width: u32,
     /// `max_frame_height_minus_1 + 1`.
@@ -414,8 +394,10 @@ struct SeqHeaderParams {
     colour: (u16, u16, u16, bool),
     /// Chroma sampling — inferred from `seq_profile`, except at 12-bit where §5.5.2 codes it.
     chroma: ChromaSubsampling,
-    /// `chroma_sample_position`, coded for 4:2:0 only.
-    chroma_sample_position: u8,
+    /// The whole parsed header, which the container's `av1C`/`colr` values are read back from
+    /// (`seq_profile`, the level and tier, and `chroma_sample_position`, which is coded for 4:2:0
+    /// only).
+    sequence: SequenceHeader,
     /// `BitDepth`, as §5.5.2 derives it from `high_bitdepth`, `twelve_bit` and `seq_profile`.
     bit_depth: BitDepth,
 }
@@ -464,22 +446,18 @@ impl SeqHeaderParams {
             ));
         }
         let color = header.color;
-        let chroma = match color.subsampling {
-            Subsampling::Monochrome => {
-                return Err(Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "AVIF: AV1 backend stream must be three-plane (mono_chrome = 0)",
-                ));
-            }
-            Subsampling::Yuv444 => ChromaSubsampling::Cs444,
-            Subsampling::Yuv422 => ChromaSubsampling::Cs422,
-            Subsampling::Yuv420 => ChromaSubsampling::Cs420,
-        };
+        let chroma = color.subsampling;
+        if chroma == ChromaSubsampling::Cs400 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend stream must be three-plane (mono_chrome = 0)",
+            ));
+        }
         let colour = (
-            u16::from(color.color_primaries),
-            u16::from(color.transfer_characteristics),
-            u16::from(color.matrix_coefficients),
-            color.full_range,
+            color.cicp.colour_primaries,
+            color.cicp.transfer_characteristics,
+            color.cicp.matrix_coefficients,
+            color.cicp.full_range,
         );
         // `color_description_present_flag = 0` leaves all three code points UNSPECIFIED, which the
         // container would have to stamp verbatim into `colr` — and which can never match the
@@ -502,14 +480,7 @@ impl SeqHeaderParams {
                 "AVIF: AV1 backend stream must set color_description_present_flag",
             ));
         }
-        // `gamut-av1` derives `BitDepth` as 8, 10 or 12 (§5.5.2), so the `None` arm is
-        // unreachable; it is an error rather than a panic because library code may not unwrap.
-        let bit_depth = BitDepth::from_bits(color.bit_depth).ok_or_else(|| {
-            Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 backend sequence header is malformed",
-            )
-        })?;
+        let bit_depth = color.bit_depth;
         // The §5.5.2 sRGB shortcut (BT.709 + sRGB + identity) infers 4:4:4 with no coded bit,
         // whatever the profile, so a stream whose profile *forces* a subsampled layout asserts two
         // chroma formats at once. libaom asserts against exactly that construction, so no
@@ -533,13 +504,11 @@ impl SeqHeaderParams {
         }
         Ok(Self {
             bit_depth,
-            seq_profile: header.seq_profile,
-            seq_level_idx_0: header.seq_level_idx,
             width: header.max_frame_width,
             height: header.max_frame_height,
             colour,
             chroma,
-            chroma_sample_position: color.chroma_sample_position,
+            sequence: header,
         })
     }
 }
@@ -561,16 +530,18 @@ impl SeqHeaderParams {
 /// [`EncodeConfig::extra`] blob, whose first byte is the AV1 `base_q_idx`. A backend registered
 /// for [`AV1_CODEC_ID`] must read `extra`, and must not read `quality`.
 ///
-/// # The speed preset
+/// # The effort preset
 ///
 /// [`EncodeConfig`] has no effort field, but the `extra` blob is length-carrying, so the preset
-/// travels there: when [`Av1EncodeRequest::speed`] is anything but [`Speed::Thorough`], `extra`
-/// is **two bytes** and the second is the [`Speed`] discriminant (`1` = `Balanced`, `2` = `Fast`,
-/// `3` = `Fastest`; permanent values, and a later preset takes the next free one). A full-search
-/// job keeps the one-byte blob, so a backend reads byte 1 only when `extra_len >= 2`, and treats
-/// its absence as `Thorough` — which is also every job a pre-speed backend was ever handed. That
+/// travels there: when [`Av1EncodeRequest::effort`] is anything but [`Effort::Thorough`], `extra`
+/// is **two bytes** and the second is the preset's **wire speed value** (`1` = `Balanced`,
+/// `2` = `Fast`, `3` = `Fastest`; permanent values, and a later preset takes the next free one).
+/// The wire value is a persisted numbering of its own — it counts *down* the search, where
+/// [`Effort::level`] counts up — so it is never the [`Effort`] discriminant. A full-search job
+/// keeps the one-byte blob, so a backend reads byte 1 only when `extra_len >= 2`, and treats its
+/// absence as `Thorough` — which is also every job a pre-preset backend was ever handed. That
 /// absence rule is a persisted wire convention, not the encoder's default: an
-/// [`AvifEncoder`](crate::AvifEncoder) left at its default preset, [`Speed::Balanced`], therefore
+/// [`AvifEncoder`](crate::AvifEncoder) left at its default preset, [`Effort::Balanced`], therefore
 /// hands a backend the **two-byte** blob `[base_q_idx, 1]`. A backend maps the preset onto its
 /// own effort scale or ignores it; either way the stream it returns is held to the same contract.
 ///
@@ -627,17 +598,36 @@ impl<E: Encoder + Send> AbiAv1StillEncoder<E> {
 }
 
 /// The codec-specific `extra` blob [`AbiAv1StillEncoder`] lowers `req` to: the `base_q_idx`,
-/// then — only when the job runs at a preset other than [`Speed::Thorough`] — the [`Speed`]
-/// discriminant. A full-search job therefore lowers to exactly the one-byte blob the adapter
-/// wrote before speed presets existed. The test is against `Thorough`, not against
-/// [`Speed::default`]: what the blob's absence means is fixed on the wire, while the default may
+/// then — only when the job runs at a preset other than [`Effort::Thorough`] — the preset's
+/// [`wire_speed`] value. A full-search job therefore lowers to exactly the one-byte blob the
+/// adapter wrote before presets existed. The test is against `Thorough`, not against
+/// [`Effort::default`]: what the blob's absence means is fixed on the wire, while the default may
 /// move.
 fn extra_blob(req: &Av1EncodeRequest) -> Vec<u8> {
     let mut blob = vec![req.base_q_idx()];
-    if req.speed() != Speed::Thorough {
-        blob.push(req.speed() as u8);
-    }
+    blob.extend(wire_speed(req.effort()));
     blob
+}
+
+/// The `extra[1]` byte `effort` crosses the C seam as, or `None` for no byte at all.
+///
+/// The wire numbering is persisted and predates [`Effort`]: it counts down the search from an
+/// absent byte meaning the full search, while [`Effort::level`] counts up from the fastest, so
+/// the mapping is spelled out here rather than derived from a discriminant.
+///
+/// `Thorough` has no arm of its own: it is the absent byte, which the wildcard also produces.
+/// The wildcard is required because [`Effort`] is `#[non_exhaustive]` in `gamut-av1`; a preset
+/// added there has no wire value until one is assigned here, and an absent byte is the one value
+/// every backend already reads, so an unmapped preset reaches a C backend as the full search
+/// rather than as a number it might misread. A separate `Thorough => None` arm would be an
+/// arm whose deletion no input could detect.
+fn wire_speed(effort: Effort) -> Option<u8> {
+    match effort {
+        Effort::Balanced => Some(1),
+        Effort::Fast => Some(2),
+        Effort::Fastest => Some(3),
+        _ => None,
+    }
 }
 
 impl<E: Encoder + Send> std::fmt::Debug for AbiAv1StillEncoder<E> {
@@ -796,22 +786,22 @@ mod tests {
     const H: u32 = 18;
 
     #[test]
-    fn extra_blob_appends_the_speed_discriminant_only_off_the_full_search() {
-        let blob = |speed| {
+    fn extra_blob_appends_the_wire_speed_only_off_the_full_search() {
+        let blob = |effort| {
             extra_blob(&Av1EncodeRequest::new(
                 Dimensions::new(W, H).unwrap(),
                 77,
-                Av1Colour::default(),
+                Av1Color::default(),
                 ChromaSubsampling::Cs444,
                 BitDepth::Eight,
-                speed,
+                effort,
                 NonZeroUsize::MIN,
             ))
         };
-        assert_eq!(blob(Speed::Thorough), [77]);
-        assert_eq!(blob(Speed::Balanced), [77, 1]);
-        assert_eq!(blob(Speed::Fast), [77, 2]);
-        assert_eq!(blob(Speed::Fastest), [77, 3]);
+        assert_eq!(blob(Effort::Thorough), [77]);
+        assert_eq!(blob(Effort::Balanced), [77, 1]);
+        assert_eq!(blob(Effort::Fast), [77, 2]);
+        assert_eq!(blob(Effort::Fastest), [77, 3]);
     }
 
     /// An MSB-first bit writer. The byte vector *is* the payload — a partial final byte is already
@@ -921,13 +911,13 @@ mod tests {
     ) {
         let h = SeqHeaderParams::parse(obus).expect("the stream is a well-formed sequence header");
         assert_eq!(h.bit_depth, bit_depth, "bit_depth");
-        assert_eq!(h.seq_profile, seq_profile, "seq_profile");
-        assert_eq!(h.seq_level_idx_0, 0, "seq_level_idx_0");
+        assert_eq!(h.sequence.seq_profile, seq_profile, "seq_profile");
+        assert_eq!(h.sequence.seq_level_idx, 0, "seq_level_idx_0");
         assert_eq!((h.width, h.height), (W, H), "coded dimensions");
         assert_eq!(h.colour, (1, 13, 1, true), "colour");
         assert_eq!(h.chroma, chroma, "derived chroma");
         assert_eq!(
-            h.chroma_sample_position, chroma_sample_position,
+            h.sequence.color.chroma_sample_position, chroma_sample_position,
             "chroma_sample_position"
         );
     }
@@ -989,7 +979,7 @@ mod tests {
         let obus = seq_header_obus(1, false, false, 0, None, 0);
         let h = SeqHeaderParams::parse(&obus).expect("the shortcut stream parses");
         assert_eq!(h.chroma, ChromaSubsampling::Cs444);
-        assert_eq!(h.chroma_sample_position, 0);
+        assert_eq!(h.sequence.color.chroma_sample_position, 0);
         assert_eq!(h.colour, (1, 13, 0, true), "the shortcut infers full range");
     }
 

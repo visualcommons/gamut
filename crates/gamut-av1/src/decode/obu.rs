@@ -12,24 +12,10 @@
 //!   where acting on them would matter.
 
 use gamut_bitstream::BitReader;
-use gamut_core::{Error, Result};
+use gamut_color::{BitDepth, ChromaSubsampling};
+use gamut_core::{Cicp, Error, Result};
 
 use super::ORIGIN;
-
-/// `OBU_SEQUENCE_HEADER` (§6.2.2).
-pub(crate) const OBU_SEQUENCE_HEADER: u8 = 1;
-/// `OBU_TEMPORAL_DELIMITER`.
-pub(crate) const OBU_TEMPORAL_DELIMITER: u8 = 2;
-/// `OBU_FRAME_HEADER`.
-pub(crate) const OBU_FRAME_HEADER: u8 = 3;
-/// `OBU_TILE_GROUP`.
-pub(crate) const OBU_TILE_GROUP: u8 = 4;
-/// `OBU_FRAME` (frame header ∥ tile group).
-pub(crate) const OBU_FRAME: u8 = 6;
-/// `OBU_REDUNDANT_FRAME_HEADER`.
-pub(crate) const OBU_REDUNDANT_FRAME_HEADER: u8 = 7;
-/// `OBU_TILE_LIST` (large-scale tiles; forbidden inside an AVIF item).
-pub(crate) const OBU_TILE_LIST: u8 = 8;
 
 /// `SELECT_SCREEN_CONTENT_TOOLS` (§3).
 pub(crate) const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
@@ -72,35 +58,75 @@ const MC_IDENTITY: u8 = 0;
 /// `CP_UNSPECIFIED` / `TC_UNSPECIFIED` / `MC_UNSPECIFIED` (§6.4.2).
 const UNSPECIFIED: u8 = 2;
 
-/// One open bitstream unit located within a temporal unit.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Obu<'a> {
-    /// `obu_type` (§5.3.2).
-    pub(crate) kind: u8,
+/// One open bitstream unit located within a temporal unit (AV1 §5.3.1), as [`ObuIter`] yields it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Obu<'a> {
+    /// `obu_type` (§5.3.2, §6.2.2): one of the `Obu::*` constants, or a reserved value a decoder
+    /// ignores.
+    pub obu_type: u8,
     /// `temporal_id` from the extension header, or 0 when absent.
-    pub(crate) temporal_id: u8,
+    pub temporal_id: u8,
     /// `spatial_id` from the extension header, or 0 when absent.
-    pub(crate) spatial_id: u8,
+    pub spatial_id: u8,
     /// Whether an extension header was present.
-    pub(crate) has_extension: bool,
+    pub has_extension: bool,
     /// The OBU payload, excluding the header and any size field.
-    pub(crate) payload: &'a [u8],
+    pub payload: &'a [u8],
 }
 
-/// Walks the open bitstream units of a temporal unit (AV1 §5.3.1).
+impl Obu<'_> {
+    /// `OBU_SEQUENCE_HEADER` (§6.2.2).
+    pub const SEQUENCE_HEADER: u8 = 1;
+    /// `OBU_TEMPORAL_DELIMITER`.
+    pub const TEMPORAL_DELIMITER: u8 = 2;
+    /// `OBU_FRAME_HEADER`.
+    pub const FRAME_HEADER: u8 = 3;
+    /// `OBU_TILE_GROUP`.
+    pub const TILE_GROUP: u8 = 4;
+    /// `OBU_METADATA`.
+    pub const METADATA: u8 = 5;
+    /// `OBU_FRAME` (frame header ∥ tile group).
+    pub const FRAME: u8 = 6;
+    /// `OBU_REDUNDANT_FRAME_HEADER`.
+    pub const REDUNDANT_FRAME_HEADER: u8 = 7;
+    /// `OBU_TILE_LIST` (large-scale tiles; forbidden inside an AVIF item).
+    pub const TILE_LIST: u8 = 8;
+    /// `OBU_PADDING`.
+    pub const PADDING: u8 = 15;
+}
+
+/// Walks the open bitstream units of a temporal unit (AV1 §5.3.1), yielding each as an [`Obu`].
 ///
 /// Every OBU in the stream must carry `obu_has_size_field = 1`, which is what both the AVIF
 /// `av01` item payload (AV1-ISOBMFF §2.4) and gamut's own encoder emit. A final OBU without a
 /// size field is accepted and takes the rest of the input, matching the low-overhead rule that
 /// only the last unit may omit its size.
-pub(crate) struct ObuIter<'a> {
+///
+/// A malformed unit yields one error and ends the walk: nothing after it can be framed, so the
+/// iterator never re-reads it or walks on from inside it.
+///
+/// ```
+/// use gamut_av1::{Av1EncodeConfig, Obu, ObuIter, encode_still};
+/// use gamut_color::Planar8;
+/// use gamut_core::Dimensions;
+///
+/// let dims = Dimensions::new(8, 8).unwrap();
+/// let planes = Planar8::from_planes(dims, [vec![0; 64], vec![0; 64], vec![0; 64]]).unwrap();
+/// let still = encode_still(&planes, &Av1EncodeConfig::lossless()).unwrap();
+/// let types: Vec<u8> = ObuIter::new(&still.obus).map(|obu| obu.unwrap().obu_type).collect();
+/// assert_eq!(types, [Obu::SEQUENCE_HEADER, Obu::FRAME]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ObuIter<'a> {
     /// The unconsumed remainder of the temporal unit.
     rest: &'a [u8],
 }
 
 impl<'a> ObuIter<'a> {
-    /// Starts a walk over `data`.
-    pub(crate) const fn new(data: &'a [u8]) -> Self {
+    /// Starts a walk over the temporal unit `data`.
+    #[must_use]
+    pub const fn new(data: &'a [u8]) -> Self {
         Self { rest: data }
     }
 }
@@ -112,9 +138,15 @@ impl<'a> Iterator for ObuIter<'a> {
         if self.rest.is_empty() {
             return None;
         }
-        Some(self.parse_next())
+        let parsed = self.parse_next();
+        if parsed.is_err() {
+            self.rest = &[];
+        }
+        Some(parsed)
     }
 }
+
+impl std::iter::FusedIterator for ObuIter<'_> {}
 
 impl<'a> ObuIter<'a> {
     /// Parses one OBU from the front of `rest`, advancing past it.
@@ -123,7 +155,7 @@ impl<'a> ObuIter<'a> {
         if r.f(1)? != 0 {
             return Err(Error::invalid_input(ORIGIN, "AV1 OBU: forbidden bit set"));
         }
-        let kind = r.f(4)? as u8;
+        let obu_type = r.f(4)? as u8;
         let has_extension = r.flag()?;
         let has_size_field = r.flag()?;
         // obu_reserved_1bit is ignored by a decoder (§6.2.2).
@@ -161,7 +193,7 @@ impl<'a> ObuIter<'a> {
         let payload = &self.rest[start..end];
         self.rest = &self.rest[end..];
         Ok(Obu {
-            kind,
+            obu_type,
             temporal_id,
             spatial_id,
             has_extension,
@@ -170,63 +202,30 @@ impl<'a> ObuIter<'a> {
     }
 }
 
-/// Chroma subsampling as signalled by `color_config()` (§5.5.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Subsampling {
-    /// `subsampling_x = 0`, `subsampling_y = 0`.
-    Yuv444,
-    /// `subsampling_x = 1`, `subsampling_y = 0`.
-    Yuv422,
-    /// `subsampling_x = 1`, `subsampling_y = 1`.
-    Yuv420,
-    /// `mono_chrome = 1`: a luma plane only.
-    Monochrome,
+/// `subsampling_x` (§5.5.2) of a chroma layout: the base-2 logarithm of its horizontal factor,
+/// so 1 for 4:2:2, 4:2:0 and — as §5.5.2 infers under `mono_chrome` — monochrome.
+pub(crate) const fn subsampling_x(subsampling: ChromaSubsampling) -> u32 {
+    subsampling.factors().width().trailing_zeros()
 }
 
-impl Subsampling {
-    /// `subsampling_x`.
-    #[must_use]
-    pub const fn x(self) -> u32 {
-        match self {
-            Self::Yuv444 => 0,
-            Self::Yuv422 | Self::Yuv420 | Self::Monochrome => 1,
-        }
-    }
-
-    /// `subsampling_y`.
-    #[must_use]
-    pub const fn y(self) -> u32 {
-        match self {
-            Self::Yuv444 | Self::Yuv422 => 0,
-            Self::Yuv420 | Self::Monochrome => 1,
-        }
-    }
-
-    /// `NumPlanes` (§5.5.2): 1 for monochrome, 3 otherwise.
-    #[must_use]
-    pub const fn num_planes(self) -> usize {
-        match self {
-            Self::Monochrome => 1,
-            _ => 3,
-        }
-    }
+/// `subsampling_y` (§5.5.2), as [`subsampling_x`] is for the vertical axis.
+pub(crate) const fn subsampling_y(subsampling: ChromaSubsampling) -> u32 {
+    subsampling.factors().height().trailing_zeros()
 }
 
-/// The colour signalling of `color_config()` (§5.5.2), as CICP code points.
+/// The colour signalling of `color_config()` (§5.5.2), in the workspace's shared vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ColorConfig {
     /// `BitDepth`: 8, 10, or 12.
-    pub bit_depth: u32,
-    /// Chroma format, with `mono_chrome` folded in.
-    pub subsampling: Subsampling,
-    /// `color_primaries` (CICP H.273).
-    pub color_primaries: u8,
-    /// `transfer_characteristics` (CICP H.273).
-    pub transfer_characteristics: u8,
-    /// `matrix_coefficients` (CICP H.273).
-    pub matrix_coefficients: u8,
-    /// `color_range`: `true` for full range.
-    pub full_range: bool,
+    pub bit_depth: BitDepth,
+    /// The chroma layout, with `mono_chrome` folded in as
+    /// [`ChromaSubsampling::Cs400`]; never [`ChromaSubsampling::Cs440`], which AV1 cannot signal.
+    pub subsampling: ChromaSubsampling,
+    /// `color_primaries`, `transfer_characteristics`, `matrix_coefficients` and `color_range`,
+    /// as coded or as §5.5.2 infers them (an absent colour description is all
+    /// `UNSPECIFIED`; the sRGB shortcut is full range).
+    pub cicp: Cicp,
     /// `chroma_sample_position` (only meaningful for 4:2:0).
     pub chroma_sample_position: u8,
     /// `separate_uv_delta_q`.
@@ -240,6 +239,7 @@ pub struct ColorConfig {
 /// their bit width and otherwise discarded — keeping them would be dead surface on an image
 /// codec, but skipping their *bits* would corrupt everything that follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SequenceHeader {
     /// `seq_profile`: 0 = Main, 1 = High, 2 = Professional.
     pub seq_profile: u8,
@@ -305,8 +305,8 @@ impl SequenceHeader {
     /// `payload` is the OBU's payload alone — the bytes after the OBU header and its `obu_size`
     /// field — so a container that has already split its OBUs (an AVIF item, an `av1C`
     /// `configOBUs`) reads the header through this one parser rather than a second copy of §5.5.
-    /// It reads syntax only: no [`DecodeLimits`](crate::DecodeLimits) are applied and no tool is
-    /// refused, so a header this crate cannot *decode* still parses.
+    /// It reads syntax only: no [`DecodeLimits`](gamut_core::DecodeLimits) are applied and no tool
+    /// is refused, so a header this crate cannot *decode* still parses.
     ///
     /// # Errors
     ///
@@ -491,11 +491,15 @@ impl SequenceHeader {
     fn parse_color_config(r: &mut BitReader<'_>, seq_profile: u8) -> Result<ColorConfig> {
         let high_bitdepth = r.flag()?;
         let bit_depth = if seq_profile == 2 && high_bitdepth {
-            if r.flag()? { 12 } else { 10 }
+            if r.flag()? {
+                BitDepth::Twelve
+            } else {
+                BitDepth::Ten
+            }
         } else if high_bitdepth {
-            10
+            BitDepth::Ten
         } else {
-            8
+            BitDepth::Eight
         };
 
         let mono_chrome = if seq_profile == 1 { false } else { r.flag()? };
@@ -507,64 +511,60 @@ impl SequenceHeader {
                 (UNSPECIFIED, UNSPECIFIED, UNSPECIFIED)
             };
 
+        let cicp = |full_range| Cicp {
+            colour_primaries: u16::from(color_primaries),
+            transfer_characteristics: u16::from(transfer_characteristics),
+            matrix_coefficients: u16::from(matrix_coefficients),
+            full_range,
+        };
         if mono_chrome {
             let full_range = r.flag()?;
             return Ok(ColorConfig {
                 bit_depth,
-                subsampling: Subsampling::Monochrome,
-                color_primaries,
-                transfer_characteristics,
-                matrix_coefficients,
-                full_range,
+                subsampling: ChromaSubsampling::Cs400,
+                cicp: cicp(full_range),
                 chroma_sample_position: 0,
                 separate_uv_delta_q: false,
             });
         }
 
-        let full_range;
-        let (ssx, ssy);
-        if color_primaries == CP_BT_709
+        let (full_range, subsampling) = if color_primaries == CP_BT_709
             && transfer_characteristics == TC_SRGB
             && matrix_coefficients == MC_IDENTITY
         {
             // The sRGB shortcut infers full range and 4:4:4 and codes no bits.
-            full_range = true;
-            (ssx, ssy) = (0u32, 0u32);
+            (true, ChromaSubsampling::Cs444)
         } else {
-            full_range = r.flag()?;
-            (ssx, ssy) = match seq_profile {
-                0 => (1, 1),
-                1 => (0, 0),
-                _ => {
-                    if bit_depth == 12 {
-                        let x = r.f(1)?;
-                        let y = if x == 1 { r.f(1)? } else { 0 };
-                        (x, y)
+            let full_range = r.flag()?;
+            let subsampling = match seq_profile {
+                0 => ChromaSubsampling::Cs420,
+                1 => ChromaSubsampling::Cs444,
+                // Profile 2 codes the pair only at 12 bits, and `subsampling_y` only once
+                // `subsampling_x` is set (§5.5.2), so 4:4:0 cannot be signalled.
+                _ if bit_depth == BitDepth::Twelve => {
+                    if !r.flag()? {
+                        ChromaSubsampling::Cs444
+                    } else if r.flag()? {
+                        ChromaSubsampling::Cs420
                     } else {
-                        (1, 0)
+                        ChromaSubsampling::Cs422
                     }
                 }
+                _ => ChromaSubsampling::Cs422,
             };
-        }
-        let chroma_sample_position = if ssx == 1 && ssy == 1 {
+            (full_range, subsampling)
+        };
+        let chroma_sample_position = if subsampling == ChromaSubsampling::Cs420 {
             r.f(2)? as u8
         } else {
             0
         };
         let separate_uv_delta_q = r.flag()?;
 
-        let subsampling = match (ssx, ssy) {
-            (0, 0) => Subsampling::Yuv444,
-            (1, 0) => Subsampling::Yuv422,
-            _ => Subsampling::Yuv420,
-        };
         Ok(ColorConfig {
             bit_depth,
             subsampling,
-            color_primaries,
-            transfer_characteristics,
-            matrix_coefficients,
-            full_range,
+            cicp: cicp(full_range),
             chroma_sample_position,
             separate_uv_delta_q,
         })
@@ -577,7 +577,7 @@ mod tests {
 
     use super::*;
     use crate::decode::testutil::{encoder_seq_header, still_config};
-    use crate::headers::Av1Colour;
+    use crate::headers::Av1Color;
 
     #[test]
     fn parses_the_encoders_reduced_sequence_header() {
@@ -599,9 +599,9 @@ mod tests {
             assert_eq!(sh.enable_superres, superres);
             assert_eq!(sh.enable_cdef, lossy);
             assert_eq!(sh.enable_restoration, lossy);
-            assert_eq!(sh.color.bit_depth, 8);
-            assert_eq!(sh.color.subsampling, Subsampling::Yuv444);
-            assert!(sh.color.full_range);
+            assert_eq!(sh.color.bit_depth, BitDepth::Eight);
+            assert_eq!(sh.color.subsampling, ChromaSubsampling::Cs444);
+            assert!(sh.color.cicp.full_range);
             assert!(!sh.film_grain_params_present);
             assert_eq!(
                 sh.seq_force_screen_content_tools,
@@ -619,7 +619,7 @@ mod tests {
         use gamut_color::cicp::{
             ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics,
         };
-        let colour = Av1Colour {
+        let colour = Av1Color {
             primaries: ColorPrimaries::Bt709,
             transfer: TransferCharacteristics::Bt709,
             matrix: MatrixCoefficients::Bt709,
@@ -628,11 +628,14 @@ mod tests {
         let cfg = still_config(32, 32, colour);
         let payload = crate::headers::sequence_header_payload(&cfg, 32, 32, true, false);
         let sh = SequenceHeader::parse(&payload).unwrap();
-        assert_eq!(sh.color.color_primaries, 1);
-        assert_eq!(sh.color.transfer_characteristics, 1);
-        assert_eq!(sh.color.matrix_coefficients, 1);
-        assert!(!sh.color.full_range, "limited range must survive the parse");
-        assert_eq!(sh.color.subsampling, Subsampling::Yuv444);
+        assert_eq!(sh.color.cicp.colour_primaries, 1);
+        assert_eq!(sh.color.cicp.transfer_characteristics, 1);
+        assert_eq!(sh.color.cicp.matrix_coefficients, 1);
+        assert!(
+            !sh.color.cicp.full_range,
+            "limited range must survive the parse"
+        );
+        assert_eq!(sh.color.subsampling, ChromaSubsampling::Cs444);
     }
 
     /// A general (non-reduced) §5.5.1 sequence header for a 64×64 frame. `operating_points` codes
@@ -749,7 +752,7 @@ mod tests {
         assert!(sh.decoder_model_info_present);
         assert_eq!((sh.operating_point_idc, sh.seq_level_idx), (0x7ff, 5));
         assert_eq!((sh.max_frame_width, sh.max_frame_height), (64, 64));
-        assert!(sh.color.full_range);
+        assert!(sh.color.cicp.full_range);
     }
 
     #[test]
@@ -758,10 +761,10 @@ mod tests {
         // only 12-bit codes `subsampling_x`, then `subsampling_y` only when `subsampling_x` is 1.
         // `chroma_sample_position` is coded for 4:2:0 alone.
         for (twelve_bit, ss, depth, subsampling, csp) in [
-            (false, None, 10, Subsampling::Yuv422, 0),
-            (true, Some((0, None)), 12, Subsampling::Yuv444, 0),
-            (true, Some((1, Some(0))), 12, Subsampling::Yuv422, 0),
-            (true, Some((1, Some(1))), 12, Subsampling::Yuv420, 2),
+            (false, None, 10, ChromaSubsampling::Cs422, 0),
+            (true, Some((0, None)), 12, ChromaSubsampling::Cs444, 0),
+            (true, Some((1, Some(0))), 12, ChromaSubsampling::Cs422, 0),
+            (true, Some((1, Some(1))), 12, ChromaSubsampling::Cs420, 2),
         ] {
             let payload = general_header(2, one_level_0_operating_point, |w| {
                 w.put_bit(1); // high_bitdepth
@@ -775,7 +778,7 @@ mod tests {
                         w.put_bits(y, 1); // subsampling_y
                     }
                 }
-                if subsampling == Subsampling::Yuv420 {
+                if subsampling == ChromaSubsampling::Cs420 {
                     w.put_bits(csp, 2); // chroma_sample_position
                 }
                 w.put_bit(0); // separate_uv_delta_q
@@ -783,7 +786,11 @@ mod tests {
             let sh = SequenceHeader::parse(&payload)
                 .unwrap_or_else(|e| panic!("{depth}-bit {subsampling:?}: {e}"));
             assert_eq!(sh.seq_profile, 2);
-            assert_eq!(sh.color.bit_depth, depth, "{subsampling:?}");
+            assert_eq!(
+                u32::from(sh.color.bit_depth.bits()),
+                depth,
+                "{subsampling:?}"
+            );
             assert_eq!(sh.color.subsampling, subsampling, "{depth}-bit");
             assert_eq!(u32::from(sh.color.chroma_sample_position), csp);
         }
@@ -802,8 +809,8 @@ mod tests {
             w.put_bit(0); // separate_uv_delta_q
         });
         let sh = SequenceHeader::parse(&payload).unwrap();
-        assert_eq!(sh.color.bit_depth, 10);
-        assert_eq!(sh.color.subsampling, Subsampling::Yuv420);
+        assert_eq!(sh.color.bit_depth, BitDepth::Ten);
+        assert_eq!(sh.color.subsampling, ChromaSubsampling::Cs420);
         assert_eq!(sh.color.chroma_sample_position, 1);
     }
 
@@ -821,8 +828,11 @@ mod tests {
             w.put_bit(0); // separate_uv_delta_q
         });
         let sh = SequenceHeader::parse(&payload).unwrap();
-        assert!(!sh.color.full_range, "the shortcut would infer full range");
-        assert_eq!(sh.color.subsampling, Subsampling::Yuv444);
+        assert!(
+            !sh.color.cicp.full_range,
+            "the shortcut would infer full range"
+        );
+        assert_eq!(sh.color.subsampling, ChromaSubsampling::Cs444);
     }
 
     #[test]
@@ -885,7 +895,7 @@ mod tests {
         let still = crate::decode::testutil::StillBuilder::default();
         let payload = still.sequence_header();
         let sane = SequenceHeader::parse(&payload).expect("the builder's header is well formed");
-        assert_eq!(sane.color.transfer_characteristics, 13);
+        assert_eq!(sane.color.cicp.transfer_characteristics, 13);
         assert_eq!(
             payload[8] & 0x80,
             0x80,
@@ -914,13 +924,13 @@ mod tests {
     #[test]
     fn subsampling_geometry_matches_the_signalled_flags() {
         for (s, x, y, planes) in [
-            (Subsampling::Yuv444, 0, 0, 3),
-            (Subsampling::Yuv422, 1, 0, 3),
-            (Subsampling::Yuv420, 1, 1, 3),
-            (Subsampling::Monochrome, 1, 1, 1),
+            (ChromaSubsampling::Cs444, 0, 0, 3),
+            (ChromaSubsampling::Cs422, 1, 0, 3),
+            (ChromaSubsampling::Cs420, 1, 1, 3),
+            (ChromaSubsampling::Cs400, 1, 1, 1),
         ] {
-            assert_eq!(s.x(), x);
-            assert_eq!(s.y(), y);
+            assert_eq!(subsampling_x(s), x, "{s:?}");
+            assert_eq!(subsampling_y(s), y, "{s:?}");
             assert_eq!(s.num_planes(), planes);
         }
     }
@@ -932,10 +942,10 @@ mod tests {
         let unit = crate::headers::assemble_temporal_unit(&seq, &frame);
         let obus: Vec<_> = ObuIter::new(&unit).collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(obus.len(), 2);
-        assert_eq!(obus[0].kind, OBU_SEQUENCE_HEADER);
+        assert_eq!(obus[0].obu_type, Obu::SEQUENCE_HEADER);
         assert_eq!(obus[0].payload, &seq[..]);
         assert!(!obus[0].has_extension);
-        assert_eq!(obus[1].kind, OBU_FRAME);
+        assert_eq!(obus[1].obu_type, Obu::FRAME);
         assert_eq!(obus[1].payload, &frame[..]);
     }
 
@@ -946,7 +956,7 @@ mod tests {
         let unit = [0b0011_0110u8, 0b0111_0000, 0x02, 0xde, 0xad];
         let obus: Vec<_> = ObuIter::new(&unit).collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(obus.len(), 1);
-        assert_eq!(obus[0].kind, OBU_FRAME);
+        assert_eq!(obus[0].obu_type, Obu::FRAME);
         assert!(obus[0].has_extension);
         assert_eq!(obus[0].temporal_id, 3);
         assert_eq!(obus[0].spatial_id, 2);
@@ -976,5 +986,26 @@ mod tests {
             err.static_message(),
             Some("AV1 OBU: size field runs past the end of the temporal unit")
         );
+    }
+
+    #[test]
+    fn a_malformed_unit_ends_the_walk() {
+        // A valid frame OBU, then one with the forbidden bit set, then bytes that would frame as
+        // another OBU: the walk yields the first, one error, and then nothing — it neither repeats
+        // the error nor walks on from inside the malformed unit.
+        let unit = [
+            0b0011_0010u8,
+            0x01,
+            0xaa,
+            0b1011_0010,
+            0x00,
+            0b0011_0010,
+            0x00,
+        ];
+        let mut walk = ObuIter::new(&unit);
+        assert_eq!(walk.next().unwrap().unwrap().payload, &[0xaa]);
+        assert!(walk.next().unwrap().is_err());
+        assert!(walk.next().is_none());
+        assert!(walk.next().is_none());
     }
 }

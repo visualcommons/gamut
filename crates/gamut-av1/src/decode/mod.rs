@@ -22,7 +22,8 @@
 //! each is a ☐ row in `gamut-avif/STATUS.md`.
 
 use gamut_bitstream::BitReader;
-use gamut_core::{Error, Result};
+use gamut_color::BitDepth;
+use gamut_core::{DecodeLimits, Error, Result};
 
 pub(crate) mod header;
 pub(crate) mod obu;
@@ -35,76 +36,65 @@ pub use header::{
     CdefParams, FrameHeader, LoopFilterParams, LrParams, QuantizationParams, RestorationType,
     SegmentationParams, TileInfo, TxMode,
 };
-pub use obu::{ColorConfig, SequenceHeader, Subsampling};
+pub use obu::{ColorConfig, Obu, ObuIter, SequenceHeader};
 
-/// Resource ceilings applied before any allocation sized by the bitstream.
+/// The decoded size in bytes of a `width × height` frame of `color`'s layout: every plane it
+/// carries, one byte per sample at 8 bits and two above.
+fn decoded_bytes(color: &ColorConfig, width: u32, height: u32) -> u64 {
+    let luma = u64::from(width) * u64::from(height);
+    let (cw, ch) = color.subsampling.chroma_dimensions(width, height);
+    let chroma = if color.subsampling.num_planes() == 1 {
+        0
+    } else {
+        2 * u64::from(cw) * u64::from(ch)
+    };
+    let sample_bytes = if color.bit_depth == BitDepth::Eight {
+        1
+    } else {
+        2
+    };
+    (luma + chroma) * sample_bytes
+}
+
+/// Checks a frame's declared geometry against `limits` and the tile cap.
 ///
-/// A decoder is the format's attack surface: every buffer it allocates is sized by numbers an
-/// attacker chose. These caps are checked against the *header* before a single sample is
-/// allocated, so a hostile stream is refused rather than serviced. The defaults are generous for
-/// real still images and far below what would exhaust a process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecodeLimits {
-    /// Largest accepted luma width, in samples.
-    pub max_width: u32,
-    /// Largest accepted luma height, in samples.
-    pub max_height: u32,
-    /// Largest accepted luma sample count (`width * height`), bounding the total allocation
-    /// independently of the aspect ratio.
-    pub max_pixels: u64,
-    /// Largest accepted number of tiles (`TileCols * TileRows`).
-    pub max_tiles: usize,
-}
-
-impl Default for DecodeLimits {
-    fn default() -> Self {
-        Self {
-            // AV1 level 6.0 tops out at 16384 in either dimension.
-            max_width: 16384,
-            max_height: 16384,
-            // 256 Mpx: a 3-plane 8-bit frame held as u16 is then ~1.5 GiB at the very top end,
-            // and typical stills are three orders of magnitude below it.
-            max_pixels: 256 << 20,
-            // MAX_TILE_ROWS * MAX_TILE_COLS (§3).
-            max_tiles: 64 * 64,
-        }
+/// A zero dimension is malformed
+/// ([`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)); a frame past a cap is a policy
+/// refusal ([`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)), as at every gamut
+/// decoder.
+fn check_limits(
+    limits: DecodeLimits,
+    max_tiles: usize,
+    (width, height): (u32, u32),
+    bytes: u64,
+    tiles: usize,
+) -> Result<()> {
+    if width == 0 || height == 0 {
+        return Err(Error::invalid_input(
+            ORIGIN,
+            "AV1 decode: frame has a zero dimension",
+        ));
     }
-}
-
-impl DecodeLimits {
-    /// Checks a frame's declared geometry against the caps.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
-    /// frame exceeds any cap.
-    pub fn check(&self, width: u32, height: u32, tiles: usize) -> Result<()> {
-        if width == 0 || height == 0 {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 decode: frame has a zero dimension",
-            ));
-        }
-        if width > self.max_width || height > self.max_height {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 decode: frame dimensions exceed the configured limit",
-            ));
-        }
-        if u64::from(width) * u64::from(height) > self.max_pixels {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 decode: frame sample count exceeds the configured limit",
-            ));
-        }
-        if tiles > self.max_tiles {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 decode: tile count exceeds the configured limit",
-            ));
-        }
-        Ok(())
+    if width > limits.max_width() || height > limits.max_height() {
+        return Err(Error::unsupported(
+            ORIGIN,
+            "AV1 decode: frame dimensions exceed the configured limit",
+        ));
     }
+    // `usize` is at most 64 bits on every target Rust supports, so the widening is lossless.
+    if bytes > limits.max_image_bytes() as u64 {
+        return Err(Error::unsupported(
+            ORIGIN,
+            "AV1 decode: decoded frame size exceeds the configured limit",
+        ));
+    }
+    if tiles > max_tiles {
+        return Err(Error::unsupported(
+            ORIGIN,
+            "AV1 decode: tile count exceeds the configured limit",
+        ));
+    }
+    Ok(())
 }
 
 /// The headers of an AV1 still, without decoding any samples.
@@ -112,6 +102,7 @@ impl DecodeLimits {
 /// What a container needs to cross-check its own records against the codestream — the shape
 /// `gamut-avif` re-derives `av1C`/`colr` from (AV1-ISOBMFF §2.3.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StreamInfo {
     /// The sequence header (§5.5.1).
     pub sequence: SequenceHeader,
@@ -140,44 +131,101 @@ pub struct StreamInfo {
 /// error naming the
 /// tool — never approximated. The remaining surface is tracked row by row in
 /// `gamut-avif/STATUS.md`.
-#[derive(Debug, Clone, Default)]
+///
+/// # Resource limits
+///
+/// A decoder is the format's attack surface: every buffer it allocates is sized by numbers an
+/// attacker chose. The [`DecodeLimits`] and the tile cap are checked against the *header* before
+/// a single sample is allocated, so a hostile stream is refused rather than serviced. The
+/// [`DecodeLimits`] bound the frame's width, height and decoded size in bytes (every plane it
+/// carries, one byte per sample at 8 bits and two above); the tile cap bounds
+/// `TileCols * TileRows`.
+///
+/// ```
+/// use gamut_av1::Av1Decoder;
+/// use gamut_core::DecodeLimits;
+///
+/// let decoder = Av1Decoder::new()
+///     .with_limits(DecodeLimits::new().with_max_width(4096).with_max_height(4096))
+///     .with_max_tiles(16);
+/// assert_eq!(decoder.limits().max_width(), 4096);
+/// assert_eq!(decoder.max_tiles(), 16);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Av1Decoder {
     /// Resource ceilings applied before any bitstream-sized allocation.
     limits: DecodeLimits,
+    /// The most tiles (`TileCols * TileRows`) a frame may carry.
+    max_tiles: usize,
+}
+
+impl Default for Av1Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Av1Decoder {
-    /// Creates a decoder with the default [`DecodeLimits`].
+    /// The per-side cap [`Av1Decoder::new`] applies: 16384 luma samples, the `MaxHSize` and
+    /// `MaxVSize` bound of level 6.x, the highest level Annex A defines.
+    pub const DEFAULT_MAX_DIMENSION: u32 = 16384;
+
+    /// The tile cap [`Av1Decoder::new`] applies: `MAX_TILE_ROWS * MAX_TILE_COLS` (§3), every tile
+    /// a conformant frame can carry.
+    pub const DEFAULT_MAX_TILES: usize = 64 * 64;
+
+    /// A decoder with the default limits: [`DecodeLimits::new`] with each side capped at
+    /// [`DEFAULT_MAX_DIMENSION`](Self::DEFAULT_MAX_DIMENSION), and
+    /// [`DEFAULT_MAX_TILES`](Self::DEFAULT_MAX_TILES) tiles.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            limits: DecodeLimits::new()
+                .with_max_width(Self::DEFAULT_MAX_DIMENSION)
+                .with_max_height(Self::DEFAULT_MAX_DIMENSION),
+            max_tiles: Self::DEFAULT_MAX_TILES,
+        }
     }
 
-    /// Creates a decoder with caller-chosen resource ceilings.
+    /// This decoder with caller-chosen resource ceilings.
     #[must_use]
-    pub const fn with_limits(limits: DecodeLimits) -> Self {
-        Self { limits }
+    pub const fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// This decoder accepting at most `max_tiles` tiles (`TileCols * TileRows`) per frame.
+    #[must_use]
+    pub const fn with_max_tiles(mut self, max_tiles: usize) -> Self {
+        self.max_tiles = max_tiles;
+        self
     }
 
     /// The ceilings this decoder enforces.
     #[must_use]
-    pub const fn limits(&self) -> &DecodeLimits {
-        &self.limits
+    pub const fn limits(&self) -> DecodeLimits {
+        self.limits
+    }
+
+    /// The most tiles a frame may carry.
+    #[must_use]
+    pub const fn max_tiles(&self) -> usize {
+        self.max_tiles
     }
 
     /// Parses the sequence and frame headers of a still without decoding any samples.
     ///
     /// Cheap enough to run before committing to a decode: it walks the OBUs, reads both headers,
-    /// applies this decoder's [`DecodeLimits`], refuses unimplemented tools, and validates the
-    /// tile framing — but never touches a tile body. Use it to check a container's records
-    /// against the codestream, or to learn a still's geometry and colour signalling up front.
+    /// applies this decoder's limits, refuses unimplemented tools, and validates the tile
+    /// framing — but never touches a tile body. Use it to check a container's records against
+    /// the codestream, or to learn a still's geometry and colour signalling up front.
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
-    /// bitstream is malformed, truncated, or exceeds this decoder's [`DecodeLimits`], and an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if it uses a coding tool that is
-    /// not implemented.
+    /// bitstream is malformed or truncated, and an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if it exceeds this
+    /// decoder's limits or uses a coding tool that is not implemented.
     pub fn inspect(&self, temporal_unit: &[u8]) -> Result<StreamInfo> {
         let (sequence, frame, tiles) = self.parse_frame(temporal_unit)?;
         Ok(StreamInfo {
@@ -204,8 +252,8 @@ impl Av1Decoder {
             // point excludes its temporal or spatial layer. Sequence headers and temporal
             // delimiters are never dropped.
             if obu.has_extension
-                && obu.kind != obu::OBU_SEQUENCE_HEADER
-                && obu.kind != obu::OBU_TEMPORAL_DELIMITER
+                && obu.obu_type != Obu::SEQUENCE_HEADER
+                && obu.obu_type != Obu::TEMPORAL_DELIMITER
                 && let Some(sh) = &seq
                 && sh.operating_point_idc != 0
             {
@@ -216,8 +264,8 @@ impl Av1Decoder {
                 }
             }
 
-            match obu.kind {
-                obu::OBU_SEQUENCE_HEADER => {
+            match obu.obu_type {
+                Obu::SEQUENCE_HEADER => {
                     let parsed = SequenceHeader::parse(obu.payload)?;
                     // A repeated sequence header must be identical (AV1 §7.5); a changed one would
                     // reinterpret the frame that follows.
@@ -231,7 +279,7 @@ impl Av1Decoder {
                     }
                     seq = Some(parsed);
                 }
-                obu::OBU_FRAME => {
+                Obu::FRAME => {
                     let sh = seq.as_ref().ok_or_else(|| {
                         Error::invalid_input(
                             ORIGIN,
@@ -252,14 +300,14 @@ impl Av1Decoder {
                     let tiles = tilegroup::split_tiles(r.remaining_bytes(), &fh.tile_info)?;
                     frame = Some((fh, tiles));
                 }
-                obu::OBU_FRAME_HEADER | obu::OBU_REDUNDANT_FRAME_HEADER => {
+                Obu::FRAME_HEADER | Obu::REDUNDANT_FRAME_HEADER => {
                     let sh = seq.as_ref().ok_or_else(|| {
                         Error::invalid_input(
                             ORIGIN,
                             "AV1 decode: frame header OBU before any sequence header",
                         )
                     })?;
-                    if obu.kind == obu::OBU_REDUNDANT_FRAME_HEADER {
+                    if obu.obu_type == Obu::REDUNDANT_FRAME_HEADER {
                         // A redundant copy repeats a header already seen; nothing new to decode.
                         continue;
                     }
@@ -278,7 +326,7 @@ impl Av1Decoder {
                     // The tiles arrive in a separate OBU_TILE_GROUP; record the header and wait.
                     frame = Some((fh, Vec::new()));
                 }
-                obu::OBU_TILE_GROUP => {
+                Obu::TILE_GROUP => {
                     let (fh, tiles) = frame.as_mut().ok_or_else(|| {
                         Error::invalid_input(
                             ORIGIN,
@@ -293,7 +341,7 @@ impl Av1Decoder {
                     }
                     *tiles = tilegroup::split_tiles(obu.payload, &fh.tile_info)?;
                 }
-                obu::OBU_TILE_LIST => {
+                Obu::TILE_LIST => {
                     return Err(Error::invalid_input(
                         ORIGIN,
                         "AV1 decode: tile list OBUs are forbidden in a still image",
@@ -327,9 +375,12 @@ impl Av1Decoder {
 
     /// Applies the resource ceilings and the unsupported-tool refusals to a parsed header.
     fn validate(&self, seq: &SequenceHeader, frame: &FrameHeader) -> Result<()> {
-        self.limits.check(
-            frame.upscaled_width,
-            frame.frame_height,
+        let size = (frame.upscaled_width, frame.frame_height);
+        check_limits(
+            self.limits,
+            self.max_tiles,
+            size,
+            decoded_bytes(&seq.color, size.0, size.1),
             frame.tile_info.tile_cols * frame.tile_info.tile_rows,
         )?;
         frame.reject_unsupported_tools(seq)
@@ -342,7 +393,7 @@ pub(crate) mod testutil {
     use gamut_bitstream::BitWriter;
 
     use crate::decode::header::tile_log2;
-    use crate::headers::{Av1Colour, Av1StillConfig};
+    use crate::headers::{Av1Color, Av1StillConfig};
 
     /// The `color_config()` (§5.5.2) a [`StillBuilder`] codes. Every form is 8-bit; they differ in
     /// the chroma subsampling and the plane count, which several later syntax conditions read.
@@ -1015,7 +1066,7 @@ pub(crate) mod testutil {
 
     /// Builds the [`Av1StillConfig`] the encoder derives for `colour` at this size, so the
     /// parsers here are checked against the exact headers `gamut-av1` emits.
-    pub(crate) fn still_config(width: u32, height: u32, colour: Av1Colour) -> Av1StillConfig {
+    pub(crate) fn still_config(width: u32, height: u32, colour: Av1Color) -> Av1StillConfig {
         use gamut_color::cicp::ColorRange;
         Av1StillConfig {
             seq_profile: 1,
@@ -1042,7 +1093,7 @@ pub(crate) mod testutil {
         lossy: bool,
         superres: bool,
     ) -> Vec<u8> {
-        let cfg = still_config(width, height, Av1Colour::default());
+        let cfg = still_config(width, height, Av1Color::default());
         crate::headers::sequence_header_payload(&cfg, width, height, lossy, superres)
     }
 }
@@ -1051,67 +1102,140 @@ pub(crate) mod testutil {
 mod tests {
     use super::*;
 
+    /// [`check_limits`] under a decoder's limits, for a frame whose decoded size is one byte per
+    /// luma sample (so the byte cap reads as a sample cap in these tests).
+    fn check(decoder: &Av1Decoder, width: u32, height: u32, tiles: usize) -> Result<()> {
+        let bytes = u64::from(width) * u64::from(height);
+        check_limits(
+            decoder.limits(),
+            decoder.max_tiles(),
+            (width, height),
+            bytes,
+            tiles,
+        )
+    }
+
     #[test]
     fn limits_reject_degenerate_and_oversized_frames() {
-        let limits = DecodeLimits::default();
-        limits.check(1920, 1080, 1).unwrap();
+        let decoder = Av1Decoder::new();
+        check(&decoder, 1920, 1080, 1).unwrap();
 
+        let zero = check(&decoder, 0, 16, 1).unwrap_err();
+        assert_eq!(zero.kind(), gamut_core::ErrorKind::InvalidInput);
         assert_eq!(
-            limits.check(0, 16, 1).unwrap_err().static_message(),
+            zero.static_message(),
             Some("AV1 decode: frame has a zero dimension")
         );
         assert_eq!(
-            limits.check(16, 0, 1).unwrap_err().static_message(),
+            check(&decoder, 16, 0, 1).unwrap_err().static_message(),
             Some("AV1 decode: frame has a zero dimension")
         );
+        // A breach is a policy refusal, `Unsupported`, as at every gamut decoder.
+        let wide = check(&decoder, 16385, 16, 1).unwrap_err();
+        assert_eq!(wide.kind(), gamut_core::ErrorKind::Unsupported);
         assert_eq!(
-            limits.check(16385, 16, 1).unwrap_err().static_message(),
+            wide.static_message(),
             Some("AV1 decode: frame dimensions exceed the configured limit")
         );
         assert_eq!(
-            limits.check(16, 16385, 1).unwrap_err().static_message(),
+            check(&decoder, 16, 16385, 1).unwrap_err().static_message(),
             Some("AV1 decode: frame dimensions exceed the configured limit")
         );
+        let tiled = check(&decoder, 16, 16, 4097).unwrap_err();
+        assert_eq!(tiled.kind(), gamut_core::ErrorKind::Unsupported);
         assert_eq!(
-            limits.check(16, 16, 4097).unwrap_err().static_message(),
+            tiled.static_message(),
             Some("AV1 decode: tile count exceeds the configured limit")
+        );
+    }
+
+    #[test]
+    fn the_default_decoder_caps_each_side_at_level_six_and_the_bytes_at_the_core_default() {
+        let decoder = Av1Decoder::new();
+        assert_eq!(decoder, Av1Decoder::default());
+        assert_eq!(decoder.limits().max_width(), 16384);
+        assert_eq!(decoder.limits().max_height(), 16384);
+        assert_eq!(
+            decoder.limits().max_image_bytes(),
+            DecodeLimits::DEFAULT_MAX_IMAGE_BYTES
+        );
+        assert_eq!(decoder.max_tiles(), 64 * 64);
+        // Each builder sets only its own bound.
+        let limits = DecodeLimits::new().with_max_width(9);
+        let built = Av1Decoder::new().with_limits(limits).with_max_tiles(3);
+        assert_eq!((built.limits(), built.max_tiles()), (limits, 3));
+        assert_eq!(
+            Av1Decoder::new().with_max_tiles(3).limits(),
+            decoder.limits()
         );
     }
 
     #[test]
     fn limits_are_inclusive_at_their_boundary() {
         // Each cap admits its exact value and refuses one more — pinning `>` against `>=`.
-        let limits = DecodeLimits {
-            max_width: 64,
-            max_height: 32,
-            max_pixels: 64 * 32,
-            max_tiles: 4,
-        };
-        limits.check(64, 32, 4).unwrap();
+        let decoder = Av1Decoder::new()
+            .with_limits(
+                DecodeLimits::new()
+                    .with_max_width(64)
+                    .with_max_height(32)
+                    .with_max_image_bytes(64 * 32),
+            )
+            .with_max_tiles(4);
+        check(&decoder, 64, 32, 4).unwrap();
         assert_eq!(
-            limits.check(65, 32, 4).unwrap_err().static_message(),
+            check(&decoder, 65, 32, 4).unwrap_err().static_message(),
             Some("AV1 decode: frame dimensions exceed the configured limit")
         );
         assert_eq!(
-            limits.check(64, 33, 4).unwrap_err().static_message(),
+            check(&decoder, 64, 33, 4).unwrap_err().static_message(),
             Some("AV1 decode: frame dimensions exceed the configured limit")
         );
         assert_eq!(
-            limits.check(64, 32, 5).unwrap_err().static_message(),
+            check(&decoder, 64, 32, 5).unwrap_err().static_message(),
             Some("AV1 decode: tile count exceeds the configured limit")
         );
-        // The sample cap is exact too: 64x32 fits, 65x32 would exceed it even if the dimension
+        // The byte cap is exact too: 64x32 fits, 65x32 would exceed it even if the dimension
         // caps allowed it.
-        let wide = DecodeLimits {
-            max_width: 4096,
-            max_pixels: 64 * 32,
-            ..limits
-        };
-        wide.check(64, 32, 4).unwrap();
+        let wide = decoder.with_limits(decoder.limits().with_max_width(4096));
+        check(&wide, 64, 32, 4).unwrap();
+        let err = check(&wide, 65, 32, 4).unwrap_err();
+        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
         assert_eq!(
-            wide.check(65, 32, 4).unwrap_err().static_message(),
-            Some("AV1 decode: frame sample count exceeds the configured limit")
+            err.static_message(),
+            Some("AV1 decode: decoded frame size exceeds the configured limit")
         );
+    }
+
+    #[test]
+    fn the_decoded_size_counts_every_plane_at_its_sample_width() {
+        // A 5x3 frame: 15 luma samples; 4:2:0 chroma planes are 3x2 each, 4:2:2 ones 3x3.
+        let color = |bit_depth, subsampling| ColorConfig {
+            bit_depth,
+            subsampling,
+            cicp: gamut_core::Cicp {
+                colour_primaries: 2,
+                transfer_characteristics: 2,
+                matrix_coefficients: 2,
+                full_range: false,
+            },
+            chroma_sample_position: 0,
+            separate_uv_delta_q: false,
+        };
+        use gamut_color::ChromaSubsampling::{Cs400, Cs420, Cs422, Cs444};
+        for (depth, ss, want) in [
+            (BitDepth::Eight, Cs444, 45),
+            (BitDepth::Eight, Cs420, 15 + 2 * 6),
+            (BitDepth::Eight, Cs422, 15 + 2 * 9),
+            (BitDepth::Eight, Cs400, 15),
+            (BitDepth::Ten, Cs444, 90),
+            (BitDepth::Twelve, Cs400, 30),
+        ] {
+            assert_eq!(
+                decoded_bytes(&color(depth, ss), 5, 3),
+                want,
+                "{depth:?} {ss:?}"
+            );
+        }
     }
 
     #[test]
@@ -1133,19 +1257,13 @@ mod tests {
         assert_eq!(info.frame.tile_info.tile_rows, 2);
         assert_eq!(info.tile_count, 4);
 
-        let capped = Av1Decoder::with_limits(DecodeLimits {
-            max_tiles: 2,
-            ..DecodeLimits::default()
-        });
+        let capped = Av1Decoder::new().with_max_tiles(2);
         assert_eq!(
             capped.inspect(&unit).unwrap_err().static_message(),
             Some("AV1 decode: tile count exceeds the configured limit")
         );
         // Four is exactly the grid, so it is admitted.
-        let exact = Av1Decoder::with_limits(DecodeLimits {
-            max_tiles: 4,
-            ..DecodeLimits::default()
-        });
+        let exact = Av1Decoder::new().with_max_tiles(4);
         exact.inspect(&unit).unwrap();
 
         // A 4x2 grid is eight tiles; their *sum* is six. A cap of seven must refuse it, which a
@@ -1169,10 +1287,7 @@ mod tests {
             (4, 2)
         );
         assert_eq!(info.tile_count, 8);
-        let seven = Av1Decoder::with_limits(DecodeLimits {
-            max_tiles: 7,
-            ..DecodeLimits::default()
-        });
+        let seven = Av1Decoder::new().with_max_tiles(7);
         assert_eq!(
             seven.inspect(&rect_unit).unwrap_err().static_message(),
             Some("AV1 decode: tile count exceeds the configured limit")
@@ -1405,16 +1520,19 @@ mod tests {
     }
 
     #[test]
-    fn the_pixel_cap_binds_independently_of_the_dimension_caps() {
-        // Both dimensions are inside their own cap, but the product is not.
-        let limits = DecodeLimits {
-            max_pixels: 1024,
-            ..DecodeLimits::default()
+    fn the_byte_cap_binds_independently_of_the_dimension_caps() {
+        // Both dimensions are inside their own cap, but the decoded size is not. The builder's
+        // default still is 64x64 8-bit 4:4:4: three one-byte planes of 4096 samples.
+        let unit = testutil::StillBuilder::default().temporal_unit();
+        let at = |bytes: usize| {
+            Av1Decoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(bytes))
         };
-        limits.check(32, 32, 1).unwrap();
+        at(3 * 64 * 64).inspect(&unit).unwrap();
+        let err = at(3 * 64 * 64 - 1).inspect(&unit).unwrap_err();
+        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
         assert_eq!(
-            limits.check(64, 32, 1).unwrap_err().static_message(),
-            Some("AV1 decode: frame sample count exceeds the configured limit")
+            err.static_message(),
+            Some("AV1 decode: decoded frame size exceeds the configured limit")
         );
     }
 }

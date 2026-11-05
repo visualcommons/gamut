@@ -464,13 +464,14 @@ fn lossy_alpha_is_the_av1_reconstruction_of_the_alpha_plane() {
     let px = source_rgba();
     let alpha_planes =
         gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, dims()).unwrap());
-    let (_, recon) = gamut_av1::encode_still_intra_with_speed(
+    let recon = gamut_av1::encode_still_with_recon(
         &alpha_planes,
-        quality_to_quant(QUALITY),
-        gamut_av1::Av1Colour::monochrome(),
-        AvifEncoder::lossy(QUALITY).speed(),
+        &gamut_av1::Av1EncodeConfig::new(quality_to_quant(QUALITY))
+            .with_color(gamut_av1::Av1Color::monochrome())
+            .with_effort(AvifEncoder::lossy(QUALITY).effort()),
     )
-    .expect("the alpha plane encodes");
+    .expect("the alpha plane encodes")
+    .recon;
 
     let (_, _, rgba) = libavif_oracle::decode_rgba(&avif).expect("libavif decodes");
     let merged: Vec<u16> = rgba
@@ -499,20 +500,19 @@ fn item_payloads(avif: &[u8]) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The built-in encoder's monochrome stream for the source's alpha plane at `base_q_idx` — what
-/// the alpha item must carry, byte for byte, when it is coded at that index (at the speed an
+/// the alpha item must carry, byte for byte, when it is coded at that index (at the effort an
 /// encoder that never chose one codes).
 fn alpha_stream_at(base_q_idx: u8) -> Vec<u8> {
     let px = source_rgba();
     let planes =
         gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, dims()).unwrap());
-    gamut_av1::encode_still_intra_with_speed(
+    gamut_av1::encode_still(
         &planes,
-        base_q_idx,
-        gamut_av1::Av1Colour::monochrome(),
-        AvifEncoder::new().speed(),
+        &gamut_av1::Av1EncodeConfig::new(base_q_idx)
+            .with_color(gamut_av1::Av1Color::monochrome())
+            .with_effort(AvifEncoder::new().effort()),
     )
     .expect("the alpha plane encodes")
-    .0
     .obus
 }
 
@@ -590,13 +590,14 @@ fn a_finer_alpha_quality_decodes_closer_to_the_source_through_libavif() {
     let fine = decoded_alpha(&encode_rgba(
         &AvifEncoder::lossy(COLOUR_Q).with_alpha_quality(ALPHA_Q),
     ));
-    let (_, recon) = gamut_av1::encode_still_intra_with_speed(
+    let recon = gamut_av1::encode_still_with_recon(
         &alpha_planes,
-        quality_to_quant(ALPHA_Q),
-        gamut_av1::Av1Colour::monochrome(),
-        AvifEncoder::lossy(COLOUR_Q).speed(),
+        &gamut_av1::Av1EncodeConfig::new(quality_to_quant(ALPHA_Q))
+            .with_color(gamut_av1::Av1Color::monochrome())
+            .with_effort(AvifEncoder::lossy(COLOUR_Q).effort()),
     )
-    .expect("the alpha plane encodes");
+    .expect("the alpha plane encodes")
+    .recon;
     assert_eq!(fine, recon.planes[0]);
 
     let coarse = decoded_alpha(&encode_rgba(&AvifEncoder::lossy(COLOUR_Q)));

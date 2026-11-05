@@ -280,7 +280,7 @@ adding it needs no container change.
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | lossless dequant (q_idx 0) feeding WHT reconstruct | §7.12.2/.3 | ✅ | M0 |
-| dc_q/ac_q lookup tables (8/10/12-bit) | §7.12.2 | ✅ (all three rows exercised: 8-bit, and 10/12-bit via `encode_still_intra16_with`) | M1/M2 |
+| dc_q/ac_q lookup tables (8/10/12-bit) | §7.12.2 | ✅ (all three rows exercised: 8-bit, and 10/12-bit via `encode_still16`) | M1/M2 |
 | quantizer matrices (qm_y/u/v) | §9.5 | ☐ | M1 |
 | encoder quantization (dead-zone, RDOQ) | (encoder) | ☐ | M1 |
 
@@ -316,7 +316,7 @@ copy, which is what a decoder does for an independently decodable tile.
 | deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4/8×8/16×16, narrow + wide + widest; one frame level, chosen against the source, 0 = off) | M1 |
 | CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy; `Cdef_Uv_Dir` incl. the non-identity 4:2:2 row; one strength set per frame, `cdef_bits = 0`, luma and chroma pairs chosen against the source; per-superblock `cdef_idx` deferred) | M1 |
 | loop restoration: Wiener (luma) + stripe boundaries + per-SB unit signaling | §5.9.20,§7.17 | ✅ (Wiener luma with the default taps, on or off per 256×256 unit by distortion, `RESTORE_NONE` when no unit gains; fitted taps, self-guided and chroma deferred) | M1 |
-| superres horizontal upscaling (8-tap polyphase, LR after upscale) | §5.9.8,§7.16 | ✅ (opt-in via `encode_still_intra_superres`) | M1 |
+| superres horizontal upscaling (8-tap polyphase, LR after upscale) | §5.9.8,§7.16 | ✅ (opt-in via `Av1EncodeConfig::with_superres`) | M1 |
 | film grain synthesis | §5.9.30,§7.18.3 | ☐ | M4 |
 
 ## I. AV1 — inter coding (permanently out of scope: sequences-only machinery, per the charter)
@@ -356,8 +356,8 @@ copy, which is what a decoder does for an independently decodable tile.
 | Subsampled chroma at 10/12-bit (`with_chroma` reaches the `Rgb16` path; `Planar16::from_rgb16_matrix_subsampled` shares `Planar8`'s box filter, so the two cannot drift) | — | ✅ (#399) | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ✅ (`Planar16`; 16-bit input narrows to a 10/12-bit coded depth — float HDR ☐) | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; rate control deferred) | M1 |
-| encode speed (`AvifEncoder::with_speed(Speed)`: `gamut-av1`'s preset, applied to the colour **and** alpha stills; default is `Speed::default()` (`Balanced`, #799), `Thorough` the full search; lossless is speed-invariant; a pushed backend sees `Av1EncodeRequest::speed`, and `AbiAv1StillEncoder` appends the discriminant as `extra[1]` for any non-`Thorough` job, the default `Balanced` included — absence still means `Thorough`) | gamut-avif/av1 | ✅ (#654; dav1d decodes every preset to `gamut-av1`'s reconstruction; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
-| encode threads (`AvifEncoder::with_threads(Option<NonZeroUsize>)` / `threads()`: `Some(1)` default spawns nothing, `None` is `available_parallelism`; an RGBA input codes its alpha still on a scoped thread beside the colour, the budget split colour `ceil(n/2)` / alpha `floor(n/2)`, each still coded tile-parallel through `gamut-av1`'s `EncodeOptions::threads` at its default tile layout; output is thread-count-invariant; a spawn failure, e.g. on `wasm32`, codes the alpha on the calling thread; a pushed backend sees the colour share as the hint `Av1EncodeRequest::threads()`, which does not cross the C seam: `AbiAv1StillEncoder`'s `extra` blob is unchanged) | gamut-avif/av1 | ✅ (#655; caps 2/3/4/16/`None` give the 1-thread bytes, libavif decodes a 4-thread RGBA file to `gamut-av1`'s reconstructions; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
+| encode effort (`AvifEncoder::with_effort(Effort)`: `gamut-av1`'s preset, applied to the colour **and** alpha stills; default is `Effort::default()` (`Balanced`, #799), `Thorough` the full search; lossless is effort-invariant; a pushed backend sees `Av1EncodeRequest::effort`, and `AbiAv1StillEncoder` appends the preset's persisted wire speed value (`Balanced` = 1, `Fast` = 2, `Fastest` = 3 — not the `Effort` discriminant) as `extra[1]` for any non-`Thorough` job, the default `Balanced` included — absence still means `Thorough`) | gamut-avif/av1 | ✅ (#654; dav1d decodes every preset to `gamut-av1`'s reconstruction; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
+| encode threads (`AvifEncoder::with_threads(Option<NonZeroUsize>)` / `threads()`: `Some(1)` default spawns nothing, `None` is `available_parallelism`; an RGBA input codes its alpha still on a scoped thread beside the colour, the budget split colour `ceil(n/2)` / alpha `floor(n/2)`, each still coded tile-parallel through `gamut-av1`'s `Av1EncodeConfig::threads` at its default tile layout; output is thread-count-invariant; a spawn failure, e.g. on `wasm32`, codes the alpha on the calling thread; a pushed backend sees the colour share as the hint `Av1EncodeRequest::threads()`, which does not cross the C seam: `AbiAv1StillEncoder`'s `extra` blob is unchanged) | gamut-avif/av1 | ✅ (#655; caps 2/3/4/16/`None` give the 1-thread bytes, libavif decodes a 4-thread RGBA file to `gamut-av1`'s reconstructions; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
 | separate alpha quality (`AvifEncoder::with_alpha_quality` / `AvifConfig::alpha_quality`; same 0..=100 → `base_q_idx` mapping, `None` follows `quality`, ignored when lossless) | gamut-avif/av1 | ✅ (#656; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
 | AVIF container decode + codestream handoff (`AvifContainer`/`AvifImage`/`Av1StillDecoder`) | gamut-avif §L | ✅ | D |
 | AV1 **encode** backend seam (`Av1StillEncoder`/`Av1EncodeRequest`/`push_backend`/`AbiAv1StillEncoder`) | gamut-avif §M | ✅ | D |
@@ -465,7 +465,7 @@ propagating its error rather than being silently re-encoded.
 | `Av1EncodeRequest`: `#[non_exhaustive]`, private fields + getters, carries the derived `base_q_idx` | (crate API) | ✅ | #274 |
 | `AvifEncoder::push_backend` registry (`Arc<Mutex<…>>`; `Clone` **shares** backends) | (crate API) | ✅ | #274 |
 | Fallback contract: push order, decline-only fall-through, `gamut-av1` tail, error propagation | #241 | ✅ | #274 |
-| `AbiAv1StillEncoder` adapter over `gamut_codec_abi::Encoder` (codec id `av01`, `base_q_idx` in `extra[0]`; a non-`Thorough` `Speed` discriminant in `extra[1]`, #654) | #272 | ✅ (8, 10 and 12-bit — `encode_still16` lowers `Planar16` as native-endian `u16` planes with the coded depth in `ImageDesc::bit_depth` and **byte** strides) | #274 |
+| `AbiAv1StillEncoder` adapter over `gamut_codec_abi::Encoder` (codec id `av01`, `base_q_idx` in `extra[0]`; a non-`Thorough` preset's wire speed value in `extra[1]`, #654) | #272 | ✅ (8, 10 and 12-bit — `encode_still16` lowers `Planar16` as native-endian `u16` planes with the coded depth in `ImageDesc::bit_depth` and **byte** strides) | #274 |
 | `av1C`/`colr` re-derived from a backend stream's sequence header (§2.3.4 consistency) | AV1-ISOBMFF §2.3.4 | ✅ | #274 |
 | Byte-identical default output with no pushed backend (the 1.0 additivity guarantee) | (crate API) | ✅ | #274 |
 | Typed decode trait `Av1StillDecoder` (`decode_still` → `DecodedFrame`) | (crate API) | ✅ | #250 |

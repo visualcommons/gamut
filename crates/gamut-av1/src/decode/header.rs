@@ -12,10 +12,13 @@
 //! motion-vector, and global-motion syntax that follows is never reachable.
 
 use gamut_bitstream::BitReader;
+use gamut_color::{BitDepth, ChromaSubsampling};
 use gamut_core::{Error, Result};
 
 use super::ORIGIN;
-use super::obu::{SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS, SequenceHeader};
+use super::obu::{
+    SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS, SequenceHeader, subsampling_x, subsampling_y,
+};
 
 /// `MAX_SEGMENTS` (§3).
 pub(crate) const MAX_SEGMENTS: usize = 8;
@@ -101,6 +104,7 @@ const REMAP_LR_TYPE: [RestorationType; 4] = [
 
 /// `loop_filter_params()` (§5.9.11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LoopFilterParams {
     /// `loop_filter_level[0..4]`: two luma passes then U and V.
     pub level: [u8; 4],
@@ -131,6 +135,7 @@ impl LoopFilterParams {
 
 /// `cdef_params()` (§5.9.19). Strengths are stored post-mapping (a coded secondary of 3 becomes 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CdefParams {
     /// `CdefDamping`.
     pub damping: u32,
@@ -162,6 +167,7 @@ impl CdefParams {
 
 /// `lr_params()` (§5.9.20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LrParams {
     /// `FrameRestorationType[plane]`.
     pub frame_restoration_type: [RestorationType; 3],
@@ -184,6 +190,7 @@ impl LrParams {
 
 /// `segmentation_params()` (§5.9.14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SegmentationParams {
     /// `segmentation_enabled`.
     pub enabled: bool,
@@ -224,6 +231,7 @@ impl SegmentationParams {
 
 /// `quantization_params()` (§5.9.12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct QuantizationParams {
     /// `base_q_idx`.
     pub base_q_idx: u8,
@@ -245,6 +253,7 @@ pub struct QuantizationParams {
 
 /// The tile grid of `tile_info()` (§5.9.15).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TileInfo {
     /// `TileCols`.
     pub tile_cols: usize,
@@ -266,6 +275,7 @@ pub struct TileInfo {
 
 /// The parsed uncompressed frame header (§5.9.2), plus the derived values §5.9.2 computes.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FrameHeader {
     /// `FrameWidth`, the coded (post-superres-downscale) luma width.
     pub frame_width: u32,
@@ -876,8 +886,8 @@ impl FrameHeader {
                 shift += r.f(1)?;
             }
             lr.loop_restoration_size[0] = RESTORATION_TILESIZE_MAX >> (2 - shift);
-            let uv_shift = if seq.color.subsampling.x() == 1
-                && seq.color.subsampling.y() == 1
+            let uv_shift = if subsampling_x(seq.color.subsampling) == 1
+                && subsampling_y(seq.color.subsampling) == 1
                 && uses_chroma_lr
             {
                 r.f(1)?
@@ -915,8 +925,8 @@ impl FrameHeader {
         let (mut num_cb_points, mut num_cr_points) = (0, 0);
         if !mono
             && !chroma_scaling_from_luma
-            && !(seq.color.subsampling.x() == 1
-                && seq.color.subsampling.y() == 1
+            && !(subsampling_x(seq.color.subsampling) == 1
+                && subsampling_y(seq.color.subsampling) == 1
                 && num_y_points == 0)
         {
             num_cb_points = r.f(4)?;
@@ -991,7 +1001,7 @@ impl FrameHeader {
                 "AV1 decode: film grain synthesis is not implemented",
             ));
         }
-        if seq.color.bit_depth != 8 {
+        if seq.color.bit_depth != BitDepth::Eight {
             return Err(Error::unsupported(
                 ORIGIN,
                 "AV1 decode: only 8-bit streams are implemented",
@@ -999,13 +1009,13 @@ impl FrameHeader {
         }
         // Monochrome carries no chroma at all, so a subsampling diagnostic would name the wrong
         // reason for a stream this crate's own encoder can emit.
-        if seq.color.subsampling == super::obu::Subsampling::Monochrome {
+        if seq.color.subsampling == ChromaSubsampling::Cs400 {
             return Err(Error::unsupported(
                 ORIGIN,
                 "AV1 decode: monochrome streams are not implemented",
             ));
         }
-        if seq.color.subsampling != super::obu::Subsampling::Yuv444 {
+        if seq.color.subsampling != ChromaSubsampling::Cs444 {
             return Err(Error::unsupported(
                 ORIGIN,
                 "AV1 decode: only 4:4:4 chroma is implemented",
@@ -1058,9 +1068,9 @@ fn get_qindex_ignoring_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decode::obu::{ObuIter, Subsampling};
+    use crate::decode::obu::ObuIter;
     use crate::filter::{CdefStrengths, FrameFilters};
-    use crate::headers::Av1Colour;
+    use crate::headers::Av1Color;
     use crate::tile::BlockVariation;
 
     /// The in-loop filters [`parse_encoder_headers`] has the encoder signal: a non-zero value in
@@ -1105,7 +1115,7 @@ mod tests {
         variation: BlockVariation,
     ) -> (SequenceHeader, FrameHeader) {
         let lossy = base_q_idx > 0;
-        let cfg = crate::decode::testutil::still_config(width, height, Av1Colour::default());
+        let cfg = crate::decode::testutil::still_config(width, height, Av1Color::default());
         let seq_payload =
             crate::headers::sequence_header_payload(&cfg, width, height, lossy, superres.is_some());
         // The tiles span the coded width, which superres narrows (as `encode_with` resolves them).
@@ -1743,7 +1753,7 @@ mod tests {
         );
 
         let mut deep = seq;
-        deep.color.bit_depth = 10;
+        deep.color.bit_depth = BitDepth::Ten;
         assert_eq!(
             fh.reject_unsupported_tools(&deep)
                 .unwrap_err()
@@ -1752,7 +1762,7 @@ mod tests {
         );
 
         let mut sub = seq;
-        sub.color.subsampling = Subsampling::Yuv420;
+        sub.color.subsampling = ChromaSubsampling::Cs420;
         assert_eq!(
             fh.reject_unsupported_tools(&sub)
                 .unwrap_err()
@@ -1764,7 +1774,7 @@ mod tests {
         // monochrome stills, so refusing one with a message about chroma subsampling would name a
         // reason that does not exist for a stream carrying no chroma.
         let mut mono = seq;
-        mono.color.subsampling = Subsampling::Monochrome;
+        mono.color.subsampling = ChromaSubsampling::Cs400;
         assert_eq!(
             fh.reject_unsupported_tools(&mono)
                 .unwrap_err()
@@ -1845,7 +1855,7 @@ mod tests {
             ..crate::decode::testutil::StillBuilder::default()
         };
         let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, Subsampling::Yuv420);
+        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs420);
         assert!(fh.lr.uses_lr);
         assert_eq!(
             fh.lr.frame_restoration_type,
@@ -1930,7 +1940,7 @@ mod tests {
             ..crate::decode::testutil::StillBuilder::default()
         };
         let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, Subsampling::Yuv420);
+        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs420);
         assert!(seq.film_grain_params_present);
         assert!(fh.apply_grain);
     }
@@ -1952,7 +1962,7 @@ mod tests {
             ..crate::decode::testutil::StillBuilder::default()
         };
         let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, Subsampling::Yuv422);
+        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs422);
         assert!(fh.apply_grain);
     }
 
@@ -1966,7 +1976,7 @@ mod tests {
             ..crate::decode::testutil::StillBuilder::default()
         };
         let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, Subsampling::Monochrome);
+        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs400);
         assert_eq!(fh.quant.base_q_idx, 128);
     }
 
@@ -2013,7 +2023,7 @@ mod tests {
             ..crate::decode::testutil::StillBuilder::default()
         };
         let (seq, fh) = parse_built(&still);
-        assert_eq!(seq.color.subsampling, Subsampling::Monochrome);
+        assert_eq!(seq.color.subsampling, ChromaSubsampling::Cs400);
         assert_eq!(fh.cdef.y_pri[..2], [1, 2]);
         assert_eq!(fh.cdef.uv_pri, [0; 8]);
     }
@@ -2090,7 +2100,7 @@ mod tests {
 
     #[test]
     fn rejects_a_truncated_frame_header() {
-        let cfg = crate::decode::testutil::still_config(64, 64, Av1Colour::default());
+        let cfg = crate::decode::testutil::still_config(64, 64, Av1Color::default());
         let seq_payload = crate::headers::sequence_header_payload(&cfg, 64, 64, true, false);
         let seq = SequenceHeader::parse(&seq_payload).unwrap();
         let layout = crate::headers::TileLayout::resolve(
