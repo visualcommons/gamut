@@ -32,7 +32,9 @@ fn png(xmp: Option<&str>) -> Vec<u8> {
     let rgb = source_rgb();
     let image = ImageRef::<Rgb8>::new(&rgb, dims()).expect("buffer matches dimensions");
     let encoder = match xmp {
-        Some(xmp) => PngEncoder::new().with_xmp(xmp),
+        Some(xmp) => PngEncoder::new()
+            .with_xmp(xmp.as_bytes())
+            .expect("the fixture packet is UTF-8"),
         None => PngEncoder::new(),
     };
     encoder.encode_to_vec(image).expect("the fixture encodes")

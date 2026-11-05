@@ -46,9 +46,10 @@ fn plain_png() -> Vec<u8> {
 
 /// The fixture with a `len`-byte reserved `caBX` payload, and the span `encode_with_report` gave.
 fn reserve_png(len: usize) -> Result<(Vec<u8>, C2paSpan)> {
-    let (png, report) = PngEncoder::new()
+    let mut png = Vec::new();
+    let report = PngEncoder::new()
         .with_c2pa_reserved(len)
-        .encode_with_report(image(&source_rgb()))
+        .and_then(|encoder| encoder.encode_with_report(image(&source_rgb()), &mut png))
         .map_err(|error| OracleError::Asset(error.to_string()))?;
     let span = report
         .c2pa

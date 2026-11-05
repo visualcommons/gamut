@@ -9,7 +9,7 @@
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_jpeg::{JpegDecoder, JpegEncoder};
-use gamut_png::{PngDecoder, PngEncoder, Preset};
+use gamut_png::{Effort, PngDecoder, PngEncoder};
 
 /// The two containers the scenario compares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -70,8 +70,9 @@ pub fn encode(
     let image = ImageRef::<Rgb8>::new(pixels, Dimensions::new(width, height)?)?;
     match container {
         Container::Png => PngEncoder::new()
-            .with_preset(Preset::Fast)
-            .with_icc_profile(PNG_PROFILE_NAME, icc)
+            .with_effort(Effort::Fast)
+            .with_icc_profile_name(PNG_PROFILE_NAME)
+            .with_icc_profile(icc)
             .encode_to_vec(image),
         Container::Jpeg => JpegEncoder::new()
             .with_quality(JPEG_QUALITY)
