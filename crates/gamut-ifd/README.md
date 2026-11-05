@@ -32,7 +32,8 @@ this crate as a near-zero-diff refactor (issue #107), and now consumes it instea
 
 ## Usage
 
-`read` / `read_header` parse a stream into a [`TiffFile`] (`ByteOrder` + `Variant` + a `Vec<Ifd>`);
+`read` parses a stream into a [`TiffFile`] (`ByteOrder` + `Variant` + a `Vec<Ifd>`), and
+`read_header` reads just its `Header` (byte order, variant, first-IFD offset);
 `write` serialises one back, handling the two-pass offset layout (it is fallible: a stream that
 does not fit classic TIFF's 2-byte entry counts or 4 GiB offsets is a typed error, never a silent
 truncation). Each `Ifd` is a tag-sorted set of `Field`s, each holding a typed [`Value`];
@@ -40,12 +41,12 @@ truncation). Each `Ifd` is a tag-sorted set of `Field`s, each holding a typed [`
 
 An `Ifd` may also carry **sub-IFD trees** — child directories under a pointer tag (`SubIFDs`,
 `ExifIFD`, …) attached with `set_sub_ifd`. `write` lays the whole tree out and synthesises the
-pointer fields; `read_tree` is its inverse, following the pointer tags you name (with depth and
-cycle guards) and rebuilding the same tree. `read_ifd_at` remains the per-pointer escape hatch for
-lenient decoders.
+pointer fields; `IfdReader::read_tree` is its inverse, following the pointer tags you name (with
+depth and cycle guards) and rebuilding the same tree. `read_ifd_at` remains the per-pointer escape
+hatch for lenient decoders.
 
 ```rust
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read_tree, write};
+use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, write};
 
 let mut exif = Ifd::new();
 exif.set(33434, Value::Rational(vec![(1, 250)])); // ExposureTime
@@ -55,7 +56,8 @@ ifd.set(257, Value::Short(vec![480])); // ImageLength
 ifd.set_sub_ifd(34665, vec![exif]); // ExifIFD pointer
 let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
 let bytes = write(&file).unwrap();
-assert_eq!(read_tree(&bytes, &[34665]).unwrap(), file); // write's inverse
+let tree = IfdReader::open(&bytes[..]).unwrap().read_tree(&[34665]).unwrap();
+assert_eq!(tree, file); // write's inverse
 ```
 
 Tag *numbers* are passed literally — tag *semantics* live in the consuming codec (e.g. `gamut-tiff`'s
@@ -100,9 +102,10 @@ relative to the note start or the TIFF header, and for TIFF streams embedded ins
 container). `IfdReader` walks structure lazily on top: `read_ifd` fetches one directory body
 and leaves each entry **raw** (tag, type code, count, and the value/offset word verbatim);
 `value` fetches and decodes a single value on demand; `ifds()` iterates the top-level chain;
-`read_file` / `read_tree` / the audited methods are the eager slice APIs' equivalents and
-produce identical results — in fact the slice functions *are* thin wrappers over this engine
-(one parser; the robustness corpus drives both entry points as a regression gate).
+`read_file` is the eager `read`'s equivalent and `read_tree` the one sub-IFD tree walk — in fact
+the slice functions *are* thin wrappers over this engine (one parser; the robustness corpus drives
+both entry points as a regression gate), and `read_audited` takes any `ReadAt` source, so a slice
+and a stream are audited by the same call.
 
 ```rust
 use gamut_ifd::{IfdReader, StreamSource, tags};
@@ -115,7 +118,7 @@ if let Some(entry) = raw.entry(tags::SUB_IFDS) {
     let raw_ifd_offsets = reader.value(entry)?; // this value's bytes only
 #   let _ = raw_ifd_offsets;
 }
-let whole_tree = reader.read_tree(tags::STANDARD_POINTER_TAGS)?; // == read_tree on the full bytes
+let whole_tree = reader.read_tree(tags::STANDARD_POINTER_TAGS)?; // the whole sub-IFD tree
 # let _ = whole_tree;
 # Ok(())
 # }
@@ -125,7 +128,8 @@ Codecs that append image data after the stream (strips, tiles, an embedded JPEG)
 documented **layout contract**: every structure sits on an even word boundary (`align_word` is the
 rule) and the layout is a pure function of structure sizes, so writing with correctly-sized
 placeholders, measuring, patching (`Value::offset_array` builds the variant-width offset arrays),
-and re-writing is byte-stable; `write_with` additionally returns a `SegmentMap` declaring every
+and re-writing is byte-stable; `write_with` additionally returns (as `WriteOutput::segments`) a
+`SegmentMap` declaring every
 emitted byte (padding included) and can **pin** a value at an exact absolute offset (the
 maker-note preservation primitive).
 

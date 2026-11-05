@@ -97,30 +97,30 @@ mod writer;
 pub use decoder::TiffDecoder;
 pub use deconstruct::deconstruct;
 pub use encoder::{TiffEncodeReport, TiffEncoder};
-// The C2PA exclusion set is `gamut_ifd::c2pa`'s — §A.3.6 and §18.5.5 are stated once, for this
-// crate and `gamut-dng` alike — but it is reachable from `TiffEncodeReport` and
-// [`c2pa_exclusions`], so it is re-exported here too and needs no direct gamut-ifd dependency.
-// The non-validating report [`c2pa_summary`] returns is the same module's, re-exported whole for
-// the same reason (issue #530).
-pub use gamut_ifd::c2pa::{
-    C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary, C2paUnreadEntry,
-    C2paUnreadReason,
-};
 // The tag-value codes are gamut-ifd's, shared with gamut-dng; they are reachable from
-// `TiffEncoder` and `TiffInfo`, so they are re-exported for the same reason as the IFD types above.
+// `TiffEncoder` and `TiffInfo`, so they are re-exported for the same reason as the IFD types below.
 // Which codes a TIFF page may carry is this crate's own (`ifd`, `compression`).
 pub use gamut_ifd::tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat};
 // The structural IFD core lives in gamut-ifd; re-export the types a gamut-tiff user can touch —
 // the read/write spine plus every type reachable from this crate's own public items
 // (`DeconstructReport` exposes `SegmentReport`, which exposes `Segment`/`SpanKind`/`DataLabel`/
-// `Range`/`Conflict`/`SharedSpan`; `Value::Unknown` carries `UnknownValue`; and `Ifd`'s
-// accessors return `SubIfd`) — so no direct gamut-ifd dependency is ever needed to name them.
-// The deconstruct report itself (`DeconstructReport` and its `Anomaly`/`Severity`/`UnknownTag`/
-// `UnknownFieldType` findings) is gamut-ifd's too, shared with gamut-dng.
+// `Conflict`/`SharedSpan`, its ranges being `core::ops::Range<u64>`; `Value::Unknown` carries
+// `UnknownValue`; and `Ifd`'s accessors return `SubIfd`) — so no direct gamut-ifd dependency is
+// ever needed to name them. The deconstruct report itself (`DeconstructReport` and its
+// `Anomaly`/`Severity`/`UnknownTag`/`UnknownFieldType` findings) is gamut-ifd's too, shared with
+// gamut-dng.
 pub use gamut_ifd::{
-    Anomaly, ByteOrder, Conflict, DataLabel, DeconstructReport, Field, FieldType, Ifd, Range,
-    Segment, SegmentReport, Severity, SharedSpan, SpanKind, SubIfd, TiffFile, UnknownFieldType,
-    UnknownTag, UnknownValue, Value, Variant, read, write,
+    Anomaly, ByteOrder, Conflict, DataLabel, DeconstructReport, Field, FieldType, Ifd, Segment,
+    SegmentReport, Severity, SharedSpan, SpanKind, SubIfd, TiffFile, UnknownFieldType, UnknownTag,
+    UnknownValue, Value, Variant, read, write,
+};
+// The C2PA exclusion set is gamut-ifd's — §A.3.6 and §18.5.5 are stated once, for this crate
+// and `gamut-dng` alike — but it is reachable from `TiffEncodeReport` and [`c2pa_exclusions`], so
+// it is re-exported here too and needs no direct gamut-ifd dependency. The non-validating report
+// [`c2pa_summary`] returns is gamut-ifd's too, re-exported whole for the same reason (issue #530).
+pub use gamut_ifd::{
+    C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary, C2paUnreadEntry,
+    C2paUnreadReason,
 };
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `TiffMetadata::metadata` / `TiffEncoder::with_metadata` without a direct dependency.

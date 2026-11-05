@@ -258,7 +258,9 @@ mod tests {
             vec![ifd0]
         })
         .expect("write");
-        let tree = crate::read_tree(&out, &[tags::SUB_IFDS]).expect("tree");
+        let tree = crate::IfdReader::open(&out[..])
+            .and_then(|mut reader| reader.read_tree(&[tags::SUB_IFDS]))
+            .expect("tree");
         let ifd0 = &tree.ifds[0];
         let at = ifd0.get_u64_vec(tags::STRIP_OFFSETS).expect("preview")[0] as usize;
         let child = &ifd0.sub_ifds()[0].ifds[0];

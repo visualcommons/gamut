@@ -56,10 +56,10 @@ pub fn deconstruct(data: &[u8]) -> Result<DeconstructReport> {
         findings.check_image_ifd(ifd, page);
         findings.audit_camera_profiles(&mut auditor, ifd, page);
     }
-    let (segments, audit_findings) = auditor.finish()?;
-    findings.map_audit_findings(&audit_findings);
+    let audited = auditor.finish()?;
+    findings.map_audit_findings(&audited.findings);
     Ok(DeconstructReport::new(
-        segments,
+        audited.report,
         findings.unknown_fields,
         findings.unknown_tags,
         findings.anomalies,

@@ -112,7 +112,7 @@ pointer-safe. The same rule scopes *where* the walk runs: **IFD 0's subtree and 
 Every later page of a multi-page document feeds one field — the C2PA manifest store, whose entry
 holds the store's bytes rather than an offset — so a *pointer* there is a discarded target too,
 and a dangling `ExifIFD` on page 1, or two pages naming one Exif directory, used to fail the whole
-read. `gamut_ifd::read_tree` can be scoped neither way: it resolves the one flat list it is given
+read. `gamut_ifd::IfdReader::read_tree` can be scoped neither way: it resolves the one flat list it is given
 at every node of every page. **(c)** The blocks live in **IFD 0 only**, so a reader decoding
 page 3 of a multi-page document alone sees none of them; duplicating an ICC profile onto every
 page is the worse outcome, and IFD 0 is where a reader conventionally looks. **(d)** The **writer
@@ -141,7 +141,8 @@ the spec's; that a narrower one is also easier to assert is not on its own a rea
 contract.
 
 The C2PA manifest store is the one carrier with a placement rule of its own, and that rule is not
-restated here: `gamut_ifd::c2pa` owns C2PA 2.4 §A.3.6 (tag 52545 / `0xCD41`, type `UNDEFINED`, one
+restated here: gamut-ifd's C2PA items (`reserve_c2pa_entry`, `append_c2pa_store`,
+`c2pa_exclusions`, `C2paExclusions`) own C2PA 2.4 §A.3.6 (tag 52545 / `0xCD41`, type `UNDEFINED`, one
 store per asset, its entry in the **last IFD of the main chain**, its bytes at the **end of the
 file**) and §18.5.5 (the two disjoint exclusion ranges — the store, and the `count` field of its
 entry — that a `c2pa.hash.data` binding excludes; §18.7.3.3 leaves that the only binding a TIFF
@@ -157,7 +158,7 @@ describe, which the encode would otherwise discover only after compressing the i
 zero-filling the reservation (BigTIFF's count is 64-bit and has no such bound). The reservation is
 taken fallibly instead, so a caller's number cannot panic a library path. A store whose *offset*
 would pass classic TIFF's 4 GiB limit depends on the size of the file it lands after, so that one
-stays `gamut_ifd::c2pa::append_store`'s, refused once the file exists. What stays outside this
+stays `gamut_ifd::append_c2pa_store`'s, refused once the file exists. What stays outside this
 crate's reach is the allocator's: a reservation the machine has no memory for aborts, as any
 oversized allocation in Rust does. `encode_with_report` reports the ranges, and `c2pa_exclusions`
 recovers them from any TIFF's bytes — including files written through `encode_palette8` or
@@ -226,7 +227,8 @@ The API was frozen after a full-surface review; the additions and breaks:
   `UnknownTag`, `DeconstructReport`), so new codes/categories/fields land semver-minor.
 - **Complete re-export closure** — every gamut-ifd type reachable from this crate's public
   items is re-exported (since #263: `SegmentReport`, `Segment`, `SpanKind`, `DataLabel`,
-  `Range`, `Conflict`, `SharedSpan`, `UnknownValue`, and `SubIfd`), so none needs a direct
+  `Conflict`, `SharedSpan`, `UnknownValue`, and `SubIfd`; since #1132 the ranges are
+  `core::ops::Range<u64>`, so there is no `Range` to re-export), so none needs a direct
   gamut-ifd dependency to name.
 - **Additions since the freeze (#299)** — `SampleFormat`, `TiffInfo`, `tags::SAMPLE_FORMAT`,
   `TiffDecoder::{info, info_page}`, and the `DecodeImage`/`EncodeImage` impls for `Gray16`/`Rgb16`/

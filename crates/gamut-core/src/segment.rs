@@ -6,8 +6,8 @@
 //! the format's own `kind` enum. What makes such a list *total* is the same in every format: the
 //! segments are non-empty, contiguous, non-overlapping, start at `0` and end at the input length.
 //! [`covers`] states that once, so the formats keep their kinds and walks and share only the
-//! law. [`tiles`] is the same predicate over bare ranges, for a report whose segments carry
-//! their extents in another form (e.g. `u64` offsets for files past `usize`).
+//! law. [`tiles`] is the same predicate over bare ranges of any offset type, for a report whose
+//! segments are addressed in `u64` (a `Segment<K, u64>`, e.g. a TIFF/DNG file past `usize`).
 //!
 //! The walks themselves stay in the format crates: each stops on its own format's rules, and
 //! those rules are what a format crate's tests pin.
@@ -17,12 +17,14 @@ use core::ops::Range;
 /// One contiguous run of an input, tagged by what it holds.
 ///
 /// `K` is the format's own classification (e.g. `gamut_isobmff::SegmentKind`); this type adds
-/// nothing to it but the half-open byte range it occupies. A list of these is total over an
-/// input of `len` bytes exactly when [`covers`] says so.
+/// nothing to it but the half-open byte range it occupies. `O` is the offset type: `usize` (the
+/// default) for an in-memory input, `u64` for a file addressed past `usize` (`gamut_ifd`'s
+/// TIFF/DNG accounting). A `usize` list is total over an input of `len` bytes exactly when
+/// [`covers`] says so; [`tiles`] asks the same of any offset type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Segment<K> {
+pub struct Segment<K, O = usize> {
     /// The half-open byte range this segment occupies within the input (`start..end`).
-    pub range: Range<usize>,
+    pub range: Range<O>,
     /// What the bytes in [`range`](Self::range) are.
     pub kind: K,
 }

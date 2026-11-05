@@ -246,7 +246,7 @@ impl TiffDecoder {
     /// `ExifIFD` offset cannot stop it; this method does follow one, and the alternative to
     /// failing is reporting `exif: None` for a directory the file plainly declares — silent loss
     /// a caller cannot tell apart from "there is no EXIF here". A caller that wants a partial
-    /// answer can walk the re-exported [`read`](crate::read) / [`gamut_ifd::read_tree`] spine
+    /// answer can walk the re-exported [`read`](crate::read) / [`gamut_ifd::IfdReader::read_tree`] spine
     /// itself and decide per pointer. (`gamut-dng` degrades instead of failing, because there the
     /// metadata is incidental to a raw *image* decode that must still succeed.)
     ///
@@ -263,7 +263,7 @@ impl TiffDecoder {
     /// not have, and collecting the blocks before resolving would make success depend on read
     /// order. A caller that needs the store from such a file has it without this method:
     /// [`c2pa_exclusions`](crate::c2pa_exclusions) follows no pointer, and its
-    /// [`store`](gamut_ifd::c2pa::C2paExclusions::store) range locates the store's bytes in the
+    /// [`store`](gamut_ifd::C2paExclusions::store) range locates the store's bytes in the
     /// file.
     pub fn metadata(&self, data: &[u8]) -> Result<TiffMetadata> {
         metadata::read_metadata(data)

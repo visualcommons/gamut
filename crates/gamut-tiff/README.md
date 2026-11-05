@@ -105,7 +105,7 @@ compression schemes land additively on this frozen surface (see Status).
   round-trips unchanged. A caller's directory nested deeper, hung off any other tag, repeating a
   tag, or carrying such a field is refused by the encode — with its own message per case — rather
   than written into a file this crate could not read back unchanged.
-  The C2PA manifest store follows C2PA 2.4 §A.3.6 through the shared `gamut_ifd::c2pa` helper it
+  The C2PA manifest store follows C2PA 2.4 §A.3.6 through the shared gamut-ifd C2PA helpers it
   and `gamut-dng` both call: the entry in the last IFD of the main
   chain, the store at the end of the file, and the two §18.5.5 exclusion ranges reported by
   `TiffEncoder::encode_with_report` or recovered from any file by `gamut_tiff::c2pa_exclusions`.

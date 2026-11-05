@@ -138,7 +138,7 @@ one only together with the injection that shows it can fail.
 
 | target | crate | entry points | check beyond the crash oracle |
 |---|---|---|---|
-| `ifd_read` | `gamut-ifd` | `read`, `read_tree`, `read_audited` | the dual-ledger audit is complete — no byte read outside a claim, **and** no claim unread |
+| `ifd_read` | `gamut-ifd` | `read`, `IfdReader::read_tree`, `read_audited` | the dual-ledger audit is complete — no byte read outside a claim, **and** no claim unread |
 | `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | the geometry the decode hands back equals the geometry the tags declare — reaching only the two lines that copy the shared tag reader's dimensions into `DecodedImage` and `convert_from_raw`'s output dims, never the reader itself |
 | `dng_decode` | `gamut-dng` | `DngDecoder::{decode,verify_new_raw_image_digest}` | none — the crash oracle alone; its two assertions are structure pins |
 | `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `read`, `BoxReader` | the segments tile `0..len` exactly — contiguous, **and** covering to end of file |

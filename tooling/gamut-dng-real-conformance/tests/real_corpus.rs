@@ -268,7 +268,7 @@ fn every_real_file_survives_a_preserving_rewrite() {
             .segments
             .iter()
             .find(|s| s.kind == gamut_ifd::SpanKind::Preamble)
-            .map(|s| (s.range.start, s.range.len));
+            .map(|s| (s.range.start, s.range.end - s.range.start));
         let original_preamble = out
             .preserved
             .iter()

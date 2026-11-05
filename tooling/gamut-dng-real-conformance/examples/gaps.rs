@@ -39,21 +39,18 @@ fn main() {
         );
 
         for span in &spans {
-            let (start, end) = (span.range.start, span.range.end());
+            let (start, end) = (span.range.start, span.range.end);
             let before = segs
                 .segments
                 .iter()
-                .filter(|s| s.range.end() <= start && s.range != span.range)
-                .max_by_key(|s| s.range.end());
+                .filter(|s| s.range.end <= start && s.range != span.range)
+                .max_by_key(|s| s.range.end);
             let after = segs
                 .segments
                 .iter()
                 .filter(|s| s.range.start >= end)
                 .min_by_key(|s| s.range.start);
-            println!(
-                "  {:?} [{start}..{end}) {} bytes",
-                span.kind, span.range.len
-            );
+            println!("  {:?} [{start}..{end}) {} bytes", span.kind, end - start);
             println!("      preceded by: {:?}", before.map(|s| s.kind));
             println!("      followed by: {:?}", after.map(|s| s.kind));
             let peek_end = (end as usize).min(start as usize + 24);

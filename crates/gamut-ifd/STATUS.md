@@ -13,7 +13,7 @@ stays the codec's.
 values and following IFDs need absolute offsets that are only known after sizes are fixed, so the
 writer plans the layout then back-patches the offset words; a read → write → read round-trip
 reproduces the directory exactly. At v1 the symmetry extends to whole sub-IFD trees:
-`read_tree(&write(&file)?, tags)? == file`.
+`IfdReader::open(&write(&file)?[..])?.read_tree(tags)? == file`.
 
 ## How it was built
 
@@ -42,7 +42,7 @@ read/write code paths byte-for-byte.
 P5's **write** side landed with the DNG codec (issue #109): [`write`](src/writer.rs) lays out the
 whole IFD *tree* — [`Ifd::set_sub_ifd`](src/entry.rs) attaches children under a pointer tag
 (`SubIFDs`/`ExifIFD`/…), the writer places them and synthesises the offset-array field. The **read**
-side closed with v1 (issue #181): [`read_tree`](src/reader.rs) follows caller-named pointer tags
+side closed with v1 (issue #181): [`read_tree`](src/stream.rs) follows caller-named pointer tags
 (the generic [`read`] cannot know which `LONG` tags are offsets) with depth and cycle guards,
 rebuilding the tree `write` flattens; [`read_ifd_at`](src/reader.rs) stays as the per-pointer escape
 hatch for lenient decoders (gamut-dng skips unparseable children while hunting the raw IFD,
@@ -79,7 +79,10 @@ The API was frozen after a full-surface review; the additions and breaks:
 - **Fallible `write`** — classic-width overflow (entry count > `u16::MAX`, layout > 4 GiB) is a
   typed error instead of silent truncation; the layout contract (word alignment, structural
   determinism) is documented API.
-- **`read_tree`** — write's inverse over sub-IFD trees; sub-IFD groups are tag-sorted (canonical).
+- **`IfdReader::read_tree`** — write's inverse over sub-IFD trees; sub-IFD groups are tag-sorted
+  (canonical). Since #1132 it is a method only: the slice-taking free function it duplicated is
+  gone, and `read_audited` takes any `ReadAt` source, so the slice and stream readers share one
+  audited read.
 - **`Ifd::remove`**, **`Value::as_str`/`as_bytes`/`as_rationals`/`as_srationals`**,
   **`Value::offset_array`**, **`align_word`** — the pieces every consumer had hand-rolled.
 - **Single canonical paths** — modules are private; the surface is the crate-root re-export list
@@ -116,7 +119,8 @@ shape. P9 adds the streaming layer **additively** — the frozen v1 slice surfac
 - [`IfdReader`](src/stream.rs) — lazy walker: `read_ifd` fetches one directory body into raw
   entries (value/offset words verbatim, in file byte order); `value` fetches/decodes one value
   on demand, span-checked against the source length *before* allocating; `ifds()` iterates the
-  chain; `read_file` / `read_tree` / the coverage methods mirror the slice APIs exactly.
+  chain; `read_file` / the coverage methods mirror the slice APIs exactly, and `read_tree` is the
+  one sub-IFD tree walk.
 - [`tags`](src/tags.rs) — the structural pointer tags (`SubIFDs`, `ExifIFD`, `GPSInfo`,
   `InteroperabilityIFD`; `MakerNote` as the named-but-not-followable blob carrier), deduplicating
   the three consumers' copies. The one sanctioned exception to "no tag semantics": these tags
@@ -203,24 +207,26 @@ The C2PA manifest store is the one cross-format payload a TIFF-based file carrie
 (C2PA 2.4 §A.3.6: tag 52545 / `0xCD41`, type `UNDEFINED`), and its placement rule is unusual
 enough — one store per asset, its entry in the **last IFD of the main chain**, its bytes at the
 **end of the file** so a resize moves no other offset — that stating it once here, for both
-`gamut-dng` (#442) and `gamut-tiff` (#446), beats two derivations. The [`c2pa`](src/c2pa.rs)
-module is that one statement; `references/c2pa/README.md` is the clause map. The store stays
+`gamut-dng` (#442) and `gamut-tiff` (#446), beats two derivations. The private [`c2pa`](src/c2pa.rs)
+module, whose items are crate-root exports since #1132, is that one statement; `references/c2pa/README.md` is the clause map. The store stays
 opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
 
 - **Placement is a post-write relocation, not a new writer mode.** A codec that appends image
   data after `write`'s stream cannot get a value placed *after* that data from the value pool,
   and a pinned span would need the data's extent before the layout it depends on exists. So
-  `reserve_entry` puts a one-byte inline placeholder in the last main IFD (the directory layout
-  is final; the pool is untouched), the codec writes its whole file, and `append_store` lands
+  `reserve_c2pa_entry` puts a one-byte inline placeholder in the last main IFD (the directory
+  layout is final; the pool is untouched), the codec writes its whole file, and
+  `append_c2pa_store` lands
   the store at `align_word(len)`, patching only the entry's `count` and value/offset words. The
   alternative — a `WriteOptions` directive placing a tag's value at the end of the *stream* —
   would still sit before the codec's pixel data, which is not "the end of the file".
 - **The exclusion set is two ranges** (§18.5.5): `C2paExclusions::store()` and
   `count_field()`, the count field being the offset-width word at entry offset 4 (4 bytes
   classic, 8 BigTIFF). They are disjoint — every constructor checks it and the fields are
-  private, so a value cannot be edited out of the invariant — and reported in the crate's own `Range` (u64 start/len) — the
-  same measure the segment map uses — rather than `core::ops::Range<usize>`.
-- **Read side.** `locate` walks the chain to its last directory over any `ReadAt` source and
+  private, so a value cannot be edited out of the invariant — and reported as half-open
+  `core::ops::Range<u64>`, the same measure the segment map uses (since #1132 its `Segment` is
+  `gamut_core::segment::Segment<SpanKind, u64>`; the crate keeps no range type of its own).
+- **Read side.** `c2pa_exclusions` walks the chain to its last directory over any `ReadAt` source and
   reports the ranges for an out-of-line *or* inline store; a tag-52545 entry of another type, or
   one in a non-last directory, is "no store" (never an error), so a decoder can still surface
   it as an unmodelled field. A store declared past the end of the file is `InvalidInput`, the
@@ -233,18 +239,19 @@ opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
 - **Minimum length, and the bound that actually keeps a store out of line.** Nothing shorter
   than a JUMBF box header (8 bytes, `MIN_STORE_LEN`) can be a manifest store, and the two
   directions treat that differently, as `references/c2pa/README.md` prescribes for a reader:
-  `locate` reports **absence** for a shorter value (so a foreign file stays readable and a
-  decode → encode cycle over it does not trip the encoder's own minimum), while `append_store`
+  `c2pa_exclusions` reports **absence** for a shorter value (so a foreign file stays readable and
+  a decode → encode cycle over it does not trip the encoder's own minimum), while
+  `append_c2pa_store`
   **refuses** it (an encoder handed a store it cannot write must say so, not drop it).
   Out-of-line-ness is a *separate* bound and is not implied by that constant: classic TIFF's
   inline threshold is 4 bytes but **BigTIFF's is 8**, so a store of exactly `MIN_STORE_LEN`
-  packs inline in a BigTIFF entry. `append_store` therefore gates on the variant's own
+  packs inline in a BigTIFF entry. `append_c2pa_store` therefore gates on the variant's own
   `inline_threshold()` — the shortest writable BigTIFF store is nine bytes. Without that gate
   the bytes would be appended at the end of the file while the entry read back as the offset
   word pointing at them, leaving the store referenced by nothing and the exclusion ranges
   covering bytes no reader returns.
 - **One store per asset.** §A.3.6 admits exactly one, so a last IFD carrying *two* tag-52545
-  entries names none and `locate` reports absence. Reporting the first would be worse than
+  entries names none and `c2pa_exclusions` reports absence. Reporting the first would be worse than
   reporting nothing: the eager `Ifd` keeps the **last** duplicate, so a caller taking bytes from
   one path and ranges from this one would get two different byte runs under one name.
 - **Byte accounting.** The store is the entry's `Value` span and the alignment filler before
@@ -262,8 +269,8 @@ route unable to name the ranges §18.5.5 asks it to exclude, and extensible and 
 both available.
 
 **The read and write sides are deliberately asymmetric.** A BigTIFF store of exactly
-`MIN_STORE_LEN` bytes packs inline; `locate` reports it (the file is lawful and its ranges are
-well defined) while `append_store` refuses to *write* that shape, because an inline value is not
+`MIN_STORE_LEN` bytes packs inline; `c2pa_exclusions` reports it (the file is lawful and its
+ranges are well defined) while `append_c2pa_store` refuses to *write* that shape, because an inline value is not
 the run at the end of the file the placement rule is built on, and admitting it would give a
 store two placements to reason about for no gain. Liberal in, conservative out — stated at both
 functions so it reads as a decision rather than an oversight.

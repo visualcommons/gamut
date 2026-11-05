@@ -17,33 +17,25 @@
 //! ([`shared`](SegmentReport::shared)); partially overlapping claims are structural
 //! [`conflicts`](SegmentReport::conflicts).
 
+use core::ops::Range;
+
 use gamut_core::Result;
 
 use crate::source::ReadAt;
 use crate::track::ReadLedger;
 
-/// A half-open byte range `[start, start + len)` within a file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Range {
-    /// The offset of the first byte.
-    pub start: u64,
-    /// The number of bytes.
-    pub len: u64,
-}
-
-impl Range {
-    /// The offset one past the last byte (`start + len`, saturating).
-    #[must_use]
-    pub fn end(self) -> u64 {
-        self.start.saturating_add(self.len)
-    }
-}
+/// One typed, claimed byte range of the file: the shared
+/// [`gamut_core::segment::Segment`] over [`SpanKind`], addressed in `u64` file offsets so a file
+/// past `usize` is accounted the same way.
+///
+/// Its `range` is the half-open `start..end`; a claim reaching past `u64::MAX` saturates there.
+pub type Segment = gamut_core::segment::Segment<SpanKind, u64>;
 
 /// What a claimed byte range structurally *is*.
 ///
 /// `#[non_exhaustive]`: codecs layered on this crate may need further kinds without a breaking
 /// change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SpanKind {
     /// The 8-byte (classic) or 16-byte (BigTIFF) image file header.
@@ -84,7 +76,7 @@ pub enum SpanKind {
 ///
 /// `#[non_exhaustive]`: further structural data carriers can be named without a breaking change;
 /// [`Other`](DataLabel::Other) covers codec-specific ones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DataLabel {
     /// `StripOffsets`/`StripByteCounts` pixel data.
@@ -112,19 +104,10 @@ pub enum Claim {
     Declared,
 }
 
-/// One typed, claimed byte range of the file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Segment {
-    /// The claimed byte range.
-    pub range: Range,
-    /// What the range is.
-    pub kind: SpanKind,
-}
-
 /// Two claims that partially overlap — a structure claiming bytes another already claimed,
 /// which an archival validator treats as out-of-spec. (Claims with *identical* extents are
 /// legal TIFF value sharing and land in [`SegmentReport::shared`] instead.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
     /// The earlier-placed segment.
     pub a: Segment,
@@ -137,7 +120,7 @@ pub struct Conflict {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedSpan {
     /// The shared byte range.
-    pub range: Range,
+    pub range: Range<u64>,
     /// Every claimant's kind, in claim order.
     pub kinds: Vec<SpanKind>,
 }
@@ -149,7 +132,7 @@ pub struct SharedSpan {
 #[derive(Debug, Clone)]
 pub struct SegmentMap {
     file_len: u64,
-    claims: Vec<(Range, SpanKind, Claim)>,
+    claims: Vec<(Range<u64>, SpanKind, Claim)>,
 }
 
 impl SegmentMap {
@@ -168,15 +151,16 @@ impl SegmentMap {
         self.file_len
     }
 
-    /// Claims `[start, start + len)` as `kind`. A zero-length claim is ignored. A range that
-    /// reaches past the end of the file is reported in
-    /// [`out_of_bounds`](SegmentReport::out_of_bounds) (as supplied); its in-bounds portion, if
-    /// any, still counts toward classification.
+    /// Claims `[start, start + len)` as `kind`, the end saturating at `u64::MAX`. A zero-length
+    /// claim is ignored. A range that reaches past the end of the file is reported in
+    /// [`out_of_bounds`](SegmentReport::out_of_bounds) (as supplied, up to that saturation); its
+    /// in-bounds portion, if any, still counts toward classification.
     pub fn claim(&mut self, start: u64, len: u64, kind: SpanKind, provenance: Claim) {
         if len == 0 {
             return;
         }
-        self.claims.push((Range { start, len }, kind, provenance));
+        self.claims
+            .push((start..start.saturating_add(len), kind, provenance));
     }
 
     /// Absorbs the claims of a map built over a [`Rebased`](crate::Rebased) view, shifting every
@@ -194,10 +178,7 @@ impl SegmentMap {
                 other => other,
             };
             self.claims.push((
-                Range {
-                    start: range.start.saturating_add(base),
-                    len: range.len,
-                },
+                range.start.saturating_add(base)..range.end.saturating_add(base),
                 kind,
                 provenance,
             ));
@@ -209,48 +190,41 @@ impl SegmentMap {
     /// claims — cross-checked against `reads` (the physical read ledger) when supplied.
     #[must_use]
     pub fn finish(self, reads: Option<&ReadLedger>) -> SegmentReport {
-        let mut in_bounds: Vec<(Range, SpanKind, Claim)> = Vec::new();
+        let mut in_bounds: Vec<(Range<u64>, SpanKind, Claim)> = Vec::new();
         let mut out_of_bounds: Vec<Segment> = Vec::new();
         for (range, kind, provenance) in self.claims {
-            if range.end() > self.file_len {
+            if range.end > self.file_len {
                 // Record the offending claim as supplied for diagnostics, and clamp the
                 // in-bounds part so the bytes that *were* valid still count.
-                out_of_bounds.push(Segment { range, kind });
                 if range.start < self.file_len {
-                    in_bounds.push((
-                        Range {
-                            start: range.start,
-                            len: self.file_len - range.start,
-                        },
-                        kind,
-                        provenance,
-                    ));
+                    in_bounds.push((range.start..self.file_len, kind, provenance));
                 }
+                out_of_bounds.push(Segment { range, kind });
             } else {
                 in_bounds.push((range, kind, provenance));
             }
         }
-        in_bounds.sort_by(|a, b| a.0.start.cmp(&b.0.start).then(a.0.end().cmp(&b.0.end())));
+        in_bounds.sort_by_key(|(range, _, _)| (range.start, range.end));
 
         let mut segments: Vec<Segment> = Vec::new();
         let mut conflicts: Vec<Conflict> = Vec::new();
         let mut shared: Vec<SharedSpan> = Vec::new();
         // The merged union of claimed bytes, for gap computation and the read-ledger subtract.
-        let mut covered: Vec<Range> = Vec::new();
+        let mut covered: Vec<Range<u64>> = Vec::new();
         for (i, (range, kind, _)) in in_bounds.iter().enumerate() {
             // Sorting makes identical extents consecutive: dedupe them as legal sharing.
             if i > 0 && in_bounds[i - 1].0 == *range {
                 match shared.last_mut() {
                     Some(s) if s.range == *range => s.kinds.push(*kind),
                     _ => shared.push(SharedSpan {
-                        range: *range,
+                        range: range.clone(),
                         kinds: vec![in_bounds[i - 1].1, *kind],
                     }),
                 }
                 continue;
             }
             if let Some(last) = covered.last_mut() {
-                if range.start < last.end() {
+                if range.start < last.end {
                     // Partial overlap: out-of-spec double-claim. Sorted iteration guarantees
                     // every earlier segment starts at or before `range.start` (so it always
                     // begins before `range` ends); overlap is purely whether it reaches
@@ -258,32 +232,31 @@ impl SegmentMap {
                     let a = segments
                         .iter()
                         .rev()
-                        .find(|s| s.range.end() > range.start)
-                        .copied()
+                        .find(|s| s.range.end > range.start)
+                        .cloned()
                         .unwrap_or(Segment {
-                            range: *last,
+                            range: last.clone(),
                             kind: *kind,
                         });
                     conflicts.push(Conflict {
                         a,
                         b: Segment {
-                            range: *range,
+                            range: range.clone(),
                             kind: *kind,
                         },
                     });
-                    let new_end = last.end().max(range.end());
-                    last.len = new_end - last.start;
-                } else if range.start == last.end() {
+                    last.end = last.end.max(range.end);
+                } else if range.start == last.end {
                     // Adjacent structures: extend the union without flagging anything.
-                    last.len = range.end() - last.start;
+                    last.end = range.end;
                 } else {
-                    covered.push(*range);
+                    covered.push(range.clone());
                 }
             } else {
-                covered.push(*range);
+                covered.push(range.clone());
             }
             segments.push(Segment {
-                range: *range,
+                range: range.clone(),
                 kind: *kind,
             });
         }
@@ -293,18 +266,12 @@ impl SegmentMap {
         let mut cursor = 0u64;
         for r in &covered {
             if r.start > cursor {
-                unclassified.push(Range {
-                    start: cursor,
-                    len: r.start - cursor,
-                });
+                unclassified.push(cursor..r.start);
             }
-            cursor = r.end();
+            cursor = r.end;
         }
         if cursor < self.file_len {
-            unclassified.push(Range {
-                start: cursor,
-                len: self.file_len - cursor,
-            });
+            unclassified.push(cursor..self.file_len);
         }
 
         // The dual-ledger cross-check: reads ⊆ claims, and Parsed claims ⊆ reads.
@@ -314,10 +281,10 @@ impl SegmentMap {
                 let unread = in_bounds
                     .iter()
                     .filter(|(range, _, provenance)| {
-                        *provenance == Claim::Parsed && !ledger.contains(*range)
+                        *provenance == Claim::Parsed && !ledger.contains(range)
                     })
                     .map(|(range, kind, _)| Segment {
-                        range: *range,
+                        range: range.clone(),
                         kind: *kind,
                     })
                     .collect();
@@ -349,7 +316,7 @@ pub struct SegmentReport {
     /// non-empty, segments may overlap.
     pub segments: Vec<Segment>,
     /// Bytes in no claim: interior gaps and any trailing run, sorted.
-    pub unclassified: Vec<Range>,
+    pub unclassified: Vec<Range<u64>>,
     /// Partially overlapping claims — out-of-spec double-claims.
     pub conflicts: Vec<Conflict>,
     /// Identical-extent multi-claims (legal TIFF value sharing) — informational.
@@ -358,7 +325,7 @@ pub struct SegmentReport {
     pub out_of_bounds: Vec<Segment>,
     /// Bytes physically read but never claimed — a **parser accounting defect**, not a file
     /// defect. Empty when no read ledger was supplied to [`SegmentMap::finish`].
-    pub unclaimed_reads: Vec<Range>,
+    pub unclaimed_reads: Vec<Range<u64>>,
     /// [`Claim::Parsed`] claims not fully covered by the read ledger — likewise a parser
     /// defect. Empty when no read ledger was supplied.
     pub unread_claims: Vec<Segment>,
@@ -380,7 +347,7 @@ impl SegmentReport {
     /// The number of unclassified bytes.
     #[must_use]
     pub fn unclassified_bytes(&self) -> u64 {
-        self.unclassified.iter().map(|r| r.len).sum()
+        self.unclassified.iter().map(|r| r.end - r.start).sum()
     }
 
     /// The offset one past the file header, when one was claimed — where a vendor preamble
@@ -389,7 +356,7 @@ impl SegmentReport {
         self.segments
             .iter()
             .find(|s| s.kind == SpanKind::Header)
-            .map(|s| s.range.end())
+            .map(|s| s.range.end)
     }
 
     /// Reclassifies word-alignment padding out of [`unclassified`](Self::unclassified) by
@@ -423,10 +390,10 @@ impl SegmentReport {
         let mut remaining = Vec::new();
         for range in std::mem::take(&mut self.unclassified) {
             let preamble_region =
-                Some(range.start) == header_end && directories.binary_search(&range.end()).is_ok();
-            let interior = range.end() % 2 == 0 && starts.binary_search(&range.end()).is_ok();
-            let at_eof = range.end() == self.file_len && range.len <= 1;
-            if !preamble_region && (interior || at_eof) && all_zero(src, range)? {
+                Some(range.start) == header_end && directories.binary_search(&range.end).is_ok();
+            let interior = range.end % 2 == 0 && starts.binary_search(&range.end).is_ok();
+            let at_eof = range.end == self.file_len && range.end - range.start <= 1;
+            if !preamble_region && (interior || at_eof) && all_zero(src, &range)? {
                 self.segments.push(Segment {
                     range,
                     kind: SpanKind::Padding,
@@ -436,7 +403,7 @@ impl SegmentReport {
             }
         }
         self.unclassified = remaining;
-        self.segments.sort_by_key(|s| (s.range.start, s.range.len));
+        self.segments.sort_by_key(|s| (s.range.start, s.range.end));
         Ok(())
     }
 
@@ -461,14 +428,14 @@ impl SegmentReport {
         for range in std::mem::take(&mut self.unclassified) {
             let kind = if Some(range.start) == header_end {
                 SpanKind::Preamble
-            } else if range.end() == self.file_len {
+            } else if range.end == self.file_len {
                 SpanKind::Trailer
             } else {
                 SpanKind::Interstitial
             };
             self.segments.push(Segment { range, kind });
         }
-        self.segments.sort_by_key(|s| (s.range.start, s.range.len));
+        self.segments.sort_by_key(|s| (s.range.start, s.range.end));
     }
 
     /// The spans [`classify_unclaimed`](Self::classify_unclaimed) named — every byte the file's
@@ -486,23 +453,26 @@ impl SegmentReport {
                     SpanKind::Preamble | SpanKind::Interstitial | SpanKind::Trailer
                 )
             })
-            .copied()
+            .cloned()
             .collect()
     }
 
     /// The total number of bytes [`unclaimed_spans`](Self::unclaimed_spans) covers.
     #[must_use]
     pub fn unclaimed_span_bytes(&self) -> u64 {
-        self.unclaimed_spans().iter().map(|s| s.range.len).sum()
+        self.unclaimed_spans()
+            .iter()
+            .map(|s| s.range.end - s.range.start)
+            .sum()
     }
 }
 
 /// Whether every byte of `range` in `src` is zero, read in bounded chunks.
-fn all_zero<S: ReadAt>(src: &mut S, range: Range) -> Result<bool> {
+fn all_zero<S: ReadAt>(src: &mut S, range: &Range<u64>) -> Result<bool> {
     /// Bytes per read. The buffer is a stack array, so this also bounds the frame.
     const CHUNK: usize = 4096;
     let mut buf = [0u8; CHUNK];
-    let end = range.end();
+    let end = range.end;
     // Stepping the range yields the chunk starts, so the range itself bounds the walk. A
     // hand-advanced cursor is bounded instead by its own arithmetic being right: `pos *= n`
     // never moves one that starts at zero, and the loop it drove could then be reported only
@@ -548,16 +518,13 @@ mod tests {
     fn out_of_order_claims_are_sorted() {
         let r = report(10, &[(4, 6), (0, 4)]);
         assert!(r.is_fully_classified());
-        assert_eq!(r.segments[0].range, Range { start: 0, len: 4 });
+        assert_eq!(r.segments[0].range, 0..4);
     }
 
     #[test]
     fn interior_gap_and_trailing_are_unclassified() {
         let r = report(20, &[(0, 5), (10, 6)]);
-        assert_eq!(
-            r.unclassified,
-            vec![Range { start: 5, len: 5 }, Range { start: 16, len: 4 }]
-        );
+        assert_eq!(r.unclassified, vec![5..10, 16..20]);
         assert!(!r.is_fully_classified());
         assert_eq!(r.unclassified_bytes(), 9);
     }
@@ -571,7 +538,7 @@ mod tests {
         let r = map.finish(None);
         assert!(r.conflicts.is_empty());
         assert_eq!(r.shared.len(), 1);
-        assert_eq!(r.shared[0].range, Range { start: 2, len: 8 });
+        assert_eq!(r.shared[0].range, 2..10);
         assert_eq!(r.shared[0].kinds.len(), 2);
         // Shared bytes count once; the report is still fully classified.
         assert!(r.is_fully_classified());
@@ -597,17 +564,11 @@ mod tests {
     fn merges_away_from_origin_have_exact_extents() {
         let r = report(20, &[(5, 6), (8, 6)]); // overlap on [8, 11)
         assert_eq!(r.conflicts.len(), 1);
-        assert_eq!(
-            r.unclassified,
-            vec![Range { start: 0, len: 5 }, Range { start: 14, len: 6 }]
-        );
+        assert_eq!(r.unclassified, vec![0..5, 14..20]);
 
         let r = report(20, &[(5, 5), (10, 5)]); // adjacent at 10
         assert!(r.conflicts.is_empty());
-        assert_eq!(
-            r.unclassified,
-            vec![Range { start: 0, len: 5 }, Range { start: 15, len: 5 }]
-        );
+        assert_eq!(r.unclassified, vec![0..5, 15..20]);
     }
 
     /// The conflict names the actual overlapped segment, not merely the union so far.
@@ -617,8 +578,8 @@ mod tests {
         // pick is distinguishable.
         let r = report(10, &[(0, 4), (4, 4), (6, 2)]);
         assert_eq!(r.conflicts.len(), 1);
-        assert_eq!(r.conflicts[0].a.range, Range { start: 4, len: 4 });
-        assert_eq!(r.conflicts[0].b.range, Range { start: 6, len: 2 });
+        assert_eq!(r.conflicts[0].a.range, 4..8);
+        assert_eq!(r.conflicts[0].b.range, 6..8);
     }
 
     /// The conflict skips an adjacent (non-overlapping) later segment and names the earlier
@@ -629,8 +590,8 @@ mod tests {
         // segment, merely *touches* offset 8 and must not be named.
         let r = report(20, &[(0, 10), (6, 2), (8, 4)]);
         assert_eq!(r.conflicts.len(), 2);
-        assert_eq!(r.conflicts[1].b.range, Range { start: 8, len: 4 });
-        assert_eq!(r.conflicts[1].a.range, Range { start: 0, len: 10 });
+        assert_eq!(r.conflicts[1].b.range, 8..12);
+        assert_eq!(r.conflicts[1].a.range, 0..10);
     }
 
     /// Two *distinct* shared extents produce two separate `SharedSpan`s, each accumulating only
@@ -654,8 +615,8 @@ mod tests {
     fn partial_overlap_is_a_conflict() {
         let r = report(10, &[(0, 6), (4, 6)]);
         assert_eq!(r.conflicts.len(), 1);
-        assert_eq!(r.conflicts[0].a.range, Range { start: 0, len: 6 });
-        assert_eq!(r.conflicts[0].b.range, Range { start: 4, len: 6 });
+        assert_eq!(r.conflicts[0].a.range, 0..6);
+        assert_eq!(r.conflicts[0].b.range, 4..10);
         assert!(!r.is_fully_classified());
         // The union still covers the file: nothing unclassified, but the conflict fails it.
         assert!(r.unclassified.is_empty());
@@ -672,12 +633,12 @@ mod tests {
     fn out_of_bounds_claim_is_recorded_and_clamped() {
         let r = report(10, &[(0, 8), (8, 6)]);
         assert_eq!(r.out_of_bounds.len(), 1);
-        assert_eq!(r.out_of_bounds[0].range, Range { start: 8, len: 6 });
+        assert_eq!(r.out_of_bounds[0].range, 8..14);
         // The in-bounds portion [8, 10) still counts toward classification — clamped exactly.
         assert!(r.unclassified.is_empty());
         assert!(
             r.segments.contains(&Segment {
-                range: Range { start: 8, len: 2 },
+                range: 8..10,
                 kind: seg(8, 6),
             }),
             "{:?}",
@@ -693,7 +654,7 @@ mod tests {
         let r = report(10, &[(10, 4)]);
         assert_eq!(r.out_of_bounds.len(), 1);
         assert!(r.segments.is_empty(), "{:?}", r.segments);
-        assert_eq!(r.unclassified, vec![Range { start: 0, len: 10 }]);
+        assert_eq!(r.unclassified, vec![0..10]);
     }
 
     #[test]
@@ -713,7 +674,7 @@ mod tests {
     #[test]
     fn empty_map_is_all_unclassified() {
         let r = report(10, &[]);
-        assert_eq!(r.unclassified, vec![Range { start: 0, len: 10 }]);
+        assert_eq!(r.unclassified, vec![0..10]);
         assert_eq!(r.unclassified_bytes(), 10);
     }
 
@@ -726,7 +687,7 @@ mod tests {
         ledger.record(0, 4); // the claimed read
         ledger.record(6, 2); // a read nothing claimed — a parser defect
         let r = map.finish(Some(&ledger));
-        assert_eq!(r.unclaimed_reads, vec![Range { start: 6, len: 2 }]);
+        assert_eq!(r.unclaimed_reads, vec![6..8]);
         assert!(r.unread_claims.is_empty());
         assert!(!r.is_fully_classified());
     }
@@ -744,7 +705,7 @@ mod tests {
         ledger.record(0, 4);
         let r = map.finish(Some(&ledger));
         assert_eq!(r.unread_claims.len(), 1);
-        assert_eq!(r.unread_claims[0].range, Range { start: 4, len: 4 });
+        assert_eq!(r.unread_claims[0].range, 4..8);
         assert!(r.unclaimed_reads.is_empty());
         assert!(!r.is_fully_classified());
     }
@@ -775,14 +736,14 @@ mod tests {
         // The zero byte at 7 (even end, before the value segment) became padding.
         assert!(
             r.segments.contains(&Segment {
-                range: Range { start: 7, len: 1 },
+                range: 7..8,
                 kind: SpanKind::Padding
             }),
             "segments: {:?}",
             r.segments
         );
         // The non-zero trailing junk stays unclassified.
-        assert_eq!(r.unclassified, vec![Range { start: 12, len: 2 }]);
+        assert_eq!(r.unclassified, vec![12..14]);
         assert!(!r.is_fully_classified());
     }
 
@@ -796,7 +757,7 @@ mod tests {
         let mut r = map.finish(None);
         let mut src = nonzero;
         r.classify_padding(&mut src).expect("classify");
-        assert_eq!(r.unclassified, vec![Range { start: 7, len: 1 }]);
+        assert_eq!(r.unclassified, vec![7..8]);
 
         // An all-zero gap ending on an odd boundary is not word alignment: stays unclassified.
         let odd_end: &[u8] = &[1, 1, 1, 1, 1, 1, 0, 0, 0, 2, 2, 2];
@@ -806,7 +767,7 @@ mod tests {
         let mut r = map.finish(None);
         let mut src = odd_end;
         r.classify_padding(&mut src).expect("classify");
-        assert_eq!(r.unclassified, vec![Range { start: 6, len: 3 }]);
+        assert_eq!(r.unclassified, vec![6..9]);
     }
 
     /// The header/first-directory gap is the preamble region: an all-zero run there is a
@@ -827,14 +788,14 @@ mod tests {
         r.classify_padding(&mut src).expect("classify");
         assert_eq!(
             r.unclassified,
-            vec![Range { start: 4, len: 4 }],
+            vec![4..8],
             "the preamble region is not padding: {r:?}"
         );
         r.classify_unclaimed();
         assert_eq!(
             r.unclaimed_spans(),
             vec![Segment {
-                range: Range { start: 4, len: 4 },
+                range: 4..8,
                 kind: SpanKind::Preamble,
             }]
         );
@@ -849,7 +810,7 @@ mod tests {
         r.classify_padding(&mut src).expect("classify");
         assert!(r.is_fully_classified(), "report: {r:?}");
         assert!(r.segments.contains(&Segment {
-            range: Range { start: 4, len: 4 },
+            range: 4..8,
             kind: SpanKind::Padding,
         }));
 
@@ -865,7 +826,7 @@ mod tests {
         r.classify_padding(&mut src).expect("classify");
         assert!(r.is_fully_classified(), "report: {r:?}");
         assert!(r.segments.contains(&Segment {
-            range: Range { start: 6, len: 2 },
+            range: 6..8,
             kind: SpanKind::Padding,
         }));
     }
@@ -893,15 +854,15 @@ mod tests {
             r.unclaimed_spans(),
             vec![
                 Segment {
-                    range: Range { start: 4, len: 2 },
+                    range: 4..6,
                     kind: SpanKind::Preamble
                 },
                 Segment {
-                    range: Range { start: 10, len: 2 },
+                    range: 10..12,
                     kind: SpanKind::Interstitial
                 },
                 Segment {
-                    range: Range { start: 16, len: 4 },
+                    range: 16..20,
                     kind: SpanKind::Trailer
                 },
             ]
@@ -961,7 +922,7 @@ mod tests {
         let mut r = map.finish(None);
         let mut src = long_tail;
         r.classify_padding(&mut src).expect("classify");
-        assert_eq!(r.unclassified, vec![Range { start: 4, len: 2 }]);
+        assert_eq!(r.unclassified, vec![4..6]);
     }
 
     /// The degenerate whole-file case: a 1-byte all-zero file with no claims classifies as a
@@ -971,14 +932,14 @@ mod tests {
     fn classify_padding_handles_a_zero_claim_file() {
         let data: &[u8] = &[0];
         let mut r = SegmentMap::new(1).finish(None);
-        assert_eq!(r.unclassified, vec![Range { start: 0, len: 1 }]);
+        assert_eq!(r.unclassified, vec![0..1]);
         let mut src = data;
         r.classify_padding(&mut src).expect("classify");
         assert!(r.is_fully_classified(), "report: {r:?}");
         assert_eq!(
             r.segments,
             vec![Segment {
-                range: Range { start: 0, len: 1 },
+                range: 0..1,
                 kind: SpanKind::Padding,
             }]
         );

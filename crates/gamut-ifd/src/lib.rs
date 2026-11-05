@@ -17,7 +17,7 @@
 //! back, laying out the IFD chain and out-of-line value pool with the two-pass offset machinery.
 //! A codec storing strips or tiles after the tree hands them to [`write_with_blocks`], and a
 //! decoder resolves them back with [`extent_slices`] and [`rows_per_strip`].
-//! [`read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
+//! [`IfdReader::read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
 //! well-known structural ones live in [`tags`]); [`resolve_subtree`] runs the same guarded walk
 //! over **one** directory a caller already holds, scoped per level by a [`SubtreeScope`]. The
 //! same [`tags`] module holds the shared tag registry — each tag TIFF 6.0 and DNG 1.7.1.0 define,
@@ -25,8 +25,8 @@
 //! gamut-exif read rather than each keeping a copy, and the value codes of the `Compression`,
 //! `PhotometricInterpretation`, `Predictor` and `SampleFormat` tags. The
 //! one cross-format payload a TIFF-based file carries by tag — the C2PA manifest store — has its
-//! placement rule and exclusion ranges stated once, in [`c2pa`], for every TIFF-based codec to
-//! share. For strict archival decoding, [`audit`] classifies **every byte** of a stream into typed
+//! placement rule and exclusion ranges stated once, for every TIFF-based codec to share (see
+//! [C2PA](#c2pa-manifest-store) below). For strict archival decoding, [`audit`] classifies **every byte** of a stream into typed
 //! segments ([`SegmentReport`]) under a dual-ledger cross-check: a [`Tracked`] source records what
 //! the parse physically read, and the claims must match — byte accounting as a machine-checked
 //! proof, not a promise (issue #263). A codec layers its own tag knowledge on top and reports it
@@ -63,6 +63,19 @@
 //! assert_eq!(value, Value::Ascii("vendor mode".to_owned()));
 //! ```
 //!
+//! ## C2PA manifest store
+//!
+//! C2PA 2.4 §A.3.6 embeds a manifest store in a TIFF-based file as the `UNDEFINED` value of tag
+//! 52545 ([`C2PA_MANIFEST_STORE`]) in the **last IFD of the main chain**, its bytes at the end of
+//! the file so a store of another size moves no other offset; §18.5.5 has a signer hash around
+//! two ranges, the store and its entry's `count` field ([`C2paExclusions`]). The writer side is
+//! [`reserve_c2pa_entry`] (a one-byte placeholder in the directory that will be written last)
+//! then [`append_c2pa_store`] (the store appended and the entry re-pointed); the reader side is
+//! [`c2pa_exclusions`] (the ranges a signer needs, or absence) and [`c2pa_summary`] (a
+//! non-validating report that also lists every entry that yields no store, and why). The store
+//! is opaque bytes throughout: nothing here parses JUMBF or reaches a validity verdict
+//! ([`C2PA_NOT_VALIDATED`]).
+//!
 //! ## BigTIFF
 //!
 //! The `bigtiff` cargo feature adds BigTIFF support (`references/tiff/bigtiff.html`): the
@@ -90,7 +103,7 @@ struct ReadmeDoctests;
 mod audit;
 mod blocks;
 mod byte_order;
-pub mod c2pa;
+mod c2pa;
 mod entry;
 mod extent;
 // Executable laws over this crate's own types, shared by the property tests and the fuzz tier
@@ -112,23 +125,28 @@ mod value;
 mod writer;
 
 pub use audit::{
-    Anomaly, Audit, AuditFinding, AuditSpec, Auditor, DeconstructReport, Severity, SkipReason,
-    StandardAuditSpec, UnknownFieldType, UnknownTag, audit, standard_data_extents,
+    Anomaly, Audit, AuditFinding, AuditOutcome, AuditSpec, Auditor, DeconstructReport, Severity,
+    SkipReason, StandardAuditSpec, UnknownFieldType, UnknownTag, audit, standard_data_extents,
 };
 pub use blocks::{BlockRun, PlacedRun, write_with_blocks};
 pub use byte_order::ByteOrder;
+pub use c2pa::{
+    C2PA_MANIFEST_STORE, C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary,
+    C2paUnreadEntry, C2paUnreadReason, append_c2pa_store, c2pa_exclusions, c2pa_summary,
+    reserve_c2pa_entry,
+};
 pub use entry::{Field, Ifd, SubIfd, Variant};
 pub use extent::{ZeroRowsPerStrip, extent_slices, rows_per_strip};
 pub use reader::{
-    SubtreeScope, TiffFile, read, read_audited, read_header, read_ifd_at, read_tree,
+    AuditedFile, Header, SubtreeScope, TiffFile, read, read_audited, read_header, read_ifd_at,
     resolve_subtree,
 };
 pub use segment::{
-    Claim, Conflict, DataLabel, Range, Segment, SegmentMap, SegmentReport, SharedSpan, SpanKind,
+    Claim, Conflict, DataLabel, Segment, SegmentMap, SegmentReport, SharedSpan, SpanKind,
 };
 pub use source::{ReadAt, Rebased, StreamSource};
-pub use stream::{IfdChain, IfdReader, RawEntry, RawIfd};
-pub use track::{ReadLedger, Tracked};
+pub use stream::{ChainedIfd, DecodedIfd, IfdChain, IfdReader, RawEntry, RawIfd};
+pub use track::{ReadLedger, Tracked, TrackedParts};
 pub use types::FieldType;
 pub use value::{UnknownValue, Value};
-pub use writer::{WriteOptions, align_word, write, write_with};
+pub use writer::{WriteOptions, WriteOutput, align_word, write, write_with};

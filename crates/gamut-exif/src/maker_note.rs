@@ -287,7 +287,7 @@ pub(crate) fn decode_lenient<S: ReadAt>(
     reader: &mut IfdReader<S>,
     raw: &RawIfd,
 ) -> Result<(Ifd, Vec<u16>)> {
-    let (ifd, findings) = reader.decode_ifd_lenient(raw)?;
+    let gamut_ifd::DecodedIfd { ifd, findings } = reader.decode_ifd_lenient(raw)?;
     let unreadable = findings
         .iter()
         .filter_map(|finding| match finding {
@@ -630,7 +630,11 @@ fn nikon(note: &[u8], outer: ByteOrder) -> Option<MakerNoteLayout> {
             OffsetBase::TiffHeader,
         ));
     }
-    let Some(Ok((order, Variant::Classic, first_ifd))) = note.get(10..).map(gamut_ifd::read_header)
+    let Some(Ok(gamut_ifd::Header {
+        order,
+        variant: Variant::Classic,
+        first_ifd,
+    })) = note.get(10..).map(gamut_ifd::read_header)
     else {
         return Some(MakerNoteLayout::new(
             D::Nikon2,

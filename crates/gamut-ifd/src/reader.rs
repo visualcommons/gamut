@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use gamut_core::{Error, Result};
 
-use crate::{ByteOrder, Ifd, Value, Variant};
+use crate::{ByteOrder, Ifd, ReadAt, Value, Variant};
 
 /// A parsed TIFF/IFD stream: its byte order, container variant, and the chain of Image File
 /// Directories.
@@ -79,7 +79,7 @@ impl ChainGuard {
 /// than the top-level chain guard already admits.
 ///
 /// What it stops accepting: a file whose followed pointers reach more than 65,536 distinct
-/// sub-IFDs in one walk. [`read_tree`] shares one walk across every page, so that includes a
+/// sub-IFDs in one walk. [`read_tree`](crate::IfdReader::read_tree) shares one walk across every page, so that includes a
 /// many-page pyramidal TIFF whose `SubIFDs` reduced-resolution levels total more than 65,536;
 /// [`resolve_subtree`] budgets each call separately.
 pub(crate) const MAX_SUBIFDS: usize = MAX_IFDS;
@@ -163,8 +163,19 @@ pub(crate) fn offset_at(
     }
 }
 
-/// Parses the image file header, returning the byte order, the container variant, and the offset
-/// of the first IFD. The header is 8 bytes for classic TIFF and 16 bytes for BigTIFF.
+/// A parsed image file header: what [`read_header`] returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Header {
+    /// The byte order the stream is written in (the `II`/`MM` mark).
+    pub order: ByteOrder,
+    /// Classic TIFF (magic `42`) or BigTIFF (magic `43`).
+    pub variant: Variant,
+    /// The file offset of the first IFD.
+    pub first_ifd: u64,
+}
+
+/// Parses the image file header: the byte order, the container variant, and the offset of the
+/// first IFD. The header is 8 bytes for classic TIFF and 16 bytes for BigTIFF.
 ///
 /// Without the `bigtiff` feature a BigTIFF magic number (`43`) is rejected as an unknown magic.
 ///
@@ -173,7 +184,7 @@ pub(crate) fn offset_at(
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
 /// byte-order mark, magic number, or (for BigTIFF) the
 /// fixed offset-size / reserved fields are not valid.
-pub fn read_header(data: &[u8]) -> Result<(ByteOrder, Variant, u64)> {
+pub fn read_header(data: &[u8]) -> Result<Header> {
     let head = data
         .get(..8)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: header too short"))?;
@@ -188,7 +199,11 @@ pub fn read_header(data: &[u8]) -> Result<(ByteOrder, Variant, u64)> {
         }
     };
     match order.u16([head[2], head[3]]) {
-        42 => Ok((order, Variant::Classic, u64::from(u32_at(data, 4, order)?))),
+        42 => Ok(Header {
+            order,
+            variant: Variant::Classic,
+            first_ifd: u64::from(u32_at(data, 4, order)?),
+        }),
         #[cfg(feature = "bigtiff")]
         43 => {
             // BigTIFF: bytes 4-5 are the offset bytesize (always 8), bytes 6-7 are reserved (0),
@@ -205,7 +220,11 @@ pub fn read_header(data: &[u8]) -> Result<(ByteOrder, Variant, u64)> {
                     "TIFF: BigTIFF reserved field must be 0",
                 ));
             }
-            Ok((order, Variant::Big, u64_at(data, 8, order)?))
+            Ok(Header {
+                order,
+                variant: Variant::Big,
+                first_ifd: u64_at(data, 8, order)?,
+            })
         }
         _ => Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
@@ -247,7 +266,7 @@ pub fn read(data: &[u8]) -> Result<TiffFile> {
     crate::IfdReader::open(data)?.read_file()
 }
 
-/// Which sub-IFD pointer tags a subtree walk ([`resolve_subtree`], [`read_tree`]) follows at each
+/// Which sub-IFD pointer tags a subtree walk ([`resolve_subtree`], [`read_tree`](crate::IfdReader::read_tree)) follows at each
 /// level, and how many levels below the starting directory it may descend.
 ///
 /// The walk starts at a **root** directory (depth 0) and follows `root_tags` there, and
@@ -255,7 +274,7 @@ pub fn read(data: &[u8]) -> Result<TiffFile> {
 /// two levels can answer opposite questions: a codec reading one page's metadata may want to
 /// follow only `ExifIFD` at the page itself (a `SubIFDs` target it throws away must not be able to
 /// fail it) yet every standard pointer inside the Exif directory (a pointer left unresolved there
-/// is a stale absolute offset in a directory it hands back). [`read_tree`] uses one list for both.
+/// is a stale absolute offset in a directory it hands back). [`read_tree`](crate::IfdReader::read_tree) uses one list for both.
 ///
 /// A directory nested deeper than [`max_depth`](Self::max_depth) is refused, never walked: the
 /// bound is what stops a few-kilobyte hostile file from nesting enough directories to exhaust the
@@ -343,43 +362,18 @@ pub(crate) fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
     }
 }
 
-/// Like [`read`], but additionally follows the given sub-IFD **pointer tags**, reconstructing the
-/// directory tree that [`write`](crate::write) flattens: each pointer field is replaced by a
-/// [`sub_ifds`](Ifd::sub_ifds) group holding its parsed children, recursively.
-///
-/// The caller names the pointer tags because the structure alone cannot: which `LONG` tags hold
-/// directory offsets is tag *semantics* (e.g. `SubIFDs` 330, `ExifIFD` 34665, `GPSInfo` 34853,
-/// `Interoperability` 40965), which lives in the consuming codec. A named tag whose value is not
-/// an offset array (`LONG`, or BigTIFF `LONG8`/`IFD8`) is left in place as a regular field.
-///
-/// This is [`write`](crate::write)'s inverse: `read_tree(&write(&file)?, tags)? == file` for any
-/// tree whose pointer tags are all named in `tags`. For per-pointer control (e.g. tolerating a
-/// malformed child), follow pointers manually with [`read_ifd_at`].
-///
-/// # Errors
-///
-/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
-/// same conditions as [`read`], or if the pointer graph
-/// is not a tree: a repeated or self-referential child offset, or nesting deeper than 16 levels
-/// ([`SubtreeScope::MAX_DEPTH`] below each page); or if the pointers reach more than 65,536
-/// sub-IFDs in all, counted across every page (the walk's directory budget, which bounds what a
-/// hostile pointer array can make the read parse).
-pub fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
-    crate::IfdReader::open(data)?.read_tree(pointer_tags)
-}
-
 /// Resolves the sub-IFD pointers of **one directory's subtree**: each pointer field `scope` names
 /// in `ifd`, and recursively in the children it reaches, is replaced by a
-/// [`sub_ifds`](Ifd::sub_ifds) group holding the parsed children — what [`read_tree`] does for
+/// [`sub_ifds`](Ifd::sub_ifds) group holding the parsed children — what [`read_tree`](crate::IfdReader::read_tree) does for
 /// every page of a file, applied to a single directory a caller already holds.
 ///
-/// That scoping is the point. [`read_tree`] resolves its list at every node of every page, so a
+/// That scoping is the point. [`read_tree`](crate::IfdReader::read_tree) resolves its list at every node of every page, so a
 /// dangling pointer on a page the caller discards fails the whole read; this walks only the
 /// subtree below `ifd`, with a per-level tag list and depth bound ([`SubtreeScope`]).
 ///
 /// `fetch` parses the directory at a file offset, so the walk serves any source: a closure over
 /// [`read_ifd_at`] for a slice, or over [`IfdReader`](crate::IfdReader) for a stream. The guards
-/// are the ones [`read_tree`] uses — they exist once — and apply to this call's walk: a cycle, two
+/// are the ones [`read_tree`](crate::IfdReader::read_tree) uses — they exist once — and apply to this call's walk: a cycle, two
 /// pointers naming one directory, or nesting past the scope's depth bound fails rather than loops.
 ///
 /// ```
@@ -416,7 +410,7 @@ pub fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
 /// pointers in the subtree name one directory (including a
 /// cycle back to a visited one), a directory sits deeper than
 /// [`max_depth`](SubtreeScope::max_depth), or the subtree holds more than 65,536 sub-IFDs (the
-/// budget each call walks under, the same one [`read_tree`] applies); and propagates any error
+/// budget each call walks under, the same one [`read_tree`](crate::IfdReader::read_tree) applies); and propagates any error
 /// `fetch` returns for a pointer target unchanged. On error `ifd` may be partially resolved.
 pub fn resolve_subtree(
     ifd: &mut Ifd,
@@ -478,40 +472,81 @@ pub(crate) fn resolve_pointers_with(
     Ok(())
 }
 
+/// What [`read_audited`] returns: the parse and the byte-level report that proves what it read.
+#[derive(Debug, Clone)]
+pub struct AuditedFile {
+    /// The parsed stream, exactly as [`read`] (or [`IfdReader::read_file`](crate::IfdReader::read_file))
+    /// returns it.
+    pub file: TiffFile,
+    /// The dual-ledger-checked accounting of the header and top-level chain.
+    pub report: crate::SegmentReport,
+}
+
 /// Like [`read`], but returns a dual-ledger-checked [`SegmentReport`](crate::SegmentReport)
 /// alongside the parse: the whole file is read through a [`Tracked`](crate::Tracked) source,
 /// the parser's typed claims are collected into a [`SegmentMap`](crate::SegmentMap), and the
 /// two are cross-checked — so the report *proves* what the parse touched.
 ///
+/// It takes any [`ReadAt`](crate::ReadAt) source, so a slice (`&bytes[..]`), a
+/// [`StreamSource`](crate::StreamSource) and a [`Rebased`](crate::Rebased) view are audited by the
+/// one reader the slice and streaming paths share.
+///
+/// ```
+/// use gamut_ifd::{ByteOrder, Ifd, StreamSource, TiffFile, Value, Variant, read_audited, write};
+///
+/// let mut ifd = Ifd::new();
+/// ifd.set(256, Value::Short(vec![640]));
+/// let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
+/// let bytes = write(&file).unwrap();
+/// let from_slice = read_audited(&bytes[..]).unwrap();
+/// let from_stream = read_audited(StreamSource::new(std::io::Cursor::new(&bytes))).unwrap();
+/// assert_eq!(from_slice.file, from_stream.file);
+/// assert_eq!(from_slice.report, from_stream.report);
+/// assert!(from_slice.report.is_fully_classified());
+/// ```
+///
 /// This audits the header and the **top-level chain** only; sub-IFDs a codec follows, its
 /// strip/tile data extents, and padding classification are the codec-level audit's job (each
 /// sub-IFD via [`IfdReader::read_ifd_at_audited`](crate::IfdReader::read_ifd_at_audited) over
-/// the same map).
+/// the same map, or the whole walk via [`audit`](crate::audit)).
 ///
 /// # Errors
 ///
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
-/// same conditions as [`read`].
-pub fn read_audited(data: &[u8]) -> Result<(TiffFile, crate::SegmentReport)> {
-    let mut tracked = crate::Tracked::new(data);
-    let mut map = crate::SegmentMap::new(data.len() as u64);
+/// same conditions as [`read`], or an [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the
+/// source fails.
+pub fn read_audited<S: ReadAt>(source: S) -> Result<AuditedFile> {
+    let mut tracked = crate::Tracked::new(source);
+    let mut map = crate::SegmentMap::new(tracked.len()?);
     let file = crate::IfdReader::open(&mut tracked)?.read_file_audited(&mut map)?;
-    Ok((file, map.finish(Some(tracked.ledger()))))
+    Ok(AuditedFile {
+        file,
+        report: map.finish(Some(tracked.ledger())),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The sub-IFD tree walk these tests pin, over a whole in-memory file.
+    fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
+        crate::IfdReader::open(data)?.read_tree(pointer_tags)
+    }
+
     #[test]
     fn rejects_bad_header() {
         assert!(read_header(b"\x49\x49").is_err()); // too short
         assert!(read_header(b"XX\x2a\x00\x08\x00\x00\x00").is_err()); // bad BOM
         assert!(read_header(b"II\x00\x00\x08\x00\x00\x00").is_err()); // bad magic
-        let (order, variant, first) = read_header(b"II\x2a\x00\x08\x00\x00\x00").expect("ok");
-        assert_eq!(order, ByteOrder::LittleEndian);
-        assert_eq!(variant, Variant::Classic);
-        assert_eq!(first, 8);
+        assert_eq!(
+            read_header(b"II\x2a\x00\x08\x00\x00\x00").expect("ok"),
+            Header {
+                order: ByteOrder::LittleEndian,
+                variant: Variant::Classic,
+                first_ifd: 8,
+            }
+        );
     }
 
     #[cfg(feature = "bigtiff")]
@@ -519,10 +554,14 @@ mod tests {
     fn parses_bigtiff_header() {
         // II, magic 43, offset-size 8, reserved 0, then an 8-byte first-IFD offset of 16.
         let head = b"II\x2b\x00\x08\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00";
-        let (order, variant, first) = read_header(head).expect("ok");
-        assert_eq!(order, ByteOrder::LittleEndian);
-        assert_eq!(variant, Variant::Big);
-        assert_eq!(first, 16);
+        assert_eq!(
+            read_header(head).expect("ok"),
+            Header {
+                order: ByteOrder::LittleEndian,
+                variant: Variant::Big,
+                first_ifd: 16,
+            }
+        );
         // The fixed BigTIFF offset-size (8) and reserved (0) fields are validated.
         assert!(
             read_header(b"II\x2b\x00\x04\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00").is_err()
@@ -582,7 +621,10 @@ mod tests {
             ifds: vec![even_value_ifd()],
         };
         let bytes = crate::write(&file).expect("write");
-        let (parsed, report) = read_audited(&bytes).expect("read");
+        let AuditedFile {
+            file: parsed,
+            report,
+        } = read_audited(&bytes[..]).expect("read");
         // The audited reader returns exactly what the plain reader would.
         assert_eq!(parsed, file);
         assert!(report.is_fully_classified(), "report: {report:?}");
@@ -614,7 +656,10 @@ mod tests {
             0xde, 0xad, 0xbe, 0xef, // value/offset word (opaque)
             0x00, 0x00, 0x00, 0x00, // next IFD = 0
         ];
-        let (parsed, report) = read_audited(&data).expect("read");
+        let AuditedFile {
+            file: parsed,
+            report,
+        } = read_audited(&data[..]).expect("read");
         // The entry is preserved, not skipped: the raw record survives in the Ifd.
         assert_eq!(parsed.ifds[0].fields().len(), 1);
         let Some(Value::Unknown(u)) = parsed.ifds[0].get(0x9999) else {
@@ -908,7 +953,7 @@ mod tests {
         (result, root, fetched)
     }
 
-    /// Drift guard: the public `# Errors` docs of `read_tree`/`resolve_subtree` and
+    /// Drift guard: the public `# Errors` docs of `IfdReader::read_tree`/`resolve_subtree` and
     /// `SkipReason::OverBudget` state the budget as 65,536, and the mutation gate cannot alter a
     /// `const`, so this is what keeps a change to `MAX_IFDS` from silently falsifying them.
     #[test]
@@ -969,10 +1014,10 @@ mod tests {
         let mut reader = crate::IfdReader::open(&bytes[..]).expect("open");
         let parsed = reader.read_file_audited(&mut map).expect("root");
         let child_off = parsed.ifds[0].get_u32(330).expect("SubIFDs pointer");
-        let (_child, next) = reader
+        let child = reader
             .read_ifd_at_audited(child_off.into(), &mut map)
             .expect("child");
-        assert_eq!(next, 0);
+        assert_eq!(child.next, 0);
         let report = map.finish(None);
         assert!(report.is_fully_classified(), "report: {report:?}");
     }

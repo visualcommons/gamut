@@ -103,7 +103,7 @@ pub struct Field {
 /// GPS sub-directories. [`write`](crate::write) lays the children out and synthesises the pointer
 /// field, patching it with their absolute offset(s). The generic [`read`](crate::read) does **not**
 /// follow these — it cannot know which arbitrary `LONG` tags are offsets — so a decoder names the
-/// pointer tags to [`read_tree`](crate::read_tree) (which rebuilds the groups exactly as written),
+/// pointer tags to [`read_tree`](crate::IfdReader::read_tree) (which rebuilds the groups exactly as written),
 /// or follows a pointer by hand with [`read_ifd_at`](crate::read_ifd_at).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubIfd {
@@ -214,7 +214,7 @@ impl Ifd {
 
     /// Returns the directory's sub-IFD pointer groups (see [`SubIfd`]), sorted by ascending
     /// pointer tag — one group per tag, like [`fields`](Self::fields), so a reconstructed tree
-    /// ([`read_tree`](crate::read_tree)) compares equal to the one that was written regardless of
+    /// ([`read_tree`](crate::IfdReader::read_tree)) compares equal to the one that was written regardless of
     /// attachment order.
     #[must_use]
     pub fn sub_ifds(&self) -> &[SubIfd] {

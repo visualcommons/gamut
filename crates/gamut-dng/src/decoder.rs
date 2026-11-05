@@ -9,11 +9,11 @@ use std::cell::RefCell;
 use std::slice;
 
 use gamut_core::{Dimensions, Error, Result};
-use gamut_ifd::c2pa::{self, C2paExclusions};
 use gamut_ifd::tags::STANDARD_POINTER_TAGS;
 use gamut_ifd::{
-    ByteOrder, Ifd, IfdReader, SubtreeScope, TiffFile, Value, Variant, ZeroRowsPerStrip,
-    extent_slices, read, read_ifd_at, resolve_subtree, rows_per_strip,
+    ByteOrder, C2PA_MANIFEST_STORE, C2paExclusions, Ifd, IfdReader, SubtreeScope, TiffFile, Value,
+    Variant, ZeroRowsPerStrip, c2pa_exclusions, extent_slices, read, read_ifd_at, resolve_subtree,
+    rows_per_strip,
 };
 use gamut_metadata::exif::Exif;
 
@@ -302,7 +302,7 @@ pub struct DecodedDng {
     pub sub_ifd_extra: Vec<SubIfdExtra>,
     /// Where the C2PA manifest store in [`metadata.c2pa`](DngMetadata::c2pa) sits in the file:
     /// the two ranges a `c2pa.hash.data` binding excludes (C2PA 2.4 §18.5.5), located by
-    /// [`gamut_ifd::c2pa::locate`] in the last IFD of the main chain (§A.3.6). `Some` exactly
+    /// [`gamut_ifd::c2pa_exclusions`] in the last IFD of the main chain (§A.3.6). `Some` exactly
     /// when the store is; a `C2PA` tag of a type other than `UNDEFINED` is not a store and stays
     /// in the verbatim channel of the directory that holds it — [`ifd0_extra`](Self::ifd0_extra)
     /// when that is IFD 0, [`trailing_extra`](Self::trailing_extra) when it is a trailing
@@ -462,7 +462,7 @@ impl DngDecoder {
         // the two surfaces cannot disagree about whether the file has a store: one rule, applied
         // once. (Reading the bytes independently is what let a duplicated entry report bytes
         // from the eager `Ifd`, which keeps the last duplicate, while the ranges reported none.)
-        let c2pa_exclusions = c2pa::locate(data)?;
+        let c2pa_exclusions = c2pa_exclusions(data)?;
         let metadata = decode_metadata(
             ifd0,
             &tracked[last_main],
@@ -579,7 +579,7 @@ impl DngDecoder {
 ///
 /// The store is taken as the `UNDEFINED` bytes C2PA 2.4 §A.3.6 mandates, verbatim — the file's
 /// byte order does not apply to them — and only when `located` says
-/// [`gamut_ifd::c2pa::locate`] recognised a store in this file. That flag is the *whole*
+/// [`gamut_ifd::c2pa_exclusions`] recognised a store in this file. That flag is the *whole*
 /// admission rule (type, length, uniqueness, placement), so this cannot disagree with
 /// [`DecodedDng::c2pa_exclusions`]: bytes and ranges are `Some` together or neither is.
 ///
@@ -595,10 +595,10 @@ fn decode_metadata(
     order: ByteOrder,
     variant: Variant,
 ) -> DngMetadata {
-    let c2pa = match store_ifd.get(c2pa::C2PA_MANIFEST_STORE) {
+    let c2pa = match store_ifd.get(C2PA_MANIFEST_STORE) {
         Some(Value::Undefined(store)) if located => Some(store.clone()),
         Some(_) => {
-            store_ifd.untouch(c2pa::C2PA_MANIFEST_STORE);
+            store_ifd.untouch(C2PA_MANIFEST_STORE);
             None
         }
         None => None,

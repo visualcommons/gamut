@@ -11,7 +11,8 @@
 //!
 //! The C2PA store is the one carrier with a placement rule of its own (C2PA 2.4 §A.3.6: the
 //! last main IFD, at the end of the file) and a signer's exclusion contract (§18.5.5); both are
-//! [`gamut_ifd::c2pa`]'s, and the encoder applies them — see
+//! gamut-ifd's ([`gamut_ifd::append_c2pa_store`], [`gamut_ifd::C2paExclusions`]), and the
+//! encoder applies them — see
 //! [`DngEncoder::encode_with_report`](crate::DngEncoder::encode_with_report).
 
 use gamut_core::{Error, Result};
@@ -70,7 +71,7 @@ pub struct DngMetadata {
     /// An ICC profile, stored in the `ICCProfile` tag (34675), verbatim.
     pub icc: Option<Vec<u8>>,
     /// A C2PA manifest store, stored in the `C2PA` tag
-    /// ([`gamut_ifd::c2pa::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`), verbatim.
+    /// ([`gamut_ifd::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`), verbatim.
     ///
     /// **Opaque, and bound to one exact file.** A manifest store is a signed hash over the
     /// bytes *around* it (C2PA 2.4 §18.5), so the only store valid here is one an external
@@ -185,7 +186,7 @@ impl DngMetadata {
     ///
     /// The C2PA store is deliberately **not** written here: its value must land at the end of
     /// the file (C2PA 2.4 §A.3.6), after the image data, which only the encoder can arrange once
-    /// the rest of the file exists ([`gamut_ifd::c2pa::append_store`]).
+    /// the rest of the file exists ([`gamut_ifd::append_c2pa_store`]).
     pub(crate) fn apply(&self, ifd0: &mut Ifd) -> Option<Ifd> {
         if let Some(xmp) = &self.xmp {
             ifd0.set(tags::XMP, Value::Byte(xmp.clone()));
@@ -208,14 +209,14 @@ impl DngMetadata {
 }
 
 /// The pointer tags [`DngRewrite::open`](crate::DngRewrite::open) resolves inside the Exif
-/// subtree: every standard one, because it hands [`gamut_ifd::read_tree`] the flat
+/// subtree: every standard one, because it hands [`gamut_ifd::IfdReader::read_tree`] the flat
 /// [`STANDARD_POINTER_TAGS`](gamut_ifd::tags::STANDARD_POINTER_TAGS) list, which that reader
 /// resolves **at every node** — the Exif directory and anything nested in it included.
 const EXIF_SUBTREE_POINTER_TAGS: &[u16] = gamut_ifd::tags::STANDARD_POINTER_TAGS;
 
 /// The on-disk field-type codes that make a directory entry a sub-IFD pointer to the reader:
 /// `LONG` (4), the typed `IFD` (13) of TIFF Technical Note 1, and BigTIFF's `LONG8` (16) /
-/// `IFD8` (18) — the set [`gamut_ifd::read_tree`] follows.
+/// `IFD8` (18) — the set [`gamut_ifd::IfdReader::read_tree`] follows.
 ///
 /// Stated as **codes** rather than as [`Value`] variants, because the reader classifies an entry
 /// by the code it parses, and the code is the one discriminator that survives the write/read
@@ -363,7 +364,7 @@ mod tests {
         );
         assert!(ifd.get(tags::ICC_PROFILE).is_some());
         // The store is the encoder's to place, so `apply` leaves the directory without it.
-        assert!(ifd.get(gamut_ifd::c2pa::C2PA_MANIFEST_STORE).is_none());
+        assert!(ifd.get(gamut_ifd::C2PA_MANIFEST_STORE).is_none());
         assert_eq!(
             written.get(tags::ISO_SPEED_RATINGS),
             Some(&Value::Short(vec![400]))

@@ -22,8 +22,8 @@
 //! to surface what is present, not to judge it.
 
 use gamut_ifd::{
-    ByteOrder, Ifd, TiffFile, Value, Variant, WriteOptions, align_word, tags as ifd_tags, write,
-    write_with,
+    ByteOrder, Ifd, TiffFile, Value, Variant, WriteOptions, WriteOutput, align_word,
+    tags as ifd_tags, write, write_with,
 };
 
 use crate::error::{ExifError, Result};
@@ -284,7 +284,7 @@ fn write_with_thumbnail(
 fn write_tree(order: ByteOrder, ifds: Vec<Ifd>, pin: Option<u64>) -> Result<Vec<u8>> {
     let file = tiff_file(order, ifds);
     if let Some(at) = pin
-        && let Ok((bytes, _map)) = write_with(
+        && let Ok(WriteOutput { bytes, .. }) = write_with(
             &file,
             &WriteOptions::default().with_pin(ifd_tags::MAKER_NOTE, at),
         )

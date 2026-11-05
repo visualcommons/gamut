@@ -104,7 +104,7 @@ pub enum SkipReason {
     /// The target lies beyond the nesting depth guard.
     TooDeep,
     /// The walk had already parsed its whole sub-IFD budget — 65,536 directories across every
-    /// page, the bound [`read_tree`](crate::read_tree) also refuses past — so this target and
+    /// page, the bound [`read_tree`](crate::IfdReader::read_tree) also refuses past — so this target and
     /// every later one is skipped rather than parsed.
     OverBudget,
 }
@@ -193,7 +193,7 @@ pub enum AuditFinding {
 #[derive(Debug, Clone)]
 pub struct Audit {
     /// The parsed stream, with the spec's pointer tags resolved into sub-IFD groups (like
-    /// [`read_tree`](crate::read_tree); a skipped target leaves its group incomplete — see
+    /// [`read_tree`](crate::IfdReader::read_tree); a skipped target leaves its group incomplete — see
     /// [`AuditFinding::SkippedSubIfd`]).
     pub file: TiffFile,
     /// The byte-level verdict: every byte classified, or precisely what was not.
@@ -221,12 +221,23 @@ pub struct Audit {
 pub fn audit<S: ReadAt>(source: S, spec: &dyn AuditSpec) -> Result<Audit> {
     let mut auditor = Auditor::new(source)?;
     let file = auditor.walk(spec)?;
-    let (report, findings) = auditor.finish()?;
+    let AuditOutcome { report, findings } = auditor.finish()?;
     Ok(Audit {
         file,
         report,
         findings,
     })
+}
+
+/// What [`Auditor::finish`] returns: an [`Audit`] without the tree, which the codec driving the
+/// [`Auditor`] already holds from [`walk`](Auditor::walk).
+#[derive(Debug, Clone)]
+pub struct AuditOutcome {
+    /// The byte-level verdict: every byte classified, or precisely what was not.
+    pub report: SegmentReport,
+    /// Lenient file-level observations made during the walk, with any the codec
+    /// [`record`](Auditor::record)ed.
+    pub findings: Vec<AuditFinding>,
 }
 
 /// An in-progress byte-completeness audit, for codecs that must account structures the generic
@@ -352,10 +363,9 @@ impl<S: ReadAt> Auditor<S> {
         let mut offset = first_ifd;
         while offset != 0 {
             guard.admit(offset)?;
-            let (ifd, next) =
-                reader.read_ifd_at_reporting(offset, &mut sub, &mut shadowed, base)?;
-            ifds.push(ifd);
-            offset = next;
+            let chained = reader.read_ifd_at_reporting(offset, &mut sub, &mut shadowed, base)?;
+            ifds.push(chained.ifd);
+            offset = chained.next;
         }
         // Like the claims, the chain's findings land only once the whole chain parsed — and they
         // were recorded at physical offsets, since a stream-relative offset names nothing in the
@@ -385,7 +395,7 @@ impl<S: ReadAt> Auditor<S> {
     /// inspected.
     ///
     /// [`ErrorKind::Io`]: gamut_core::ErrorKind::Io
-    pub fn finish(mut self) -> Result<(SegmentReport, Vec<AuditFinding>)> {
+    pub fn finish(mut self) -> Result<AuditOutcome> {
         let mut report = self.map.finish(Some(self.tracked.ledger()));
         report.classify_padding(&mut self.tracked)?;
         let walked_everything = !self
@@ -395,7 +405,10 @@ impl<S: ReadAt> Auditor<S> {
         if walked_everything {
             report.classify_unclaimed();
         }
-        Ok((report, self.findings))
+        Ok(AuditOutcome {
+            report,
+            findings: self.findings,
+        })
     }
 }
 
@@ -470,21 +483,23 @@ fn follow_subifds<S: ReadAt>(
                     break;
                 }
                 let mut shadowed = Vec::new();
-                let (mut child, next) =
-                    match reader.read_ifd_at_reporting(offset, map, &mut shadowed, 0) {
-                        Ok(parsed) => parsed,
-                        // Transport failures abort the audit; file defects are findings.
-                        Err(error) if error.kind() == ErrorKind::Io => return Err(error),
-                        Err(_) => {
-                            findings.push(AuditFinding::SkippedSubIfd {
-                                page,
-                                tag,
-                                offset,
-                                reason: SkipReason::Unparseable,
-                            });
-                            break;
-                        }
-                    };
+                let crate::ChainedIfd {
+                    ifd: mut child,
+                    next,
+                } = match reader.read_ifd_at_reporting(offset, map, &mut shadowed, 0) {
+                    Ok(parsed) => parsed,
+                    // Transport failures abort the audit; file defects are findings.
+                    Err(error) if error.kind() == ErrorKind::Io => return Err(error),
+                    Err(_) => {
+                        findings.push(AuditFinding::SkippedSubIfd {
+                            page,
+                            tag,
+                            offset,
+                            reason: SkipReason::Unparseable,
+                        });
+                        break;
+                    }
+                };
                 if !reported.contains(&offset) {
                     findings.append(&mut shadowed);
                 }
@@ -518,7 +533,12 @@ fn follow_subifds<S: ReadAt>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ByteOrder, Value, Variant, align_word, read_tree, write};
+    use crate::{ByteOrder, IfdReader, Value, Variant, align_word, write};
+
+    /// The sub-IFD tree walk the audit's tree is compared against.
+    fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
+        IfdReader::open(data)?.read_tree(pointer_tags)
+    }
 
     fn classic_le(ifds: Vec<Ifd>) -> Vec<u8> {
         write(&TiffFile {
@@ -562,11 +582,7 @@ mod tests {
         );
         assert!(out.report.segments.iter().any(|s| {
             s.kind == SpanKind::Data(DataLabel::Strip)
-                && s.range
-                    == crate::Range {
-                        start: strip_at,
-                        len: strip.len() as u64,
-                    }
+                && s.range == (strip_at..strip_at + strip.len() as u64)
         }));
     }
 
@@ -820,7 +836,7 @@ mod tests {
         auditor
             .walk_embedded(base, 8, ByteOrder::LittleEndian, Variant::Classic)
             .expect("walk_embedded");
-        let (_, findings) = auditor.finish().expect("finish");
+        let findings = auditor.finish().expect("finish").findings;
         assert_eq!(
             findings,
             vec![AuditFinding::ShadowedEntry {
@@ -887,7 +903,7 @@ mod tests {
             offset: 2,
         };
         auditor.record(noted);
-        let (report, findings) = auditor.finish().expect("finish");
+        let AuditOutcome { report, findings } = auditor.finish().expect("finish");
         assert!(report.is_fully_classified(), "report: {report:?}");
         assert_eq!(findings, vec![noted]);
     }
@@ -931,7 +947,7 @@ mod tests {
             SpanKind::Data(DataLabel::Other("embedded header")),
             crate::Claim::Declared,
         );
-        let (report, _) = auditor.finish().expect("finish");
+        let report = auditor.finish().expect("finish").report;
         assert!(report.is_fully_classified(), "report: {report:?}");
         // The embedded directory bodies sit at base + 8 (and chained after), physically —
         // and the out-of-line value claim is shifted the same way, its owning-IFD diagnostic

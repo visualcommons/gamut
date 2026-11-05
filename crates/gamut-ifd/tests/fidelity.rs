@@ -3,8 +3,8 @@
 //! out-of-line values hold together, and the maker-note byte range can be kept untouched.
 
 use gamut_ifd::{
-    ByteOrder, Ifd, TiffFile, UnknownValue, Value, Variant, WriteOptions, read, read_audited, tags,
-    write, write_with,
+    AuditedFile, ByteOrder, Ifd, TiffFile, UnknownValue, Value, Variant, WriteOptions, WriteOutput,
+    read, read_audited, tags, write, write_with,
 };
 
 fn orders_and_variants() -> Vec<(ByteOrder, Variant)> {
@@ -101,7 +101,10 @@ fn large_out_of_line_value_roundtrips_and_classifies() {
         ifds: vec![ifd],
     };
     let bytes = write(&file).expect("write");
-    let (parsed, report) = read_audited(&bytes).expect("read");
+    let AuditedFile {
+        file: parsed,
+        report,
+    } = read_audited(&bytes[..]).expect("read");
     assert_eq!(parsed, file);
     assert!(report.is_fully_classified(), "large value fully claimed");
     assert_eq!(
@@ -153,7 +156,10 @@ fn maker_note_bytes_survive_and_pin_at_their_source_offset() {
     // (b) Offset preservation through a pinned rewrite: find the note's current absolute
     // position, then rewrite pinning it there — the bytes land at exactly that offset.
     let note_at = find(&bytes, &note).expect("note present") as u64;
-    let (pinned_bytes, map) = write_with(
+    let WriteOutput {
+        bytes: pinned_bytes,
+        segments: map,
+    } = write_with(
         &file,
         &WriteOptions::default().with_pin(tags::MAKER_NOTE, note_at),
     )

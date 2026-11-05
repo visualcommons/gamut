@@ -5,8 +5,7 @@
 //! scheme, means to the pixels is codec business. The pointer tags are the one principled exception, because they are
 //! *structure*: their values locate other directories (or, for [`MAKER_NOTE`], a byte blob
 //! vendors fill with a rebased mini-IFD), i.e. they name the directory graph itself — the graph
-//! [`read_tree`](crate::read_tree) / [`IfdReader::read_tree`](crate::IfdReader::read_tree)
-//! reconstruct and [`write`](crate::write) flattens. Before this module, every consumer
+//! [`IfdReader::read_tree`](crate::IfdReader::read_tree) reconstructs and [`write`](crate::write) flattens. Before this module, every consumer
 //! (gamut-tiff, gamut-dng, gamut-exif) duplicated them.
 //!
 //! # The tag registry
@@ -60,7 +59,7 @@ pub const GPS_INFO: u16 = 34853;
 /// `MakerNote` (37500, 0x927C) — an `UNDEFINED` vendor blob, usually a mini-IFD whose internal
 /// offsets are relative to the note start or the enclosing TIFF header.
 ///
-/// **Not** a pointer tag for [`read_tree`](crate::read_tree): its value is bytes, not a `LONG`
+/// **Not** a pointer tag for [`read_tree`](crate::IfdReader::read_tree): its value is bytes, not a `LONG`
 /// offset array. Decode it by hand with
 /// [`IfdReader::with_layout`](crate::IfdReader::with_layout) over a
 /// [`Rebased`](crate::Rebased) source once the vendor's offset convention is known.
@@ -71,7 +70,7 @@ pub const MAKER_NOTE: u16 = 37500;
 pub const INTEROPERABILITY_IFD: u16 = 40965;
 
 /// The standard pointer tags a TIFF/EP-, DNG-, or EXIF-shaped consumer follows with
-/// [`read_tree`](crate::read_tree): [`SUB_IFDS`], [`EXIF_IFD`], [`GPS_INFO`], and
+/// [`read_tree`](crate::IfdReader::read_tree): [`SUB_IFDS`], [`EXIF_IFD`], [`GPS_INFO`], and
 /// [`INTEROPERABILITY_IFD`]. ([`MAKER_NOTE`] is deliberately absent — see its docs.)
 pub const STANDARD_POINTER_TAGS: &[u16] = &[SUB_IFDS, EXIF_IFD, GPS_INFO, INTEROPERABILITY_IFD];
 

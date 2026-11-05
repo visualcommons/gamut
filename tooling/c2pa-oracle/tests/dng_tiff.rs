@@ -1,7 +1,7 @@
 //! `gamut-tiff` and `gamut-dng` against c2pa-rs: the C2PA 2.4 §A.3.6 tag-52545 store, bound by
 //! `c2pa.hash.data` around the **two** disjoint ranges §18.5.5 names (issue #534).
 //!
-//! Both crates report their exclusions through the one `gamut_ifd::c2pa::C2paExclusions` — the
+//! Both crates report their exclusions through the one `gamut_ifd::C2paExclusions` — the
 //! store's bytes and the `count` field of its IFD entry — so both are driven by the same tests
 //! here, once per container. §18.7.3.3 removed box hash for TIFF, so `c2pa.hash.data` is the only
 //! binding either has, and the second range is exactly what the oracle should check rather than
@@ -56,14 +56,14 @@ fn asset_error(error: gamut_core::Error) -> OracleError {
     OracleError::Asset(error.to_string())
 }
 
-/// A `gamut_ifd::Range` as the half-open range the oracle compares in.
-fn range(range: gamut_tiff::Range) -> Range<usize> {
+/// A file-offset range as the `usize` range the oracle compares in.
+fn range(range: Range<u64>) -> Range<usize> {
     let start = usize::try_from(range.start).expect("a fixture offset fits usize");
-    start..start + usize::try_from(range.len).expect("a fixture length fits usize")
+    start..usize::try_from(range.end).expect("a fixture end fits usize")
 }
 
 /// The two exclusions, store first — the order `C2paExclusions` names them in.
-fn ranges(exclusions: C2paExclusions) -> Vec<Range<usize>> {
+fn ranges(exclusions: &C2paExclusions) -> Vec<Range<usize>> {
     vec![range(exclusions.store()), range(exclusions.count_field())]
 }
 
@@ -163,7 +163,7 @@ fn reserve_and_fill(container: &Container) -> Vec<u8> {
             let exclusions = exclusions.ok_or_else(|| {
                 OracleError::Asset("encode_with_report reported no C2PA exclusions".into())
             })?;
-            Ok((asset, ranges(exclusions), range(exclusions.store())))
+            Ok((asset, ranges(&exclusions), range(exclusions.store())))
         },
         |mut asset, store_range, store| {
             asset[store_range].copy_from_slice(store);
@@ -233,7 +233,7 @@ fn c2pa_rs_excludes_the_same_two_disjoint_ranges_the_gamut_locator_reports() {
 
         let mut wrote = data_hash_exclusions(container.mime, &asset).expect("c2pa-rs's data hash");
         wrote.sort_by_key(|range| range.start);
-        let mut reported = ranges(located);
+        let mut reported = ranges(&located);
         reported.sort_by_key(|range| range.start);
 
         assert_eq!(

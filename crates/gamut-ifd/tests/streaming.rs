@@ -6,7 +6,7 @@
 use gamut_core::Result;
 use gamut_ifd::{
     ByteOrder, Ifd, IfdReader, ReadAt, SegmentMap, SpanKind, StreamSource, TiffFile, Tracked,
-    Value, Variant, read, read_tree, tags, write,
+    Value, Variant, read, tags, write,
 };
 
 /// A flat single-IFD file, a two-IFD chain, and a nested sub-IFD tree — the shapes the
@@ -76,17 +76,12 @@ fn streaming_equals_slice_across_source_shapes() {
         for file in fixture_files(order, variant) {
             let bytes = write(&file).expect("write");
             let flat = read(&bytes).expect("slice read");
-            let tree = read_tree(&bytes, tags::STANDARD_POINTER_TAGS).expect("slice read_tree");
-            assert_eq!(tree, file, "fixture round-trips");
-
             let mut slice_reader = IfdReader::open(&bytes[..]).expect("open slice");
             assert_eq!(slice_reader.read_file().expect("read_file"), flat);
-            assert_eq!(
-                slice_reader
-                    .read_tree(tags::STANDARD_POINTER_TAGS)
-                    .expect("read_tree"),
-                tree
-            );
+            let tree = slice_reader
+                .read_tree(tags::STANDARD_POINTER_TAGS)
+                .expect("slice read_tree");
+            assert_eq!(tree, file, "fixture round-trips");
 
             let cursor = std::io::Cursor::new(bytes.clone());
             let mut stream_reader =
@@ -144,9 +139,9 @@ fn audited_read_classifies_every_byte_of_written_files() {
                 collect(ifd, &mut pending);
             }
             while let Some(off) = pending.pop() {
-                let (child, next) = reader.read_ifd_at_audited(off, &mut map).expect("child");
-                assert_eq!(next, 0);
-                collect(&child, &mut pending);
+                let child = reader.read_ifd_at_audited(off, &mut map).expect("child");
+                assert_eq!(child.next, 0);
+                collect(&child.ifd, &mut pending);
             }
 
             let mut report = map.finish(Some(tracked.ledger()));

@@ -8,8 +8,10 @@
 //! directories on the path a decoder actually follows, and the values it actually reads.
 //!
 //! This module is **the** parser: the slice functions ([`read`](crate::read),
-//! [`read_ifd_at`](crate::read_ifd_at), [`read_tree`](crate::read_tree)) are thin wrappers over
-//! an `IfdReader<&[u8]>`, so there is exactly one directory-body walk and one set of
+//! [`read_ifd_at`](crate::read_ifd_at)) are thin wrappers over an `IfdReader<&[u8]>`, the
+//! sub-IFD tree walk exists only as [`IfdReader::read_tree`], and
+//! [`read_audited`](crate::read_audited) takes any [`ReadAt`] source, so there is exactly one
+//! directory-body walk and one set of
 //! hostile-input guards (the chain loop/length guard, the sub-IFD depth/cycle guards) —
 //! byte-accounting or robustness rules cannot drift between two copies.
 //! `tests/robustness.rs` still drives both entry points over the hostile corpus as a
@@ -41,6 +43,27 @@ pub struct IfdReader<S> {
     order: ByteOrder,
     variant: Variant,
     first: u64,
+}
+
+/// A decoded directory and what decoding it discarded: what
+/// [`IfdReader::decode_ifd_reporting`] and [`IfdReader::decode_ifd_lenient`] return.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedIfd {
+    /// The decoded directory.
+    pub ifd: Ifd,
+    /// One finding per entry the directory does not hold — shadowed by a later duplicate tag, or
+    /// (lenient decode only) unreadable — in the order the method documents.
+    pub findings: Vec<AuditFinding>,
+}
+
+/// A decoded directory and its next-IFD pointer: what
+/// [`IfdReader::read_ifd_at_audited`] returns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainedIfd {
+    /// The decoded directory.
+    pub ifd: Ifd,
+    /// The directory's next-IFD offset; `0` ends the chain.
+    pub next: u64,
 }
 
 /// One directory read raw: entries undecoded, values unfetched.
@@ -127,12 +150,12 @@ impl<S: ReadAt> IfdReader<S> {
         } else {
             first8
         };
-        let (order, variant, first) = read_header(&head[..head_len])?;
+        let header = read_header(&head[..head_len])?;
         Ok(Self {
             source,
-            order,
-            variant,
-            first,
+            order: header.order,
+            variant: header.variant,
+            first: header.first_ifd,
         })
     }
 
@@ -370,11 +393,11 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// As [`decode_ifd`](Self::decode_ifd): a shadowed entry's value is still decoded, so a
     /// malformed one fails the directory just as it does there.
-    pub fn decode_ifd_reporting(&mut self, raw: &RawIfd) -> Result<(Ifd, Vec<AuditFinding>)> {
+    pub fn decode_ifd_reporting(&mut self, raw: &RawIfd) -> Result<DecodedIfd> {
         let ifd = self.decode_ifd_inner(raw, None, None)?;
         let mut findings = Vec::new();
         report_shadowed(raw.offset, raw.entries.iter(), 0, &mut findings);
-        Ok((ifd, findings))
+        Ok(DecodedIfd { ifd, findings })
     }
 
     /// [`decode_ifd_reporting`](Self::decode_ifd_reporting) that **recovers** instead of failing:
@@ -403,7 +426,7 @@ impl<S: ReadAt> IfdReader<S> {
     /// failure would report a readable file as damaged. An
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) failure is always
     /// recovered.
-    pub fn decode_ifd_lenient(&mut self, raw: &RawIfd) -> Result<(Ifd, Vec<AuditFinding>)> {
+    pub fn decode_ifd_lenient(&mut self, raw: &RawIfd) -> Result<DecodedIfd> {
         let mut skipped = Vec::new();
         let ifd = self.decode_ifd_inner(raw, None, Some(&mut skipped))?;
         let mut findings: Vec<AuditFinding> = skipped
@@ -417,7 +440,7 @@ impl<S: ReadAt> IfdReader<S> {
         let gone: BTreeSet<u64> = skipped.iter().map(|entry| entry.offset).collect();
         let kept = raw.entries.iter().filter(|e| !gone.contains(&e.offset));
         report_shadowed(raw.offset, kept, 0, &mut findings);
-        Ok((ifd, findings))
+        Ok(DecodedIfd { ifd, findings })
     }
 
     /// Eagerly parses the whole top-level chain — [`read`](crate::read)'s streaming equivalent:
@@ -433,15 +456,32 @@ impl<S: ReadAt> IfdReader<S> {
         self.read_chain(None, None)
     }
 
-    /// [`read_tree`](crate::read_tree)'s streaming equivalent: parses the top-level chain, then
-    /// follows the named sub-IFD pointer tags with the same depth, cycle and budget guards,
-    /// reading only directory bodies and the values they reference.
+    /// Like [`read_file`](Self::read_file), but additionally follows the given sub-IFD **pointer
+    /// tags**, reconstructing the directory tree that [`write`](crate::write) flattens: each
+    /// pointer field is replaced by a [`sub_ifds`](Ifd::sub_ifds) group holding its parsed
+    /// children, recursively. Only directory bodies and the values they reference are read.
+    ///
+    /// The caller names the pointer tags because the structure alone cannot: which `LONG` tags
+    /// hold directory offsets is tag *semantics* (e.g. `SubIFDs` 330, `ExifIFD` 34665, `GPSInfo`
+    /// 34853, `Interoperability` 40965), which lives in the consuming codec. A named tag whose
+    /// value is not an offset array (`LONG`, or BigTIFF `LONG8`/`IFD8`) is left in place as a
+    /// regular field.
+    ///
+    /// This is [`write`](crate::write)'s inverse:
+    /// `IfdReader::open(&write(&file)?[..])?.read_tree(tags)? == file` for any tree whose pointer
+    /// tags are all named in `tags`. For per-pointer control (e.g. tolerating a malformed child),
+    /// follow pointers manually with [`read_ifd`](Self::read_ifd) or
+    /// [`resolve_subtree`](crate::resolve_subtree).
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
-    /// same conditions as [`read_tree`](crate::read_tree), or an
-    /// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
+    /// same conditions as [`read_file`](Self::read_file), or if the pointer graph is not a tree: a
+    /// repeated or self-referential child offset, or nesting deeper than 16 levels
+    /// ([`SubtreeScope::MAX_DEPTH`](crate::SubtreeScope::MAX_DEPTH) below each page); or if the
+    /// pointers reach more than 65,536 sub-IFDs in all, counted across every page (the walk's
+    /// directory budget, which bounds what a hostile pointer array can make the read parse). An
+    /// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error is returned if the source fails.
     pub fn read_tree(&mut self, pointer_tags: &[u16]) -> Result<TiffFile> {
         let mut file = self.read_file()?;
         // One visited set across every page, so two pages claiming one directory fail too.
@@ -474,17 +514,20 @@ impl<S: ReadAt> IfdReader<S> {
 
     /// Like `read_ifd` + `decode_ifd` with typed byte-range claims into `map`, mirroring
     /// [`read_file_audited`](Self::read_file_audited) for a sub-IFD reached via a pointer tag;
-    /// returns the next-IFD offset alongside the decoded directory.
+    /// returns the decoded directory with its next-IFD offset.
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
     /// directory or a value is out of bounds or truncated, or an
     /// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
-    pub fn read_ifd_at_audited(&mut self, offset: u64, map: &mut SegmentMap) -> Result<(Ifd, u64)> {
+    pub fn read_ifd_at_audited(&mut self, offset: u64, map: &mut SegmentMap) -> Result<ChainedIfd> {
         let raw = self.read_ifd(offset)?;
         let ifd = self.decode_ifd_inner(&raw, Some(map), None)?;
-        Ok((ifd, raw.next))
+        Ok(ChainedIfd {
+            ifd,
+            next: raw.next,
+        })
     }
 
     /// [`read_ifd_at_audited`](Self::read_ifd_at_audited) for the [`audit`](crate::audit) walk,
@@ -497,11 +540,14 @@ impl<S: ReadAt> IfdReader<S> {
         map: &mut SegmentMap,
         findings: &mut Vec<AuditFinding>,
         base: u64,
-    ) -> Result<(Ifd, u64)> {
+    ) -> Result<ChainedIfd> {
         let raw = self.read_ifd(offset)?;
         let ifd = self.decode_ifd_inner(&raw, Some(map), None)?;
         report_shadowed(raw.offset, raw.entries.iter(), base, findings);
-        Ok((ifd, raw.next))
+        Ok(ChainedIfd {
+            ifd,
+            next: raw.next,
+        })
     }
 
     /// The underlying source — how a codec reads its strip/tile/blob bytes (which this crate
@@ -948,7 +994,7 @@ mod tests {
         ];
         let mut r = IfdReader::open(data).expect("open");
         let raw = r.read_ifd(8).expect("read_ifd");
-        let (ifd, findings) = r.decode_ifd_reporting(&raw).expect("decode");
+        let DecodedIfd { ifd, findings } = r.decode_ifd_reporting(&raw).expect("decode");
         assert_eq!(ifd, r.decode_ifd(&raw).expect("decode"));
         assert_eq!(
             findings,
@@ -978,7 +1024,10 @@ mod tests {
         let raw = r.read_ifd(8).expect("read_ifd");
         assert_eq!(
             r.decode_ifd_reporting(&raw).expect("decode"),
-            (ifd, Vec::new())
+            DecodedIfd {
+                ifd,
+                findings: Vec::new()
+            }
         );
     }
 
@@ -1030,14 +1079,14 @@ mod tests {
         want.set(259, Value::Short(vec![5]));
         assert_eq!(
             r.decode_ifd_lenient(&raw).expect("lenient"),
-            (
-                want,
-                vec![AuditFinding::UnreadableEntry {
+            DecodedIfd {
+                ifd: want,
+                findings: vec![AuditFinding::UnreadableEntry {
                     ifd: 8,
                     tag: 258,
                     offset: 22,
                 }]
-            )
+            }
         );
     }
 
@@ -1054,7 +1103,7 @@ mod tests {
         ]);
         let mut r = IfdReader::open(&data[..]).expect("open");
         let raw = r.read_ifd(8).expect("read_ifd");
-        let (ifd, findings) = r.decode_ifd_lenient(&raw).expect("lenient");
+        let DecodedIfd { ifd, findings } = r.decode_ifd_lenient(&raw).expect("lenient");
         assert_eq!(ifd.get(256), Some(&Value::Short(vec![2])));
         assert_eq!(ifd.get(257), None);
         assert_eq!(
@@ -1088,7 +1137,7 @@ mod tests {
         let raw = r.read_ifd(8).expect("read_ifd");
         let lenient = r.decode_ifd_lenient(&raw).expect("lenient");
         assert_eq!(lenient, r.decode_ifd_reporting(&raw).expect("reporting"));
-        assert_eq!(lenient.1.len(), 1, "the first 256 is shadowed");
+        assert_eq!(lenient.findings.len(), 1, "the first 256 is shadowed");
     }
 
     /// A transport failure is not a damaged entry: the lenient decode propagates it unchanged
@@ -1289,10 +1338,10 @@ mod tests {
         let mut map = SegmentMap::new(bytes.len() as u64);
         let file = r.read_file_audited(&mut map).expect("read_file");
         let child_off = u64::from(file.ifds[0].get_u32(330).expect("pointer"));
-        let (_, next) = r
+        let child = r
             .read_ifd_at_audited(child_off, &mut map)
             .expect("stream child");
-        assert_eq!(next, 0);
+        assert_eq!(child.next, 0);
         let report = map.finish(None);
         assert!(report.is_fully_classified(), "report: {report:?}");
     }
