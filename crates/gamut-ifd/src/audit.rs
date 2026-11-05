@@ -582,11 +582,7 @@ mod tests {
         );
         assert!(out.report.segments.iter().any(|s| {
             s.kind == SpanKind::Data(DataLabel::Strip)
-                && s.range
-                    == crate::Range {
-                        start: strip_at,
-                        len: strip.len() as u64,
-                    }
+                && s.range == (strip_at..strip_at + strip.len() as u64)
         }));
     }
 

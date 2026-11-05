@@ -48,11 +48,12 @@
 //! disjoint ranges, never one. §18.7.3.3 removed general box hash for TIFF, so `c2pa.hash.data`
 //! over these exclusions is the only binding a TIFF-based asset has.
 
+use core::ops::Range;
+
 use gamut_core::{Error, Result};
 
 use crate::{
-    ByteOrder, FieldType, Ifd, IfdReader, Range, RawEntry, RawIfd, ReadAt, Value, Variant,
-    align_word,
+    ByteOrder, FieldType, Ifd, IfdReader, RawEntry, RawIfd, ReadAt, Value, Variant, align_word,
 };
 
 /// The tag carrying the C2PA manifest store: 52545 (`0xCD41`), type `UNDEFINED` (7) — C2PA 2.4
@@ -98,11 +99,11 @@ pub use gamut_core::c2pa::{MIN_STORE_LEN, NOT_VALIDATED as C2PA_NOT_VALIDATED};
 /// invariant after it was checked; `#[non_exhaustive]` keeps room for a later §18.5.5 revision
 /// naming a third range. Get one by locating or writing a store, or build one from its two
 /// ranges through the validating [`new`](Self::new).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct C2paExclusions {
-    store: Range,
-    count_field: Range,
+    store: Range<u64>,
+    count_field: Range<u64>,
 }
 
 impl C2paExclusions {
@@ -125,14 +126,14 @@ impl C2paExclusions {
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if either
     /// range is empty (nothing to exclude), or if the two overlap. Ranges that merely *abut* are accepted: touching is not overlapping.
-    pub fn new(store: Range, count_field: Range) -> Result<Self> {
-        if store.len == 0 || count_field.len == 0 {
+    pub fn new(store: Range<u64>, count_field: Range<u64>) -> Result<Self> {
+        if store.is_empty() || count_field.is_empty() {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "TIFF: a C2PA exclusion range is empty",
             ));
         }
-        if store.start < count_field.end() && count_field.start < store.end() {
+        if store.start < count_field.end && count_field.start < store.end {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "TIFF: the C2PA exclusion ranges overlap",
@@ -141,18 +142,18 @@ impl C2paExclusions {
         Ok(Self { store, count_field })
     }
 
-    /// The manifest store's bytes: `len` is the entry's `count`, the store being `UNDEFINED`
-    /// (one byte per element).
+    /// The manifest store's bytes, half-open: its length is the entry's `count`, the store being
+    /// `UNDEFINED` (one byte per element).
     #[must_use]
-    pub fn store(&self) -> Range {
-        self.store
+    pub fn store(&self) -> Range<u64> {
+        self.store.clone()
     }
 
-    /// The entry's `count` field: 4 bytes in classic TIFF, 8 in BigTIFF, at offset 4 of the
-    /// entry record (after the 2-byte tag and 2-byte type).
+    /// The entry's `count` field, half-open: 4 bytes in classic TIFF, 8 in BigTIFF, at offset 4
+    /// of the entry record (after the 2-byte tag and 2-byte type).
     #[must_use]
-    pub fn count_field(&self) -> Range {
-        self.count_field
+    pub fn count_field(&self) -> Range<u64> {
+        self.count_field.clone()
     }
 }
 
@@ -205,11 +206,9 @@ fn store_entry(ifd: &RawIfd) -> Option<&RawEntry> {
 }
 
 /// The count field of `entry`: the offset-width word after the 2-byte tag and 2-byte type.
-fn count_field(entry: &RawEntry, variant: Variant) -> Range {
-    Range {
-        start: entry.offset + 4,
-        len: variant.offset_size() as u64,
-    }
+fn count_field(entry: &RawEntry, variant: Variant) -> Range<u64> {
+    let start = entry.offset + 4;
+    start..start + variant.offset_size() as u64
 }
 
 /// Whether a file of `end` bytes has outgrown `variant`'s offset width — possible only for
@@ -300,24 +299,18 @@ fn read_store<S: ReadAt>(
     }
     let count_field = count_field(entry, reader.variant());
     // Out of line at the offset the entry declares; inline, the value word follows the count.
-    let start = reader.value_offset(entry).unwrap_or(count_field.end());
+    let start = reader.value_offset(entry).unwrap_or(count_field.end);
     let source_len = reader.source_mut().len()?;
-    if start
+    let Some(end) = start
         .checked_add(entry.count)
-        .is_none_or(|end| end > source_len)
-    {
+        .filter(|&end| end <= source_len)
+    else {
         return Ok(Err(C2paUnreadReason::OutsideFile));
-    }
+    };
     // Both ranges are non-empty here (the count is at least `MIN_STORE_LEN`, the count field is
     // an offset word), so overlap is the only refusal `new` can make.
-    Ok(C2paExclusions::new(
-        Range {
-            start,
-            len: entry.count,
-        },
-        count_field,
-    )
-    .map_err(|_| C2paUnreadReason::OverlapsCountField))
+    Ok(C2paExclusions::new(start..end, count_field)
+        .map_err(|_| C2paUnreadReason::OverlapsCountField))
 }
 
 /// Why a tag-52545 ([`C2PA_MANIFEST_STORE`]) entry of the main IFD chain yielded no manifest store.
@@ -377,7 +370,7 @@ impl C2paUnreadReason {
 /// and the directory that carries its entry.
 ///
 /// Non-exhaustive: a later revision may report more without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct C2paStoreSummary {
     /// The store's range and its entry's `count` field — exactly what [`locate`] returns.
@@ -391,7 +384,8 @@ impl C2paStoreSummary {
     /// The store's size in bytes.
     #[must_use]
     pub fn size(&self) -> u64 {
-        self.exclusions.store().len
+        let store = self.exclusions.store();
+        store.end - store.start
     }
 }
 
@@ -399,11 +393,11 @@ impl C2paStoreSummary {
 /// which directory, and why. Reported without any value bytes.
 ///
 /// Non-exhaustive: a later revision may report more without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct C2paUnreadEntry {
-    /// The 12-byte (classic) or 20-byte (BigTIFF) entry record.
-    pub entry: Range,
+    /// The 12-byte (classic) or 20-byte (BigTIFF) entry record, half-open.
+    pub entry: Range<u64>,
     /// The zero-based index, in the main IFD chain, of the directory carrying it.
     pub ifd: usize,
     /// Why no store was read from it.
@@ -484,7 +478,7 @@ impl C2paSummary {
                 "  unread tag 52545 entry in IFD {ifd} at [{start}, {end}): {reason}",
                 ifd = unread.ifd,
                 start = unread.entry.start,
-                end = unread.entry.end(),
+                end = unread.entry.end,
                 reason = unread.reason.describe(),
             )
         });
@@ -496,9 +490,9 @@ impl C2paSummary {
                 ifd = store.ifd,
                 size = store.size(),
                 start = bytes.start,
-                end = bytes.end(),
+                end = bytes.end,
                 count_start = count.start,
-                count_end = count.end(),
+                count_end = count.end,
             )
         });
         unread.chain(store)
@@ -534,10 +528,7 @@ pub fn summarize<S: ReadAt>(src: S) -> Result<C2paSummary> {
     };
     let entry_len = reader.variant().entry_size() as u64;
     let unread = |ifd: usize, entry: &RawEntry, reason| C2paUnreadEntry {
-        entry: Range {
-            start: entry.offset,
-            len: entry_len,
-        },
+        entry: entry.offset..entry.offset + entry_len,
         ifd,
         reason,
     };
@@ -689,7 +680,7 @@ pub fn append_store(file: &mut Vec<u8>, store: &[u8]) -> Result<C2paExclusions> 
     let count_field = count_field(&entry, variant);
     patch_entry(file, &count_field, len, start, order, variant);
     Ok(C2paExclusions {
-        store: Range { start, len },
+        store: start..end,
         count_field,
     })
 }
@@ -698,7 +689,7 @@ pub fn append_store(file: &mut Vec<u8>, store: &[u8]) -> Result<C2paExclusions> 
 /// and type — in the file's byte order.
 fn patch_entry(
     file: &mut [u8],
-    count_field: &Range,
+    count_field: &Range<u64>,
     count: u64,
     offset: u64,
     order: ByteOrder,
@@ -752,13 +743,23 @@ mod tests {
 
     /// The writer's own declaration of where the `Value { tag }` span of the sole directory
     /// landed.
-    fn declared_value_span(report: &SegmentReport, tag: u16) -> Range {
+    fn declared_value_span(report: &SegmentReport, tag: u16) -> Range<u64> {
         report
             .segments
             .iter()
             .find(|s| matches!(s.kind, SpanKind::Value { tag: t, .. } if t == tag))
-            .map(|s| s.range)
+            .map(|s| s.range.clone())
             .expect("the writer declares the value span")
+    }
+
+    /// The half-open range of `len` bytes from `start`.
+    fn span(start: u64, len: u64) -> Range<u64> {
+        start..start + len
+    }
+
+    /// The number of bytes `range` covers.
+    fn width(range: &Range<u64>) -> u64 {
+        range.end - range.start
     }
 
     fn ifd_body_offset(report: &SegmentReport) -> u64 {
@@ -800,17 +801,14 @@ mod tests {
             let body = ifd_body_offset(&report);
             assert_eq!(
                 found.count_field(),
-                Range {
-                    start: body + 2 + 2 * 12 + 4,
-                    len: 4
-                },
+                span(body + 2 + 2 * 12 + 4, 4),
                 "{order:?}"
             );
             let at = found.count_field().start as usize;
             let count = order.u32(bytes[at..at + 4].try_into().expect("4 bytes"));
-            assert_eq!(u64::from(count), found.store().len, "{order:?}");
+            assert_eq!(u64::from(count), width(&found.store()), "{order:?}");
             assert_eq!(
-                &bytes[found.store().start as usize..found.store().end() as usize],
+                &bytes[found.store().start as usize..found.store().end as usize],
                 store().as_slice(),
                 "{order:?}: the store's bytes are verbatim, not byte-swapped"
             );
@@ -839,13 +837,7 @@ mod tests {
             declared_value_span(&report, C2PA_MANIFEST_STORE)
         );
         let body = ifd_body_offset(&report);
-        assert_eq!(
-            found.count_field(),
-            Range {
-                start: body + 8 + 2 * 20 + 4,
-                len: 8
-            }
-        );
+        assert_eq!(found.count_field(), span(body + 8 + 2 * 20 + 4, 8));
     }
 
     /// No entry, an entry of the wrong type, and an entry in a directory that is not the last of
@@ -932,10 +924,10 @@ mod tests {
         let found = locate(&bytes[..]).expect("locate").expect("a store");
         // BigTIFF header 16, entry count 8: the entry starts at 24, its count at 28, its value
         // word at 36.
-        assert_eq!(found.count_field(), Range { start: 28, len: 8 });
-        assert_eq!(found.store(), Range { start: 36, len: 8 });
+        assert_eq!(found.count_field(), 28..36);
+        assert_eq!(found.store(), 36..44);
         assert_eq!(&bytes[36..44], inline.as_slice());
-        assert_eq!(found.store().start, found.count_field().end());
+        assert_eq!(found.store().start, found.count_field().end);
     }
 
     /// A value too short to hold a JUMBF box header is not a manifest store
@@ -966,7 +958,7 @@ mod tests {
         let found = locate(&classic(ifd)[..])
             .expect("locate")
             .expect("exactly the header length is a store");
-        assert_eq!(found.store().len, MIN_STORE_LEN as u64);
+        assert_eq!(width(&found.store()), MIN_STORE_LEN as u64);
     }
 
     /// §A.3.6 admits one store per asset, so a directory carrying two tag-52545 entries names
@@ -1035,7 +1027,7 @@ mod tests {
         let bytes =
             write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
         let found = locate(&bytes[..]).expect("locate").expect("a store");
-        assert_eq!(found.store().end(), bytes.len() as u64);
+        assert_eq!(found.store().end, bytes.len() as u64);
     }
 
     /// A hostile offset word can point the store back over its own entry, so the two ranges a
@@ -1090,14 +1082,8 @@ mod tests {
 
             let excl = append_store(&mut bytes, &store()).expect("append");
             let start = align_word(before.len() as u64);
-            assert_eq!(
-                excl.store(),
-                Range {
-                    start,
-                    len: store().len() as u64
-                }
-            );
-            assert_eq!(bytes.len() as u64, excl.store().end(), "the store is last");
+            assert_eq!(excl.store(), span(start, store().len() as u64));
+            assert_eq!(bytes.len() as u64, excl.store().end, "the store is last");
             assert_eq!(bytes[before.len()], 0, "one zero byte of alignment filler");
             assert_eq!(
                 &bytes[start as usize..],
@@ -1122,7 +1108,7 @@ mod tests {
                 parsed.ifds[0].get(C2PA_MANIFEST_STORE),
                 Some(&Value::Undefined(store()))
             );
-            assert_eq!(locate(&bytes[..]).expect("locate"), Some(excl));
+            assert_eq!(locate(&bytes[..]).expect("locate"), Some(excl.clone()));
 
             let mut report = read_audited(&bytes[..]).expect("audit").report;
             report
@@ -1138,10 +1124,7 @@ mod tests {
                 },
             }));
             assert!(report.segments.contains(&Segment {
-                range: Range {
-                    start: before.len() as u64,
-                    len: 1
-                },
+                range: span(before.len() as u64, 1),
                 kind: SpanKind::Padding,
             }));
         }
@@ -1169,7 +1152,7 @@ mod tests {
         reserve_entry(&mut ifd);
         let mut bytes = write(&file(ByteOrder::BigEndian, Variant::Big, vec![ifd])).expect("write");
         let excl = append_store(&mut bytes, &store()).expect("append");
-        assert_eq!(excl.count_field().len, 8);
+        assert_eq!(width(&excl.count_field()), 8);
         let cf = excl.count_field().start as usize;
         assert_eq!(
             ByteOrder::BigEndian.u64(bytes[cf..cf + 8].try_into().expect("8")),
@@ -1292,7 +1275,7 @@ mod tests {
     /// inputs on which `<` and `<=` disagree.
     #[test]
     fn exclusions_new_rejects_empty_or_overlapping_ranges() {
-        let at = |start, len| Range { start, len };
+        let at = span;
         let empty = "TIFF: a C2PA exclusion range is empty";
         let overlap = "TIFF: the C2PA exclusion ranges overlap";
 
@@ -1368,7 +1351,7 @@ mod tests {
         let mut bytes =
             write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
         let excl = append_store(&mut bytes, &at_threshold).expect("classic accepts 8 bytes");
-        assert_eq!(excl.store().end(), bytes.len() as u64);
+        assert_eq!(excl.store().end, bytes.len() as u64);
         assert_eq!(
             read(&bytes).expect("read").ifds[0].get(C2PA_MANIFEST_STORE),
             Some(&Value::Undefined(at_threshold.clone())),
@@ -1396,12 +1379,12 @@ mod tests {
             let mut writable = store()[..MIN_STORE_LEN + 1].to_vec();
             writable[0] ^= 0xFF; // keep it asymmetric
             let excl = append_store(&mut bytes, &writable).expect("nine bytes are writable");
-            assert_eq!(excl.store().end(), bytes.len() as u64);
+            assert_eq!(excl.store().end, bytes.len() as u64);
             assert_eq!(
                 read(&bytes).expect("read").ifds[0].get(C2PA_MANIFEST_STORE),
                 Some(&Value::Undefined(writable))
             );
-            assert_eq!(locate(&bytes[..]).expect("locate"), Some(excl));
+            assert_eq!(locate(&bytes[..]).expect("locate"), Some(excl.clone()));
         }
     }
 
@@ -1418,7 +1401,7 @@ mod tests {
         let summary = summarize(bytes).expect("summarize");
         assert_eq!(summary.store, None);
         assert_eq!(summary.unread.len(), 1, "{:?}", summary.unread);
-        summary.unread[0]
+        summary.unread[0].clone()
     }
 
     /// The located store is exactly `locate`'s, reported with the directory carrying it.
@@ -1434,7 +1417,13 @@ mod tests {
         .expect("write");
         let exclusions = locate(&bytes[..]).expect("locate").expect("a store");
         let summary = summarize(&bytes[..]).expect("summarize");
-        assert_eq!(summary.store, Some(C2paStoreSummary { exclusions, ifd: 1 }));
+        assert_eq!(
+            summary.store,
+            Some(C2paStoreSummary {
+                exclusions: exclusions.clone(),
+                ifd: 1
+            })
+        );
         assert!(summary.unread.is_empty());
         assert_eq!(summary.detail_line_count(), 1);
         let (bytes_at, count) = (exclusions.store(), exclusions.count_field());
@@ -1445,10 +1434,7 @@ mod tests {
                 format!(
                     "  tag 52545 in IFD 1: 32-byte store at [{}, {}) — located, not validated; its \
                      count field at [{}, {})",
-                    bytes_at.start,
-                    bytes_at.end(),
-                    count.start,
-                    count.end()
+                    bytes_at.start, bytes_at.end, count.start, count.end
                 ),
             ]
         );
@@ -1458,9 +1444,9 @@ mod tests {
     /// `locate` reports most of them as absence.
     #[test]
     fn summarize_lists_each_unreadable_entry_with_its_reason() {
-        let entry = Range { start: 10, len: 12 };
+        let entry = 10..22;
         let unread = |reason| C2paUnreadEntry {
-            entry,
+            entry: entry.clone(),
             ifd: 0,
             reason,
         };
@@ -1497,7 +1483,7 @@ mod tests {
             vec![
                 unread(C2paUnreadReason::Duplicate),
                 C2paUnreadEntry {
-                    entry: Range { start: 22, len: 12 },
+                    entry: 22..34,
                     ..unread(C2paUnreadReason::Duplicate)
                 },
             ]
@@ -1519,13 +1505,13 @@ mod tests {
         ))
         .expect("write");
         let summary = summarize(&bytes[..]).expect("summarize");
-        assert_eq!(summary.store.map(|store| store.ifd), Some(1));
+        assert_eq!(summary.store.as_ref().map(|store| store.ifd), Some(1));
         assert_eq!(summary.unread.len(), 1);
-        let misplaced = summary.unread[0];
+        let misplaced = &summary.unread[0];
         assert_eq!(misplaced.ifd, 0);
         assert_eq!(misplaced.reason, C2paUnreadReason::NotInLastIfd);
         // The entry record is the third of IFD 0 (tags 256, 258, 52545): body 8 + 2 + 2 * 12.
-        assert_eq!(misplaced.entry, Range { start: 34, len: 12 });
+        assert_eq!(misplaced.entry, 34..46);
         assert_eq!(summary.detail_line_count(), 2);
         let lines = summary.report_lines();
         assert_eq!(
@@ -1621,6 +1607,6 @@ mod tests {
         ifd.set(C2PA_MANIFEST_STORE, Value::Byte(store()));
         let bytes = write(&file(ByteOrder::LittleEndian, Variant::Big, vec![ifd])).expect("write");
         let unread = sole_unread(&bytes);
-        assert_eq!(unread.entry, Range { start: 24, len: 20 });
+        assert_eq!(unread.entry, 24..44);
     }
 }

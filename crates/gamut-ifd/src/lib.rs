@@ -121,7 +121,7 @@ pub use reader::{
     resolve_subtree,
 };
 pub use segment::{
-    Claim, Conflict, DataLabel, Range, Segment, SegmentMap, SegmentReport, SharedSpan, SpanKind,
+    Claim, Conflict, DataLabel, Segment, SegmentMap, SegmentReport, SharedSpan, SpanKind,
 };
 pub use source::{ReadAt, Rebased, StreamSource};
 pub use stream::{ChainedIfd, DecodedIfd, IfdChain, IfdReader, RawEntry, RawIfd};

@@ -20,10 +20,7 @@ fn assert_clean(r: &DeconstructReport) {
     // predicate (#500), so the two accounts of the same file must agree.
     assert!(
         tiles(
-            r.segments
-                .segments
-                .iter()
-                .map(|s| s.range.start..s.range.end()),
+            r.segments.segments.iter().map(|s| s.range.clone()),
             r.segments.file_len
         ),
         "segments must tile the file: {r:?}"
@@ -57,7 +54,7 @@ fn encoded_cfa_dng_is_accounted() {
                 .segments
                 .iter()
                 .filter(|s| matches!(s.kind, gamut_ifd::SpanKind::Data(_)))
-                .map(|s| s.range.len)
+                .map(|s| s.range.end - s.range.start)
                 .sum();
             assert!(data_bytes * 2 > report.segments.file_len, "{report:?}");
         }
@@ -249,8 +246,7 @@ fn trailing_junk_is_classified_as_a_trailer() {
     let spans = report.segments.unclaimed_spans();
     assert_eq!(spans.len(), 1, "{spans:?}");
     assert_eq!(spans[0].kind, gamut_dng::SpanKind::Trailer);
-    assert_eq!(spans[0].range.start, clean_len);
-    assert_eq!(spans[0].range.len, 3);
+    assert_eq!(spans[0].range, clean_len..clean_len + 3);
     assert_eq!(report.segments.unclaimed_span_bytes(), 3);
 }
 

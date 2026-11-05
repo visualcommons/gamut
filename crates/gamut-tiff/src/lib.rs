@@ -110,14 +110,15 @@ pub use gamut_ifd::c2pa::{
 // The structural IFD core lives in gamut-ifd; re-export the types a gamut-tiff user can touch —
 // the read/write spine plus every type reachable from this crate's own public items
 // (`DeconstructReport` exposes `SegmentReport`, which exposes `Segment`/`SpanKind`/`DataLabel`/
-// `Range`/`Conflict`/`SharedSpan`; `Value::Unknown` carries `UnknownValue`; and `Ifd`'s
-// accessors return `SubIfd`) — so no direct gamut-ifd dependency is ever needed to name them.
-// The deconstruct report itself (`DeconstructReport` and its `Anomaly`/`Severity`/`UnknownTag`/
-// `UnknownFieldType` findings) is gamut-ifd's too, shared with gamut-dng.
+// `Conflict`/`SharedSpan`, its ranges being `core::ops::Range<u64>`; `Value::Unknown` carries
+// `UnknownValue`; and `Ifd`'s accessors return `SubIfd`) — so no direct gamut-ifd dependency is
+// ever needed to name them. The deconstruct report itself (`DeconstructReport` and its
+// `Anomaly`/`Severity`/`UnknownTag`/`UnknownFieldType` findings) is gamut-ifd's too, shared with
+// gamut-dng.
 pub use gamut_ifd::{
-    Anomaly, ByteOrder, Conflict, DataLabel, DeconstructReport, Field, FieldType, Ifd, Range,
-    Segment, SegmentReport, Severity, SharedSpan, SpanKind, SubIfd, TiffFile, UnknownFieldType,
-    UnknownTag, UnknownValue, Value, Variant, read, write,
+    Anomaly, ByteOrder, Conflict, DataLabel, DeconstructReport, Field, FieldType, Ifd, Segment,
+    SegmentReport, Severity, SharedSpan, SpanKind, SubIfd, TiffFile, UnknownFieldType, UnknownTag,
+    UnknownValue, Value, Variant, read, write,
 };
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `TiffMetadata::metadata` / `TiffEncoder::with_metadata` without a direct dependency.

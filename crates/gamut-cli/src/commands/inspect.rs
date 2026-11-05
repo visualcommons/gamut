@@ -538,7 +538,7 @@ fn print_summary(path: &std::path::Path, format: Format, s: &Summary) {
         "unclassified ranges",
         &seg.unclassified
             .iter()
-            .map(|g| (g.start, g.len))
+            .map(|g| (g.start, g.end - g.start))
             .collect::<Vec<_>>(),
     );
     if !seg.conflicts.is_empty() {
@@ -546,10 +546,7 @@ fn print_summary(path: &std::path::Path, format: Format, s: &Summary) {
         for c in seg.conflicts.iter().take(MAX_LIST) {
             println!(
                 "    - [{}, {}) overlaps [{}, {})",
-                c.b.range.start,
-                c.b.range.end(),
-                c.a.range.start,
-                c.a.range.end()
+                c.b.range.start, c.b.range.end, c.a.range.start, c.a.range.end
             );
         }
     }
@@ -560,7 +557,7 @@ fn print_summary(path: &std::path::Path, format: Format, s: &Summary) {
         "out-of-bounds claims",
         &seg.out_of_bounds
             .iter()
-            .map(|o| (o.range.start, o.range.len))
+            .map(|o| (o.range.start, o.range.end - o.range.start))
             .collect::<Vec<_>>(),
     );
     // The dual-ledger parser cross-check: non-empty lists here are gamut bugs, not file defects.
@@ -568,14 +565,14 @@ fn print_summary(path: &std::path::Path, format: Format, s: &Summary) {
         "unclaimed reads (parser defect)",
         &seg.unclaimed_reads
             .iter()
-            .map(|r| (r.start, r.len))
+            .map(|r| (r.start, r.end - r.start))
             .collect::<Vec<_>>(),
     );
     print_ranges(
         "unread claims (parser defect)",
         &seg.unread_claims
             .iter()
-            .map(|c| (c.range.start, c.range.len))
+            .map(|c| (c.range.start, c.range.end - c.range.start))
             .collect::<Vec<_>>(),
     );
 
@@ -590,8 +587,8 @@ fn print_summary(path: &std::path::Path, format: Format, s: &Summary) {
 /// The JSON members of a TIFF/DNG report: the facts [`print_summary`] prints, every list uncapped.
 fn summary_json(s: &Summary) -> Vec<(&'static str, Json)> {
     let seg = &s.segments;
-    let ranges = |ranges: &mut dyn Iterator<Item = gamut::ifd::Range>| {
-        Json::Array(ranges.map(|r| span(r.start, r.end())).collect())
+    let ranges = |ranges: &mut dyn Iterator<Item = &core::ops::Range<u64>>| {
+        Json::Array(ranges.map(|r| span(r.start, r.end)).collect())
     };
     let accounting = Json::Object(vec![
         ("file_len", Json::from(seg.file_len)),
@@ -601,10 +598,7 @@ fn summary_json(s: &Summary) -> Vec<(&'static str, Json)> {
         ),
         ("unclassified_bytes", Json::from(seg.unclassified_bytes())),
         ("segment_count", Json::from(seg.segments.len())),
-        (
-            "unclassified",
-            ranges(&mut seg.unclassified.iter().copied()),
-        ),
+        ("unclassified", ranges(&mut seg.unclassified.iter())),
         (
             "conflicts",
             Json::Array(
@@ -612,8 +606,8 @@ fn summary_json(s: &Summary) -> Vec<(&'static str, Json)> {
                     .iter()
                     .map(|c| {
                         Json::Object(vec![
-                            ("a", span(c.a.range.start, c.a.range.end())),
-                            ("b", span(c.b.range.start, c.b.range.end())),
+                            ("a", span(c.a.range.start, c.a.range.end)),
+                            ("b", span(c.b.range.start, c.b.range.end)),
                         ])
                     })
                     .collect(),
@@ -622,15 +616,12 @@ fn summary_json(s: &Summary) -> Vec<(&'static str, Json)> {
         ("shared_values", Json::from(seg.shared.len())),
         (
             "out_of_bounds",
-            ranges(&mut seg.out_of_bounds.iter().map(|o| o.range)),
+            ranges(&mut seg.out_of_bounds.iter().map(|o| &o.range)),
         ),
-        (
-            "unclaimed_reads",
-            ranges(&mut seg.unclaimed_reads.iter().copied()),
-        ),
+        ("unclaimed_reads", ranges(&mut seg.unclaimed_reads.iter())),
         (
             "unread_claims",
-            ranges(&mut seg.unread_claims.iter().map(|c| c.range)),
+            ranges(&mut seg.unread_claims.iter().map(|c| &c.range)),
         ),
     ]);
     let listed = |list: &[Listed]| Json::Array(list.iter().map(|l| l.json.clone()).collect());
@@ -1522,13 +1513,13 @@ fn ifd_c2pa_json(summary: &gamut::tiff::C2paSummary) -> Json {
         Reason::OverlapsCountField => "overlaps_count_field",
         _ => "other",
     };
-    let store = summary.store.map_or(Json::Null, |s| {
+    let store = summary.store.as_ref().map_or(Json::Null, |s| {
         let store = s.exclusions.store();
         let count = s.exclusions.count_field();
         Json::Object(vec![
             ("size", Json::from(s.size())),
-            ("range", span(store.start, store.end())),
-            ("count_field", span(count.start, count.end())),
+            ("range", span(store.start, store.end)),
+            ("count_field", span(count.start, count.end)),
             ("ifd", Json::from(s.ifd)),
         ])
     });
@@ -1543,7 +1534,7 @@ fn ifd_c2pa_json(summary: &gamut::tiff::C2paSummary) -> Json {
                     .iter()
                     .map(|u| {
                         Json::Object(vec![
-                            ("entry", span(u.entry.start, u.entry.end())),
+                            ("entry", span(u.entry.start, u.entry.end)),
                             ("ifd", Json::from(u.ifd)),
                             ("reason", Json::from(reason(u.reason))),
                             ("description", Json::from(u.reason.describe())),

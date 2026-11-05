@@ -225,7 +225,8 @@ The API was frozen after a full-surface review; the additions and breaks:
   `UnknownTag`, `DeconstructReport`), so new codes/categories/fields land semver-minor.
 - **Complete re-export closure** — every gamut-ifd type reachable from this crate's public
   items is re-exported (since #263: `SegmentReport`, `Segment`, `SpanKind`, `DataLabel`,
-  `Range`, `Conflict`, `SharedSpan`, `UnknownValue`, and `SubIfd`), so none needs a direct
+  `Conflict`, `SharedSpan`, `UnknownValue`, and `SubIfd`; since #1132 the ranges are
+  `core::ops::Range<u64>`, so there is no `Range` to re-export), so none needs a direct
   gamut-ifd dependency to name.
 - **Additions since the freeze (#299)** — `SampleFormat`, `TiffInfo`, `tags::SAMPLE_FORMAT`,
   `TiffDecoder::{info, info_page}`, and the `DecodeImage`/`EncodeImage` impls for `Gray16`/`Rgb16`/

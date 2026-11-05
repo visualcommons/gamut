@@ -125,10 +125,10 @@ pub use gamut_ifd::c2pa::{
     C2paUnreadEntry, C2paUnreadReason, MIN_STORE_LEN, summarize as c2pa_summary,
 };
 // `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum;
-// `Segment`/`SpanKind`/`Range` are part of the preservation surface, naming the byte runs a
-// real camera file carries that its own structures do not account for (`Range` is also what
-// `C2paExclusions` measures in).
-pub use gamut_ifd::{ByteOrder, Range, Segment, SpanKind, Value};
+// `Segment`/`SpanKind` are part of the preservation surface, naming the byte runs a real camera
+// file carries that its own structures do not account for (their ranges, like the ones
+// `C2paExclusions` measures in, are plain `core::ops::Range<u64>`).
+pub use gamut_ifd::{ByteOrder, Segment, SpanKind, Value};
 // The shared metadata facade supplies this crate's metadata models rather than a DNG-local
 // restatement of them: `DngMetadata::exif` *is* the facade's `Exif`, and its `TypedMetadata` impl
 // hands the byte carriers over as `MetadataBlock`s. Re-exported so a caller can build and read

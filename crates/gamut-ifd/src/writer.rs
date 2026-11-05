@@ -581,7 +581,7 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<WriteOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::segment::{Range, Segment};
+    use crate::segment::Segment;
     use crate::{read, read_header, read_ifd_at};
 
     // Tag numbers are used literally: tag semantics live in the consuming codec, not this
@@ -1009,7 +1009,7 @@ mod tests {
                 .iter()
                 .any(|s| s.kind == SpanKind::Preamble
                     && s.range.start == header_len as u64
-                    && s.range.len == preamble.len() as u64),
+                    && s.range.end - s.range.start == preamble.len() as u64),
             "the preamble must be declared as one: {writer_report:?}"
         );
         let crate::AuditedFile {
@@ -1066,10 +1066,7 @@ mod tests {
         assert!(writer_report.is_fully_classified());
         assert!(
             writer_report.segments.contains(&Segment {
-                range: Range {
-                    start: header_len,
-                    len: 6
-                },
+                range: header_len..header_len + 6,
                 kind: SpanKind::Preamble,
             }),
             "the whole header/directory gap is the preamble: {writer_report:?}"
@@ -1119,10 +1116,7 @@ mod tests {
         assert_eq!(
             audit_report.unclaimed_spans(),
             vec![Segment {
-                range: Range {
-                    start: header_len,
-                    len: 4
-                },
+                range: header_len..header_len + 4,
                 kind: SpanKind::Preamble,
             }],
             "zeros after the header are the preamble, not padding"
@@ -1163,7 +1157,7 @@ mod tests {
             report
                 .segments
                 .iter()
-                .any(|s| s.kind == crate::SpanKind::Padding && s.range.end() == pin_at),
+                .any(|s| s.kind == crate::SpanKind::Padding && s.range.end == pin_at),
             "filler before the pin is declared padding: {report:?}"
         );
         // The stream ends at the pin's end (nothing after it).

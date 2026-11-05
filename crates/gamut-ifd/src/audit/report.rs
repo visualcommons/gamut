@@ -260,7 +260,6 @@ impl DeconstructReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::segment::Range;
 
     /// A byte-level verdict over an empty file: nothing claimed, nothing left over.
     fn clean() -> SegmentReport {
@@ -280,7 +279,7 @@ mod tests {
     fn unclassified() -> SegmentReport {
         SegmentReport {
             file_len: 1,
-            unclassified: vec![Range { start: 0, len: 1 }],
+            unclassified: core::iter::once(0..1).collect(),
             ..clean()
         }
     }

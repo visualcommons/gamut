@@ -46,7 +46,7 @@ pub struct TiffEncoder {
 /// excludes from its `c2pa.hash.data` hard binding (C2PA 2.4 §18.5.5).
 ///
 /// `#[non_exhaustive]`: later encoder features may report more without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TiffEncodeReport {
     /// The number of bytes appended to the output — the whole TIFF.

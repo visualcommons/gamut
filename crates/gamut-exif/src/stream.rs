@@ -1565,7 +1565,7 @@ mod tests {
         assert!(report.is_empty(), "nothing was *dropped*: {report:?}");
         let spans = report.byte_audit().expect("asked for").unclaimed_spans();
         assert_eq!(spans.len(), 1, "{spans:?}");
-        assert_eq!((spans[0].range.start, spans[0].range.len), (tiff_len, 16));
+        assert_eq!(spans[0].range, tiff_len..tiff_len + 16);
     }
 
     /// The audit is a second, strict walk: a sub-IFD recovery kept still fails it, so its bytes

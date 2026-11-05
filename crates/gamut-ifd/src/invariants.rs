@@ -17,10 +17,10 @@
 //! This module is the test oracle, not the system under test, so `.cargo/mutants.toml` excludes
 //! `crates/*/src/invariants.rs` from mutation. Every new `invariants` module inherits that.
 
+use core::ops::Range;
 use std::collections::BTreeMap;
 
 use crate::entry::Ifd;
-use crate::segment::Range;
 use crate::track::ReadLedger;
 use crate::value::Value;
 
@@ -65,7 +65,8 @@ impl core::fmt::Display for Violation {
     }
 }
 
-/// Maps an arbitrary range wholly inside [`UNIVERSE`], preserving zero length.
+/// Maps an arbitrary `start` and `len` to a range wholly inside [`UNIVERSE`], preserving zero
+/// length.
 ///
 /// Callers hand the result to the laws below, which assume it. The result never runs past the
 /// universe, so the model and the code under test see exactly the same bytes — clipping one but
@@ -74,27 +75,25 @@ impl core::fmt::Display for Violation {
 /// Zero-length ranges survive normalisation deliberately: they are the input class that separates
 /// a claim filter that drops them from one that lets them through.
 #[must_use]
-pub fn normalise(range: Range) -> Range {
-    let start = range.start % UNIVERSE;
-    Range {
-        start,
-        len: (range.len % (MAX_LEN + 1)).min(UNIVERSE - start),
-    }
+pub fn normalise(start: u64, len: u64) -> Range<u64> {
+    let start = start % UNIVERSE;
+    let len = (len % (MAX_LEN + 1)).min(UNIVERSE - start);
+    start..start + len
 }
 
 /// Marks every byte offset a normalised range covers.
-fn mark(set: &mut [bool], range: Range) {
+fn mark(set: &mut [bool], range: &Range<u64>) {
     let start = usize::try_from(range.start).unwrap_or(set.len());
-    let end = usize::try_from(range.end()).unwrap_or(set.len());
+    let end = usize::try_from(range.end).unwrap_or(set.len());
     for byte in set.iter_mut().take(end).skip(start) {
         *byte = true;
     }
 }
 
 /// The byte set a range list covers.
-fn to_set(ranges: &[Range]) -> Vec<bool> {
+fn to_set(ranges: &[Range<u64>]) -> Vec<bool> {
     let mut set = vec![false; UNIVERSE as usize];
-    for &r in ranges {
+    for r in ranges {
         mark(&mut set, r);
     }
     set
@@ -105,13 +104,13 @@ fn to_set(ranges: &[Range]) -> Vec<bool> {
 ///
 /// Adjacency is the interesting half: two touching ranges describe the same byte set as one, so
 /// a coalescing defect is invisible to a set-equality check on its own.
-fn canonical_form(ranges: &[Range], law: &'static str) -> Result<(), Violation> {
+fn canonical_form(ranges: &[Range<u64>], law: &'static str) -> Result<(), Violation> {
     for (i, r) in ranges.iter().enumerate() {
-        if r.len == 0 {
+        if r.is_empty() {
             return Err(Violation::new(law, format!("empty range at index {i}")));
         }
         if let Some(prev) = i.checked_sub(1).and_then(|p| ranges.get(p))
-            && prev.end() >= r.start
+            && prev.end >= r.start
         {
             return Err(Violation::new(
                 law,
@@ -130,11 +129,11 @@ fn canonical_form(ranges: &[Range], law: &'static str) -> Result<(), Violation> 
 /// # Errors
 ///
 /// Returns the first [`Violation`] found.
-pub fn ledger_is_canonical(reads: &[Range]) -> Result<(), Violation> {
+pub fn ledger_is_canonical(reads: &[Range<u64>]) -> Result<(), Violation> {
     let mut ledger = ReadLedger::new();
     let mut model = vec![false; UNIVERSE as usize];
-    for &r in reads {
-        ledger.record(r.start, r.len);
+    for r in reads {
+        ledger.record(r.start, r.end - r.start);
         mark(&mut model, r);
     }
 
@@ -154,31 +153,18 @@ pub fn ledger_is_canonical(reads: &[Range]) -> Result<(), Violation> {
     // offsets a fencepost error lives at — rather than over some fixed window the generated
     // reads would usually miss. The zero-length query is included: it is vacuously contained.
     for span in ledger.spans() {
+        let before = span.start.saturating_sub(1);
+        let last = span.end.saturating_sub(1);
         for probe in [
-            Range {
-                start: span.start,
-                len: 0,
-            },
-            Range {
-                start: span.start,
-                len: 1,
-            },
-            *span,
-            Range {
-                start: span.start,
-                len: span.len + 1,
-            },
-            Range {
-                start: span.start.saturating_sub(1),
-                len: 2,
-            },
-            Range {
-                start: span.end().saturating_sub(1),
-                len: 2,
-            },
+            span.start..span.start,
+            span.start..span.start + 1,
+            span.clone(),
+            span.start..span.end + 1,
+            before..before + 2,
+            last..last + 2,
         ] {
-            let want = (probe.start..probe.end()).all(|b| model.get(b as usize) == Some(&true));
-            if ledger.contains(probe) != want {
+            let want = probe.clone().all(|b| model.get(b as usize) == Some(&true));
+            if ledger.contains(&probe) != want {
                 return Err(Violation::new(
                     "ledger_is_canonical",
                     format!("contains({probe:?}) disagrees with the recorded bytes (want {want})"),
@@ -199,9 +185,15 @@ pub fn ledger_is_canonical(reads: &[Range]) -> Result<(), Violation> {
 /// # Errors
 ///
 /// Returns the first [`Violation`] found.
-pub fn subtract_is_set_difference(reads: &[Range], claims: &[Range]) -> Result<(), Violation> {
+pub fn subtract_is_set_difference(
+    reads: &[Range<u64>],
+    claims: &[Range<u64>],
+) -> Result<(), Violation> {
     subtract_is_set_difference_under(ReadLedger::subtract, reads, claims)
 }
+
+/// The shape of [`ReadLedger::subtract`]: the reads a ledger holds, less a list of claims.
+type Subtraction = fn(&ReadLedger, &[Range<u64>]) -> Vec<Range<u64>>;
 
 /// [`subtract_is_set_difference`] over an arbitrary subtraction.
 ///
@@ -209,19 +201,19 @@ pub fn subtract_is_set_difference(reads: &[Range], claims: &[Range]) -> Result<(
 /// deliberately broken one, because the real subtraction honours the law and the property would
 /// otherwise only ever reach the `Ok` arm.
 fn subtract_is_set_difference_under(
-    subtract: fn(&ReadLedger, &[Range]) -> Vec<Range>,
-    reads: &[Range],
-    claims: &[Range],
+    subtract: Subtraction,
+    reads: &[Range<u64>],
+    claims: &[Range<u64>],
 ) -> Result<(), Violation> {
     let mut ledger = ReadLedger::new();
     let mut read_bytes = vec![false; UNIVERSE as usize];
-    for &r in reads {
-        ledger.record(r.start, r.len);
+    for r in reads {
+        ledger.record(r.start, r.end - r.start);
         mark(&mut read_bytes, r);
     }
 
     let mut claimed = vec![false; UNIVERSE as usize];
-    for &c in claims {
+    for c in claims {
         mark(&mut claimed, c);
     }
 
@@ -356,13 +348,15 @@ pub fn setters_keep_one_store_per_tag(edits: &[Edit]) -> Result<(), Violation> {
 
 #[cfg(test)]
 mod tests {
+    use core::ops::Range;
+
     use proptest::collection;
     use proptest::prelude::{Just, Strategy, prop_assert_eq, prop_oneof, proptest};
     use proptest::test_runner::{Config, RngSeed};
 
     use super::{
-        Edit, MAX_LEN, Range, UNIVERSE, canonical_form, ledger_is_canonical, normalise,
-        one_store_per_tag, setters_keep_one_store_per_tag, subtract_is_set_difference,
+        Edit, MAX_LEN, UNIVERSE, canonical_form, ledger_is_canonical, normalise, one_store_per_tag,
+        setters_keep_one_store_per_tag, subtract_is_set_difference,
         subtract_is_set_difference_under,
     };
     use crate::entry::Ifd;
@@ -404,12 +398,12 @@ mod tests {
     /// and must therefore split nothing, and that is the input class separating a claim filter
     /// that drops empty ranges from one that keeps them. Uniform `u64` lengths would reach it
     /// about once in 257 draws.
-    fn range() -> impl Strategy<Value = Range> {
+    fn range() -> impl Strategy<Value = Range<u64>> {
         (
             0..UNIVERSE,
             prop_oneof![1 => Just(0u64), 6 => 1u64..=MAX_LEN],
         )
-            .prop_map(|(start, len)| normalise(Range { start, len }))
+            .prop_map(|(start, len)| normalise(start, len))
     }
 
     proptest! {
@@ -493,8 +487,8 @@ mod tests {
 
     #[test]
     fn canonical_form_rejects_an_empty_range() {
-        let bad = [Range { start: 4, len: 0 }];
-        let err = canonical_form(&bad, "law").expect_err("empty range must be rejected");
+        let bad = core::slice::from_ref(&(4..4));
+        let err = canonical_form(bad, "law").expect_err("empty range must be rejected");
         assert_eq!(err.law(), "law");
         assert!(err.detail().contains("empty range at index 0"), "{err}");
     }
@@ -503,7 +497,7 @@ mod tests {
     fn canonical_form_rejects_adjacent_ranges() {
         // Touching, not overlapping: the case a byte-set comparison cannot see, and the one the
         // zero-length-claim defect in `subtract` produced.
-        let bad = [Range { start: 0, len: 4 }, Range { start: 4, len: 4 }];
+        let bad = [0..4, 4..8];
         let err = canonical_form(&bad, "law").expect_err("adjacent ranges must be rejected");
         assert!(err.detail().contains("adjacent or overlapping"), "{err}");
         assert_eq!(format!("{err}"), format!("law: {}", err.detail()));
@@ -511,7 +505,7 @@ mod tests {
 
     #[test]
     fn canonical_form_rejects_descending_ranges() {
-        let bad = [Range { start: 8, len: 2 }, Range { start: 0, len: 2 }];
+        let bad = [8..10, 0..2];
         assert!(canonical_form(&bad, "law").is_err());
     }
 
@@ -521,8 +515,8 @@ mod tests {
         // passes and only the law's own byte-by-byte comparison can catch it.
         let violation = subtract_is_set_difference_under(
             |ledger, _| ledger.spans().to_vec(),
-            &[Range { start: 0, len: 8 }],
-            &[Range { start: 2, len: 2 }],
+            core::slice::from_ref(&(0..8)),
+            core::slice::from_ref(&(2..4)),
         )
         .expect_err("ignoring the claims must violate the law");
 
@@ -537,21 +531,11 @@ mod tests {
 
     #[test]
     fn normalise_keeps_every_range_inside_the_universe() {
-        for raw in [
-            Range {
-                start: u64::MAX,
-                len: u64::MAX,
-            },
-            Range {
-                start: UNIVERSE - 1,
-                len: MAX_LEN,
-            },
-            Range { start: 0, len: 0 },
-        ] {
-            let r = normalise(raw);
-            assert!(r.start < UNIVERSE && r.end() <= UNIVERSE, "{r:?}");
+        for (start, len) in [(u64::MAX, u64::MAX), (UNIVERSE - 1, MAX_LEN), (0, 0)] {
+            let r = normalise(start, len);
+            assert!(r.start < UNIVERSE && r.end <= UNIVERSE, "{r:?}");
         }
         // Zero length must survive: it is the input class the claim filter turns on.
-        assert_eq!(normalise(Range { start: 7, len: 0 }).len, 0);
+        assert!(normalise(7, 0).is_empty());
     }
 }

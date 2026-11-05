@@ -19,7 +19,8 @@
 
 #![no_main]
 
-use gamut_ifd::Range;
+use core::ops::Range;
+
 use gamut_ifd::invariants::{UNIVERSE, ledger_is_canonical, normalise, subtract_is_set_difference};
 use libfuzzer_sys::fuzz_target;
 
@@ -34,23 +35,23 @@ const MAX_LEN: u64 = 256;
 /// Normalising here rather than inside the laws is the same rule the property follows and for the
 /// same reason: a law that normalised its own inputs would feed the identical value to the model
 /// and to the code under test, so a defect in the normaliser would cancel on both sides.
-fn take_range(bytes: &[u8; 4]) -> Range {
+fn take_range(bytes: &[u8; 4]) -> Range<u64> {
     let start = u64::from(u16::from_le_bytes([bytes[0], bytes[1]])) % UNIVERSE;
     // Zero length is reachable and deliberately so: a zero-length *claim* covers nothing and must
     // therefore split nothing, and that is the input class separating a claim filter that drops
     // empty ranges from one that keeps them. It is the class the pilot's counterexample came from.
     let len = u64::from(u16::from_le_bytes([bytes[2], bytes[3]])) % (MAX_LEN + 1);
-    normalise(Range { start, len })
+    normalise(start, len)
 }
 
 /// Splits `data` into two range lists: the reads recorded, and the claims subtracted from them.
-fn parse(data: &[u8]) -> (Vec<Range>, Vec<Range>) {
+fn parse(data: &[u8]) -> (Vec<Range<u64>>, Vec<Range<u64>>) {
     // One leading byte decides the split point, so the engine can steer the balance between the
     // two lists rather than always seeing them equal.
     let Some((&split, rest)) = data.split_first() else {
         return (Vec::new(), Vec::new());
     };
-    let ranges: Vec<Range> = rest.as_chunks::<4>().0.iter().map(take_range).collect();
+    let ranges: Vec<Range<u64>> = rest.as_chunks::<4>().0.iter().map(take_range).collect();
     if ranges.is_empty() {
         return (Vec::new(), Vec::new());
     }

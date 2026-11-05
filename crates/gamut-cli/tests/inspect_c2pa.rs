@@ -665,8 +665,7 @@ fn a_tiff_reports_its_store_beside_the_accounting_without_moving_the_verdict() {
     assert!(
         stdout.contains(&format!(
             "tag 52545 in IFD 0: 25-byte store at [{}, {}) — located, not validated",
-            store.start,
-            store.end()
+            store.start, store.end
         )),
         "{stdout}"
     );
@@ -754,8 +753,7 @@ fn a_dng_reports_its_reserved_store_beside_the_accounting() {
     assert!(
         stdout.contains(&format!(
             "tag 52545 in IFD 0: 64-byte store at [{}, {})",
-            store.start,
-            store.end()
+            store.start, store.end
         )),
         "{stdout}"
     );
@@ -1173,8 +1171,8 @@ fn json_output_reports_a_tiff_store_beside_its_accounting() {
     assert_eq!(doc["accounting"]["unclassified_bytes"], 0);
     let json = &doc["c2pa"]["store"];
     assert_eq!(json["size"], 25);
-    assert_eq!(json["range"], json_range(store.start, store.end()));
-    assert_eq!(json["count_field"], json_range(count.start, count.end()));
+    assert_eq!(json["range"], json_range(store.start, store.end));
+    assert_eq!(json["count_field"], json_range(count.start, count.end));
     assert_eq!(json["ifd"], 0);
     assert_eq!(
         doc["c2pa"]["not_validated"],

@@ -10,9 +10,10 @@
 //! [`Rebased`](crate::Rebased) views layered on `&mut Tracked<…>` delegate down, so reads made
 //! through a rebased view (a maker-note mini-IFD) land in the ledger at **physical** offsets.
 
+use core::ops::Range;
+
 use gamut_core::Result;
 
-use crate::segment::Range;
 use crate::source::ReadAt;
 
 /// A sorted, coalesced set of byte ranges that were physically read.
@@ -22,7 +23,7 @@ use crate::source::ReadAt;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadLedger {
     /// Disjoint, non-adjacent, sorted by start.
-    spans: Vec<Range>,
+    spans: Vec<Range<u64>>,
 }
 
 impl ReadLedger {
@@ -41,15 +42,9 @@ impl ReadLedger {
         let end = start.saturating_add(len);
         // First span that could merge: the earliest whose end reaches `start` (adjacency
         // included).
-        let i = self.spans.partition_point(|s| s.end() < start);
+        let i = self.spans.partition_point(|s| s.end < start);
         if i == self.spans.len() || self.spans[i].start > end {
-            self.spans.insert(
-                i,
-                Range {
-                    start,
-                    len: end - start,
-                },
-            );
+            self.spans.insert(i, start..end);
             return;
         }
         let new_start = self.spans[i].start.min(start);
@@ -64,48 +59,41 @@ impl ReadLedger {
             .take_while(|s| s.start <= end)
             .count();
         let j = i + merge_len;
-        let new_end = self.spans[i..j].iter().fold(end, |e, s| e.max(s.end()));
-        self.spans.splice(
-            i..j,
-            [Range {
-                start: new_start,
-                len: new_end - new_start,
-            }],
-        );
+        let new_end = self.spans[i..j].iter().fold(end, |e, s| e.max(s.end));
+        self.spans
+            .splice(i..j, core::iter::once(new_start..new_end));
     }
 
     /// The recorded spans: disjoint, non-adjacent, sorted by start.
     #[must_use]
-    pub fn spans(&self) -> &[Range] {
+    pub fn spans(&self) -> &[Range<u64>] {
         &self.spans
     }
 
     /// Whether every byte of `range` was read. (Spans are coalesced, so containment can only
-    /// hold within a single span.)
+    /// hold within a single span.) An empty range is contained.
     #[must_use]
-    pub fn contains(&self, range: Range) -> bool {
-        if range.len == 0 {
+    pub fn contains(&self, range: &Range<u64>) -> bool {
+        if range.is_empty() {
             return true;
         }
         let i = self.spans.partition_point(|s| s.start <= range.start);
-        i > 0 && self.spans[i - 1].end() >= range.end()
+        i > 0 && self.spans[i - 1].end >= range.end
     }
 
     /// The bytes read but **not** covered by `claims` — the parser-defect signal
     /// ([`SegmentReport::unclaimed_reads`](crate::SegmentReport::unclaimed_reads)). `claims`
     /// need not be sorted or disjoint; it is normalised internally.
     #[must_use]
-    pub fn subtract(&self, claims: &[Range]) -> Vec<Range> {
+    pub fn subtract(&self, claims: &[Range<u64>]) -> Vec<Range<u64>> {
         // Normalise: sort and merge (overlap and adjacency both coalesce).
-        let mut merged: Vec<Range> = Vec::with_capacity(claims.len());
-        let mut sorted: Vec<Range> = claims.iter().copied().filter(|r| r.len > 0).collect();
-        sorted.sort_by_key(|r| (r.start, r.len));
+        let mut merged: Vec<Range<u64>> = Vec::with_capacity(claims.len());
+        let mut sorted: Vec<Range<u64>> =
+            claims.iter().filter(|r| r.end > r.start).cloned().collect();
+        sorted.sort_by_key(|r| (r.start, r.end));
         for r in sorted {
             match merged.last_mut() {
-                Some(last) if r.start <= last.end() => {
-                    let new_end = last.end().max(r.end());
-                    last.len = new_end - last.start;
-                }
+                Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
                 _ => merged.push(r),
             }
         }
@@ -120,15 +108,15 @@ impl ReadLedger {
         // bounding the walk by the data removes it (issue #110).
         let mut out = Vec::new();
         for span in &self.spans {
-            let end = span.end();
-            let live = &merged[merged.partition_point(|r| r.end() <= span.start)..];
+            let end = span.end;
+            let live = &merged[merged.partition_point(|r| r.end <= span.start)..];
             let touching = live.iter().take_while(|r| r.start < end).count();
             // Each claim closes the stretch before it and moves the cursor to its own end,
             // clamped to the span; whatever is left over after the run is the trailing stretch.
             let mut pos = span.start;
             for r in &live[..touching] {
                 push_gap(&mut out, pos, r.start);
-                pos = r.end().min(end);
+                pos = r.end.min(end);
             }
             push_gap(&mut out, pos, end);
         }
@@ -141,12 +129,9 @@ impl ReadLedger {
 /// One guard serves both the stretch before a claim and the one after the last claim, so the
 /// emptiness test is written once. `stop` may be *below* `start` -- a claim reaching back before
 /// the span it is subtracted from starts there -- which is why the test is `>` and not `!=`.
-fn push_gap(out: &mut Vec<Range>, start: u64, stop: u64) {
+fn push_gap(out: &mut Vec<Range<u64>>, start: u64, stop: u64) {
     if stop > start {
-        out.push(Range {
-            start,
-            len: stop - start,
-        });
+        out.push(start..stop);
     }
 }
 
@@ -220,10 +205,11 @@ impl<S: ReadAt> ReadAt for Tracked<S> {
 mod tests {
     use super::*;
 
-    fn spans(pairs: &[(u64, u64)]) -> Vec<Range> {
+    /// Half-open ranges from `(start, len)` pairs.
+    fn spans(pairs: &[(u64, u64)]) -> Vec<Range<u64>> {
         pairs
             .iter()
-            .map(|&(start, len)| Range { start, len })
+            .map(|&(start, len)| start..start + len)
             .collect()
     }
 
@@ -265,12 +251,12 @@ mod tests {
     fn contains_requires_full_coverage() {
         let mut ledger = ReadLedger::new();
         ledger.record(4, 6); // [4, 10)
-        assert!(ledger.contains(Range { start: 4, len: 6 }));
-        assert!(ledger.contains(Range { start: 5, len: 2 }));
-        assert!(!ledger.contains(Range { start: 3, len: 2 }));
-        assert!(!ledger.contains(Range { start: 8, len: 4 }));
-        assert!(!ledger.contains(Range { start: 20, len: 1 }));
-        assert!(ledger.contains(Range { start: 0, len: 0 }), "empty range");
+        assert!(ledger.contains(&(4..10)));
+        assert!(ledger.contains(&(5..7)));
+        assert!(!ledger.contains(&(3..5)));
+        assert!(!ledger.contains(&(8..12)));
+        assert!(!ledger.contains(&(20..21)));
+        assert!(ledger.contains(&(0..0)), "empty range");
     }
 
     #[test]

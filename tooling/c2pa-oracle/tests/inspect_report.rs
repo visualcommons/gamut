@@ -53,10 +53,10 @@ fn exclusions(mime: &str, asset: &[u8]) -> Vec<Range<usize>> {
     wrote
 }
 
-/// A `gamut_ifd::Range` as a half-open range.
-fn ifd_range(range: gamut_tiff::Range) -> Range<usize> {
+/// A file-offset range as a `usize` range.
+fn ifd_range(range: Range<u64>) -> Range<usize> {
     let start = usize::try_from(range.start).expect("a fixture offset fits usize");
-    start..start + usize::try_from(range.len).expect("a fixture length fits usize")
+    start..usize::try_from(range.end).expect("a fixture end fits usize")
 }
 
 fn plain_png() -> Vec<u8> {

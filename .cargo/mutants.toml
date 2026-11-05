@@ -140,8 +140,8 @@ exclude_re = [
     # `typed_wiring_names_every_format`.
     '^crates/gamut-metadata/src/capability\.rs:263:5: replace typed_wiring -> bool with true$',
     # gamut-ifd track::subtract — disabling the merge guard is equivalent by construction: the
-    # skip loop discards every claim with `end() <= pos`, and the covered arm advances `pos` to
-    # `r.end().min(end)`, strictly greater than `pos`, so an unmerged sorted-but-overlapping list
+    # skip loop discards every claim with `end <= pos`, and the covered arm advances `pos` to
+    # `r.end.min(end)`, strictly greater than `pos`, so an unmerged sorted-but-overlapping list
     # is consumed identically to the merged one. That argument is what carries this entry; the
     # property in `gamut_ifd::invariants` (issue #240) corroborates it — the mutant passes there
     # too — but a finite run is evidence, not proof. The merge *arithmetic* is NOT excluded
@@ -153,7 +153,7 @@ exclude_re = [
     # *adjacent* ranges where one is correct: the byte set is unchanged, which is why every
     # set-equality test missed it, but the canonical form is not. `subtract_is_the_set_difference`
     # kills it and shrinks to `reads = [{2747, 103}], claims = [{2748, 0}]`.
-    '^crates/gamut-ifd/src/track\.rs:105:31: replace match guard r\.start <= last\.end\(\) with false in ReadLedger::subtract$',
+    '^crates/gamut-ifd/src/track\.rs:96:31: replace match guard r\.start <= last\.end with false in ReadLedger::subtract$',
     # gamut-ifd `ReadLedger::subtract` — the `take_while` that bounds the run of claims touching a
     # span, `r.start < end`, relaxed to `<=`. `merged` is coalesced and its zero-length claims are
     # filtered out, so at most one claim can begin exactly at a span's end, and that claim
@@ -164,7 +164,7 @@ exclude_re = [
     # universe (1 048 576 pairs) the mutant's outputs fingerprint identically to the original's.
     # Line/column-anchored, not named: the `==` and `>` twins of this very comparison shorten the
     # run and ARE caught, as are every other comparison in the function.
-    '^crates/gamut-ifd/src/track\.rs:125:63: replace < with <= in ReadLedger::subtract$',
+    '^crates/gamut-ifd/src/track\.rs:113:63: replace < with <= in ReadLedger::subtract$',
     # gamut-dng rewrite::write — the pin-fallback match guard. With `pin == None` the guard is
     # the only difference between "return the error" and "retry the identical un-pinned write
     # and return its (identical) error": `write_with` is deterministic in its inputs, so forcing

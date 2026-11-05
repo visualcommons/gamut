@@ -219,8 +219,9 @@ opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
 - **The exclusion set is two ranges** (§18.5.5): `C2paExclusions::store()` and
   `count_field()`, the count field being the offset-width word at entry offset 4 (4 bytes
   classic, 8 BigTIFF). They are disjoint — every constructor checks it and the fields are
-  private, so a value cannot be edited out of the invariant — and reported in the crate's own `Range` (u64 start/len) — the
-  same measure the segment map uses — rather than `core::ops::Range<usize>`.
+  private, so a value cannot be edited out of the invariant — and reported as half-open
+  `core::ops::Range<u64>`, the same measure the segment map uses (since #1132 its `Segment` is
+  `gamut_core::segment::Segment<SpanKind, u64>`; the crate keeps no range type of its own).
 - **Read side.** `locate` walks the chain to its last directory over any `ReadAt` source and
   reports the ranges for an out-of-line *or* inline store; a tag-52545 entry of another type, or
   one in a non-last directory, is "no store" (never an error), so a decoder can still surface

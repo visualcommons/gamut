@@ -45,7 +45,7 @@ fn the_store_is_written_verbatim_into_a_big_endian_file() {
     let (bytes, report) = encoded_with_store();
     let range = report.c2pa.expect("a store was written").store();
     assert_eq!(
-        &bytes[range.start as usize..range.end() as usize],
+        &bytes[range.start as usize..range.end as usize],
         STORE,
         "the store's bytes are not governed by the file's byte order"
     );
@@ -65,8 +65,8 @@ fn the_store_is_the_last_thing_in_the_file() {
     // written after it, a signer replacing the store would invalidate those bytes' offsets.
     let (bytes, report) = encoded_with_store();
     let range = report.c2pa.expect("a store was written").store();
-    assert_eq!(range.end(), bytes.len() as u64);
-    assert_eq!(range.len, STORE.len() as u64);
+    assert_eq!(range.end, bytes.len() as u64);
+    assert_eq!(range.end - range.start, STORE.len() as u64);
 }
 
 #[test]
@@ -76,11 +76,15 @@ fn the_two_exclusion_ranges_are_disjoint() {
     let (_, report) = encoded_with_store();
     let excl = report.c2pa.expect("a store was written");
     assert!(
-        excl.count_field().end() <= excl.store().start
-            || excl.store().end() <= excl.count_field().start,
+        excl.count_field().end <= excl.store().start
+            || excl.store().end <= excl.count_field().start,
         "overlapping exclusion ranges: {excl:?}"
     );
-    assert_eq!(excl.count_field().len, 4, "classic TIFF count field");
+    assert_eq!(
+        excl.count_field().end - excl.count_field().start,
+        4,
+        "classic TIFF count field"
+    );
 }
 
 #[test]
@@ -95,8 +99,8 @@ fn a_reservation_is_zero_filled_at_the_offset_the_report_gives() {
         .encode_with_report(image(&pixels, 17, 13), &mut bytes)
         .expect("encode");
     let range = report.c2pa.expect("a reservation was written").store();
-    assert_eq!(range.len, 64);
-    assert_eq!(&bytes[range.start as usize..range.end() as usize], &[0; 64]);
+    assert_eq!(range.end - range.start, 64);
+    assert_eq!(&bytes[range.start as usize..range.end as usize], &[0; 64]);
 }
 
 #[test]
@@ -112,7 +116,7 @@ fn the_tile_path_places_the_store_too() {
         .encode_with_report(image(&pixels, 32, 32), &mut bytes)
         .expect("encode");
     let range = report.c2pa.expect("a store was written").store();
-    assert_eq!(&bytes[range.start as usize..range.end() as usize], STORE);
+    assert_eq!(&bytes[range.start as usize..range.end as usize], STORE);
 }
 
 #[test]
@@ -129,12 +133,12 @@ fn a_bigtiff_carries_the_store_with_its_wider_count_field() {
         .encode_with_report(image(&pixels, 17, 13), &mut bytes)
         .expect("encode");
     let excl = report.c2pa.expect("a store was written");
-    assert_eq!(excl.count_field().len, 8);
+    assert_eq!(excl.count_field().end - excl.count_field().start, 8);
     assert_eq!(
-        &bytes[excl.store().start as usize..excl.store().end() as usize],
+        &bytes[excl.store().start as usize..excl.store().end as usize],
         STORE
     );
-    assert_eq!(excl.store().end(), bytes.len() as u64);
+    assert_eq!(excl.store().end, bytes.len() as u64);
 }
 
 #[test]
@@ -161,8 +165,8 @@ fn the_palette_path_places_the_store_and_reports_it_through_the_locator() {
         .expect("locate")
         .expect("a store")
         .store();
-    assert_eq!(&bytes[range.start as usize..range.end() as usize], STORE);
-    assert_eq!(range.end(), bytes.len() as u64);
+    assert_eq!(&bytes[range.start as usize..range.end as usize], STORE);
+    assert_eq!(range.end, bytes.len() as u64);
     assert_eq!(
         TiffDecoder::new()
             .metadata(&bytes)
@@ -193,7 +197,7 @@ fn a_multipage_document_puts_the_entry_in_its_last_page() {
         .expect("locate")
         .expect("a store")
         .store();
-    assert_eq!(&bytes[range.start as usize..range.end() as usize], STORE);
+    assert_eq!(&bytes[range.start as usize..range.end as usize], STORE);
 }
 
 #[test]
@@ -235,11 +239,11 @@ fn the_pixel_paths_that_pack_their_own_buffer_place_the_store_too() {
             .unwrap_or_else(|| panic!("{path} wrote no store"))
             .store();
         assert_eq!(
-            &bytes[range.start as usize..range.end() as usize],
+            &bytes[range.start as usize..range.end as usize],
             STORE,
             "{path}"
         );
-        assert_eq!(range.end(), bytes.len() as u64, "{path}");
+        assert_eq!(range.end, bytes.len() as u64, "{path}");
     }
 }
 

@@ -185,7 +185,7 @@ impl DngRewrite {
     fn slice(&self, span: &gamut_ifd::Segment) -> Result<&[u8]> {
         let start = usize::try_from(span.range.start)
             .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows"))?;
-        let end = usize::try_from(span.range.end())
+        let end = usize::try_from(span.range.end)
             .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows"))?;
         self.data.get(start..end).ok_or_else(|| {
             Error::invalid_input(
@@ -322,7 +322,7 @@ impl DngRewrite {
                 kind: span.kind,
                 original_offset: span.range.start,
                 offset: span.range.start,
-                len: span.range.len,
+                len: span.range.end - span.range.start,
             });
         }
         for span in appended {
@@ -337,7 +337,7 @@ impl DngRewrite {
                 kind: span.kind,
                 original_offset: span.range.start,
                 offset: at,
-                len: span.range.len,
+                len: span.range.end - span.range.start,
             });
         }
 
@@ -538,7 +538,7 @@ mod tests {
 
     fn segment(kind: gamut_ifd::SpanKind, start: u64, len: u64) -> gamut_ifd::Segment {
         gamut_ifd::Segment {
-            range: gamut_ifd::Range { start, len },
+            range: start..start + len,
             kind,
         }
     }
