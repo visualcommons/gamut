@@ -17,12 +17,15 @@
 
 #![no_main]
 
-use gamut_iptc::IptcReader;
+use gamut_iptc::{IptcReader, Sources};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let reader = IptcReader::new();
     if let Ok(Some(iim)) = reader.read_irb(data) {
-        let _ = reader.read(Some(&iim), None);
+        let _ = reader.read(Sources {
+            iim: Some(&iim),
+            xmp: None,
+        });
     }
 });

@@ -2,7 +2,7 @@
 
 use gamut_exif::Exif;
 use gamut_icc::IccProfile;
-use gamut_iptc::{ConflictPolicy, FieldConflict, IimBlock, IptcReader};
+use gamut_iptc::{ConflictPolicy, FieldConflict, IimBlock, IptcReader, Sources};
 use gamut_xmp::XmpMeta;
 
 use crate::error::Result;
@@ -84,9 +84,10 @@ impl MetadataExtractor {
         // Reconcile the legacy IIM carrier into the XMP graph — the single home for IPTC data.
         if let Some(iim) = iim_bytes {
             let iim = IimBlock::parse(iim)?;
-            let reconciled = IptcReader::new()
-                .policy(self.policy)
-                .read(Some(&iim), xmp.as_ref())?;
+            let reconciled = IptcReader::new().with_policy(self.policy).read(Sources {
+                iim: Some(&iim),
+                xmp: xmp.as_ref(),
+            })?;
             let graph = xmp.get_or_insert_with(XmpMeta::new);
             for property in reconciled.to_xmp().properties {
                 graph.set(property);
@@ -131,7 +132,7 @@ impl MetadataExtractor {
         let iim = IimBlock::parse(iim)?;
         let xmp = XmpMeta::parse(xmp)?;
         Ok(IptcReader::new()
-            .policy(self.policy)
+            .with_policy(self.policy)
             .conflicts(&iim, &xmp)?)
     }
 }

@@ -10,7 +10,7 @@
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
-use gamut_iptc::{IimBlock, IptcReader, IptcWriter, PhotoMetadata, PhotoshopIrb};
+use gamut_iptc::{IimBlock, IptcReader, IptcWriter, PhotoMetadata, PhotoshopIrb, Sources};
 
 fn main() {
     divan::main();
@@ -51,7 +51,7 @@ fn sample_view(city: &str) -> PhotoMetadata {
 /// exercised).
 fn sample_block() -> IimBlock {
     IptcWriter::new()
-        .write_iim(&sample_view("Paris"))
+        .to_iim_block(&sample_view("Paris"))
         .expect("sample view projects to IIM")
 }
 
@@ -103,7 +103,10 @@ fn reconcile_merge(bencher: Bencher) {
         .counter(BytesCount::new(iim.encode().unwrap().len()))
         .bench_local(|| {
             reader
-                .read(Some(black_box(&iim)), Some(black_box(&xmp)))
+                .read(Sources {
+                    iim: Some(black_box(&iim)),
+                    xmp: Some(black_box(&xmp)),
+                })
                 .unwrap()
         });
 }
