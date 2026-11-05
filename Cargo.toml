@@ -190,8 +190,20 @@ gamut = { path = "crates/gamut", version = "0.4.0" }
 # once per codegen unit as `.dwo` files that the binaries reference, which costs no debug
 # information at all — but it does mean a binary is no longer self-contained, so one copied out of
 # `target/` loses it. Debug and profile them where they were built.
+#
+# Workspace crates carry line tables only and dependencies carry no DWARF at all, to keep full
+# debug info from piling up in `target/` under a fast edit-build loop. A panic or backtrace in
+# gamut's own code still resolves to file:line; a frame in a dependency's own compiled code keeps
+# its symbol name, which comes from the symbol table, but loses its file:line (generic code
+# instantiated in a workspace crate keeps that crate's line tables). To step through code with a
+# debugger, put the DWARF back for one build: `CARGO_PROFILE_DEV_DEBUG=2` for the workspace, and
+# `cargo --config 'profile.dev.package."*".debug=2' ...` for dependencies.
 [profile.dev]
+debug = "line-tables-only"
 split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+debug = false
 
 # The three packages that compile vendored C/C++ take their `CMAKE_BUILD_TYPE` (via cmake-rs) and
 # their `-O`/`-g` flags (via cc) from the `OPT_LEVEL` and `DEBUG` that cargo derives from this
@@ -223,16 +235,21 @@ inherits = "release"
 debug = 1
 incremental = true
 
+# `opt-level = 3` because the oracle differential tests are dominated by run time, not compile
+# time. Debug info follows `[profile.dev]`: line tables for workspace crates, and none for
+# dependencies, which `test` inherits from `[profile.dev.package."*"]` (override with
+# `CARGO_PROFILE_TEST_DEBUG=2` and `cargo --config 'profile.dev.package."*".debug=2' ...`).
 [profile.test]
 opt-level = 3
-debug = 1
+debug = "line-tables-only"
 split-debuginfo = "unpacked"
 incremental = true
 
 # Mutation testing (`.cargo/mutants.toml` selects it with `profile = "mutants"`). Identical to
-# `test` except for debug info, which is the largest per-mutant cost that buys nothing: a mutation
-# run reads pass/fail and never a backtrace, while `[profile.test]` links 139 integration binaries
-# at full optimisation with DWARF — once per mutant, in a cold build directory. `opt-level` is
+# `test` except for debug info, which buys nothing per mutant: a mutation run reads pass/fail and
+# never a backtrace, while `[profile.test]` links 139 integration binaries at full optimisation
+# with line tables for every workspace crate (dependencies carry none, inherited from
+# `[profile.dev.package."*"]`) — once per mutant, in a cold build directory. `opt-level` is
 # deliberately kept at 3 so the oracle differential tests run at the same speed the gate sees.
 # `incremental` is off because every mutant builds in a fresh copy of the tree, so an incremental
 # cache can only ever be written, never read.

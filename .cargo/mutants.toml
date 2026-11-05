@@ -72,9 +72,9 @@ test_workspace = false
 gitignore = true
 
 # Build the mutants with `debug = 0` (see `[profile.mutants]` in the root Cargo.toml). Debug info
-# is the largest per-mutant cost that buys nothing here: mutation testing reads pass/fail, never a
-# backtrace, and `[profile.test]` otherwise links 139 integration binaries at `opt-level = 3` with
-# full DWARF, once per mutant.
+# buys nothing here: mutation testing reads pass/fail, never a backtrace, and `[profile.test]`
+# otherwise links 139 integration binaries at `opt-level = 3` with line tables for every workspace
+# crate (dependencies already carry none), once per mutant.
 profile = "mutants"
 
 # Mutants that stay out of the survey, in two labelled groups. Which group an entry belongs in is
