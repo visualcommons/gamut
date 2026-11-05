@@ -35,7 +35,8 @@ pub(crate) const MAX_DATA_LEN: usize = (1 << 31) - 1;
 ///
 /// # Errors
 ///
-/// [`Error::InvalidInput`] if `len` exceeds [`MAX_DATA_LEN`].
+/// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `len` exceeds
+/// [`MAX_DATA_LEN`].
 pub(crate) fn check_data_len(len: usize) -> Result<()> {
     if len > MAX_DATA_LEN {
         return Err(Error::invalid_input(
@@ -238,16 +239,9 @@ impl StoreRule {
     }
 }
 
-/// What a report of a located manifest store has to say beside it, because locating one is not
-/// validating it.
-///
-/// C2PA 2.4 §15.12 puts validation on a validator; this crate holds no COSE, X.509, RFC 3161 or
-/// trust-list code and never reports a validity verdict. "C2PA: present" printed beside EXIF and
-/// ICC reads as *verified* to anyone who has seen a Content Credentials badge, so
-/// [`C2paSummary::summary_lines`] carries this text in the line that reports the store, never as a
-/// footnote. The same sentence `gamut-heic` carries, so every container reports alike.
-pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
-     it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
+// `C2paSummary::summary_lines` carries this text in the line that reports the store, never as a
+// footnote.
+pub use gamut_core::c2pa::NOT_VALIDATED as C2PA_NOT_VALIDATED;
 
 /// Why a `caBX` chunk yielded no manifest store.
 ///
@@ -418,7 +412,8 @@ impl C2paSummary {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `png` does not start with the PNG signature.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `png` does
+/// not start with the PNG signature.
 ///
 /// # Example
 ///
@@ -467,7 +462,8 @@ impl<'a> ChunkReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the input does not start with the PNG signature.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// input does not start with the PNG signature.
     pub(crate) fn new(png: &'a [u8]) -> Result<Self> {
         match png.split_at_checked(SIGNATURE.len()) {
             Some((signature, rest)) if signature == SIGNATURE => Ok(Self {
@@ -489,8 +485,8 @@ impl<'a> ChunkReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the chunk declares a length of 2³¹ or more (§5.3) or
-    /// runs past the end of the input.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// chunk declares a length of 2³¹ or more (§5.3) or runs past the end of the input.
     pub(crate) fn next_chunk(&mut self) -> Result<Option<RawChunk<'a>>> {
         if self.rest.is_empty() {
             return Ok(None);
@@ -565,10 +561,11 @@ impl<'a> ChunkReader<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] and leaves `png` **unmodified** if `span` runs past the end of
-/// `png`, if it does not frame a chunk (its payload must be `chunk.start + 8 .. chunk.end - 4`),
-/// if the bytes it names are not a `caBX` chunk, if the span's payload length disagrees with the
-/// length the chunk itself declares, or if `store` is not exactly the reserved length. Every check
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error and leaves
+/// `png` **unmodified** if `span` runs past the end of `png`, if it does not frame a chunk (its
+/// payload must be `chunk.start + 8 .. chunk.end - 4`), if the bytes it names are not a `caBX`
+/// chunk, if the span's payload length disagrees with the length the chunk itself declares, or if
+/// `store` is not exactly the reserved length. Every check
 /// runs before the first byte is written, so a rejected call cannot leave a half-filled chunk
 /// behind — and a store of the wrong length is rejected rather than resized, because resizing
 /// would move every byte after the chunk and invalidate the signer's hash.

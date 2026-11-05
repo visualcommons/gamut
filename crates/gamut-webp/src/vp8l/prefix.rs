@@ -81,9 +81,9 @@ impl PrefixCode {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if a length exceeds [`MAX_CODE_LENGTH`], if no symbol is
-    /// used, or if the lengths do not form a complete tree (the single-symbol leaf is the one
-    /// permitted incomplete tree, per §3.7.2).
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
+    /// length exceeds [`MAX_CODE_LENGTH`], if no symbol is used, or if the lengths do not form a
+    /// complete tree (the single-symbol leaf is the one permitted incomplete tree, per §3.7.2).
     pub fn from_code_lengths(code_lengths: &[u8]) -> Result<Self> {
         let mut counts = [0u16; MAX_CODE_LENGTH + 1];
         let mut n_used = 0usize;
@@ -162,7 +162,8 @@ impl PrefixCode {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] on truncation or if the bits do not match any code.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on
+    /// truncation or if the bits do not match any code.
     pub fn read_symbol(&self, r: &mut BitReader<'_>) -> Result<u16> {
         if let Some(sym) = self.single {
             return Ok(sym);
@@ -199,7 +200,8 @@ impl PrefixCode {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] on any malformed code-length coding or truncation.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on any
+/// malformed code-length coding or truncation.
 pub fn read_prefix_code(r: &mut BitReader<'_>, alphabet_size: usize) -> Result<PrefixCode> {
     if r.read_bit()? == 1 {
         read_simple_prefix_code(r, alphabet_size)
@@ -326,7 +328,8 @@ pub struct PrefixCodeGroup {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] on any malformed code or truncation.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on any
+/// malformed code or truncation.
 pub fn read_prefix_code_group(
     r: &mut BitReader<'_>,
     color_cache_size: usize,

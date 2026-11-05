@@ -22,10 +22,7 @@ fn minimal_icc() -> Vec<u8> {
 /// A PNG with `icc` embedded in its `iCCP` chunk (or none if `icc` is empty).
 fn png_with_icc(icc: &[u8]) -> Vec<u8> {
     let rgba = vec![255u8; 4 * 4]; // 2×2 opaque white
-    let dims = Dimensions {
-        width: 2,
-        height: 2,
-    };
+    let dims = Dimensions::new(2, 2).unwrap();
     let image = ImageRef::<Rgba8>::new(&rgba, dims).unwrap();
     let mut encoder = PngEncoder::new();
     if !icc.is_empty() {

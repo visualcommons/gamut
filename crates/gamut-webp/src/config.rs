@@ -15,8 +15,9 @@
 /// One interaction is worth knowing about on very large lossy frames. Levels 1 and up emit VP8's
 /// 4x4 (`B_PRED`) modes, whose per-macroblock records fill the control partition, and that
 /// partition's size field is only 19 bits (RFC 6386 §9.1). Past roughly twelve megapixels of
-/// highly detailed content the records no longer fit, and the encode fails with
-/// [`Error::InvalidInput`](gamut_core::Error) rather than emitting an unreadable file — the same
+/// highly detailed content the records no longer fit, and the encode fails with an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than emitting an
+/// unreadable file — the same
 /// condition libwebp reports as `VP8_ENC_ERROR_PARTITION0_OVERFLOW`. [`Effort::Fastest`] never
 /// emits `B_PRED`, so it covers the whole canvas range (up to 16383x16383) at any detail level.
 /// Lossless encodes are unaffected: VP8L has no such field.
@@ -105,7 +106,8 @@ impl NearLossless {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`](gamut_core::Error) if `strength` exceeds `99`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `strength` exceeds `99`.
     pub fn new(strength: u8) -> gamut_core::Result<Self> {
         if strength <= Self::MAX_STRENGTH {
             Ok(Self(strength))

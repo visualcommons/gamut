@@ -91,7 +91,7 @@ fn jbrd_stream_decodes_as_pixels_in_both_decoders() {
         .decode_image(&jxl)
         .expect("gamut decode of the jbrd stream failed");
     let dims = gamut_core::ImageBuf::<Rgb8>::dimensions(&image);
-    assert_eq!((dims.width, dims.height), (16, 16));
+    assert_eq!((dims.width(), dims.height()), (16, 16));
     let gamut_samples = image.as_samples();
     assert_eq!(gamut_samples.len(), oracle_samples.len());
     for (i, (&a, &b)) in gamut_samples.iter().zip(&oracle_samples).enumerate() {

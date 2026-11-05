@@ -39,9 +39,10 @@ impl RiffWriter {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if `payload` is longer than `u32::MAX`, which the chunk's
-    /// `uint32` size field cannot express. Such a payload cannot occur for a still image; rejecting
-    /// it keeps an over-large one from being silently written with a truncated size.
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if `payload`
+    /// is longer than `u32::MAX`, which the chunk's `uint32` size field cannot express. Such a
+    /// payload cannot occur for a still image; rejecting it keeps an over-large one from being
+    /// silently written with a truncated size.
     pub fn write_chunk(&mut self, fourcc: FourCc, payload: &[u8]) -> Result<()> {
         let size = chunk_size_field(payload.len())?;
         self.buf.extend_from_slice(fourcc.as_bytes());
@@ -58,8 +59,9 @@ impl RiffWriter {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if the accumulated file exceeds the spec's ceiling of
-    /// `2^32 - 10` bytes for the file-size field (RFC 9649 §2.4).
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the
+    /// accumulated file exceeds the spec's ceiling of `2^32 - 10` bytes for the file-size field
+    /// (RFC 9649 §2.4).
     pub fn finish(mut self) -> Result<Vec<u8>> {
         // `buf` always holds at least the 12-byte header, so the subtraction cannot underflow.
         let file_size = file_size_field(self.buf.len() as u64 - 8)?;

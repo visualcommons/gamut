@@ -35,14 +35,7 @@ fn libtiff_decodes_a_gamut_rgb_image_carrying_metadata() {
         let tiff = TiffEncoder::new()
             .with_tiff_metadata(metadata())
             .encode_to_vec(
-                ImageRef::<Rgb8>::new(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .expect("image"),
+                ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).expect("image"),
             )
             .expect("gamut encode");
         let dec = libtiff_oracle::decode_tiff(&tiff).expect("libtiff decode");
@@ -61,14 +54,7 @@ fn libtiff_decodes_a_gamut_image_carrying_a_c2pa_manifest_store() {
         let tiff = TiffEncoder::new()
             .with_tiff_metadata(metadata().with_c2pa(store.clone()))
             .encode_to_vec(
-                ImageRef::<Rgb8>::new(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .expect("image"),
+                ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).expect("image"),
             )
             .expect("gamut encode");
         let dec = libtiff_oracle::decode_tiff(&tiff).expect("libtiff decode");

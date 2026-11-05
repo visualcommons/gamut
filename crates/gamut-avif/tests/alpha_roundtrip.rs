@@ -19,10 +19,9 @@ use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgb16, Rgba8, R
 const W: u32 = 34;
 const H: u32 = 18;
 
-const DIMS: Dimensions = Dimensions {
-    width: W,
-    height: H,
-};
+fn dims() -> Dimensions {
+    Dimensions::new(W, H).unwrap()
+}
 
 /// The `aux_type` URN AVIF v1.2.0 §4 assigns an alpha auxiliary. Spelled out here rather than
 /// imported so the test pins the wire string independently of the constant the encoder uses.
@@ -68,14 +67,14 @@ fn source_gray() -> Vec<u8> {
 fn encode_rgba(encoder: &AvifEncoder) -> Vec<u8> {
     let px = source_rgba();
     encoder
-        .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).expect("buffer matches dimensions"))
+        .encode_to_vec(ImageRef::<Rgba8>::new(&px, dims()).expect("buffer matches dimensions"))
         .expect("encode")
 }
 
 fn encode_gray(encoder: &AvifEncoder) -> Vec<u8> {
     let px = source_gray();
     encoder
-        .encode_to_vec(ImageRef::<Gray8>::new(&px, DIMS).expect("buffer matches dimensions"))
+        .encode_to_vec(ImageRef::<Gray8>::new(&px, dims()).expect("buffer matches dimensions"))
         .expect("encode")
 }
 
@@ -122,7 +121,7 @@ fn alpha_is_a_conformant_auxiliary_image_item() {
     assert_eq!(alpha.auxiliary_type(), Some(ALPHA_URN));
     assert_eq!(
         alpha.dimensions(),
-        Some(DIMS),
+        Some(dims()),
         "aux ispe matches the master"
     );
 
@@ -175,7 +174,7 @@ fn premultiplication_is_declared_only_when_asked() {
     let rgb = vec![0u8; (W * H * 3) as usize];
     let avif = AvifEncoder::new()
         .with_premultiplied_alpha(true)
-        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims()).unwrap())
         .expect("encode");
     assert!(
         !AvifContainer::parse(&avif)
@@ -231,10 +230,10 @@ fn an_opaque_rgba8_is_coded_as_its_rgb8() {
         AvifEncoder::new().with_alpha_mode(AlphaMode::PremultiplyOnEncode),
     ] {
         let from_rgba = encoder
-            .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Rgba8>::new(&px, dims()).unwrap())
             .expect("encode RGBA");
         let from_rgb = encoder
-            .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims()).unwrap())
             .expect("encode RGB");
         assert_eq!(from_rgba, from_rgb, "{encoder:?}");
     }
@@ -246,10 +245,10 @@ fn an_opaque_rgba16_is_coded_as_its_rgb16() {
     let rgb = colour_of(&px);
     let encoder = AvifEncoder::new();
     let from_rgba = encoder
-        .encode_to_vec(ImageRef::<Rgba16>::new(&px, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgba16>::new(&px, dims()).unwrap())
         .expect("encode RGBA");
     let from_rgb = encoder
-        .encode_to_vec(ImageRef::<Rgb16>::new(&rgb, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgb16>::new(&rgb, dims()).unwrap())
         .expect("encode RGB");
     assert_eq!(from_rgba, from_rgb);
 }
@@ -262,7 +261,7 @@ fn one_non_opaque_alpha_sample_keeps_the_alpha_auxiliary() {
     let last = px.len() - 1;
     px[last] = u8::MAX - 1;
     let avif = AvifEncoder::new()
-        .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgba8>::new(&px, dims()).unwrap())
         .expect("encode");
     assert!(has_alpha_auxiliary(&avif));
 }
@@ -275,7 +274,7 @@ fn a_16_bit_alpha_below_full_scale_keeps_the_alpha_auxiliary() {
     let last = px.len() - 1;
     px[last] = u16::MAX - 1;
     let avif = AvifEncoder::new()
-        .encode_to_vec(ImageRef::<Rgba16>::new(&px, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgba16>::new(&px, dims()).unwrap())
         .expect("encode");
     assert!(has_alpha_auxiliary(&avif));
 }
@@ -285,7 +284,7 @@ fn keep_opaque_alpha_keeps_the_alpha_auxiliary_of_an_opaque_rgba8() {
     let px = opaque_rgba();
     let avif = AvifEncoder::new()
         .with_keep_opaque_alpha(true)
-        .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgba8>::new(&px, dims()).unwrap())
         .expect("encode");
     assert!(has_alpha_auxiliary(&avif));
 }
@@ -318,7 +317,7 @@ fn a_monochrome_item_costs_the_advanced_profile_brand() {
     //   writer satisfies, and four `should`s about sequences and tracks that a still cannot reach).
     let rgb = vec![0u8; (W * H * 3) as usize];
     let colour_only = AvifEncoder::new()
-        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims()).unwrap())
         .expect("encode");
     for (name, avif, advanced, baseline) in [
         ("rgb", colour_only, true, false),
@@ -464,7 +463,7 @@ fn lossy_alpha_is_the_av1_reconstruction_of_the_alpha_plane() {
 
     let px = source_rgba();
     let alpha_planes =
-        gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, DIMS).unwrap());
+        gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, dims()).unwrap());
     let (_, recon) = gamut_av1::encode_still_intra_with_speed(
         &alpha_planes,
         quality_to_quant(QUALITY),
@@ -505,7 +504,7 @@ fn item_payloads(avif: &[u8]) -> (Vec<u8>, Vec<u8>) {
 fn alpha_stream_at(base_q_idx: u8) -> Vec<u8> {
     let px = source_rgba();
     let planes =
-        gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, DIMS).unwrap());
+        gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, dims()).unwrap());
     gamut_av1::encode_still_intra_with_speed(
         &planes,
         base_q_idx,
@@ -564,7 +563,7 @@ fn a_finer_alpha_quality_decodes_closer_to_the_source_through_libavif() {
     const ALPHA_Q: u8 = 95;
     let px = source_rgba();
     let alpha_planes =
-        gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, DIMS).unwrap());
+        gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, dims()).unwrap());
     let source_alpha: Vec<u16> = px
         .as_chunks::<4>()
         .0
@@ -631,10 +630,7 @@ fn odd_and_tiny_sizes_round_trip_with_alpha() {
     // Sizes that exercise edge padding and a single-superblock frame, where a plane-geometry
     // mistake in the monochrome auxiliary would show up first.
     for (w, h) in [(1, 1), (3, 7), (17, 13), (64, 64)] {
-        let dims = Dimensions {
-            width: w,
-            height: h,
-        };
+        let dims = Dimensions::new(w, h).unwrap();
         let mut px = vec![0u8; (w * h * 4) as usize];
         for y in 0..h {
             for x in 0..w {
@@ -686,10 +682,7 @@ fn transparent_edge_rgba() -> Vec<u8> {
 #[test]
 fn clean_alpha_shrinks_a_lossy_transparent_edge_and_libavif_decodes_it() {
     const SIDE: u32 = 64;
-    let dims = Dimensions {
-        width: SIDE,
-        height: SIDE,
-    };
+    let dims = Dimensions::new(SIDE, SIDE).unwrap();
     let px = transparent_edge_rgba();
     let encode = |enc: AvifEncoder| {
         enc.encode_to_vec(ImageRef::<Rgba8>::new(&px, dims).expect("buffer matches dimensions"))

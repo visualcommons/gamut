@@ -177,8 +177,8 @@ pub struct ColorInfo {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidInput`] on a bad precision (`Pq > 1`), destination (`Tq > 3`), a zero
-/// quantization value (forbidden by Table B.5), or a length that does not match the tables.
+/// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on a bad precision
+/// (`Pq > 1`), destination (`Tq > 3`), a zero quantization value (forbidden by Table B.5), or a length that does not match the tables.
 pub fn parse_dqt(payload: &[u8], tables: &mut Tables) -> Result<()> {
     use crate::zigzag::ZIGZAG;
     let mut r = Reader::new(payload);
@@ -235,8 +235,9 @@ pub fn parse_dqt(payload: &[u8], tables: &mut Tables) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidInput`] on a bad class (`Tc > 1`), destination (`Th > 3`), a length that does not
-/// match `sum(BITS)`, or an overfull code space.
+/// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on a bad class
+/// (`Tc > 1`), destination (`Th > 3`), a length that does not match `sum(BITS)`, or an overfull code
+/// space.
 pub fn parse_dht(payload: &[u8], tables: &mut Tables) -> Result<()> {
     let mut r = Reader::new(payload);
     while r.remaining() > 0 {
@@ -272,7 +273,8 @@ pub fn parse_dht(payload: &[u8], tables: &mut Tables) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidInput`] if the payload is not exactly two bytes.
+/// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the payload is not
+/// exactly two bytes.
 pub fn parse_dri(payload: &[u8]) -> Result<u16> {
     let mut r = Reader::new(payload);
     let ri = r.u16("JPEG: truncated DRI")?;
@@ -289,7 +291,8 @@ pub fn parse_dri(payload: &[u8]) -> Result<u16> {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidInput`] if the payload is not exactly two bytes or `NL == 0`.
+/// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the payload is not
+/// exactly two bytes or `NL == 0`.
 pub fn parse_dnl(payload: &[u8]) -> Result<u16> {
     let mut r = Reader::new(payload);
     let nl = r.u16("JPEG: truncated DNL")?;
@@ -313,8 +316,9 @@ pub fn parse_dnl(payload: &[u8]) -> Result<u16> {
 ///
 /// # Errors
 ///
-/// [`Error::Unsupported`] for 12-bit precision or more than four components; [`Error::InvalidInput`]
-/// for a bad precision, a zero-width or zero-component frame, an out-of-range sampling factor or
+/// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for 12-bit precision or
+/// more than four components; an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
+/// error for a bad precision, a zero-width or zero-component frame, an out-of-range sampling factor or
 /// table destination, a duplicate component id, or a length mismatch.
 pub fn parse_sof(payload: &[u8]) -> Result<Frame> {
     let mut r = Reader::new(payload);
@@ -398,7 +402,8 @@ pub fn parse_sof(payload: &[u8]) -> Result<Frame> {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidInput`] for a bad component count, an unknown or duplicated component selector,
+/// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a bad component
+/// count, an unknown or duplicated component selector,
 /// an out-of-range table destination, an interleaved sampling sum `> 10`, a length mismatch, or a
 /// spectral-selection field outside the range Table B.3 allows for the process (including a
 /// multi-component AC scan or a mismatched `Ah`/`Al` in the progressive case).

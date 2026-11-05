@@ -93,8 +93,12 @@ impl Av1StillDecoder for Dav1dDecoder {
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;
-        let pic = dav1d_oracle::decode_obu(&stream)
-            .map_err(|_| Error::InvalidInput("raw planes: dav1d rejected the stream"))?;
+        let pic = dav1d_oracle::decode_obu(&stream).map_err(|_| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "raw planes: dav1d rejected the stream",
+            )
+        })?;
         let [y, u, v] = pic.planes;
         DecodedFrame::new(
             pic.width,

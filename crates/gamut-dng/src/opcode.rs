@@ -102,7 +102,8 @@ impl OpcodeList {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the bytes are not a well-formed opcode list.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// bytes are not a well-formed opcode list.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let count = read_u32(bytes, 0)?;
         // Each opcode needs at least its 16-byte header; an impossible count fails fast instead

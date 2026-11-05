@@ -111,7 +111,7 @@ println!(
 Sample decoding — the tile body, reconstruction and the in-loop filters — is **not implemented
 yet**, and no entry point pretends otherwise. Streams are accepted only at `seq_profile = 1`
 (8-bit 4:4:4) with intra key frames; every other tool is refused with a typed
-`Error::Unsupported` naming it, never approximated. `default-features = false` drops the decoder
+`ErrorKind::Unsupported` error naming it, never approximated. `default-features = false` drops the decoder
 entirely and leaves the encoder-only crate unchanged.
 
 It is checked against **libaom**, the AV1 reference codec, in the direction that matters for a

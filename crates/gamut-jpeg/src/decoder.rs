@@ -19,13 +19,14 @@
 //! entropy decoder, and reconstructs all components once at EOI. Two policy choices (both documented
 //! in `STATUS.md`):
 //!
-//! - **Deferred height (Y = 0 / DNL) is rejected** as [`Error::Unsupported`]: the coefficient
+//! - **Deferred height (Y = 0 / DNL) is rejected** as an
+//!   [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error: the coefficient
 //!   buffers must be sized to the full block grid before the first scan, and no real encoder (nor
 //!   the libjpeg-turbo oracle) emits a `Y = 0` progressive frame.
 //! - **Partial streams render generously** (matching libjpeg): a frame that ends before every band
 //!   is complete still reconstructs from the coefficients delivered so far, provided every component
 //!   received its DC first pass — otherwise the frame has no baseline and is rejected as
-//!   [`Error::InvalidInput`].
+//!   an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error.
 //!
 //! # Colour interpretation
 //!
@@ -39,7 +40,7 @@
 //! - **4 components** → Adobe APP14 `transform=2` ⇒ YCCK (the inverse YCbCr transform on the first
 //!   three channels, `K` passed through); otherwise CMYK stored verbatim (no Adobe inversion, the
 //!   libjpeg convention).
-//! - **2 or > 4 components** → [`Error::Unsupported`].
+//! - **2 or > 4 components** → [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported).
 //!
 //! # Upsampling
 //!
@@ -365,9 +366,10 @@ pub struct JpegInfo {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the stream is malformed or has no frame header, or
-/// [`Error::Unsupported`] if the frame uses a process other than baseline / extended-sequential /
-/// progressive DCT.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream
+/// is malformed or has no frame header, or an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the frame uses a process
+/// other than baseline / extended-sequential / progressive DCT.
 pub fn info(data: &[u8]) -> Result<JpegInfo> {
     let (process, payload) = frame_header(data)?;
     // Frame header layout (§B.2.2): P, Y(2), X(2), Nf, then components.
@@ -396,9 +398,10 @@ pub fn info(data: &[u8]) -> Result<JpegInfo> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the stream is malformed or has no frame header, or
-/// [`Error::Unsupported`] if the frame uses a process other than baseline / extended-sequential /
-/// progressive DCT.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream
+/// is malformed or has no frame header, or an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the frame uses a process
+/// other than baseline / extended-sequential / progressive DCT.
 pub(crate) fn frame_header(data: &[u8]) -> Result<(JpegProcess, &[u8])> {
     expect_soi(data)?;
     let mut pos = 2;
@@ -487,7 +490,8 @@ pub struct JpegMetadata {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the stream is malformed before the first scan, or if the
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream
+/// is malformed before the first scan, or if the
 /// `ICC_PROFILE` chunk sequence is inconsistent (index/count out of range, duplicated, mismatched,
 /// or missing chunks).
 ///
@@ -1314,7 +1318,8 @@ fn native_samples(
 
 impl DecodeImage<Rgb8> for JpegDecoder {
     /// Grayscale is replicated across channels; three-component YCbCr/RGB is presented as RGB;
-    /// four-component (CMYK/YCCK) returns [`Error::Unsupported`] (decode as [`Cmyk8`]).
+    /// four-component (CMYK/YCCK) returns an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error (decode as [`Cmyk8`]).
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
         self.present(data)
     }

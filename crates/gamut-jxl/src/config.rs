@@ -370,8 +370,8 @@ impl Distance {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `distance` is NaN or infinite, is `0.0` or negative, or
-    /// exceeds `25.0`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `distance` is NaN or infinite, is `0.0` or negative, or exceeds `25.0`.
     pub fn new(distance: f32) -> Result<Self> {
         if distance.is_finite() && distance > 0.0 && distance <= 25.0 {
             Ok(Self(distance))

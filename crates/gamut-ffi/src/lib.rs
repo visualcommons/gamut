@@ -155,7 +155,7 @@ mod tests {
             GAMUT_STATUS_UNSUPPORTED
         );
         assert_eq!(
-            status_of(&Error::Io(std::io::Error::other("m"))),
+            status_of(&Error::from(std::io::Error::other("m"))),
             GAMUT_STATUS_IO
         );
         // Classification looks through diagnostic context.

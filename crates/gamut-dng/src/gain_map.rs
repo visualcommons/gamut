@@ -109,7 +109,7 @@ impl ProfileGainTableMap {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the byte count disagrees with the header's dimensions,
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the byte count disagrees with the header's dimensions,
     /// a dimension is zero, or a gain is negative or not finite.
     pub fn parse_v1(bytes: &[u8], order: ByteOrder) -> Result<Self> {
         let mut r = Reader {
@@ -157,7 +157,7 @@ impl ProfileGainTableMap {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the byte count disagrees with the header, a dimension
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the byte count disagrees with the header, a dimension
     /// is zero, `DataType` is unknown, `Gamma` is outside `0.25 ..= 4.0`, or a float gain is not
     /// finite.
     pub fn parse_v2(bytes: &[u8], order: ByteOrder) -> Result<Self> {
@@ -244,7 +244,7 @@ impl ProfileGainTableMap {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the gains are not the 32-bit floats v1 requires, the
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the gains are not the 32-bit floats v1 requires, the
     /// gain count disagrees with the dimensions, or `gamma` is not the 1.0 v1 cannot store.
     pub fn to_bytes_v1(&self, order: ByteOrder) -> Result<Vec<u8>> {
         let GainValues::F32(gains) = &self.gains else {
@@ -282,7 +282,7 @@ impl ProfileGainTableMap {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the gain count disagrees with the dimensions or
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the gain count disagrees with the dimensions or
     /// `gamma` is outside `0.25 ..= 4.0`.
     pub fn to_bytes_v2(&self, order: ByteOrder) -> Result<Vec<u8>> {
         if !(0.25..=4.0).contains(&self.gamma) {

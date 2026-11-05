@@ -19,7 +19,8 @@
 //! - A backend that accepts and then fails **propagates**: its error is returned unchanged and no
 //!   later backend is consulted, so a partial result is never silently masked.
 //! - There is **no implicit software tail**: gamut ships no in-tree HEVC codestream decoder (issue
-//!   #18). An empty registry, or one where every backend declines, returns [`Error::Unsupported`].
+//!   #18). An empty registry, or one where every backend declines, returns an
+//!   [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
 
 use gamut_codec_abi::{Decoder, ImageDesc, MAX_PLANES, StreamConfig, codec_id, pixel_format};
 use gamut_core::{Dimensions, Error, Result};
@@ -33,7 +34,8 @@ use crate::{ChromaFormat, DecodedFrame, HevcConfig, HevcDecoder};
 /// part of the seam's wire contract and never changes.
 pub const HEVC_CODEC_ID: u32 = codec_id(*b"hvc1");
 
-/// The [`Error::Unsupported`] message a backend returns to decline a codestream **after** its
+/// The [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) message a backend returns to
+/// decline a codestream **after** its
 /// [`HevcDecoder::supports`] already said `true` — the "late decline".
 ///
 /// [`HevcDecoders`] treats exactly this message as a fall-through (it tries the next backend);
@@ -42,7 +44,8 @@ pub const HEVC_CODEC_ID: u32 = codec_id(*b"hvc1");
 /// [`decode`](gamut_codec_abi::Decoder::decode), which is the C-side spelling of the same signal.
 pub const BACKEND_DECLINED: &str = "HEIC: HEVC backend declined the codestream after accepting it";
 
-/// The [`Error::Unsupported`] message [`HevcDecoders`] returns when no backend accepted the job —
+/// The [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) message [`HevcDecoders`]
+/// returns when no backend accepted the job —
 /// an empty registry, or every backend declining.
 ///
 /// gamut ships no in-tree software HEVC decoder (issue #18), so there is no implicit fallback tail
@@ -102,7 +105,8 @@ impl core::fmt::Debug for HevcDecoders {
 
 impl HevcDecoders {
     /// Creates an empty registry. Decoding through it before any
-    /// [`push_backend`](Self::push_backend) yields [`Error::Unsupported`] ([`NO_BACKEND`]).
+    /// [`push_backend`](Self::push_backend) yields an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error ([`NO_BACKEND`]).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -144,7 +148,8 @@ impl HevcDecoder for HevcDecoders {
     /// # Errors
     ///
     /// Propagates the accepting backend's error unchanged (no later backend is tried), or returns
-    /// [`Error::Unsupported`] with the [`NO_BACKEND`] message when every backend declines.
+    /// an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error with the
+    /// [`NO_BACKEND`] message when every backend declines.
     fn decode_intra(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame> {
         for backend in &mut self.backends {
             if !backend.supports(config) {
@@ -191,8 +196,10 @@ impl HevcDecoder for HevcDecoders {
 ///
 /// [`Status::OK`](gamut_codec_abi::Status::OK) ⇒ a validated [`DecodedFrame`].
 /// [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) returned late from
-/// [`decode`](Decoder::decode) ⇒ [`Error::Unsupported`] carrying [`BACKEND_DECLINED`], the sentinel
-/// [`HevcDecoders`] falls through on. Any other non-OK status ⇒ [`Error::InvalidInput`] — terminal,
+/// [`decode`](Decoder::decode) ⇒ an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
+/// error carrying [`BACKEND_DECLINED`], the sentinel [`HevcDecoders`] falls through on. Any other
+/// non-OK status ⇒ an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error —
+/// terminal,
 /// and it propagates out of the registry.
 #[derive(Debug, Clone, Copy)]
 pub struct AbiHevcDecoder<D> {
@@ -260,8 +267,8 @@ impl<D: Decoder> AbiHevcDecoder<D> {
     fn stream_config(&self, config: &HevcConfig, extradata: &[u8]) -> StreamConfig {
         let mut cfg = StreamConfig::new(
             HEVC_CODEC_ID,
-            self.dimensions.width,
-            self.dimensions.height,
+            self.dimensions.width(),
+            self.dimensions.height(),
             u32::from(config.bit_depth_luma()),
         );
         cfg.extradata = extradata.as_ptr();
@@ -284,13 +291,15 @@ impl<D: Decoder> HevcDecoder for AbiHevcDecoder<D> {
     ///
     /// # Errors
     ///
-    /// [`Error::Unsupported`] with the [`BACKEND_DECLINED`] message when the backend returns
-    /// [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED); [`Error::InvalidInput`] for
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error with the
+    /// [`BACKEND_DECLINED`] message when the backend returns
+    /// [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED); an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for
     /// any other non-OK status, for a picture whose size overflows `usize`, or from
     /// [`DecodedFrame::new`]'s validation.
     fn decode_intra(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame> {
-        let width = self.dimensions.width;
-        let height = self.dimensions.height;
+        let width = self.dimensions.width();
+        let height = self.dimensions.height();
         let chroma = config.chroma_format();
         let bit_depth = config.bit_depth_luma();
         let luma_len = self.dimensions.num_pixels().ok_or_else(|| {

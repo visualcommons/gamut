@@ -25,14 +25,7 @@ fn rgb(w: u32, h: u32) -> Vec<u8> {
 }
 
 fn image(pixels: &[u8], w: u32, h: u32) -> ImageRef<'_, Rgb8> {
-    ImageRef::<Rgb8>::new(
-        pixels,
-        Dimensions {
-            width: w,
-            height: h,
-        },
-    )
-    .expect("image")
+    ImageRef::<Rgb8>::new(pixels, Dimensions::new(w, h).unwrap()).expect("image")
 }
 
 /// A big-endian TIFF carrying `STORE`, plus the encoder's report of where it landed.
@@ -159,14 +152,7 @@ fn the_palette_path_places_the_store_and_reports_it_through_the_locator() {
         .with_byte_order(ByteOrder::BigEndian)
         .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
         .encode_palette8(
-            ImageRef::<Indexed8>::new(
-                &indices,
-                Dimensions {
-                    width: 16,
-                    height: 16,
-                },
-            )
-            .expect("indices"),
+            ImageRef::<Indexed8>::new(&indices, Dimensions::new(16, 16).unwrap()).expect("indices"),
             &palette,
             &mut bytes,
         )
@@ -219,10 +205,7 @@ fn the_pixel_paths_that_pack_their_own_buffer_place_the_store_too() {
     // and they are the three that do pixel work of their own first — a byte-order-corrected copy
     // for 16-bit, an extra sample for RGBA, a whole bit-packing pass for bilevel — which is
     // exactly where a store gets dropped on the floor.
-    let dims = Dimensions {
-        width: 4,
-        height: 4,
-    };
+    let dims = Dimensions::new(4, 4).unwrap();
     let encoder = TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
         .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()));

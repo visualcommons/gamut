@@ -61,10 +61,7 @@ unsafe impl GlobalAlloc for CappedAllocator {
 static ALLOCATOR: CappedAllocator = CappedAllocator;
 
 fn valid_lzw_tiff() -> Vec<u8> {
-    let dims = Dimensions {
-        width: 12,
-        height: 9,
-    };
+    let dims = Dimensions::new(12, 9).unwrap();
     let rgb: Vec<u8> = (0..12 * 9 * 3).map(|i| (i * 7) as u8).collect();
     let mut out = Vec::new();
     TiffEncoder::new()
@@ -78,10 +75,7 @@ fn valid_lzw_tiff() -> Vec<u8> {
 /// send the byte-order deserialisation and the `u16` predictor over a buffer whose length no longer
 /// matches the declared depth.
 fn valid_rgb16_tiff() -> Vec<u8> {
-    let dims = Dimensions {
-        width: 12,
-        height: 9,
-    };
+    let dims = Dimensions::new(12, 9).unwrap();
     let rgb: Vec<u16> = (0..12 * 9 * 3).map(|i| (i * 2711 % 65536) as u16).collect();
     TiffEncoder::new()
         .with_compression(Compression::Lzw)
@@ -94,10 +88,7 @@ fn valid_rgb16_tiff() -> Vec<u8> {
 /// structures `TiffDecoder::metadata` and `c2pa_exclusions` walk, and the only ones in this crate
 /// reached by following a pointer tag out of IFD 0 or an offset/count pair out of the last IFD.
 fn valid_metadata_tiff() -> Vec<u8> {
-    let dims = Dimensions {
-        width: 12,
-        height: 9,
-    };
+    let dims = Dimensions::new(12, 9).unwrap();
     let rgb: Vec<u8> = (0..12 * 9 * 3).map(|i| (i * 7) as u8).collect();
     let mut exif = Ifd::new();
     exif.set(33434, Value::Rational(vec![(1, 250)]));

@@ -157,11 +157,11 @@ pub const MAX_FIRST_PARTITION_SIZE: u32 = (1 << 19) - 1;
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `first_partition_size` exceeds
-/// [`MAX_FIRST_PARTITION_SIZE`]. The size shares a 3-byte tag with the version and show-frame
-/// bits, so an oversized value would silently lose its high bits and describe a partition
-/// boundary that is not there — a stream no decoder can read. Reporting it is the only honest
-/// option: the ceiling is the format's.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+/// `first_partition_size` exceeds [`MAX_FIRST_PARTITION_SIZE`]. The size shares a 3-byte tag with
+/// the version and show-frame bits, so an oversized value would silently lose its high bits and
+/// describe a partition boundary that is not there — a stream no decoder can read. Reporting it is
+/// the only honest option: the ceiling is the format's.
 pub fn write_uncompressed_chunk(
     header: &Vp8FrameHeader,
     first_partition_size: u32,
@@ -192,8 +192,10 @@ pub fn write_uncompressed_chunk(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the data is too short or the key-frame start code is wrong, or
-/// [`Error::Unsupported`] for an inter frame (gamut codes key frames only).
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the data is
+/// too short or the key-frame start code is wrong, or an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for an inter frame (gamut
+/// codes key frames only).
 pub fn read_uncompressed_chunk(data: &[u8]) -> Result<UncompressedChunk> {
     if data.len() < 3 {
         return Err(Error::invalid_input(

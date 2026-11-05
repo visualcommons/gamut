@@ -48,7 +48,8 @@ impl TryFrom<u32> for Compression {
     /// Maps an on-disk `Compression` tag value (tag 259) to its scheme.
     ///
     /// The legacy Adobe Deflate code `32946` maps to [`Compression::Deflate`] like the
-    /// standardised `8`. Unrecognised codes fail with [`gamut_core::Error::Unsupported`].
+    /// standardised `8`. Unrecognised codes fail with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
     fn try_from(code: u32) -> Result<Self, Self::Error> {
         Ok(match code {
             1 => Compression::None,

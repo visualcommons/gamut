@@ -11,7 +11,8 @@
 //!   policy question with no universally right answer.
 //!
 //! This module defines both halves once, for every [`Pixel`] layout, so format crates never have to
-//! answer the policy questions themselves. A conversion is refused with [`Error::Unsupported`]
+//! answer the policy questions themselves. A conversion is refused with an
+//! [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) error
 //! unless the [`ConvertPolicy`] explicitly permits the loss it would incur — [`ConvertPolicy`]'s
 //! default is [`ConvertPolicy::lossless`], which permits none of it.
 //!
@@ -83,7 +84,8 @@ use crate::{
 #[non_exhaustive]
 #[repr(u32)]
 pub enum AlphaPolicy {
-    /// Refuse the conversion with [`Error::Unsupported`]. The default.
+    /// Refuse the conversion with an [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported)
+    /// error. The default.
     #[default]
     Reject = 0,
     /// Discard the alpha channel, keeping the unassociated colour samples untouched.
@@ -108,7 +110,8 @@ pub enum AlphaPolicy {
 #[non_exhaustive]
 #[repr(u32)]
 pub enum DepthPolicy {
-    /// Refuse the conversion with [`Error::Unsupported`]. The default.
+    /// Refuse the conversion with an [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported)
+    /// error. The default.
     #[default]
     Reject = 0,
     /// Rescale to the narrower range, rounding to nearest.
@@ -130,7 +133,8 @@ pub enum DepthPolicy {
 #[non_exhaustive]
 #[repr(u32)]
 pub enum LumaPolicy {
-    /// Refuse the conversion with [`Error::Unsupported`]. The default.
+    /// Refuse the conversion with an [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported)
+    /// error. The default.
     #[default]
     Reject = 0,
     /// BT.601 / SMPTE 170M weights — the JFIF convention.
@@ -304,20 +308,14 @@ impl<'a, S: Sample> RawImage<'a, S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `S` is not `format`'s sample width, if `dims` is
-    /// zero-sized or overflows `usize`, or if `samples.len()` is not
+    /// Returns an [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) error if `S` is not
+    /// `format`'s sample width, if `dims` overflows `usize`, or if `samples.len()` is not
     /// `width * height * format.channels()`.
     pub fn new(samples: &'a [S], format: PixelFormat, dims: Dimensions) -> Result<Self> {
         if format.bytes_per_sample() != core::mem::size_of::<S>() {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "convert: sample type does not match the pixel format's sample width",
-            ));
-        }
-        if dims.is_empty() {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "convert: zero-sized image",
             ));
         }
         let want = dims.sample_count(format.channels()).ok_or_else(|| {
@@ -619,9 +617,11 @@ fn run<S: Sample, T: Sample>(src: &[S], dst: &mut [T], plan: &Plan) {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unsupported`] if the conversion would lose information `policy` does not
-/// permit, or if either layout is [`Indexed8`](crate::Indexed8) or [`Cmyk8`](crate::Cmyk8) and the
-/// two differ. Returns [`Error::InvalidInput`] if the dimensions overflow `usize`.
+/// Returns an [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) error if the conversion
+/// would lose information `policy` does not permit, or if either layout is
+/// [`Indexed8`](crate::Indexed8) or [`Cmyk8`](crate::Cmyk8) and the two differ. Returns an
+/// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) error if the dimensions overflow
+/// `usize`.
 pub fn convert_from_raw<S: Sample, Q: Pixel>(
     src: RawImage<'_, S>,
     policy: ConvertPolicy,
@@ -641,7 +641,8 @@ pub fn convert_from_raw<S: Sample, Q: Pixel>(
 ///
 /// # Errors
 ///
-/// As [`convert_from_raw`], plus [`Error::InvalidInput`] if `dst` is not exactly
+/// As [`convert_from_raw`], plus an [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput)
+/// error if `dst` is not exactly
 /// `width * height * Q::CHANNELS` samples.
 pub fn convert_from_raw_into<S: Sample, Q: Pixel>(
     src: RawImage<'_, S>,
@@ -804,10 +805,7 @@ mod tests {
     };
 
     fn dims(w: u32, h: u32) -> Dimensions {
-        Dimensions {
-            width: w,
-            height: h,
-        }
+        Dimensions::new(w, h).unwrap()
     }
 
     /// Builds a one-pixel raw image; the shortest way to exercise a specific layout pair.
@@ -1128,8 +1126,6 @@ mod tests {
         assert!(RawImage::new(&samples, PixelFormat::Rgb8, dims(2, 1)).is_ok());
         // Wrong sample count.
         assert!(RawImage::new(&samples, PixelFormat::Rgb8, dims(3, 1)).is_err());
-        // Zero-sized.
-        assert!(RawImage::new(&[] as &[u8], PixelFormat::Rgb8, dims(0, 1)).is_err());
         // Sample width disagrees with the format: u8 samples described as a 16-bit layout.
         assert!(RawImage::new(&samples, PixelFormat::Rgb16, dims(2, 1)).is_err());
         assert!(RawImage::new(&[0u16; 6], PixelFormat::Rgb8, dims(2, 1)).is_err());

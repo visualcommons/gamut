@@ -134,7 +134,8 @@ const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `xy` is not a usable chromaticity (non-finite, `y <= 0`, or
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `xy` is not
+/// a usable chromaticity (non-finite, `y <= 0`, or
 /// outside the CIE 1960 transform's domain) or if the calibration maps it to a camera response
 /// that is not finite and positive, which leaves nothing to normalise by.
 pub(crate) fn camera_neutral_from_white_xy(

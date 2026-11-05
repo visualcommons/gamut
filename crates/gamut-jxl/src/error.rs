@@ -20,10 +20,12 @@ mod encode {
     /// [`gamut_core::Error`] with a static `"JXL: …"` message.
     ///
     /// The mapping mirrors libjxl's `JxlEncoderError` categories: out-of-memory and rejected input
-    /// map to [`Error::InvalidInput`], an unsupported configuration to [`Error::Unsupported`], and
-    /// API misuse (a bug in this crate — the wrapper is supposed to make every call in the right
-    /// order) to [`Error::InvalidInput`] after a `debug_assert!` that trips in debug builds. Any
-    /// other code, including the generic error, falls through to a generic [`Error::InvalidInput`].
+    /// map to [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput), an unsupported
+    /// configuration to [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported), and API
+    /// misuse (a bug in this crate — the wrapper is supposed to make every call in the right order)
+    /// to [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) after a `debug_assert!`
+    /// that trips in debug builds. Any other code, including the generic error, falls through to a
+    /// generic [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error.
     pub(crate) fn map_encoder_error(err: JxlEncoderError) -> Error {
         let detail = format!("{err:?}");
         let classified = match err {
@@ -148,18 +150,22 @@ mod decode {
     /// surface is deliberately coarse, so this collapses it to a handful of distinguishable classes
     /// and a generic fallback:
     ///
-    /// - an invalid magic/signature → [`Error::InvalidInput`] (not a JPEG XL stream);
-    /// - the pixel-limit guard tripping → [`Error::InvalidInput`] (image too large);
+    /// - an invalid magic/signature → [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
+    ///   (not a JPEG XL stream);
+    /// - the pixel-limit guard tripping →
+    ///   [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) (image too large);
     /// - features gamut can't present — a colour image requested as grayscale, or output that would
-    ///   need a colour-management transform we don't run — → [`Error::Unsupported`];
+    ///   need a colour-management transform we don't run — →
+    ///   [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported);
     /// - buffer-count/-size mismatches, which can only be a bug in this wrapper's own driver → a
-    ///   `debug_assert!` plus [`Error::InvalidInput`];
+    ///   `debug_assert!` plus [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput);
     /// - everything else (malformed codestream, unsupported-but-valid feature, allocation failure) →
-    ///   the generic [`Error::InvalidInput`] fallback.
+    ///   the generic [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) fallback.
     ///
     /// Truncation is *not* handled here: jxl-rs signals "needs more input" as a
     /// [`ProcessingResult::NeedsMoreInput`](jxl::api::ProcessingResult), never an `Err`, so the
-    /// decoder maps truncation to [`Error::InvalidInput`] itself (see [`crate::decoder`]).
+    /// decoder maps truncation to an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
+    /// error itself (see [`crate::decoder`]).
     pub(crate) fn map_decode_error(err: JxlError) -> Error {
         let detail = err.to_string();
         let classified = match err {

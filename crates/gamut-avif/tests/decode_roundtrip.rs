@@ -40,14 +40,7 @@ fn roundtrip(w: u32, h: u32) {
     let mut avif = Vec::new();
     AvifEncoder::new()
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut avif,
         )
         .unwrap();
@@ -113,14 +106,7 @@ fn lossy_roundtrip_via_libavif() {
             let mut avif = Vec::new();
             AvifEncoder::lossy(quality)
                 .encode_image(
-                    ImageRef::<Rgb8>::new(
-                        &rgb,
-                        Dimensions {
-                            width: w,
-                            height: h,
-                        },
-                    )
-                    .unwrap(),
+                    ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap(),
                     &mut avif,
                 )
                 .unwrap();
@@ -128,14 +114,7 @@ fn lossy_roundtrip_via_libavif() {
             // The AV1 layer's reconstruction (the exact decoder output) for the same input, coded
             // through the same BT.709 matrix *and* the same 4:2:0 chroma the lossy encoder
             // defaults to.
-            let img = ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap();
+            let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap();
             let planes = gamut_color::Planar8::from_rgb8_matrix_subsampled(
                 img,
                 lossy_matrix(),
@@ -223,14 +202,7 @@ fn lossy_ycbcr_returns_to_rgb_through_libavif() {
             let mut avif = Vec::new();
             AvifEncoder::lossy(quality)
                 .encode_image(
-                    ImageRef::<Rgb8>::new(
-                        &rgb,
-                        Dimensions {
-                            width: w,
-                            height: h,
-                        },
-                    )
-                    .unwrap(),
+                    ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap(),
                     &mut avif,
                 )
                 .unwrap();
@@ -261,14 +233,7 @@ fn lossy_ycbcr_is_smaller_than_the_identity_encoding() {
     for &quality in &[80u8, 50] {
         for &(w, h) in &[(64u32, 48u32), (100, 80)] {
             let rgb = photo_rgb(w, h);
-            let img = ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap();
+            let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap();
             let ycbcr = AvifEncoder::lossy(quality).encode_to_vec(img).unwrap();
             let identity = AvifEncoder::lossy(quality)
                 .with_matrix(gamut_color::MatrixCoefficients::Identity)
@@ -304,14 +269,7 @@ fn orientation_transforms_roundtrip_via_libavif() {
         }
         let mut avif = Vec::new();
         enc.encode_image(
-            ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut avif,
         )
         .unwrap();
@@ -356,26 +314,12 @@ fn every_chroma_format_roundtrips_via_libavif() {
             AvifEncoder::lossy(60)
                 .with_chroma(chroma)
                 .encode_image(
-                    ImageRef::<Rgb8>::new(
-                        &rgb,
-                        Dimensions {
-                            width: w,
-                            height: h,
-                        },
-                    )
-                    .unwrap(),
+                    ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap(),
                     &mut avif,
                 )
                 .unwrap();
 
-            let img = ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap();
+            let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap();
             let planes =
                 gamut_color::Planar8::from_rgb8_matrix_subsampled(img, lossy_matrix(), chroma)
                     .unwrap();

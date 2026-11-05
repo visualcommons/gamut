@@ -200,7 +200,8 @@ fn put_offset(out: &mut [u8], pos: usize, v: u64, order: ByteOrder, variant: Var
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the stream is not representable in the classic-TIFF widths:
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream
+/// is not representable in the classic-TIFF widths:
 /// a directory with more than `u16::MAX` entries, or a total layout past the 4 GiB offset limit.
 /// (BigTIFF widths cannot overflow in practice.)
 pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
@@ -215,7 +216,8 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] under the same conditions as [`write()`], or if a
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
+/// same conditions as [`write()`], or if a
 /// [`PinnedSpan`] is unsatisfiable: its tag absent or duplicated, its value inline or
 /// unsizable, its offset colliding with the directory region or another pin.
 pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, SegmentMap)> {

@@ -105,7 +105,8 @@ fn encoded(encoder: &WebpEncoder, width: u32, height: u32) -> Vec<u8> {
     let mut out = Vec::new();
     encoder
         .encode_image(
-            ImageRef::<Rgb8>::new(&px, Dimensions { width, height }).expect("fixture"),
+            ImageRef::<Rgb8>::new(&px, Dimensions::new(width, height).expect("fixture"))
+                .expect("fixture"),
             &mut out,
         )
         .expect("encode");

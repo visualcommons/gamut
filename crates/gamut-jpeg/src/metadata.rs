@@ -84,8 +84,9 @@ impl JpegEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message is
-    /// carried as [`Error::detail`]), and whatever
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the
+    /// model does not serialize (the facade's message is carried as [`Error::detail`]), and
+    /// whatever
     /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
     pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
         let encoded = MetadataEmbedder::new().embed(meta).map_err(|e| {
@@ -105,7 +106,8 @@ impl JpegEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (JPEG's APP13
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the
+    /// blocks carry a legacy IPTC-IIM stream (JPEG's APP13
     /// carriage is not implemented — see `STATUS.md`) or a C2PA manifest store (APP11 carriage is
     /// not implemented, and a store must not be copied forward in any case). Nothing is applied
     /// when an error is returned.

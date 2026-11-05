@@ -596,7 +596,8 @@ impl PngEncoder {
     ///
     /// Backends are tried in **push order**; the built-in [`gamut_deflate`] encoder is the implicit
     /// tail, so pushing nothing keeps today's behaviour byte for byte. A backend that returns
-    /// `false` from [`IdatDeflater::supports`] (or [`Error::Unsupported`] from
+    /// `false` from [`IdatDeflater::supports`] (or an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error from
     /// [`IdatDeflater::deflate`]) is skipped; one that accepts and then fails propagates its error
     /// rather than falling back — see the [`backend`](crate::backend) module docs for the full
     /// contract.
@@ -1090,7 +1091,8 @@ impl PngEncoder {
     /// and a text string holding a null are left behind, and
     /// [`MetadataNotice::carried`](MetadataNotice::carried) says which happened. **Only a null in
     /// a keyword** — or in an `iTXt` translated keyword — fails the encode with
-    /// [`Error::InvalidInput`] naming the annotation: those fields end at their first null, so
+    /// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error naming the
+    /// annotation: those fields end at their first null, so
     /// the chunk would be read back as a *different* annotation, which no notice can undo.
     ///
     /// The ICC profile's name answers to the same rule (§11.3.2.3); see
@@ -1316,7 +1318,8 @@ impl PngEncoder {
     /// same reason. Set only a store computed for the output this encoder is about to write.
     ///
     /// A chunk's payload is limited to 2^31 − 1 bytes (PNG §5.3); an encode with a longer `store`
-    /// fails with [`Error::InvalidInput`] rather than writing a chunk no reader accepts.
+    /// fails with an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather
+    /// than writing a chunk no reader accepts.
     ///
     /// The last of `with_c2pa` / `with_c2pa_reserved` wins; a file carries exactly one store.
     #[must_use]
@@ -1347,7 +1350,8 @@ impl PngEncoder {
     /// The reservation is `len` bytes exactly — no slack is added — so ask for what the signer
     /// says it needs (`c2pa-rs` reports a `reserve_size`). It is bounded like any chunk payload
     /// by PNG §5.3 to 2^31 − 1 bytes: an encode with a larger `len` fails with
-    /// [`Error::InvalidInput`] rather than writing a chunk no reader accepts.
+    /// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than
+    /// writing a chunk no reader accepts.
     ///
     /// The offsets hold for the file as this encoder wrote it. A PNG editor may lawfully insert
     /// another ancillary chunk after the store (PNG §14.3.2), so reserve, hash and fill without
@@ -1417,7 +1421,8 @@ impl PngEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if any index is out of range for `palette`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
+    /// index is out of range for `palette`.
     pub fn encode_indexed8(
         &self,
         image: ImageRef<'_, Indexed8>,
@@ -1498,8 +1503,12 @@ impl PngEncoder {
         let depth = reduce::index_bit_depth(palette.len());
         let packed;
         let sample_bytes = if depth < 8 {
-            packed =
-                pack::pack_scanlines(&indices, dims.width as usize, dims.height as usize, depth);
+            packed = pack::pack_scanlines(
+                &indices,
+                dims.width() as usize,
+                dims.height() as usize,
+                depth,
+            );
             packed.as_slice()
         } else {
             indices.as_slice()
@@ -1507,7 +1516,7 @@ impl PngEncoder {
         let plte = palette.plte();
         let trns = palette.trns();
         this.write_png(
-            (dims.width, dims.height),
+            (dims.width(), dims.height()),
             sample_bytes,
             WrittenHeader {
                 color: ColorType::Indexed,
@@ -1539,7 +1548,7 @@ impl PngEncoder {
     ) -> Result<usize> {
         let dims = image.dimensions();
         self.write_png(
-            (dims.width, dims.height),
+            (dims.width(), dims.height()),
             image.as_samples(),
             WrittenHeader::new(color, 8),
             |_| {},
@@ -1567,7 +1576,7 @@ impl PngEncoder {
                 reduce::analyze8_for(samples, channels, self.profile_family()),
                 |o| {
                     self.write_png(
-                        (dims.width, dims.height),
+                        (dims.width(), dims.height()),
                         samples,
                         WrittenHeader::new(color, 8),
                         |_| {},
@@ -1578,7 +1587,7 @@ impl PngEncoder {
             );
         }
         self.write_png(
-            (dims.width, dims.height),
+            (dims.width(), dims.height()),
             samples,
             WrittenHeader::new(color, 8),
             |_| {},
@@ -1686,7 +1695,7 @@ impl PngEncoder {
             bytes.extend_from_slice(&sample.to_be_bytes());
         }
         self.write_png(
-            (dims.width, dims.height),
+            (dims.width(), dims.height()),
             &bytes,
             WrittenHeader::new(color, 16),
             |_| {},
@@ -1888,15 +1897,15 @@ impl PngEncoder {
         reduced: Reduced,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        let wh = (dims.width, dims.height);
+        let wh = (dims.width(), dims.height());
         match reduced {
             Reduced::Gray { depth, samples } => {
                 let packed;
                 let sample_bytes = if depth < 8 {
                     packed = pack::pack_scanlines(
                         &samples,
-                        dims.width as usize,
-                        dims.height as usize,
+                        dims.width() as usize,
+                        dims.height() as usize,
                         depth,
                     );
                     packed.as_slice()
@@ -1983,8 +1992,8 @@ impl PngEncoder {
                 let sample_bytes = if depth < 8 {
                     packed = pack::pack_scanlines(
                         &indices,
-                        dims.width as usize,
-                        dims.height as usize,
+                        dims.width() as usize,
+                        dims.height() as usize,
                         depth,
                     );
                     packed.as_slice()
@@ -2121,9 +2130,9 @@ impl EncodeImage<Bilevel> for PngEncoder {
             .iter()
             .map(|&v| u8::from(v != 0))
             .collect();
-        let packed = pack::pack_scanlines(&bits, dims.width as usize, dims.height as usize, 1);
+        let packed = pack::pack_scanlines(&bits, dims.width() as usize, dims.height() as usize, 1);
         self.write_png(
-            (dims.width, dims.height),
+            (dims.width(), dims.height()),
             &packed,
             WrittenHeader::new(ColorType::Grayscale, 1),
             |_| {},
@@ -2953,9 +2962,9 @@ mod typed {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message
-        /// is carried as [`Error::detail`]), and whatever
-        /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
+        /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when
+        /// the model does not serialize (the facade's message is carried as [`Error::detail`]),
+        /// and whatever [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
         pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
             let encoded = MetadataEmbedder::new().embed(meta).map_err(|e| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: metadata does not serialize")
@@ -2976,13 +2985,14 @@ mod typed {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (PNG
-        /// defines no IPTC-IIM chunk) or a C2PA manifest store. A store is never embedded from
-        /// metadata blocks: it is signed over the bytes of the one file it was made for, so a
-        /// store computed for this output goes through [`with_c2pa`](Self::with_c2pa) /
-        /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) instead. Returns
-        /// [`Error::InvalidInput`] when the XMP packet is not UTF-8, which an `iTXt` text field
-        /// must be (§11.3.3.4). Nothing is applied when an error is returned.
+        /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the
+        /// blocks carry a legacy IPTC-IIM stream (PNG defines no IPTC-IIM chunk) or a C2PA
+        /// manifest store. A store is never embedded from metadata blocks: it is signed over the
+        /// bytes of the one file it was made for, so a store computed for this output goes through
+        /// [`with_c2pa`](Self::with_c2pa) / [`with_c2pa_reserved`](Self::with_c2pa_reserved)
+        /// instead. Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
+        /// error when the XMP packet is not UTF-8, which an `iTXt` text field must be (§11.3.3.4).
+        /// Nothing is applied when an error is returned.
         pub fn with_encoded_metadata(mut self, encoded: &EncodedMetadata) -> Result<Self> {
             if encoded.iptc_iim.is_some() {
                 return Err(Error::unsupported(

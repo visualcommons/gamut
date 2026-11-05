@@ -60,8 +60,8 @@ impl<'a> HeifContainer<'a> {
     /// # Errors
     ///
     /// Propagates every [`gamut_isobmff::read`] error (a missing/truncated required box, an
-    /// out-of-scope feature such as a sequence-only file, …) and returns
-    /// [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the
+    /// out-of-scope feature such as a sequence-only file, …) and returns an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
     /// primary item is missing or hidden. A malformed top-level box *before* both `ftyp` and `meta`
     /// are seen is a parse error; after that it is retained as a [`SegmentKind::Trailer`]. A
     /// `moov`/`trak` beside the `meta` still is not an error: it is skipped, and its bytes are one

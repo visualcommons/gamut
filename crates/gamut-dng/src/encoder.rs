@@ -223,7 +223,8 @@ impl DngEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if both were requested, if the store is too short to be a
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if both
+    /// were requested, if the store is too short to be a
     /// JUMBF box at all ([`c2pa::MIN_STORE_LEN`]), or if it would pack *inline* in this
     /// encoder's container variant — BigTIFF's inline threshold is those same 8 bytes, so a
     /// BigTIFF store must exceed them to be placeable at the end of the file; if classic TIFF's
@@ -293,8 +294,10 @@ impl DngEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if the raw is not 3-colour (the profile is a `3 × 3` matrix).
-    /// Returns [`Error::InvalidInput`] — before any pixel work — if the
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the raw
+    /// is not 3-colour (the profile is a `3 × 3` matrix).
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error — before
+    /// any pixel work — if the
     /// [`DngMetadata::exif`] sub-IFD, or a directory nested in it, carries a field under a
     /// standard pointer tag (`SubIFDs`, `ExifIFD`, `GPSInfo`, `InteroperabilityIFD`) whose on-disk
     /// type is a pointer's own (`LONG`, `IFD`, `LONG8`, `IFD8`, judged by [`Value::type_code`],
@@ -322,7 +325,8 @@ impl DngEncoder {
     ///
     /// # Errors
     ///
-    /// As [`encode`](Self::encode); additionally [`Error::InvalidInput`] if both a store and a
+    /// As [`encode`](Self::encode); additionally an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if both a store and a
     /// reservation were configured; if the store (or reservation) is shorter than
     /// [`gamut_ifd::c2pa::MIN_STORE_LEN`]; or if, with [`with_big_tiff`](Self::with_big_tiff),
     /// it is exactly `MIN_STORE_LEN` (8) bytes — BigTIFF packs a value that short inline in its
@@ -365,8 +369,8 @@ impl DngEncoder {
             ));
         }
         let (width, height) = (
-            raw.dimensions().width as usize,
-            raw.dimensions().height as usize,
+            raw.dimensions().width() as usize,
+            raw.dimensions().height() as usize,
         );
         let spp = usize::from(raw.samples_per_pixel());
         let period = horizontal_cfa_period(raw);
@@ -392,7 +396,7 @@ impl DngEncoder {
             }
         };
 
-        let (preview_dims, preview_rgb) = preview::raw_preview(raw);
+        let (preview_dims, preview_rgb) = preview::raw_preview(raw)?;
         // Effective versions: the backward version per the compatibility rules, and (unless
         // overridden) the minimal DNGVersion covering the features used — never below the
         // backward version, which a reader is entitled to assume.
@@ -480,8 +484,8 @@ impl DngEncoder {
         let mut ifd = Ifd::new();
         // Preview image (a reduced-resolution RGB thumbnail).
         ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
-        ifd.set(tags::IMAGE_WIDTH, count_value(preview_dims.width));
-        ifd.set(tags::IMAGE_LENGTH, count_value(preview_dims.height));
+        ifd.set(tags::IMAGE_WIDTH, count_value(preview_dims.width()));
+        ifd.set(tags::IMAGE_LENGTH, count_value(preview_dims.height()));
         ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8, 8, 8]));
         ifd.set(
             tags::COMPRESSION,
@@ -493,7 +497,7 @@ impl DngEncoder {
         );
         ifd.set(tags::ORIENTATION, Value::Short(vec![1]));
         ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
-        ifd.set(tags::ROWS_PER_STRIP, count_value(preview_dims.height));
+        ifd.set(tags::ROWS_PER_STRIP, count_value(preview_dims.height()));
         ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
@@ -807,7 +811,8 @@ fn color_plane_count(raw: &RawImage) -> usize {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the level model cannot be stored: a delta vector whose
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the level
+/// model cannot be stored: a delta vector whose
 /// length doesn't match the active area, a non-integral white level, or a level outside the
 /// tag's representable range.
 fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
@@ -816,8 +821,8 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
     let dims = raw.dimensions();
     let spp = raw.samples_per_pixel();
     ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![0])); // full-resolution main image
-    ifd.set(tags::IMAGE_WIDTH, count_value(dims.width));
-    ifd.set(tags::IMAGE_LENGTH, count_value(dims.height));
+    ifd.set(tags::IMAGE_WIDTH, count_value(dims.width()));
+    ifd.set(tags::IMAGE_LENGTH, count_value(dims.height()));
     ifd.set(
         tags::BITS_PER_SAMPLE,
         Value::Short(vec![raw.bits_per_sample(); usize::from(spp)]),
@@ -831,7 +836,7 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
             ifd.set(tags::TILE_WIDTH, count_value(tile_width));
             ifd.set(tags::TILE_LENGTH, count_value(tile_height));
         }
-        None => ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height)),
+        None => ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height())),
     }
     // JPEG XL records its encode parameters (optional tags; DNG 1.7.1 pp. 97-98).
     if compression == Compression::JpegXl {
@@ -903,7 +908,7 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
             right.saturating_sub(left) as usize,
             bottom.saturating_sub(top) as usize,
         ),
-        None => (dims.width as usize, dims.height as usize),
+        None => (dims.width() as usize, dims.height() as usize),
     };
     if let Some(deltas) = levels.black_delta_h() {
         if deltas.len() != aa_width {
@@ -1031,7 +1036,8 @@ fn uncountable_store_len(variant: Variant, len: usize) -> bool {
 /// [`DngEncoder::with_c2pa_reserved`] returns `Self`, so it cannot refuse anything itself and the
 /// length it stores is a caller's number that reaches this untouched. Past `isize::MAX` a
 /// `Vec<u8>` cannot exist, and `vec![0; len]` panics with a capacity overflow — which a library
-/// path must not do. Reserving fallibly turns that into [`Error::InvalidInput`]. A reservation the
+/// path must not do. Reserving fallibly turns that into an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error. A reservation the
 /// machine merely lacks memory for still aborts, as any oversized allocation in Rust does.
 fn zeroed(len: usize) -> Result<Vec<u8>> {
     let mut store = Vec::new();

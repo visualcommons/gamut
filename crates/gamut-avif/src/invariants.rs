@@ -330,14 +330,14 @@ mod tests {
 
     #[test]
     fn success_only_under_the_tighter_limits_violates_the_decode_law() {
-        let refused = Err(Error::InvalidInput("x"));
+        let refused = Err(Error::invalid_input(env!("CARGO_PKG_NAME"), "x"));
         assert!(runs_agree_within_limits("t", 1, LIMITS, Ok((1, 1, vec![0])), refused).is_err());
     }
 
     #[test]
     fn only_a_limit_refusal_may_be_added_by_the_tighter_limits() {
         let ok = || Ok((1, 1, vec![0]));
-        let other = Err(Error::InvalidInput("x"));
+        let other = Err(Error::invalid_input(env!("CARGO_PKG_NAME"), "x"));
         assert!(runs_agree_within_limits("t", 1, LIMITS, other, ok()).is_err());
         for message in [
             DIMENSION_LIMIT,
@@ -351,7 +351,7 @@ mod tests {
                 Ok(())
             );
         }
-        let both = || Err(Error::InvalidInput("x"));
+        let both = || Err(Error::invalid_input(env!("CARGO_PKG_NAME"), "x"));
         assert_eq!(
             runs_agree_within_limits("t", 1, LIMITS, both(), both()),
             Ok(())

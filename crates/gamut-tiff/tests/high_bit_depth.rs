@@ -38,10 +38,7 @@ fn rgb16_pattern(w: u32, h: u32) -> Vec<u16> {
 }
 
 fn dims(w: u32, h: u32) -> Dimensions {
-    Dimensions {
-        width: w,
-        height: h,
-    }
+    Dimensions::new(w, h).unwrap()
 }
 
 /// Every gamut compression that can carry 16-bit samples, paired with the predictors it allows.

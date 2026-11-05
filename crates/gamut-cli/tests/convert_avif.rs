@@ -19,10 +19,9 @@ use gamut::isobmff::ColourInformation;
 use gamut::png::PngEncoder;
 
 /// A 2×2 image.
-const DIMS: Dimensions = Dimensions {
-    width: 2,
-    height: 2,
-};
+fn dims() -> Dimensions {
+    Dimensions::new(2, 2).unwrap()
+}
 
 /// A bare TIFF stream holding one 0th-IFD tag, as a PNG `eXIf` carries it and as `gamut-exif`
 /// writes it — so the command's parse-and-rewrite (which changes none of these tags) reproduces it
@@ -51,7 +50,7 @@ where
     PngEncoder: EncodeImage<P>,
 {
     encoder
-        .encode_to_vec(ImageRef::<P>::new(samples, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<P>::new(samples, dims()).unwrap())
         .unwrap()
 }
 

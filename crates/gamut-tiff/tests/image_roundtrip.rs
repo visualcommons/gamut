@@ -34,10 +34,7 @@ fn gray_pattern(w: u32, h: u32) -> Vec<u8> {
 #[test]
 fn rgb_roundtrips_all_sizes_both_orders() {
     for &(w, h) in SIZES {
-        let dims = Dimensions {
-            width: w,
-            height: h,
-        };
+        let dims = Dimensions::new(w, h).unwrap();
         let src = rgb_pattern(w, h);
         for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
             let mut tiff = Vec::new();
@@ -49,7 +46,7 @@ fn rgb_roundtrips_all_sizes_both_orders() {
 
             let got: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
             assert_eq!(
-                (got.dimensions().width, got.dimensions().height),
+                (got.dimensions().width(), got.dimensions().height()),
                 (w, h),
                 "dims {w}x{h} {order:?}"
             );
@@ -61,10 +58,7 @@ fn rgb_roundtrips_all_sizes_both_orders() {
 #[test]
 fn gray_roundtrips_and_replicates_to_rgb() {
     for &(w, h) in SIZES {
-        let dims = Dimensions {
-            width: w,
-            height: h,
-        };
+        let dims = Dimensions::new(w, h).unwrap();
         let src = gray_pattern(w, h);
         let mut tiff = Vec::new();
         TiffEncoder::new()
@@ -72,7 +66,10 @@ fn gray_roundtrips_and_replicates_to_rgb() {
             .expect("encode");
 
         let got: ImageBuf<Gray8> = TiffDecoder::new().decode_image(&tiff).expect("gray");
-        assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+        assert_eq!(
+            (got.dimensions().width(), got.dimensions().height()),
+            (w, h)
+        );
         assert_eq!(got.as_samples(), src.as_slice());
 
         let rgb: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("rgb");
@@ -91,14 +88,7 @@ fn multi_strip_image_is_split_and_reassembled() {
     let mut tiff = Vec::new();
     TiffEncoder::new()
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                &src,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut tiff,
         )
         .expect("encode");

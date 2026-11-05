@@ -13,17 +13,23 @@
 //! - **Interleaved `u8` / `u16` layouts only.** [`Sample`] is sealed over `u8` and `u16`; planar
 //!   layouts and codec-side concerns such as coded bit depth live in `gamut-color`
 //!   (`gamut_color::Planar8`, `gamut_color::BitDepth`), not here.
-//! - **Open where growth is additive, sealed where it must not be.** [`Error`] and [`ColorModel`]
-//!   are `#[non_exhaustive]` so variants can be added without a breaking change, while [`Pixel`]
-//!   and [`Sample`] are sealed — the set of pixel layouts is closed and only this crate defines it.
-//! - **Static classifications, optional diagnostics.** [`Error::InvalidInput`] /
-//!   [`Error::Unsupported`] retain their allocation-free `&'static str` payloads and public shape.
-//!   Producers can wrap any error in [`Error::Context`] to attach an origin, byte offset, or owned
-//!   detail without changing its [`ErrorKind`]. [`Error::Io`] preserves the underlying
-//!   [`std::io::Error`] so transport failures stay distinguishable from malformed input.
-//! - **The length invariant lives on the buffers, not on [`Dimensions`].** [`Dimensions`] is a plain
-//!   value type with public fields; non-emptiness and `len == width * height * channels` are
-//!   enforced once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs receive a known-good buffer.
+//! - **Open where growth is additive, sealed where it must not be.** [`ErrorKind`] and
+//!   [`ColorModel`] are `#[non_exhaustive]` so variants can be added without a breaking change,
+//!   while [`Pixel`] and [`Sample`] are sealed — the set of pixel layouts is closed and only this
+//!   crate defines it.
+//! - **One opaque error, matched by kind.** [`Error`] keeps its representation private: callers
+//!   match on [`Error::kind`] and read [`Error::origin`], [`Error::byte_offset`],
+//!   [`Error::detail`] and `source()`, so a match never depends on what context a producer
+//!   attached. It is built with [`Error::invalid_input`], [`Error::unsupported`] or
+//!   `From<std::io::Error>`, the last keeping transport failures distinguishable from malformed
+//!   input.
+//! - **Dimensions are never empty.** [`Dimensions`] has private fields and one constructor,
+//!   [`Dimensions::new`], which rejects a zero width or height; the buffers then enforce
+//!   `len == width * height * channels` once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs
+//!   receive a known-good buffer.
+//! - **One vocabulary for what every format carries.** [`DecodeLimits`], [`Cicp`],
+//!   [`Orientation`], [`Palette`], [`RawMetadata`] and the [`c2pa`] constants are defined here
+//!   once, so format crates share them instead of each defining its own.
 //! - **Byte accounting shares its shape and law, not its walks.** [`segment::Segment`] is generic
 //!   over each format's own `kind` enum and [`segment::covers`] is the one "tiles `0..len`"
 //!   predicate; the walks that produce the segments stay format-specific.
@@ -61,8 +67,10 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+pub mod c2pa;
+mod cicp;
 pub mod convert;
-
+mod error;
 mod image;
 // Executable laws for the conversion engine, shared by this crate's property tests and the
 // out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
@@ -71,291 +79,68 @@ mod image;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod invariants;
+mod limits;
 pub mod luminance;
+mod metadata;
+mod orientation;
+mod palette;
 mod pixel;
 pub mod segment;
 
+pub use cicp::Cicp;
+pub use convert::RawImage;
+pub use error::{Error, ErrorKind, Result};
 pub use image::{ImageBuf, ImageRef};
+pub use limits::DecodeLimits;
+pub use metadata::RawMetadata;
+pub use orientation::Orientation;
+pub use palette::Palette;
 pub use pixel::{
     Bilevel, Cmyk8, ColorModel, Gray8, Gray16, GrayAlpha8, GrayAlpha16, Indexed8, Pixel,
     PixelFormat, Rgb8, Rgb16, Rgba8, Rgba16, Sample,
 };
 
-/// Stable classification of a gamut error, independent of any diagnostic context around it.
+/// Width and height of an image, in pixels; neither is ever zero.
 ///
-/// The discriminants are permanent and append-only so the classification remains mechanically
-/// portable to the C status surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-#[repr(u32)]
-pub enum ErrorKind {
-    /// The input data was malformed, truncated, or otherwise invalid.
-    InvalidInput = 1,
-    /// The requested format, profile, or feature is unsupported.
-    Unsupported = 2,
-    /// An underlying I/O operation failed.
-    Io = 3,
-}
-
-const _: () = {
-    assert!(ErrorKind::InvalidInput as u32 == 1);
-    assert!(ErrorKind::Unsupported as u32 == 2);
-    assert!(ErrorKind::Io as u32 == 3);
-};
-
-/// Structured diagnostic information attached to an [`Error`].
-///
-/// Callers normally inspect this through [`Error::origin`], [`Error::byte_offset`], and
-/// [`Error::detail`]. The fields stay private so more optional context can be added without
-/// changing the construction contract.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct Diagnostic {
-    source: Error,
-    origin: Option<&'static str>,
-    byte_offset: Option<u64>,
-    detail: Option<Box<str>>,
-}
-
-impl Diagnostic {
-    /// The underlying classified error.
-    #[must_use]
-    pub fn source_error(&self) -> &Error {
-        &self.source
-    }
-
-    /// The Cargo package or format layer that produced the error, when known.
-    #[must_use]
-    pub fn origin(&self) -> Option<&'static str> {
-        self.origin
-    }
-
-    /// The byte offset relative to the producing parser's immediate input, when known.
-    #[must_use]
-    pub fn byte_offset(&self) -> Option<u64> {
-        self.byte_offset
-    }
-
-    /// Dynamic diagnostic detail retained from an underlying parser or backend, when available.
-    #[must_use]
-    pub fn detail(&self) -> Option<&str> {
-        self.detail.as_deref()
-    }
-}
-
-impl core::fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.source)?;
-        if self.origin.is_some() || self.byte_offset.is_some() {
-            f.write_str(" [")?;
-            if let Some(origin) = self.origin {
-                write!(f, "origin: {origin}")?;
-                if self.byte_offset.is_some() {
-                    f.write_str(", ")?;
-                }
-            }
-            if let Some(offset) = self.byte_offset {
-                write!(f, "byte offset: {offset}")?;
-            }
-            f.write_str("]")?;
-        }
-        if let Some(detail) = &self.detail {
-            write!(f, ": {detail}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for Diagnostic {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
-    }
-}
-
-/// Errors produced by gamut encoders and decoders.
-///
-/// Marked `#[non_exhaustive]` so additional variants can be added as formats land without a
-/// breaking change.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum Error {
-    /// The input data was malformed, truncated, or otherwise not valid for the format.
-    #[error("invalid input: {0}")]
-    InvalidInput(&'static str),
-    /// The requested format, profile, or feature is not yet supported.
-    #[error("unsupported: {0}")]
-    Unsupported(&'static str),
-    /// An underlying I/O operation failed while reading from a stream-backed source.
-    ///
-    /// Distinct from [`Error::InvalidInput`]: this reports the *transport* failing (a disk
-    /// error, an interrupted read), not the bytes being malformed, so batch pipelines can retry
-    /// or surface it instead of misclassifying the file as corrupt.
-    #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
-    /// An existing error enriched with optional structured diagnostic context.
-    ///
-    /// The payload is boxed so adding context does not inflate the allocation-free legacy
-    /// variants. Context is allocated only while constructing an error, never on a successful
-    /// codec path.
-    #[error("{0}")]
-    Context(#[source] Box<Diagnostic>),
-}
-
-impl Error {
-    /// Constructs an invalid-input error attributed to `origin`.
-    ///
-    /// Direct [`Error::InvalidInput`] construction remains the allocation-free compatibility
-    /// path. This constructor is for producers that opt into structured diagnostics.
-    #[must_use]
-    pub fn invalid_input(origin: &'static str, message: &'static str) -> Self {
-        Self::InvalidInput(message).with_origin(origin)
-    }
-
-    /// Constructs an unsupported-feature error attributed to `origin`.
-    ///
-    /// Direct [`Error::Unsupported`] construction remains the allocation-free compatibility path.
-    #[must_use]
-    pub fn unsupported(origin: &'static str, message: &'static str) -> Self {
-        Self::Unsupported(message).with_origin(origin)
-    }
-
-    /// Returns the stable classification of this error, looking through diagnostic context.
-    #[must_use]
-    pub fn kind(&self) -> ErrorKind {
-        match self {
-            Self::InvalidInput(_) => ErrorKind::InvalidInput,
-            Self::Unsupported(_) => ErrorKind::Unsupported,
-            Self::Io(_) => ErrorKind::Io,
-            Self::Context(diagnostic) => diagnostic.source.kind(),
-        }
-    }
-
-    /// Returns the allocation-free static message carried by a legacy error, when present.
-    ///
-    /// Context does not change the message. [`Error::Io`] has no static message because its text
-    /// belongs to the underlying [`std::io::Error`].
-    #[must_use]
-    pub fn static_message(&self) -> Option<&'static str> {
-        match self {
-            Self::InvalidInput(message) | Self::Unsupported(message) => Some(message),
-            Self::Io(_) => None,
-            Self::Context(diagnostic) => diagnostic.source.static_message(),
-        }
-    }
-
-    /// Returns the Cargo package or format layer that produced the error, when known.
-    #[must_use]
-    pub fn origin(&self) -> Option<&'static str> {
-        match self {
-            Self::Context(diagnostic) => diagnostic.origin(),
-            _ => None,
-        }
-    }
-
-    /// Returns the byte offset relative to the producing parser's immediate input, when known.
-    #[must_use]
-    pub fn byte_offset(&self) -> Option<u64> {
-        match self {
-            Self::Context(diagnostic) => diagnostic.byte_offset(),
-            _ => None,
-        }
-    }
-
-    /// Returns dynamic diagnostic detail retained from an underlying parser or backend.
-    #[must_use]
-    pub fn detail(&self) -> Option<&str> {
-        match self {
-            Self::Context(diagnostic) => diagnostic.detail(),
-            _ => None,
-        }
-    }
-
-    /// Attaches the producing Cargo package or format layer if no origin is already present.
-    #[must_use]
-    pub fn with_origin(self, origin: &'static str) -> Self {
-        self.with_diagnostic(|diagnostic| {
-            if diagnostic.origin.is_none() {
-                diagnostic.origin = Some(origin);
-            }
-        })
-    }
-
-    /// Attaches a byte offset if no offset is already present.
-    ///
-    /// The offset is relative to the immediate input accepted by the parser that reports it.
-    #[must_use]
-    pub fn with_byte_offset(self, byte_offset: u64) -> Self {
-        self.with_diagnostic(|diagnostic| {
-            if diagnostic.byte_offset.is_none() {
-                diagnostic.byte_offset = Some(byte_offset);
-            }
-        })
-    }
-
-    /// Attaches owned dynamic detail if no detail is already present.
-    ///
-    /// This is the opt-in allocating path; static-only callers can keep constructing
-    /// [`Error::InvalidInput`] and [`Error::Unsupported`] directly.
-    #[must_use]
-    pub fn with_detail(self, detail: impl Into<Box<str>>) -> Self {
-        self.with_diagnostic(|diagnostic| {
-            if diagnostic.detail.is_none() {
-                diagnostic.detail = Some(detail.into());
-            }
-        })
-    }
-
-    fn with_diagnostic(self, update: impl FnOnce(&mut Diagnostic)) -> Self {
-        match self {
-            Self::Context(mut diagnostic) => {
-                update(&mut diagnostic);
-                Self::Context(diagnostic)
-            }
-            source => {
-                let mut diagnostic = Diagnostic {
-                    source,
-                    origin: None,
-                    byte_offset: None,
-                    detail: None,
-                };
-                update(&mut diagnostic);
-                Self::Context(Box::new(diagnostic))
-            }
-        }
-    }
-}
-
-/// Convenience result type for gamut operations.
-pub type Result<T> = core::result::Result<T, Error>;
-
-/// Width and height of an image, in pixels.
-///
-/// `#[repr(C)]`: the layout — `width` then `height`, two `u32`s — is a public guarantee so the
-/// value can cross the C ABI boundary as-is (issue #242).
+/// The fields are private so [`Dimensions::new`] is the only way to build one, and the non-zero
+/// invariant holds for every value. `#[repr(C)]`: the layout — `width` then `height`, two `u32`s
+/// — is a public guarantee so the value can cross the C ABI boundary as-is (issue #242).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct Dimensions {
-    /// Image width in pixels.
-    pub width: u32,
-    /// Image height in pixels.
-    pub height: u32,
+    width: u32,
+    height: u32,
 }
 
 impl Dimensions {
     /// Creates dimensions, rejecting a zero width or height.
     ///
-    /// The fields stay public for ergonomic struct literals; this constructor is the validated
-    /// path that buffer types ([`crate::ImageRef`]) and codecs use so an empty image is caught
-    /// once, at the boundary, rather than re-checked in every encoder.
+    /// The only constructor, so an empty image is caught once, at the boundary, rather than
+    /// re-checked in every encoder.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if either dimension is zero.
+    /// Returns an [`ErrorKind::InvalidInput`] error if either dimension is zero.
     pub fn new(width: u32, height: u32) -> Result<Self> {
         if width == 0 || height == 0 {
-            return Err(Error::InvalidInput("zero-sized image").with_origin(env!("CARGO_PKG_NAME")));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "zero-sized image",
+            ));
         }
         Ok(Self { width, height })
+    }
+
+    /// The image width, in pixels (never zero).
+    #[must_use]
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    /// The image height, in pixels (never zero).
+    #[must_use]
+    pub const fn height(self) -> u32 {
+        self.height
     }
 
     /// The pixel count `width * height`, or `None` if it overflows `usize`.
@@ -371,12 +156,6 @@ impl Dimensions {
     pub fn sample_count(self, channels: usize) -> Option<usize> {
         self.num_pixels()?.checked_mul(channels)
     }
-
-    /// Whether either dimension is zero.
-    #[must_use]
-    pub fn is_empty(self) -> bool {
-        self.width == 0 || self.height == 0
-    }
 }
 
 /// Encodes an [`ImageRef`] of a specific pixel layout `P` into a compressed byte stream.
@@ -391,8 +170,9 @@ pub trait EncodeImage<P: Pixel> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if the requested encoder configuration is not implemented, or
-    /// [`Error::InvalidInput`] if the image violates a format constraint (e.g. a dimension limit).
+    /// Returns an [`ErrorKind::Unsupported`] error if the requested encoder configuration is not
+    /// implemented, or an [`ErrorKind::InvalidInput`] one if the image violates a format
+    /// constraint (e.g. a dimension limit).
     fn encode_image(&self, image: ImageRef<'_, P>, out: &mut Vec<u8>) -> Result<usize>;
 
     /// Encode `image` into a fresh [`Vec`], returning the encoded bytes.
@@ -422,8 +202,9 @@ pub trait DecodeImage<P: Pixel> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `data` is malformed, or [`Error::Unsupported`] if it uses
-    /// a feature that is not implemented or cannot be presented as `P`.
+    /// Returns an [`ErrorKind::InvalidInput`] error if `data` is malformed, or an
+    /// [`ErrorKind::Unsupported`] one if it uses a feature that is not implemented or cannot be
+    /// presented as `P`.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<P>>;
 
     /// Decode `data` into `dst`, reusing its allocation when possible.
@@ -447,167 +228,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn error_displays_and_dimensions_fields() {
-        assert!(!Error::Unsupported("x").to_string().is_empty());
-        assert!(!Error::InvalidInput("y").to_string().is_empty());
-        let d = Dimensions {
-            width: 1920,
-            height: 1080,
-        };
-        assert_eq!(d.width, 1920);
-        assert_eq!(d.height, 1080);
-    }
-
-    #[test]
-    fn io_error_converts_and_displays() {
-        // `#[from]` gives the `?`-friendly conversion; the Display must surface the source.
-        let io = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short read");
-        let err: Error = io.into();
-        assert!(matches!(err, Error::Io(_)));
-        assert!(err.to_string().contains("short read"));
-    }
-
-    #[test]
-    fn legacy_error_variants_keep_their_public_shape() {
-        let invalid = Error::InvalidInput("bad bytes");
-        let unsupported = Error::Unsupported("future profile");
-        assert!(matches!(invalid, Error::InvalidInput("bad bytes")));
-        assert!(matches!(unsupported, Error::Unsupported("future profile")));
-        assert_eq!(invalid.kind(), ErrorKind::InvalidInput);
-        assert_eq!(unsupported.kind(), ErrorKind::Unsupported);
-        assert_eq!(invalid.static_message(), Some("bad bytes"));
-        assert_eq!(unsupported.static_message(), Some("future profile"));
-        assert_eq!(invalid.origin(), None);
-    }
-
-    #[test]
-    fn context_is_structured_first_write_wins_and_keeps_the_source() {
-        use std::error::Error as _;
-
-        let err = Error::InvalidInput("bad box")
-            .with_origin("gamut-isobmff")
-            .with_origin("gamut-avif")
-            .with_byte_offset(17)
-            .with_byte_offset(99)
-            .with_detail("declared size exceeds input")
-            .with_detail("replacement");
-
-        assert_eq!(err.kind(), ErrorKind::InvalidInput);
-        assert_eq!(err.static_message(), Some("bad box"));
-        assert_eq!(err.origin(), Some("gamut-isobmff"));
-        assert_eq!(err.byte_offset(), Some(17));
-        assert_eq!(err.detail(), Some("declared size exceeds input"));
-        assert_eq!(
-            err.to_string(),
-            "invalid input: bad box [origin: gamut-isobmff, byte offset: 17]: declared size exceeds input"
-        );
-
-        let diagnostic = match &err {
-            Error::Context(diagnostic) => diagnostic,
-            other => panic!("expected contextual error, got {other:?}"),
-        };
-        assert!(matches!(
-            diagnostic.source_error(),
-            Error::InvalidInput("bad box")
-        ));
-        assert!(err.source().is_some());
-    }
-
-    #[test]
-    fn partial_context_displays_without_empty_separators() {
-        assert_eq!(
-            Error::Unsupported("future profile")
-                .with_byte_offset(3)
-                .to_string(),
-            "unsupported: future profile [byte offset: 3]"
-        );
-        assert_eq!(
-            Error::InvalidInput("bad bytes")
-                .with_detail("decoder rejected marker")
-                .to_string(),
-            "invalid input: bad bytes: decoder rejected marker"
-        );
-        assert_eq!(
-            Error::unsupported("gamut-test", "future profile").to_string(),
-            "unsupported: future profile [origin: gamut-test]"
-        );
-    }
-
-    #[test]
-    fn contextual_io_keeps_its_kind_and_source_chain() {
-        use std::error::Error as _;
-
-        let err = Error::Io(std::io::Error::other("disk on fire"))
-            .with_origin("gamut-ifd")
-            .with_byte_offset(4096);
-        assert_eq!(err.kind(), ErrorKind::Io);
-        assert_eq!(err.static_message(), None);
-        assert_eq!(err.origin(), Some("gamut-ifd"));
-        assert_eq!(err.byte_offset(), Some(4096));
-        let diagnostic = err.source().expect("diagnostic source");
-        let io = diagnostic.source().expect("io source");
-        assert_eq!(io.to_string(), "i/o error: disk on fire");
-    }
-
-    #[test]
-    fn errors_remain_send_and_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Error>();
-    }
-
-    #[test]
     fn dimensions_new_rejects_zero() {
-        assert!(Dimensions::new(0, 4).is_err());
-        assert!(Dimensions::new(4, 0).is_err());
-        assert!(Dimensions::new(0, 0).is_err());
+        for (width, height) in [(0, 4), (4, 0), (0, 0)] {
+            let err = Dimensions::new(width, height).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert_eq!(err.static_message(), Some("zero-sized image"));
+            assert_eq!(err.origin(), Some("gamut-core"));
+        }
         let d = Dimensions::new(4, 3).unwrap();
-        assert_eq!((d.width, d.height), (4, 3));
+        assert_eq!((d.width(), d.height()), (4, 3));
     }
 
     #[test]
     fn dimensions_pixel_and_sample_counts() {
-        let d = Dimensions {
-            width: 4,
-            height: 3,
-        };
+        let d = Dimensions::new(4, 3).unwrap();
         assert_eq!(d.num_pixels(), Some(12));
         assert_eq!(d.sample_count(3), Some(36));
         assert_eq!(d.sample_count(1), Some(12));
-        assert!(!d.is_empty());
-    }
-
-    #[test]
-    fn dimensions_is_empty() {
-        assert!(
-            Dimensions {
-                width: 0,
-                height: 5
-            }
-            .is_empty()
-        );
-        assert!(
-            Dimensions {
-                width: 5,
-                height: 0
-            }
-            .is_empty()
-        );
-        assert!(
-            !Dimensions {
-                width: 5,
-                height: 5
-            }
-            .is_empty()
-        );
     }
 
     #[test]
     fn dimensions_sample_count_overflow_is_none() {
         // 65535*65535 fits in a 32-bit usize, so num_pixels is Some on every target...
-        let d = Dimensions {
-            width: 0xFFFF,
-            height: 0xFFFF,
-        };
+        let d = Dimensions::new(0xFFFF, 0xFFFF).unwrap();
         assert_eq!(d.num_pixels(), Some(0xFFFF * 0xFFFF));
         // ...but scaling by usize::MAX channels overflows on any platform.
         assert_eq!(d.sample_count(usize::MAX), None);
@@ -640,7 +283,7 @@ mod trait_tests {
 
     impl EncodeImage<Gray8> for Failing {
         fn encode_image(&self, _image: ImageRef<'_, Gray8>, _out: &mut Vec<u8>) -> Result<usize> {
-            Err(Error::Unsupported("nope"))
+            Err(Error::unsupported("gamut-test", "nope"))
         }
     }
 

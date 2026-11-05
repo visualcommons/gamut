@@ -14,10 +14,9 @@ use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgba8, Rgba16};
 const W: u32 = 40;
 const H: u32 = 24;
 
-const DIMS: Dimensions = Dimensions {
-    width: W,
-    height: H,
-};
+fn dims() -> Dimensions {
+    Dimensions::new(W, H).unwrap()
+}
 
 /// `AvifEncoder::lossy(50)`'s `base_q_idx`: `(100 - 50) * 255 / 100`.
 const Q50: u8 = 127;
@@ -80,7 +79,7 @@ fn payloads(avif: &[u8]) -> (Vec<u8>, Option<Vec<u8>>) {
 fn encode_rgba8(encoder: &AvifEncoder) -> Vec<u8> {
     let px = source_rgba8();
     encoder
-        .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgba8>::new(&px, dims()).unwrap())
         .unwrap()
 }
 
@@ -88,7 +87,7 @@ fn encode_rgba8(encoder: &AvifEncoder) -> Vec<u8> {
 /// `speed` — what `lossy(50).with_speed(speed)` must carry.
 fn rgba8_stills(speed: Speed) -> [(EncodedStill, ReconImage); 2] {
     let px = source_rgba8();
-    let image = ImageRef::<Rgba8>::new(&px, DIMS).unwrap();
+    let image = ImageRef::<Rgba8>::new(&px, dims()).unwrap();
     let colour = Planar8::from_rgba8_matrix_view(image, bt709(BitDepth::Eight));
     let alpha = Planar8::from_rgba8_alpha_view(image);
     [
@@ -150,7 +149,7 @@ fn rgba8_codes_colour_and_alpha_at_the_chosen_preset() {
 #[test]
 fn rgba16_codes_colour_and_alpha_at_the_chosen_preset() {
     let px = source_rgba16();
-    let image = ImageRef::<Rgba16>::new(&px, DIMS).unwrap();
+    let image = ImageRef::<Rgba16>::new(&px, dims()).unwrap();
     let colour_planes = Planar16::from_rgba16_matrix_view(image, bt709(BitDepth::Ten));
     let alpha_planes = Planar16::from_rgba16_alpha_view(image, BitDepth::Ten);
     let at = |speed| {
@@ -176,7 +175,7 @@ fn rgba16_codes_colour_and_alpha_at_the_chosen_preset() {
 #[test]
 fn gray8_codes_its_monochrome_still_at_the_chosen_preset() {
     let px = source_gray8();
-    let image = ImageRef::<Gray8>::new(&px, DIMS).unwrap();
+    let image = ImageRef::<Gray8>::new(&px, dims()).unwrap();
     let at = |speed| {
         AvifEncoder::lossy(50)
             .with_speed(speed)

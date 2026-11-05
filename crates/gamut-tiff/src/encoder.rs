@@ -144,7 +144,8 @@ impl TiffEncoder {
     /// did not build. The 0th-IFD fields ([`TiffMetadata::ifd0`]) are refused when they hold a
     /// tag outside [`IFD0_EXIF_TAGS`](crate::IFD0_EXIF_TAGS) — the rest of IFD 0 is this
     /// encoder's — or a sub-IFD group. For the Exif and GPS sub-IFDs four shapes are refused —
-    /// each a typed [`Error::InvalidInput`] raised before any pixel work, with its own message,
+    /// each a typed [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error raised
+    /// before any pixel work, with its own message,
     /// rather than a well-formed file this crate's own reader then rejects:
     ///
     /// * a **field** under one of the four standard pointer tags — `SubIFDs` (330), `ExifIFD`
@@ -215,7 +216,8 @@ impl TiffEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if both were requested, if the store is shorter than
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if both
+    /// were requested, if the store is shorter than
     /// [`min_store_len`](Self::min_store_len), if classic TIFF's 32-bit `LONG` count cannot
     /// describe it, or if a reservation is longer than a buffer can hold ([`zeroed`]) — all
     /// caught here, before any pixel work, rather than after a whole image has been compressed.
@@ -312,7 +314,7 @@ impl TiffEncoder {
     /// shared by every entry point of this encoder — `encode_image`,
     /// [`encode_palette8`](Self::encode_palette8) and
     /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) alike — and each is an
-    /// [`Error::InvalidInput`]. These are raised **before any pixel work**:
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error. These are raised **before any pixel work**:
     ///
     /// * the Exif or GPS sub-IFD supplied through [`with_tiff_metadata`](Self::with_tiff_metadata)
     ///   is one this crate's reader could not hand back — a pointer-typed field under a pointer
@@ -408,8 +410,8 @@ impl TiffEncoder {
         // The caller is an EncodeImage impl handing us an ImageRef-validated buffer, so
         // pixels.len() == width * height * spp holds and the product cannot overflow.
         let store = self.checked_store()?;
-        let row_bytes = dims.width as usize * spp;
-        debug_assert_eq!(pixels.len(), row_bytes * dims.height as usize);
+        let row_bytes = dims.width() as usize * spp;
+        debug_assert_eq!(pixels.len(), row_bytes * dims.height() as usize);
         self.encode_packed(
             pixels,
             dims,
@@ -442,8 +444,8 @@ impl TiffEncoder {
         // Before the serialisation buffer below, so a bad C2PA configuration costs no allocation.
         let store = self.checked_store()?;
         // As in `encode_8bit`, the caller hands us an ImageRef-validated buffer.
-        let row_bytes = dims.width as usize * spp * 2;
-        debug_assert_eq!(samples.len() * 2, row_bytes * dims.height as usize);
+        let row_bytes = dims.width() as usize * spp * 2;
+        debug_assert_eq!(samples.len() * 2, row_bytes * dims.height() as usize);
         // The packed buffer must exist in *file* order, and must be owned so the predictor can
         // difference it in place — one allocation is the format's unavoidable serialisation cost.
         let order = self.order;
@@ -508,7 +510,7 @@ impl TiffEncoder {
         layout: &SampleLayout,
         extra_fields: &[(u16, Value)],
     ) -> Result<(Ifd, Vec<Vec<u8>>)> {
-        let h = dims.height as usize;
+        let h = dims.height() as usize;
         let stored_row_bytes = layout.stored_row_bytes;
 
         // Apply the horizontal-differencing predictor before compression. §14 differences sample
@@ -545,8 +547,8 @@ impl TiffEncoder {
         }
 
         let mut ifd = Ifd::new();
-        ifd.set(tags::IMAGE_WIDTH, dim_value(dims.width));
-        ifd.set(tags::IMAGE_LENGTH, dim_value(dims.height));
+        ifd.set(tags::IMAGE_WIDTH, dim_value(dims.width()));
+        ifd.set(tags::IMAGE_LENGTH, dim_value(dims.height()));
         ifd.set(
             tags::BITS_PER_SAMPLE,
             Value::Short(vec![layout.bits_per_sample; layout.spp]),
@@ -585,7 +587,8 @@ impl TiffEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `pages` is empty, and on any of the configuration
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `pages`
+    /// is empty, and on any of the configuration
     /// refusals [`encode_with_report`](Self::encode_with_report) lists.
     pub fn encode_pages_rgb8(
         &self,
@@ -650,7 +653,7 @@ impl TiffEncoder {
                         "TIFF: Modified Huffman requires a bilevel image",
                     ));
                 }
-                ccitt::mh_encode_strip(raw, row_bytes, dims.width as usize)
+                ccitt::mh_encode_strip(raw, row_bytes, dims.width() as usize)
             }
             Compression::CcittGroup4Fax => {
                 if layout.bits_per_sample != 1 {
@@ -660,7 +663,7 @@ impl TiffEncoder {
                     ));
                 }
                 let rows = raw.len() / row_bytes;
-                ccitt::g4_encode_strip(raw, row_bytes, rows, dims.width as usize)
+                ccitt::g4_encode_strip(raw, row_bytes, rows, dims.width() as usize)
             }
             _ => self.compress_bytes(raw, row_bytes),
         }
@@ -719,7 +722,7 @@ impl TiffEncoder {
                 "TIFF: tile dimensions must be positive multiples of 16",
             ));
         }
-        let (w, h, spp) = (dims.width as usize, dims.height as usize, layout.spp);
+        let (w, h, spp) = (dims.width() as usize, dims.height() as usize, layout.spp);
         let stored_row_bytes = layout.stored_row_bytes;
         // Every offset below is a byte offset, so the per-pixel stride carries the sample width too.
         let pixel_bytes = spp * (layout.bits_per_sample as usize / 8);
@@ -754,8 +757,8 @@ impl TiffEncoder {
         }
 
         let mut ifd = Ifd::new();
-        ifd.set(tags::IMAGE_WIDTH, dim_value(dims.width));
-        ifd.set(tags::IMAGE_LENGTH, dim_value(dims.height));
+        ifd.set(tags::IMAGE_WIDTH, dim_value(dims.width()));
+        ifd.set(tags::IMAGE_LENGTH, dim_value(dims.height()));
         ifd.set(
             tags::BITS_PER_SAMPLE,
             Value::Short(vec![layout.bits_per_sample; spp]),
@@ -956,7 +959,8 @@ fn uncountable_store_len(variant: Variant, len: usize) -> bool {
 /// [`TiffEncoder::with_c2pa_reserved`] returns `Self`, so it cannot refuse anything itself and the
 /// length it stores is a caller's number that reaches this untouched. Past `isize::MAX` a `Vec<u8>`
 /// cannot exist at all, and `vec![0; len]` says so by panicking with a capacity overflow — which a
-/// library path must not do. Reserving fallibly turns that into [`Error::InvalidInput`], raised
+/// library path must not do. Reserving fallibly turns that into an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error, raised
 /// before any pixel work.
 ///
 /// What remains outside this crate's reach is the allocator's: a reservation the machine has no
@@ -1158,10 +1162,7 @@ mod tests {
         // callers plus `encode_palette8`, which reaches it through the same layout stage. Only
         // `encode_pages_rgb8` is absent, and not by choice: it builds strip images directly, so
         // there is no second refusal for the C2PA one to be told apart from.
-        let dims = Dimensions {
-            width: 2,
-            height: 2,
-        };
+        let dims = Dimensions::new(2, 2).unwrap();
         let palette = Palette8::from_rgb_triples(&[0u8; 768]).expect("palette");
         let bad = TiffEncoder::new()
             .with_tiff_metadata(TiffMetadata::new().with_c2pa(vec![0; 4]))
@@ -1220,22 +1221,16 @@ mod tests {
     fn image_ref_rejects_mismatched_buffer() {
         // Validation now lives at the ImageRef boundary, so a wrong-length or zero-sized buffer
         // can't even be constructed for the encoder's pixel types.
-        let dims = Dimensions {
-            width: 2,
-            height: 2,
-        };
+        let dims = Dimensions::new(2, 2).unwrap();
         assert!(ImageRef::<Rgb8>::new(&[0; 11], dims).is_err());
         assert!(ImageRef::<Gray8>::new(&[0; 3], dims).is_err());
         assert!(ImageRef::<Bilevel>::new(&[0; 3], dims).is_err());
+        // A zero-sized `Dimensions` is now refused by `Dimensions::new` itself, before an
+        // `ImageRef` can be asked for one; the chain still asserts no such image exists.
         assert!(
-            ImageRef::<Rgb8>::new(
-                &[],
-                Dimensions {
-                    width: 0,
-                    height: 1
-                }
-            )
-            .is_err()
+            Dimensions::new(0, 1)
+                .and_then(|dims| ImageRef::<Rgb8>::new(&[], dims))
+                .is_err()
         );
     }
 
@@ -1247,10 +1242,7 @@ mod tests {
             .encode_image(
                 ImageRef::<Rgb8>::new(
                     &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                    Dimensions {
-                        width: 2,
-                        height: 2,
-                    },
+                    Dimensions::new(2, 2).unwrap(),
                 )
                 .unwrap(),
                 &mut out,
@@ -1270,10 +1262,7 @@ mod tests {
             .encode_image(
                 ImageRef::<Rgb8>::new(
                     &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                    Dimensions {
-                        width: 2,
-                        height: 2,
-                    },
+                    Dimensions::new(2, 2).unwrap(),
                 )
                 .unwrap(),
                 &mut out,
@@ -1319,7 +1308,8 @@ mod typed {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message
+        /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when
+        /// the model does not serialize (the facade's message
         /// is carried as [`Error::detail`]), and whatever
         /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
         pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
@@ -1346,14 +1336,16 @@ mod typed {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::Unsupported`] when the blocks carry a C2PA manifest store — a store is
+        /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the
+        /// blocks carry a C2PA manifest store — a store is
         /// never embedded from metadata blocks, since it is signed over the bytes of the one file
         /// it was made for; reserve one for this output with
         /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) — and when the EXIF model holds a
         /// thumbnail, which a TIFF would hold as a page of its own, or a 0th-IFD field under a tag
         /// outside [`IFD0_EXIF_TAGS`](crate::IFD0_EXIF_TAGS), which IFD 0 holds as the encoder's
         /// own (`XResolution`, `YCbCrPositioning`, …).
-        /// Returns [`Error::InvalidInput`] when the EXIF block does not parse (the parser's
+        /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when
+        /// the EXIF block does not parse (the parser's
         /// message is carried as [`Error::detail`]). Nothing is applied when an error is
         /// returned.
         pub fn with_encoded_metadata(mut self, encoded: &EncodedMetadata) -> Result<Self> {

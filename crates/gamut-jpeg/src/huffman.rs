@@ -185,7 +185,8 @@ impl DecTable {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the code space is over-subscribed
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// code space is over-subscribed
     /// (`sum(bits[l] · 2^(16−l)) > 2^16`).
     pub fn from_bits(bits: &[u8; 16], values: &[u8]) -> Result<Self> {
         // Annex C code-space check: each length-l code claims 2^(16-l) of the depth-16 leaf space;

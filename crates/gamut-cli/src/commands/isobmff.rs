@@ -72,18 +72,19 @@ const SEQUENCE_BRANDS: [[u8; 4]; 6] = [*b"avis", *b"msf1", *b"hevc", *b"hevx", *
 ///
 /// # Errors
 ///
-/// [`gamut::core::Error::Unsupported`] when the major brand is a sequence brand and no other
-/// compatible brand is left to stand in for it.
+/// An [`ErrorKind::Unsupported`](gamut::core::ErrorKind::Unsupported) error when the major brand is
+/// a sequence brand and no other compatible brand is left to stand in for it.
 fn drop_sequence_brands(model: &mut IsoBmffImage) -> Result<(), CliError> {
     model
         .compatible_brands
         .retain(|brand| !SEQUENCE_BRANDS.contains(brand));
     if SEQUENCE_BRANDS.contains(&model.major_brand) {
-        model.major_brand = *model.compatible_brands.first().ok_or(CliError::Codec(
-            gamut::core::Error::Unsupported(
+        model.major_brand = *model.compatible_brands.first().ok_or_else(|| {
+            CliError::Codec(gamut::core::Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "isobmff remux: only image-sequence brands name this file, and the copy has no track",
-            ),
-        ))?;
+            ))
+        })?;
     }
     Ok(())
 }
@@ -96,7 +97,8 @@ fn remux(input: &Path, output: &Path) -> Result<(), CliError> {
     let bytes = isobmff::write(&model)?;
     // Round-trip guard: re-parsing our own output must reproduce the model exactly.
     if isobmff::read(&bytes)? != model {
-        return Err(CliError::Codec(gamut::core::Error::InvalidInput(
+        return Err(CliError::Codec(gamut::core::Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "isobmff remux: re-parsed container did not match the source model",
         )));
     }

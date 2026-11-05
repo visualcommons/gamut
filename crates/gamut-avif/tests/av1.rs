@@ -471,14 +471,7 @@ fn encoder_output_carries_a_parseable_av1c_and_a_valid_still_payload() {
     use gamut_isobmff::PropertyKind;
 
     let rgb: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 31) as u8).collect();
-    let image = ImageRef::<Rgb8>::new(
-        &rgb,
-        Dimensions {
-            width: 8,
-            height: 8,
-        },
-    )
-    .unwrap();
+    let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap();
     let mut file = Vec::new();
     gamut_avif::AvifEncoder::new()
         .encode_image(image, &mut file)

@@ -59,7 +59,7 @@
 //! use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
 //! use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
 //!
-//! let dims = Dimensions { width: 2, height: 2 };
+//! let dims = Dimensions::new(2, 2)?;
 //! let pixels = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
 //! let image = ImageRef::<Rgb8>::new(&pixels, dims)?;
 //!

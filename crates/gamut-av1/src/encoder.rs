@@ -210,8 +210,9 @@ impl ReconImage {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for zero-sized images, or [`Error::Unsupported`] if the
-/// dimensions exceed AV1 level 6.0 (out of M0 scope).
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for
+/// zero-sized images, or an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error
+/// if the dimensions exceed AV1 level 6.0 (out of M0 scope).
 pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> {
     Ok(encode_still_intra(planes, 0)?.0)
 }
@@ -227,8 +228,9 @@ pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> 
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for zero-sized images, or [`Error::Unsupported`] if the
-/// dimensions exceed AV1 level 6.0.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for
+/// zero-sized images, or an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error
+/// if the dimensions exceed AV1 level 6.0.
 pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill, ReconImage)> {
     encode_with(
         planes,
@@ -256,7 +258,9 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
 ///
 /// # Errors
 ///
-/// As [`encode_still_intra`], and [`Error::InvalidInput`] if monochrome planes are paired with
+/// As [`encode_still_intra`], and an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if monochrome planes are
+/// paired with
 /// [`MatrixCoefficients::Identity`] — AV1 §6.4.2 permits that matrix only at subsampling 0/0, and
 /// §5.5.2 infers 1/1 for a monochrome stream.
 ///
@@ -503,7 +507,9 @@ fn append_tiles(frame_payload: &mut Vec<u8>, tile_bytes: &[Vec<u8>]) {
 ///
 /// # Errors
 ///
-/// As [`encode_still_intra_with`], plus [`Error::Unsupported`] for [`BitDepth::Sixteen`], which is
+/// As [`encode_still_intra_with`], plus an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for [`BitDepth::Sixteen`],
+/// which is
 /// not an AV1 sample depth (§6.4.1 defines 8, 10 and 12 only).
 ///
 /// Superres has no high-bit-depth entry point: [`encode_still_intra_superres`] takes a

@@ -560,11 +560,13 @@ pub fn content_provenance_payload(purpose: C2paBoxPurpose, slot: &[u8]) -> Vec<u
 ///
 /// Every refusal is decided from the integers before anything is allocated:
 ///
-/// - [`Error::InvalidInput`] if `len` is below 8 bytes — a slot too small for a JUMBF box header can
+/// - An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `len` is below
+///   8 bytes — a slot too small for a JUMBF box header can
 ///   never hold a manifest store — or if the framed payload would exceed `isize::MAX`, the most a
 ///   `Vec` can hold. Unchecked, the first emits a slot no signer can use; the second either wraps
 ///   the framing addition (a well-formed file whose C2PA box no lens can find) or panics in `Vec`.
-/// - [`Error::Unsupported`] if the complete box would reach 4 GiB — the bound
+/// - An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the complete box
+///   would reach 4 GiB — the bound
 ///   [`write`](crate::write) applies to every top-level box. `Unsupported` rather than
 ///   `InvalidInput` (issue #576) because a box that long is well-formed ISOBMFF through a 64-bit
 ///   `largesize`; only this crate's writer, which emits 32-bit sizes, cannot produce it.

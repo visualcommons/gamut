@@ -46,7 +46,7 @@ pub fn encode_row(row: &[u8], out: &mut Vec<u8>) {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `src` is truncated or decodes to the wrong length.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `src` is truncated or decodes to the wrong length.
 pub fn decode(src: &[u8], expected: usize) -> Result<Vec<u8>> {
     // Cap the pre-allocation so a malformed `expected` can't reserve a huge buffer up front.
     let mut out = Vec::with_capacity(expected.min(1 << 16));

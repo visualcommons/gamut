@@ -45,20 +45,16 @@ fn palette_roundtrips_in_gamut() {
             TiffEncoder::new()
                 .with_compression(comp)
                 .encode_palette8(
-                    ImageRef::<Indexed8>::new(
-                        &idx,
-                        Dimensions {
-                            width: w,
-                            height: h,
-                        },
-                    )
-                    .unwrap(),
+                    ImageRef::<Indexed8>::new(&idx, Dimensions::new(w, h).unwrap()).unwrap(),
                     &Palette8::from_rgb_triples(&pal).unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
             let rgb: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
-            assert_eq!((rgb.dimensions().width, rgb.dimensions().height), (w, h));
+            assert_eq!(
+                (rgb.dimensions().width(), rgb.dimensions().height()),
+                (w, h)
+            );
             assert_eq!(
                 rgb.as_samples(),
                 expected_rgb(&idx, &pal).as_slice(),
@@ -76,14 +72,7 @@ fn gamut_palette_is_resolved_by_libtiff() {
         let mut tiff = Vec::new();
         TiffEncoder::new()
             .encode_palette8(
-                ImageRef::<Indexed8>::new(
-                    &idx,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Indexed8>::new(&idx, Dimensions::new(w, h).unwrap()).unwrap(),
                 &Palette8::from_rgb_triples(&pal).unwrap(),
                 &mut tiff,
             )

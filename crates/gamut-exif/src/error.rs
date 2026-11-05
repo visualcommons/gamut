@@ -69,10 +69,13 @@ mod tests {
 
     #[test]
     fn wraps_ifd_errors_transparently() {
-        let inner = gamut_core::Error::InvalidInput("TIFF: bad");
+        let inner = gamut_core::Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: bad");
         let err: ExifError = inner.into();
         // `#[error(transparent)]` forwards the inner Display verbatim.
-        assert_eq!(err.to_string(), "invalid input: TIFF: bad");
+        assert_eq!(
+            err.to_string(),
+            "invalid input: TIFF: bad [origin: gamut-exif]"
+        );
         assert!(matches!(err, ExifError::Ifd(_)));
     }
 }

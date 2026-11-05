@@ -9,7 +9,8 @@
 //!
 //! Reads are bounds-checked against the backing slice, so a hostile or truncated header cannot
 //! index out of range or spin: every method either consumes bits and returns a value, or returns
-//! [`Error::InvalidInput`] and leaves the reader positioned where it failed.
+//! an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error and leaves the reader
+//! positioned where it failed.
 
 use gamut_core::{Error, Result};
 
@@ -84,7 +85,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if fewer than `n` bits remain, or if `n > 32`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if fewer
+    /// than `n` bits remain, or if `n > 32`.
     pub fn f(&mut self, n: u32) -> Result<u32> {
         if n > 32 {
             return Err(Error::invalid_input(
@@ -112,7 +114,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if fewer than `n` bits remain, or if `n > 64`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if fewer
+    /// than `n` bits remain, or if `n > 64`.
     pub fn f64(&mut self, n: u32) -> Result<u64> {
         if n > 64 {
             return Err(Error::invalid_input(
@@ -134,7 +137,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the bitstream is exhausted.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// bitstream is exhausted.
     pub fn flag(&mut self) -> Result<bool> {
         Ok(self.f(1)? != 0)
     }
@@ -143,7 +147,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if fewer than `n` bits remain, or if `n` is 0 or `> 32`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if fewer
+    /// than `n` bits remain, or if `n` is 0 or `> 32`.
     pub fn su(&mut self, n: u32) -> Result<i32> {
         if n == 0 {
             return Err(Error::invalid_input(ORIGIN, "AV1 su(n): zero-width field"));
@@ -165,7 +170,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the bitstream is truncated or `n` is 0.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// bitstream is truncated or `n` is 0.
     pub fn ns(&mut self, n: u32) -> Result<u32> {
         if n == 0 {
             return Err(Error::invalid_input(ORIGIN, "AV1 ns(n): empty range"));
@@ -188,7 +194,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the bitstream is truncated before the value completes.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// bitstream is truncated before the value completes.
     pub fn uvlc(&mut self) -> Result<u32> {
         // §4.10.3 counts leading zeroes until the terminating one bit *first*, and only then
         // tests the 32 threshold. Returning early at the 32nd zero would leave the cursor before
@@ -210,8 +217,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the reader is not byte-aligned, `n > 8`, or fewer than
-    /// `n` bytes remain.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// reader is not byte-aligned, `n > 8`, or fewer than `n` bytes remain.
     pub fn le(&mut self, n: u32) -> Result<u64> {
         if !self.is_byte_aligned() {
             return Err(Error::invalid_input(
@@ -236,8 +243,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the reader is not byte-aligned or the encoding is
-    /// malformed, over-long, or truncated.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// reader is not byte-aligned or the encoding is malformed, over-long, or truncated.
     pub fn leb128(&mut self) -> Result<u64> {
         if !self.is_byte_aligned() {
             return Err(Error::invalid_input(
@@ -269,7 +276,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if fewer than `n` bits remain.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if fewer
+    /// than `n` bits remain.
     pub fn skip_bits(&mut self, n: usize) -> Result<()> {
         if n > self.bits_remaining() {
             return Err(Error::invalid_input(
@@ -286,7 +294,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the padding bits are not zero or the input is truncated.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// padding bits are not zero or the input is truncated.
     pub fn byte_alignment(&mut self) -> Result<()> {
         while !self.is_byte_aligned() {
             if self.f(1)? != 0 {
@@ -311,7 +320,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the marker bit is absent or a padding bit is set.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// marker bit is absent or a padding bit is set.
     pub fn trailing_bits(&mut self) -> Result<()> {
         if self.f(1)? != 1 {
             return Err(Error::invalid_input(

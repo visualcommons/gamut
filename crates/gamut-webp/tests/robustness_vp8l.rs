@@ -33,14 +33,7 @@ fn valid_vp8l_payload() -> Vec<u8> {
     let mut file = Vec::new();
     WebpEncoder::lossless()
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                &sample_rgb(w, h),
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&sample_rgb(w, h), Dimensions::new(w, h).unwrap()).unwrap(),
             &mut file,
         )
         .expect("gamut lossless encode");
@@ -136,14 +129,7 @@ fn webp_container_survives_corrupted_vp8l_chunk() {
     let mut file = Vec::new();
     WebpEncoder::lossless()
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                &sample_rgb(w, h),
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&sample_rgb(w, h), Dimensions::new(w, h).unwrap()).unwrap(),
             &mut file,
         )
         .expect("encode");

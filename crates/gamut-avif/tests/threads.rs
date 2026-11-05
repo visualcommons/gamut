@@ -19,10 +19,9 @@ use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Result, Rgb8, 
 const W: u32 = 160;
 const H: u32 = 40;
 
-const DIMS: Dimensions = Dimensions {
-    width: W,
-    height: H,
-};
+fn dims() -> Dimensions {
+    Dimensions::new(W, H).unwrap()
+}
 
 /// `AvifEncoder::lossy(50)`'s `base_q_idx`: `(100 - 50) * 255 / 100`.
 const Q50: u8 = 127;
@@ -80,7 +79,7 @@ where
     AvifEncoder: EncodeImage<P>,
 {
     encoder
-        .encode_to_vec(ImageRef::<P>::new(px, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<P>::new(px, dims()).unwrap())
         .unwrap()
 }
 
@@ -115,7 +114,7 @@ fn threads_default_to_one_and_report_the_chosen_cap() {
 #[test]
 fn the_fixture_codes_more_than_one_tile() {
     let px = source_rgb8();
-    let image = ImageRef::<Rgb8>::new(&px, DIMS).unwrap();
+    let image = ImageRef::<Rgb8>::new(&px, dims()).unwrap();
     let planes = Planar8::from_rgb8_identity_view(image);
     let at = |tiling| {
         gamut_av1::encode_still_intra_with_options(
@@ -167,7 +166,7 @@ fn libavif_reconstructs_a_multithreaded_rgba_encode_to_the_av1_reconstruction() 
     let px = source_rgba8();
     let avif = encode::<Rgba8>(&AvifEncoder::lossy(50).with_threads(threads(4)), &px);
 
-    let image = ImageRef::<Rgba8>::new(&px, DIMS).unwrap();
+    let image = ImageRef::<Rgba8>::new(&px, dims()).unwrap();
     let bt709 =
         RgbToYcbcr::new(MatrixCoefficients::Bt709, ColorRange::Full, BitDepth::Eight).unwrap();
     let colour_planes = Planar8::from_rgba8_matrix_view(image, bt709);

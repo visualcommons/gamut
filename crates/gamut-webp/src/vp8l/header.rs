@@ -32,19 +32,20 @@ impl Vp8lHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if either dimension is 0 or exceeds [`VP8L_MAX_DIMENSION`]
-    /// (16384).
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if either
+    /// dimension exceeds [`VP8L_MAX_DIMENSION`] (16384). A zero side cannot reach here:
+    /// [`Dimensions::new`] rejects it.
     pub fn from_dimensions(dims: Dimensions, alpha_is_used: bool) -> Result<Self> {
         let max = u32::from(VP8L_MAX_DIMENSION);
-        if dims.width == 0 || dims.height == 0 || dims.width > max || dims.height > max {
+        if dims.width() > max || dims.height() > max {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "VP8L: dimensions out of range (1..=16384)",
             ));
         }
         Ok(Self {
-            width: dims.width as u16,
-            height: dims.height as u16,
+            width: dims.width() as u16,
+            height: dims.height() as u16,
             alpha_is_used,
             version: 0,
         })
@@ -54,10 +55,7 @@ impl Vp8lHeader {
     #[cfg(test)]
     #[must_use]
     pub fn dimensions(&self) -> Dimensions {
-        Dimensions {
-            width: u32::from(self.width),
-            height: u32::from(self.height),
-        }
+        Dimensions::new(u32::from(self.width), u32::from(self.height)).unwrap()
     }
 
     /// Reads a VP8L header: the [`VP8L_SIGNATURE`] byte, 14-bit `width - 1` / `height - 1`, the
@@ -65,8 +63,8 @@ impl Vp8lHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the signature byte is wrong, the version is nonzero, or
-    /// the stream is truncated.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// signature byte is wrong, the version is nonzero, or the stream is truncated.
     pub fn read(r: &mut BitReader<'_>) -> Result<Self> {
         if r.read_bits(8)? != u32::from(VP8L_SIGNATURE) {
             return Err(Error::invalid_input(
@@ -130,44 +128,17 @@ mod tests {
 
     #[test]
     fn from_dimensions_validates_range() {
-        assert!(
-            Vp8lHeader::from_dimensions(
-                Dimensions {
-                    width: 1,
-                    height: 1
-                },
-                false
-            )
-            .is_ok()
-        );
-        let max = Dimensions {
-            width: 16384,
-            height: 16384,
-        };
+        assert!(Vp8lHeader::from_dimensions(Dimensions::new(1, 1).unwrap(), false).is_ok());
+        let max = Dimensions::new(16384, 16384).unwrap();
         assert_eq!(
             Vp8lHeader::from_dimensions(max, true).unwrap().dimensions(),
             max
         );
-        for bad in [
-            Dimensions {
-                width: 0,
-                height: 5,
-            },
-            Dimensions {
-                width: 5,
-                height: 0,
-            },
-            Dimensions {
-                width: 16385,
-                height: 1,
-            },
-            Dimensions {
-                width: 1,
-                height: 16385,
-            },
-        ] {
+        // A zero side can no longer be expressed as a `Dimensions` at all: `Dimensions::new`
+        // rejects it before `from_dimensions` is reached.
+        for (width, height) in [(0, 5), (5, 0), (16385, 1), (1, 16385)] {
             assert!(matches!(
-                Vp8lHeader::from_dimensions(bad, false),
+                Dimensions::new(width, height).and_then(|bad| Vp8lHeader::from_dimensions(bad, false)),
                 Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
             ));
         }

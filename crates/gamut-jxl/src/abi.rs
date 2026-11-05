@@ -14,9 +14,11 @@
 //! # Status translation
 //!
 //! [`Status::OK`] is success. A late [`Status::UNSUPPORTED`] — the backend accepted the job at
-//! `supports` time and then declined — becomes [`Error::Unsupported`], which the host treats as a
+//! `supports` time and then declined — becomes an
+//! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, which the host treats as a
 //! decline and falls through to the next backend. **Every other non-OK status is terminal** and
-//! becomes an [`Error::InvalidInput`] that propagates to the caller, per the seam's fallback
+//! becomes an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error that
+//! propagates to the caller, per the seam's fallback
 //! contract: a backend that may have produced a partial result is never silently retried.
 //!
 //! # What the ABI can and cannot carry
@@ -101,7 +103,7 @@ fn is_conveyable(req: &JxlEncodeRequest) -> bool {
 /// is a plain pointer cast — no dereference, so the crate stays `#![deny(unsafe_code)]`.
 fn image_desc(image: &JxlImageRef<'_>, coded_depth: u32) -> ImageDesc {
     let bytes_per_sample = (image.bits_per_sample() / 8) as usize;
-    let stride = (image.dimensions().width as usize)
+    let stride = (image.dimensions().width() as usize)
         .saturating_mul(image.channels() as usize)
         .saturating_mul(bytes_per_sample);
     let base = match image.samples() {
@@ -114,8 +116,8 @@ fn image_desc(image: &JxlImageRef<'_>, coded_depth: u32) -> ImageDesc {
     strides[0] = stride;
     ImageDesc::new(
         image.format() as u32,
-        image.dimensions().width,
-        image.dimensions().height,
+        image.dimensions().width(),
+        image.dimensions().height(),
         coded_depth,
         1,
         planes,
@@ -125,9 +127,10 @@ fn image_desc(image: &JxlImageRef<'_>, coded_depth: u32) -> ImageDesc {
 
 /// Translates a terminal (non-OK) [`Status`] into a typed error.
 ///
-/// [`Status::UNSUPPORTED`] is the fall-through code and becomes [`Error::Unsupported`] — a late
-/// decline the host converts back into "try the next backend". Anything else is a backend failure
-/// and becomes [`Error::InvalidInput`], which propagates.
+/// [`Status::UNSUPPORTED`] is the fall-through code and becomes an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error — a late decline the host
+/// converts back into "try the next backend". Anything else is a backend failure and becomes an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error, which propagates.
 fn status_error(status: Status, declined: &'static str, failed: &'static str) -> Error {
     let classified = if status.is_unsupported() {
         Error::unsupported(env!("CARGO_PKG_NAME"), declined)
@@ -242,8 +245,8 @@ impl<D: AbiDecoder + Send> JxlCodestreamDecoder for AbiDecodeBackend<D> {
         };
         self.inner.supports(&StreamConfig::new(
             JXL_CODEC_ID,
-            dims.width,
-            dims.height,
+            dims.width(),
+            dims.height(),
             bits,
         ))
     }
@@ -267,11 +270,11 @@ impl<D: AbiDecoder + Send> JxlCodestreamDecoder for AbiDecodeBackend<D> {
             .sample_count(channels as usize)
             .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image too large"))?;
         let bytes_per_sample = (bits / 8) as usize;
-        let stride = (dims.width as usize)
+        let stride = (dims.width() as usize)
             .saturating_mul(channels as usize)
             .saturating_mul(bytes_per_sample);
 
-        let cfg = StreamConfig::new(JXL_CODEC_ID, dims.width, dims.height, bits);
+        let cfg = StreamConfig::new(JXL_CODEC_ID, dims.width(), dims.height(), bits);
         let mut strides = [0usize; MAX_PLANES];
         strides[0] = stride;
 
@@ -284,8 +287,8 @@ impl<D: AbiDecoder + Send> JxlCodestreamDecoder for AbiDecodeBackend<D> {
                 planes[0] = buf.as_mut_ptr();
                 let desc = ImageDesc::new(
                     info.format() as u32,
-                    dims.width,
-                    dims.height,
+                    dims.width(),
+                    dims.height(),
                     bits,
                     1,
                     planes,
@@ -300,8 +303,8 @@ impl<D: AbiDecoder + Send> JxlCodestreamDecoder for AbiDecodeBackend<D> {
                 planes[0] = buf.as_mut_ptr().cast::<u8>();
                 let desc = ImageDesc::new(
                     info.format() as u32,
-                    dims.width,
-                    dims.height,
+                    dims.width(),
+                    dims.height(),
                     bits,
                     1,
                     planes,
@@ -563,7 +566,7 @@ mod tests {
         });
         assert!(!declining.supports(&req));
 
-        // A late UNSUPPORTED is a decline expressed as Error::Unsupported.
+        // A late UNSUPPORTED is a decline expressed as an ErrorKind::Unsupported error.
         let mut late = AbiEncodeBackend::new(FakeAbiEncoder {
             supported: true,
             status: Status::UNSUPPORTED,

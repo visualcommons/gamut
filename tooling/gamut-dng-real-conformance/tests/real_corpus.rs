@@ -137,7 +137,7 @@ fn assert_decoded(name: &str, decoded: &DecodedDng, expect: &Expect) {
     );
     let raw = &decoded.raw;
     assert_eq!(
-        [raw.dimensions().width, raw.dimensions().height],
+        [raw.dimensions().width(), raw.dimensions().height()],
         expect.dims,
         "{name}: dimensions"
     );

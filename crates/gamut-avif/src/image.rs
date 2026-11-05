@@ -52,8 +52,8 @@ impl AvifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the `pitm` primary-item id names no item, or if that
-    /// item is hidden (ISO/IEC 23008-12: the primary item shall not be hidden).
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// `pitm` primary-item id names no item, or if that item is hidden (ISO/IEC 23008-12: the primary item shall not be hidden).
     pub(crate) fn new(inner: IsoBmffImage) -> Result<Self> {
         let primary_index = inner
             .items
@@ -244,8 +244,8 @@ impl AvifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `item_id` names no item or the tile count does not match
-    /// `rows * columns`, and propagates [`ImageGrid::parse`] errors for a malformed payload.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `item_id` names no item or the tile count does not match `rows * columns`, and propagates [`ImageGrid::parse`] errors for a malformed payload.
     pub fn grid(&self, item_id: u32) -> Result<ImageGrid> {
         let item = self.item(item_id).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: grid item not found")
@@ -266,8 +266,8 @@ impl AvifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `item_id` names no item, and propagates
-    /// [`ImageOverlay::parse`] errors for a payload that does not hold exactly that many offset
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `item_id` names no item, and propagates [`ImageOverlay::parse`] errors for a payload that does not hold exactly that many offset
     /// pairs.
     pub fn overlay(&self, item_id: u32) -> Result<ImageOverlay> {
         let item = self.item(item_id).ok_or_else(|| {
@@ -292,8 +292,8 @@ impl AvifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `item_id` names no item or the item carries no `av1C`,
-    /// and propagates [`AvifItem::av1_config`]'s and [`Av1Config::sequence_header`]'s errors.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `item_id` names no item or the item carries no `av1C`, and propagates [`AvifItem::av1_config`]'s and [`Av1Config::sequence_header`]'s errors.
     pub fn av1_sequence_header(&self, item_id: u32) -> Result<SequenceHeader> {
         let item = self.item(item_id).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: item id names no item")
@@ -371,8 +371,10 @@ impl gamut_metadata::TypedMetadata for AvifImage {
     /// # Errors
     ///
     /// Returns [`MetadataError::Container`](gamut_metadata::MetadataError::Container) carrying
-    /// [`Error::InvalidInput`] when the `Exif` item's offset field is short or points past the
-    /// payload, and carrying [`Error::Unsupported`] when the XMP item declares a
+    /// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the `Exif`
+    /// item's offset field is short or points past the payload, and carrying an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the XMP item
+    /// declares a
     /// `content_encoding` (ISO/IEC 14496-12 §8.11.6): its payload is then not the raw packet, and
     /// this crate decodes no content codings. The coded item stays reachable through
     /// [`xmp`](AvifImage::xmp).

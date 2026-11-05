@@ -14,8 +14,8 @@
 //! the path the reader's dimensions travel after that, to the buffer a caller receives:
 //!
 //! - the copy into locals, `let (width, height) = (info.width as usize, info.height as usize)`;
-//! - the copy back out, where `decode_page_samples` builds `DecodedImage { dims: Dimensions { width,
-//!   height }, .. }`;
+//! - the copy back out, where `decode_page_samples` builds `DecodedImage { dims:
+//!   Dimensions::new(width as u32, height as u32)?, .. }`;
 //! - `convert_from_raw`, which gives its output `src.dims` through `ImageBuf::zeroed`.
 //!
 //! No crop, orientation or tile-rounding stage exists between those points today. Such a stage is
@@ -110,11 +110,11 @@ fuzz_target!(|data: &[u8]| {
                 // that reader and this buffer, and `convert_from_raw`'s dims (module docs).
                 let decoded = image.dimensions();
                 assert_eq!(
-                    (decoded.width, decoded.height),
+                    (decoded.width(), decoded.height()),
                     (info.width, info.height),
                     "page {page}: decoded {} × {} for the {} × {} the tags declare",
-                    decoded.width,
-                    decoded.height,
+                    decoded.width(),
+                    decoded.height(),
                     info.width,
                     info.height
                 );

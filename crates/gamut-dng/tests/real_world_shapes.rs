@@ -43,8 +43,8 @@ fn a_file_without_colour_calibration_decodes_with_no_profile() {
         decoded.profile.is_none(),
         "no colour calibration must yield no profile, not an invented one"
     );
-    assert_eq!(decoded.raw.dimensions().width, 16);
-    assert_eq!(decoded.raw.dimensions().height, 16);
+    assert_eq!(decoded.raw.dimensions().width(), 16);
+    assert_eq!(decoded.raw.dimensions().height(), 16);
 }
 
 /// Calibration that is *present but malformed* is a broken file, not an absent feature — it must

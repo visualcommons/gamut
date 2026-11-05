@@ -16,9 +16,9 @@ foundation so that:
 - **The dependency graph stays acyclic.** This crate has **no** dependency on any other workspace
   crate, so no format crate is below it; most workspace crates depend on it, never the other way
   around.
-- **Errors are typed, never panicking.** [`Error`] is a `thiserror` enum marked `#[non_exhaustive]`,
-  so new variants land without a breaking change and library paths return errors instead of
-  `unwrap()`/`expect()`.
+- **Errors are typed, never panicking.** [`Error`] is opaque and classified by
+  [`ErrorKind`] (`#[non_exhaustive]`), so new kinds land without a breaking change and library
+  paths return errors instead of `unwrap()`/`expect()`.
 - **Hot paths stay allocation-conscious.** [`EncodeImage::encode_image`] appends to a caller-provided
   `&mut Vec<u8>` rather than allocating a fresh buffer, so callers can reuse scratch space.
 - **Memory-safe end to end.** `#![forbid(unsafe_code)]`.
@@ -57,9 +57,27 @@ Stable foundation whose public surface changes incompatibly only in a new major 
 branded [`ImageRef`] / [`ImageBuf`] buffers and [`Pixel`] markers, [`Dimensions`], [`Result`], and
 the structured [`Error`] / [`ErrorKind`] surface. Every codec in the workspace is built on it.
 
-The settled design decisions behind that surface (interleaved `u8`/`u16` only, what is sealed and
-what is `#[non_exhaustive]`, where the length invariant lives) are kept in one place,
-[`STATUS.md`](STATUS.md), together with the frozen-surface table and the deferred follow-ups.
+The surface is intentionally minimal. The following are deliberate design decisions, not gaps:
+
+- **Interleaved `u8` / `u16` layouts only.** [`Sample`] is sealed over `u8` and `u16`. Planar
+  layouts and coded bit depth are codec concerns and live in `gamut-color` (`Planar8`, `BitDepth`),
+  which builds on these types.
+- **Open vs. sealed.** [`ErrorKind`] and `ColorModel` are `#[non_exhaustive]`. [`Pixel`] /
+  [`Sample`] are sealed: the supported layouts are closed and defined only here.
+- **One opaque error, matched by kind.** [`Error`] keeps its representation private: callers match
+  on `Error::kind` and read `origin`, `byte_offset`, `detail`, `static_message` and `source`. It is
+  built with `Error::invalid_input`, `Error::unsupported` or `From<std::io::Error>`, and is one
+  pointer wide, so `Result<T>` stays small on every success path; the allocation happens only when
+  an error is constructed.
+- **Dimensions are never empty.** [`Dimensions`] has private fields and one constructor,
+  `Dimensions::new`, which rejects a zero width or height; `len == width * height * channels` is
+  then validated once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs never re-check.
+- **One vocabulary for what every format carries.** `DecodeLimits`, `Cicp`, `Orientation`,
+  `Palette`, `RawMetadata` and the `c2pa` constants are defined here once, for the format crates to
+  share.
+
+Additive growth (new `ErrorKind`/`ColorModel` variants, more buffer helpers) stays
+backward-compatible; removing or changing existing items would not.
 
 ## License
 

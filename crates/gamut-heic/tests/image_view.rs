@@ -137,8 +137,8 @@ fn typed_property_accessors() {
     let c = HeifContainer::parse(&data).unwrap();
     let it = c.image().primary_item();
 
-    assert_eq!(it.dimensions().unwrap().width, 100);
-    assert_eq!(it.dimensions().unwrap().height, 200);
+    assert_eq!(it.dimensions().unwrap().width(), 100);
+    assert_eq!(it.dimensions().unwrap().height(), 200);
     assert_eq!(it.bits_per_channel(), Some(&[10u8, 10, 10][..]));
     assert!(matches!(
         it.colour(),

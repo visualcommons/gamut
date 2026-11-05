@@ -127,7 +127,8 @@ fn encode_row(out: &mut BitWriter, row: &[u8], width: usize) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unsupported`] only on an internal table inconsistency (never for valid input).
+/// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error only on an
+/// internal table inconsistency (never for valid input).
 pub fn mh_encode_strip(packed: &[u8], stored_row_bytes: usize, width: usize) -> Result<Vec<u8>> {
     let mut out = BitWriter::new();
     for row in packed.chunks(stored_row_bytes) {
@@ -205,7 +206,7 @@ fn decode_run(r: &mut BitReader, white: bool) -> Result<usize> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the stream is truncated, a code is invalid, or a row's runs
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream is truncated, a code is invalid, or a row's runs
 /// do not sum to `width`.
 pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>> {
     let stored_row_bytes = width.div_ceil(8);

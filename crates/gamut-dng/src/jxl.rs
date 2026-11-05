@@ -33,8 +33,8 @@ pub(crate) fn decode_chunk(bytes: &[u8], cols: usize, rows: usize, spp: usize) -
         ));
     }
     if (
-        info.dimensions.width as usize,
-        info.dimensions.height as usize,
+        info.dimensions.width() as usize,
+        info.dimensions.height() as usize,
     ) != (cols, rows)
     {
         return Err(Error::invalid_input(

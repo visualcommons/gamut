@@ -33,7 +33,7 @@ fn assert_error<T>(result: Result<T>, kind: ErrorKind, message: &'static str) {
 // ================================================================================================
 
 fn dims(width: u32, height: u32) -> Dimensions {
-    Dimensions { width, height }
+    Dimensions::new(width, height).unwrap()
 }
 
 /// A deterministic RGB gradient.
@@ -93,7 +93,7 @@ enum Outcome {
     Bytes(Vec<u8>),
     /// Fail with this error.
     Fail(&'static str),
-    /// Fail with an [`Error::Unsupported`] carrying this message.
+    /// Fail with an [`ErrorKind::Unsupported`] error carrying this message.
     Unsupported(&'static str),
 }
 
@@ -167,11 +167,13 @@ impl WebpCodestreamDecoder for ScriptedDecoder {
                 pixels: pixels.clone(),
             }),
             Outcome::Yuv(luma) => Ok(DecodedRaster::Yuv420(scripted_yuv(
-                d.width, d.height, *luma,
+                d.width(),
+                d.height(),
+                *luma,
             )?)),
             Outcome::Bytes(_) => panic!("byte outcome is encode-only"),
-            Outcome::Fail(msg) => Err(Error::InvalidInput(msg)),
-            Outcome::Unsupported(msg) => Err(Error::Unsupported(msg)),
+            Outcome::Fail(msg) => Err(Error::invalid_input(env!("CARGO_PKG_NAME"), msg)),
+            Outcome::Unsupported(msg) => Err(Error::unsupported(env!("CARGO_PKG_NAME"), msg)),
         }
     }
 }
@@ -212,8 +214,8 @@ impl WebpCodestreamEncoder for ScriptedEncoder {
         self.log.clones.fetch_add(1, Ordering::SeqCst);
         match &self.outcome {
             Outcome::Bytes(bytes) => Ok(bytes.clone()),
-            Outcome::Fail(msg) => Err(Error::InvalidInput(msg)),
-            Outcome::Unsupported(msg) => Err(Error::Unsupported(msg)),
+            Outcome::Fail(msg) => Err(Error::invalid_input(env!("CARGO_PKG_NAME"), msg)),
+            Outcome::Unsupported(msg) => Err(Error::unsupported(env!("CARGO_PKG_NAME"), msg)),
             _ => panic!("raster outcomes are decode-only"),
         }
     }
@@ -317,7 +319,7 @@ fn decode_propagates_an_accepted_backends_error_without_running_the_tail() {
         &log,
     ));
     let err: Result<ImageBuf<Rgb8>> = dec.decode_image(&file);
-    assert!(matches!(err, Err(Error::InvalidInput("backend exploded"))));
+    assert_error(err, ErrorKind::InvalidInput, "backend exploded");
     assert_eq!(log.ran(), vec!["boom"]);
 }
 
@@ -630,7 +632,7 @@ fn encode_propagates_an_accepted_backends_error_without_running_the_tail() {
         &log,
     ));
     let err = encode_rgb(&enc, &rgb(16, 16), dims(16, 16));
-    assert!(matches!(err, Err(Error::InvalidInput("encoder exploded"))));
+    assert_error(err, ErrorKind::InvalidInput, "encoder exploded");
     assert_eq!(log.ran(), vec!["boom"]);
 }
 

@@ -16,9 +16,8 @@
 //! evaluated as written (no clamping) so they stay faithful to the reference.
 
 // The reference luminance levels are defined once in `gamut_core::luminance` (see
-// `references/color/README.md`) and re-exported here so existing `gamut_color::transfer::*` paths
-// keep resolving.
-pub use gamut_core::luminance::{HDR_REFERENCE_WHITE_NITS, PQ_PEAK_NITS};
+// `references/color/README.md`); that is their only public path.
+use gamut_core::luminance::{HDR_REFERENCE_WHITE_NITS, PQ_PEAK_NITS};
 
 use crate::cicp::TransferCharacteristics;
 

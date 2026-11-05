@@ -140,7 +140,7 @@
 //!
 //! // A 2×2 8-bit RGB image, row-major (red, green, blue, yellow).
 //! let pixels = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
-//! let image = ImageRef::<Rgb8>::new(&pixels, Dimensions { width: 2, height: 2 })?;
+//! let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
 //!
 //! // Lossless by default; `AvifEncoder::lossy(quality)` trades fidelity for a smaller file.
 //! let avif = AvifEncoder::new().encode_to_vec(image)?;

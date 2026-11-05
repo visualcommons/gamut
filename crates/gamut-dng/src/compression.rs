@@ -16,7 +16,8 @@ use crate::values::Compression;
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unsupported`] for a scheme gamut-dng cannot yet encode.
+/// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a scheme
+/// gamut-dng cannot yet encode.
 pub(crate) fn compress(scheme: Compression, packed: &[u8]) -> Result<Vec<u8>> {
     match scheme {
         Compression::Uncompressed => Ok(packed.to_vec()),
@@ -43,8 +44,10 @@ pub(crate) fn compress(scheme: Compression, packed: &[u8]) -> Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the compressed data is malformed or inflates past `max_out`,
-/// or [`Error::Unsupported`] for a scheme gamut-dng cannot yet decode.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// compressed data is malformed or inflates past `max_out`, or an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a scheme gamut-dng
+/// cannot yet decode.
 pub(crate) fn decompress(scheme: Compression, bytes: &[u8], max_out: usize) -> Result<Vec<u8>> {
     match scheme {
         Compression::Uncompressed => Ok(bytes.to_vec()),

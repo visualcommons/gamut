@@ -645,8 +645,8 @@ fn report(args: &ConvertArgs, job: &Job, encoded: &Encoded) {
         } else {
             job.output.display().to_string()
         },
-        encoded.dims.width,
-        encoded.dims.height,
+        encoded.dims.width(),
+        encoded.dims.height(),
     );
     if job.output == Path::new(STDIO) {
         eprintln!("{line}");
@@ -680,8 +680,8 @@ fn encode(
             let image = decode_native(input, bytes)?;
             let dims = image.dimensions();
             tracing::info!(
-                width = dims.width,
-                height = dims.height,
+                width = dims.width(),
+                height = dims.height(),
                 bytes = image.byte_len(),
                 "decoded input"
             );
@@ -727,8 +727,8 @@ fn encode(
             // RGBA so transparency survives; `encode_rgba8` emits a simple file when fully opaque.
             let (rgba, dims) = decode_bytes(input, bytes, true)?;
             tracing::info!(
-                width = dims.width,
-                height = dims.height,
+                width = dims.width(),
+                height = dims.height(),
                 bytes = rgba.len(),
                 "decoded input"
             );
@@ -767,8 +767,8 @@ fn encode(
         OutputFormat::Tiff => {
             let (rgb, dims) = decode_bytes(input, bytes, false)?;
             tracing::info!(
-                width = dims.width,
-                height = dims.height,
+                width = dims.width(),
+                height = dims.height(),
                 bytes = rgb.len(),
                 "decoded input"
             );
@@ -810,8 +810,8 @@ fn encode(
             // that is lossless.
             let (rgba, dims) = decode_bytes(input, bytes, true)?;
             tracing::info!(
-                width = dims.width,
-                height = dims.height,
+                width = dims.width(),
+                height = dims.height(),
                 bytes = rgba.len(),
                 "decoded input"
             );
@@ -872,8 +872,8 @@ fn encode(
             // RGBA so transparency survives, matching the PNG/WebP paths.
             let (rgba, dims) = decode_bytes(input, bytes, true)?;
             tracing::info!(
-                width = dims.width,
-                height = dims.height,
+                width = dims.width(),
+                height = dims.height(),
                 bytes = rgba.len(),
                 "decoded input"
             );
@@ -951,8 +951,8 @@ fn encode(
             // pipeline does not distinguish grayscale, so colour is always encoded as YCbCr.
             let (rgb, dims) = decode_bytes(input, bytes, false)?;
             tracing::info!(
-                width = dims.width,
-                height = dims.height,
+                width = dims.width(),
+                height = dims.height(),
                 bytes = rgb.len(),
                 "decoded input"
             );
@@ -1269,8 +1269,8 @@ fn rewrite_exif(exif: &mut Exif, meta: &InputMetadata, dims: Dimensions, icc_car
         exif.set_tag(ExifTag::Orientation, ExifValue::Short(vec![1]));
     }
     for (tag, length) in [
-        (ExifTag::PixelXDimension, dims.width),
-        (ExifTag::PixelYDimension, dims.height),
+        (ExifTag::PixelXDimension, dims.width()),
+        (ExifTag::PixelYDimension, dims.height()),
     ] {
         if present(exif, tag) {
             exif.set_tag(tag, ExifValue::Long(vec![length]));

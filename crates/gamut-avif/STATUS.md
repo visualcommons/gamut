@@ -77,14 +77,14 @@ box to the same pixels as one without.
 
 `with_c2pa_reserved` is an infallible builder, so an unusable `len` is refused by the **encode**
 that follows, on every entry point including `EncodeImage::encode_to_vec`. This crate refuses two
-lengths as `Error::InvalidInput`: below 8 bytes (the JUMBF `LBox`/`TBox` header a manifest store
+lengths as `ErrorKind::InvalidInput`: below 8 bytes (the JUMBF `LBox`/`TBox` header a manifest store
 opens with, so a shorter slot could never hold one) and above what a buffer can hold. Unchecked,
 the second was worse than a panic — the release profile a downstream consumer builds with wrapped
 the framing addition and emitted a well-formed AVIF whose C2PA box no locator, this crate's
 included, could find. On 64-bit targets a **third** refusal sits between them: a top-level box carries a
 32-bit size field, so a `ContentProvenanceBox` at or beyond 4 GiB cannot be written. This crate
 applies the container writer's top-level-box bound itself, before the slot is allocated, and
-refuses as `Error::Unsupported` — the kind `gamut-isobmff` would give. There that is the effective
+refuses as `ErrorKind::Unsupported` — the kind `gamut-isobmff` would give. There that is the effective
 ceiling — the largest `len` that clears it is `4_294_967_250` and `4_294_967_251` is refused. The
 kind is `Unsupported` rather than `InvalidInput` by decision (#576): such a box is well-formed
 ISOBMFF through a 64-bit `largesize`, which the writer does not emit, so the limit is the writer's
@@ -515,7 +515,7 @@ Delivered in slices, one PR each, the way section L delivered #250:
 filters, **D6** the pixel-format matrix, **D7** the `gamut-avif` wiring.
 
 A decoder cannot pick a subset the way the encoder does — it must accept whatever a conformant
-encoder produced — so a ☐ row here is **refused with a typed `Error::Unsupported` naming the
+encoder produced — so a ☐ row here is **refused with a typed `ErrorKind::Unsupported` error naming the
 tool**, never approximated and never silently mis-decoded.
 
 Oracle: libaom's reference **encoder** (`aom_oracle::encode_still_intra`), staged for this purpose

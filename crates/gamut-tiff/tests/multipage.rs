@@ -24,14 +24,7 @@ fn multipage_roundtrips_in_gamut() {
     let refs: Vec<ImageRef<'_, Rgb8>> = p
         .iter()
         .map(|(d, w, h)| {
-            ImageRef::<Rgb8>::new(
-                d.as_slice(),
-                Dimensions {
-                    width: *w,
-                    height: *h,
-                },
-            )
-            .unwrap()
+            ImageRef::<Rgb8>::new(d.as_slice(), Dimensions::new(*w, *h).unwrap()).unwrap()
         })
         .collect();
     let mut tiff = Vec::new();
@@ -44,7 +37,10 @@ fn multipage_roundtrips_in_gamut() {
     assert_eq!(dec.page_count(&tiff).expect("count"), p.len());
     for (i, (data, w, h)) in p.iter().enumerate() {
         let got: ImageBuf<Rgb8> = dec.decode_page(&tiff, i).expect("decode page");
-        assert_eq!((got.dimensions().width, got.dimensions().height), (*w, *h));
+        assert_eq!(
+            (got.dimensions().width(), got.dimensions().height()),
+            (*w, *h)
+        );
         assert_eq!(got.as_samples(), data.as_slice(), "page {i}");
     }
     // Out-of-range page is rejected.
@@ -57,14 +53,7 @@ fn gamut_multipage_is_decoded_by_libtiff() {
     let refs: Vec<ImageRef<'_, Rgb8>> = p
         .iter()
         .map(|(d, w, h)| {
-            ImageRef::<Rgb8>::new(
-                d.as_slice(),
-                Dimensions {
-                    width: *w,
-                    height: *h,
-                },
-            )
-            .unwrap()
+            ImageRef::<Rgb8>::new(d.as_slice(), Dimensions::new(*w, *h).unwrap()).unwrap()
         })
         .collect();
     let mut tiff = Vec::new();

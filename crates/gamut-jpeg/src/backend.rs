@@ -145,9 +145,10 @@ impl JpegStreamInfo {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the stream is malformed or has no frame header, or
-    /// [`Error::Unsupported`] if the frame uses a process other than baseline / extended-sequential
-    /// / progressive DCT.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// stream is malformed or has no frame header, or an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the frame uses a
+    /// process other than baseline / extended-sequential / progressive DCT.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let (process, payload) = frame_header(data)?;
         let precision = *payload.first().ok_or_else(crate::decoder::trunc_sof)?;
@@ -255,9 +256,9 @@ impl DecodedJpeg {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if `format` is not [`PixelFormat::Gray8`],
-    /// [`PixelFormat::Rgb8`], or [`PixelFormat::Cmyk8`], and [`Error::InvalidInput`] if either
-    /// dimension is `0` or `samples.len()` is not exactly `width * height * channels`.
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if `format`
+    /// is not [`PixelFormat::Gray8`], [`PixelFormat::Rgb8`], or [`PixelFormat::Cmyk8`], and an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if either dimension is `0` or `samples.len()` is not exactly `width * height * channels`.
     pub fn new(width: u32, height: u32, format: PixelFormat, samples: Vec<u8>) -> Result<Self> {
         check_format(format)?;
         if width == 0 || height == 0 {
@@ -329,9 +330,10 @@ impl<'a> RasterRef<'a> {
     ///
     /// # Errors
     ///
-    /// Same contract as [`DecodedJpeg::new`]: [`Error::Unsupported`] for a format outside
-    /// `Gray8`/`Rgb8`/`Cmyk8`, [`Error::InvalidInput`] for a zero extent or a sample count that is
-    /// not exactly `width * height * channels`.
+    /// Same contract as [`DecodedJpeg::new`]: an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a format outside
+    /// `Gray8`/`Rgb8`/`Cmyk8`, an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
+    /// error for a zero extent or a sample count that is not exactly `width * height * channels`.
     pub fn new(width: u32, height: u32, format: PixelFormat, samples: &'a [u8]) -> Result<Self> {
         check_format(format)?;
         if width == 0 || height == 0 {
@@ -627,7 +629,8 @@ const _: () = {
 /// the crate's presentation rules), fills a single-plane [`ImageDesc`] over it, and calls the ABI
 /// `decode` with the **whole** interchange stream as the codestream. A late
 /// [`Status::UNSUPPORTED`] becomes [`backend_declined`] — the registry then tries the next backend;
-/// any other non-OK status becomes a terminal [`Error::InvalidInput`] that propagates. The numeric
+/// any other non-OK status becomes a terminal
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error that propagates. The numeric
 /// status is retained as diagnostic detail.
 #[derive(Debug, Clone)]
 pub struct AbiStreamDecoder<D> {

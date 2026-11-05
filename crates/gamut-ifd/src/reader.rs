@@ -170,7 +170,8 @@ pub(crate) fn offset_at(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the byte-order mark, magic number, or (for BigTIFF) the
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// byte-order mark, magic number, or (for BigTIFF) the
 /// fixed offset-size / reserved fields are not valid.
 pub fn read_header(data: &[u8]) -> Result<(ByteOrder, Variant, u64)> {
     let head = data
@@ -223,7 +224,8 @@ pub fn read_header(data: &[u8]) -> Result<(ByteOrder, Variant, u64)> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the directory at `offset` is out of bounds or a field value
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// directory at `offset` is out of bounds or a field value
 /// is truncated.
 pub fn read_ifd_at(data: &[u8], offset: u64, order: ByteOrder, variant: Variant) -> Result<Ifd> {
     let mut reader = crate::IfdReader::with_layout(data, order, variant);
@@ -238,7 +240,8 @@ pub fn read_ifd_at(data: &[u8], offset: u64, order: ByteOrder, variant: Variant)
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the header is invalid, an offset is out of bounds, the IFD
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// header is invalid, an offset is out of bounds, the IFD
 /// chain loops, or a field value is truncated.
 pub fn read(data: &[u8]) -> Result<TiffFile> {
     crate::IfdReader::open(data)?.read_file()
@@ -355,7 +358,8 @@ pub(crate) fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] under the same conditions as [`read`], or if the pointer graph
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
+/// same conditions as [`read`], or if the pointer graph
 /// is not a tree: a repeated or self-referential child offset, or nesting deeper than 16 levels
 /// ([`SubtreeScope::MAX_DEPTH`] below each page); or if the pointers reach more than 65,536
 /// sub-IFDs in all, counted across every page (the walk's directory budget, which bounds what a
@@ -408,7 +412,8 @@ pub fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if two pointers in the subtree name one directory (including a
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if two
+/// pointers in the subtree name one directory (including a
 /// cycle back to a visited one), a directory sits deeper than
 /// [`max_depth`](SubtreeScope::max_depth), or the subtree holds more than 65,536 sub-IFDs (the
 /// budget each call walks under, the same one [`read_tree`] applies); and propagates any error
@@ -485,7 +490,8 @@ pub(crate) fn resolve_pointers_with(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] under the same conditions as [`read`].
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
+/// same conditions as [`read`].
 pub fn read_audited(data: &[u8]) -> Result<(TiffFile, crate::SegmentReport)> {
     let mut tracked = crate::Tracked::new(data);
     let mut map = crate::SegmentMap::new(data.len() as u64);

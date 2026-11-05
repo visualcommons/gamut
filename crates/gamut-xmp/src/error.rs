@@ -107,33 +107,42 @@ mod tests {
 
     #[test]
     fn maps_to_core_unsupported_vs_invalid() {
-        // Encoding / unsupported-form become Unsupported; everything else is invalid input.
-        assert!(matches!(
-            gamut_core::Error::from(XmpError::Encoding("x")),
-            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::Unsupported
-        ));
-        assert!(matches!(
-            gamut_core::Error::from(XmpError::UnsupportedForm("parseType=Literal".into())),
-            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::Unsupported
-        ));
-        assert!(matches!(
-            gamut_core::Error::from(XmpError::MissingRdf),
-            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
-        ));
-        assert!(matches!(
-            gamut_core::Error::from(XmpError::DuplicateLang("en".into())),
-            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
-        ));
+        // Encoding / unsupported-form become Unsupported; everything else is invalid input. The
+        // conversion always carries the XMP diagnostic as detail.
+        let classified = |err: XmpError| {
+            let core = gamut_core::Error::from(err);
+            assert!(
+                core.detail().is_some(),
+                "XMP diagnostic must be carried: {core}"
+            );
+            core.kind()
+        };
+        assert_eq!(
+            classified(XmpError::Encoding("x")),
+            gamut_core::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            classified(XmpError::UnsupportedForm("parseType=Literal".into())),
+            gamut_core::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            classified(XmpError::MissingRdf),
+            gamut_core::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            classified(XmpError::DuplicateLang("en".into())),
+            gamut_core::ErrorKind::InvalidInput
+        );
         // A sidecar without its wrapper is bad input, not an unimplemented feature: the caller
         // fixes it by handing the bytes to `XmpMeta::from_packet` or wrapping them.
-        assert!(matches!(
-            gamut_core::Error::from(XmpError::MissingXmpMeta("RDF".into())),
-            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
-        ));
+        assert_eq!(
+            classified(XmpError::MissingXmpMeta("RDF".into())),
+            gamut_core::ErrorKind::InvalidInput
+        );
         // A catenation is malformed input the caller can split, not an unimplemented feature.
-        assert!(matches!(
-            gamut_core::Error::from(XmpError::MultiplePackets(42)),
-            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
-        ));
+        assert_eq!(
+            classified(XmpError::MultiplePackets(42)),
+            gamut_core::ErrorKind::InvalidInput
+        );
     }
 }

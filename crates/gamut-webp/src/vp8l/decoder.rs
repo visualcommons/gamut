@@ -32,13 +32,14 @@ const MAX_PIXELS: usize = 16384 * 16384;
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for any malformed, truncated, or over-spec stream.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for any
+/// malformed, truncated, or over-spec stream.
 pub fn decode(data: &[u8]) -> Result<(Dimensions, Vec<u32>)> {
     let mut r = BitReader::new(data);
     let header = Vp8lHeader::read(&mut r)?;
     let (width, height) = (u32::from(header.width), u32::from(header.height));
     let pixels = decode_image(&mut r, width, height)?;
-    Ok((Dimensions { width, height }, pixels))
+    Ok((Dimensions::new(width, height)?, pixels))
 }
 
 /// Decodes a **headerless** VP8L image-stream of the given dimensions: the transform chain followed by
@@ -47,7 +48,8 @@ pub fn decode(data: &[u8]) -> Result<(Dimensions, Vec<u32>)> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for any malformed, truncated, or over-spec stream.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for any
+/// malformed, truncated, or over-spec stream.
 pub(crate) fn decode_image(r: &mut BitReader<'_>, width: u32, height: u32) -> Result<Vec<u32>> {
     // Read the transform chain (each type at most once), tracking the working width that
     // color-indexing shrinks for everything read after it (RFC 9649 §4).
@@ -328,9 +330,11 @@ mod tests {
     /// bits). Exercises the header / transform-loop / cache-info / meta / group-read / literal paths.
     fn solid_color_stream(width: u32, height: u32, color: u32) -> Vec<u8> {
         let mut w = BitWriter::new();
-        let header =
-            Vp8lHeader::from_dimensions(Dimensions { width, height }, alpha(color) != 0xff)
-                .expect("valid dims");
+        let header = Vp8lHeader::from_dimensions(
+            Dimensions::new(width, height).unwrap(),
+            alpha(color) != 0xff,
+        )
+        .expect("valid dims");
         header.write(&mut w);
         w.write_bits(0, 1); // no transforms
         w.write_bits(0, 1); // no color cache
@@ -349,7 +353,7 @@ mod tests {
             let color = make_argb(0xff, 0x12, 0x34, 0x56);
             let stream = solid_color_stream(width, height, color);
             let (dims, pixels) = decode(&stream).expect("decode");
-            assert_eq!(dims, Dimensions { width, height });
+            assert_eq!(dims, Dimensions::new(width, height).unwrap());
             assert_eq!(pixels.len(), (width * height) as usize);
             assert!(pixels.iter().all(|&p| p == color));
         }
@@ -453,15 +457,9 @@ mod tests {
     #[test]
     fn rejects_repeated_transform() {
         let mut w = BitWriter::new();
-        Vp8lHeader::from_dimensions(
-            Dimensions {
-                width: 4,
-                height: 4,
-            },
-            false,
-        )
-        .unwrap()
-        .write(&mut w);
+        Vp8lHeader::from_dimensions(Dimensions::new(4, 4).unwrap(), false)
+            .unwrap()
+            .write(&mut w);
         // Two subtract-green transforms in a row is illegal.
         w.write_bits(1, 1);
         w.write_bits(u32::from(SUBTRACT_GREEN_TRANSFORM), 2);
@@ -486,15 +484,9 @@ mod tests {
     fn rejects_out_of_range_color_cache_bits() {
         // color-cache-info with size bits = 0 is invalid (valid range is 1..=11).
         let mut w = BitWriter::new();
-        Vp8lHeader::from_dimensions(
-            Dimensions {
-                width: 4,
-                height: 4,
-            },
-            false,
-        )
-        .unwrap()
-        .write(&mut w);
+        Vp8lHeader::from_dimensions(Dimensions::new(4, 4).unwrap(), false)
+            .unwrap()
+            .write(&mut w);
         w.write_bits(0, 1); // no transforms
         w.write_bits(1, 1); // use color cache
         w.write_bits(0, 4); // cache_code_bits = 0 → invalid
@@ -511,15 +503,9 @@ mod tests {
         // code / image-data path must surface as `Err`, never a panic. Bounded dimensions keep the
         // pixel allocation tiny regardless of the random bits.
         let mut header = BitWriter::new();
-        Vp8lHeader::from_dimensions(
-            Dimensions {
-                width: 4,
-                height: 4,
-            },
-            false,
-        )
-        .unwrap()
-        .write(&mut header);
+        Vp8lHeader::from_dimensions(Dimensions::new(4, 4).unwrap(), false)
+            .unwrap()
+            .write(&mut header);
         let header = header.finish();
 
         let mut state = 0x1234_5678_9abc_def0u64;

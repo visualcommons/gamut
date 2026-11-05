@@ -12,8 +12,8 @@ use miniz_oxide::inflate::TINFLStatus;
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the stream is corrupt, truncated, or would inflate past
-/// `max_out`.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream
+/// is corrupt, truncated, or would inflate past `max_out`.
 pub(crate) fn inflate_zlib(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
     miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, max_out).map_err(|error| {
         let classified = match error.status {

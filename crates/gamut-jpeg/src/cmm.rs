@@ -40,9 +40,10 @@ impl JpegDecoder {
     ///
     /// # Errors
     ///
-    /// Whatever the [`Rgb8`] decode or [`crate::metadata`] returns; [`Error::InvalidInput`] when
-    /// the embedded profile does not parse or `gamut-cmm` cannot build a transform from it; and
-    /// [`Error::Unsupported`] for a profile whose data colour space is not RGB (a GRAY profile on
+    /// Whatever the [`Rgb8`] decode or [`crate::metadata`] returns; an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the embedded
+    /// profile does not parse or `gamut-cmm` cannot build a transform from it; and an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a profile whose data colour space is not RGB (a GRAY profile on
     /// a grayscale stream, a CMYK one on a four-component stream) — those destinations are not
     /// wired here yet.
     ///

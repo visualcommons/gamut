@@ -38,10 +38,7 @@ fn source_rgb() -> Vec<u8> {
 
 fn encode(encoder: AvifEncoder) -> Vec<u8> {
     let rgb = source_rgb();
-    let dims = Dimensions {
-        width: W,
-        height: H,
-    };
+    let dims = Dimensions::new(W, H).unwrap();
     encoder
         .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims).expect("buffer matches dimensions"))
         .expect("encode")

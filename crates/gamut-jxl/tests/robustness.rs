@@ -104,7 +104,7 @@ fn caller_limits_refuse_a_stream_truncated_after_its_headers() {
         .info(&HEADER_ONLY_9717X8098)
         .expect("the size header parses");
     assert_eq!(
-        (info.dimensions.width, info.dimensions.height),
+        (info.dimensions.width(), info.dimensions.height()),
         (9717, 8098)
     );
 

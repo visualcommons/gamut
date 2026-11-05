@@ -27,8 +27,8 @@ use crate::raw::RawImage;
 /// Computes the `NewRawImageDigest` of `raw` (see the module docs).
 #[must_use]
 pub(crate) fn new_raw_image_digest(raw: &RawImage) -> [u8; 16] {
-    let width = raw.dimensions().width as usize;
-    let height = raw.dimensions().height as usize;
+    let width = raw.dimensions().width() as usize;
+    let height = raw.dimensions().height() as usize;
     let spp = usize::from(raw.samples_per_pixel());
     let samples = raw.samples();
 

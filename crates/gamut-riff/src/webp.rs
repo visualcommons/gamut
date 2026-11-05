@@ -67,10 +67,11 @@ impl Vp8xHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the canvas is one the format cannot express: either
-    /// dimension outside `1..=`[`MAX_CANVAS_DIMENSION`], or a width × height product above
-    /// `2^32 - 1`, both of which §2.7 forbids. Validating here rather than truncating means a
-    /// header that encodes always decodes back to the same canvas.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// canvas is one the format cannot express: either dimension outside
+    /// `1..=`[`MAX_CANVAS_DIMENSION`], or a width × height product above `2^32 - 1`, both of which
+    /// §2.7 forbids. Validating here rather than truncating means a header that encodes always
+    /// decodes back to the same canvas.
     pub fn to_payload(&self) -> Result<[u8; VP8X_PAYLOAD_LEN]> {
         self.validate_canvas()?;
         let flags = (u8::from(self.icc_profile) << 5)
@@ -121,9 +122,10 @@ impl Vp8xHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `payload` is shorter than [`VP8X_PAYLOAD_LEN`], or if the
-    /// canvas it declares has a width × height product above `2^32 - 1`, which §2.7 forbids. (The
-    /// dimensions themselves need no check: 24 bits stored 1-based can only land in `1..=2^24`.)
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `payload` is shorter than [`VP8X_PAYLOAD_LEN`], or if the canvas it declares has a width ×
+    /// height product above `2^32 - 1`, which §2.7 forbids. (The dimensions themselves need no
+    /// check: 24 bits stored 1-based can only land in `1..=2^24`.)
     pub fn from_payload(payload: &[u8]) -> Result<Self> {
         if payload.len() < VP8X_PAYLOAD_LEN {
             return Err(Error::invalid_input(
@@ -156,9 +158,10 @@ impl Vp8xHeader {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `header` declares a canvas the format cannot express (see
-/// [`Vp8xHeader::to_payload`]), or [`Error::Unsupported`] if a payload or the finished file exceeds
-/// the RIFF size fields.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `header`
+/// declares a canvas the format cannot express (see [`Vp8xHeader::to_payload`]), or an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if a payload or the
+/// finished file exceeds the RIFF size fields.
 pub fn write_extended(header: &Vp8xHeader, chunks: &[(FourCc, &[u8])]) -> Result<Vec<u8>> {
     let mut w = RiffWriter::new();
     w.write_chunk(FourCc::VP8X, &header.to_payload()?)?;
@@ -202,8 +205,8 @@ impl<'a> MetadataChunks<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `data` is not a valid RIFF/WebP file, or if a chunk's
-    /// declared size runs past the end of the data.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data`
+    /// is not a valid RIFF/WebP file, or if a chunk's declared size runs past the end of the data.
     pub fn read(data: &'a [u8]) -> Result<Self> {
         let mut found = Self::default();
         for chunk in RiffReader::new(data)? {
@@ -254,8 +257,8 @@ impl<'a> MetadataChunks<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `data` is not a valid RIFF/WebP file, or if a chunk's declared
-/// size runs past the end of the data.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data` is
+/// not a valid RIFF/WebP file, or if a chunk's declared size runs past the end of the data.
 ///
 /// # Example
 ///
@@ -301,16 +304,9 @@ fn located_chunks(data: &[u8]) -> Result<impl Iterator<Item = Result<(Range<usiz
     }))
 }
 
-/// What a report of a located manifest store has to say beside it, because locating one is not
-/// validating it.
-///
-/// C2PA 2.4 §15.12 puts validation on a validator; this crate holds no COSE, X.509, RFC 3161 or
-/// trust-list code and never reports a validity verdict. "C2PA: present" printed beside EXIF and
-/// ICC reads as *verified* to anyone who has seen a Content Credentials badge, so
-/// [`C2paSummary::summary_lines`] carries this text in the line that reports the stores, never as a
-/// footnote. The same sentence `gamut-heic` carries, so every container reports alike.
-pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
-     it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
+// `C2paSummary::summary_lines` carries this text in the line that reports the stores, never as a
+// footnote.
+pub use gamut_core::c2pa::NOT_VALIDATED as C2PA_NOT_VALIDATED;
 
 /// Where a `C2PA` chunk sits among the file's chunks — a **positional fact about bytes**, never a
 /// verdict.
@@ -369,12 +365,10 @@ impl C2paStoreSummary {
     }
 }
 
-/// The length below which a `C2PA` chunk's payload cannot be a manifest store: a JUMBF box header,
-/// a 4-byte `LBox` followed by a 4-byte `TBox` (C2PA 2.4 §8.4.2.3; `references/c2pa/README.md`). A
-/// manifest store is a JUMBF superbox, so nothing shorter can be one. The bound `gamut-ifd`'s
-/// `MIN_STORE_LEN` applies to a tag-52545 value and `gamut-heic` to a store's `LBox`, applied here
-/// to the chunk payload §A.3.7 makes the store.
-const MIN_STORE_LEN: usize = 8;
+// The length below which a `C2PA` chunk's payload cannot be a manifest store. The bound `gamut-ifd`
+// applies to a tag-52545 value and `gamut-heic` to a store's `LBox`, applied here to the chunk
+// payload §A.3.7 makes the store.
+use gamut_core::c2pa::MIN_STORE_LEN;
 
 /// A `C2PA` chunk from which no manifest store could be read, reported **without its bytes**: its
 /// payload is shorter than the 8-byte JUMBF box header every store opens with, so it cannot be a
@@ -543,8 +537,8 @@ impl C2paSummary {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `data` is not a valid RIFF/WebP file, or if a chunk's declared
-/// size runs past the end of the data.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data` is
+/// not a valid RIFF/WebP file, or if a chunk's declared size runs past the end of the data.
 pub fn c2pa_summary(data: &[u8]) -> Result<C2paSummary> {
     let mut summary = C2paSummary::default();
     let mut last_end = None;
@@ -748,10 +742,12 @@ impl<'a> WebpLayout<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `data` is not a valid RIFF/WebP file, if a chunk runs
-    /// past the end of the data, or if a reconstruction chunk appears out of order (the error
-    /// carries the offending chunk's byte offset). Returns [`Error::Unsupported`] for an animated
-    /// file — an `ANIM` or `ANMF` chunk — which is outside this crate's still-image scope.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data`
+    /// is not a valid RIFF/WebP file, if a chunk runs past the end of the data, or if a
+    /// reconstruction chunk appears out of order (the error carries the offending chunk's byte
+    /// offset). Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for
+    /// an animated file — an `ANIM` or `ANMF` chunk — which is outside this crate's still-image
+    /// scope.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let reader = RiffReader::new(data)?;
         let mut layout = Self {
@@ -867,8 +863,8 @@ impl From<FourCc> for WebpChunkId {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unsupported`] if the bitstream or the finished file exceeds the RIFF size
-/// fields (§2.3, §2.4).
+/// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the
+/// bitstream or the finished file exceeds the RIFF size fields (§2.3, §2.4).
 pub fn write_simple_lossless(vp8l_bitstream: &[u8]) -> Result<Vec<u8>> {
     let mut w = RiffWriter::new();
     w.write_chunk(FourCc::VP8L, vp8l_bitstream)?;
@@ -880,8 +876,8 @@ pub fn write_simple_lossless(vp8l_bitstream: &[u8]) -> Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unsupported`] if the bitstream or the finished file exceeds the RIFF size
-/// fields (§2.3, §2.4).
+/// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the
+/// bitstream or the finished file exceeds the RIFF size fields (§2.3, §2.4).
 pub fn write_simple_lossy(vp8_bitstream: &[u8]) -> Result<Vec<u8>> {
     let mut w = RiffWriter::new();
     w.write_chunk(FourCc::VP8, vp8_bitstream)?;

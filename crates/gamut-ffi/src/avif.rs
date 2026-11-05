@@ -175,7 +175,9 @@ impl GamutAvifEncoder {
             let samples = unsafe { core::slice::from_raw_parts(samples, samples_len) };
             // `ImageRef::new` is the boundary validation DESIGN.md names: the length must be
             // exactly `width * height * channels` and the dimensions non-empty.
-            let image = match ImageRef::<P>::new(samples, Dimensions { width, height }) {
+            let image = match Dimensions::new(width, height)
+                .and_then(|dims| ImageRef::<P>::new(samples, dims))
+            {
                 Ok(image) => image,
                 Err(error) => return status_of(&error),
             };
@@ -1184,23 +1186,18 @@ pub unsafe extern "C" fn gamut_avif_image_dimensions(
 ) -> GamutStatus {
     // SAFETY (both closures): `read` calls them only once both out-params are non-null, and
     // they are writable per this fn's contract.
-    let write = |dims: Dimensions| unsafe {
-        width.write(dims.width);
-        height.write(dims.height);
+    let write = |w: u32, h: u32| unsafe {
+        width.write(w);
+        height.write(h);
     };
     unsafe {
         GamutAvifImage::read(
             image,
             !width.is_null() && !height.is_null(),
-            || {
-                write(Dimensions {
-                    width: 0,
-                    height: 0,
-                })
-            },
+            || write(0, 0),
             |inner| match inner.primary_item().dimensions() {
                 Some(dims) => {
-                    write(dims);
+                    write(dims.width(), dims.height());
                     GAMUT_OK
                 }
                 None => GAMUT_STATUS_INVALID_INPUT,
@@ -1272,8 +1269,9 @@ mod tests {
     where
         AvifEncoder: EncodeImage<P>,
     {
-        let image =
-            ImageRef::<P>::new(samples, Dimensions { width, height }).map_err(|e| status_of(&e))?;
+        let image = Dimensions::new(width, height)
+            .and_then(|dims| ImageRef::<P>::new(samples, dims))
+            .map_err(|e| status_of(&e))?;
         encoder.encode_to_vec(image).map_err(|e| status_of(&e))
     }
 
@@ -1972,14 +1970,7 @@ mod tests {
             let slot = c2pa_slot(encoder);
             unsafe { gamut_avif_encoder_free(encoder) };
 
-            let image = ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: 4,
-                    height: 4,
-                },
-            )
-            .unwrap();
+            let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(4, 4).unwrap()).unwrap();
             let (rust, report) = with(AvifEncoder::new()).encode_with_report(image).unwrap();
             assert_eq!(c, rust);
             assert_eq!(slot, report.c2pa);

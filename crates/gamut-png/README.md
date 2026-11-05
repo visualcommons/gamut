@@ -60,9 +60,9 @@ let rich = PngDecoder::new().with_max_dimensions(8192, 8192).decode(&png)?;
 The typed `DecodeImage<P>` implementations accept any file `P` can hold **losslessly** — palette
 and tRNS expand to RGB(A), greyscale replicates into RGB, an opaque alpha channel can be added,
 sub-byte greys scale exactly to 8 bits and 8-bit samples to 16 by ×257 — and refuse lossy
-requests (16-bit files as 8-bit layouts, dropping alpha or transparency) with
-`Error::Unsupported`. Format-agnostic *lossy* pixel conversion is deliberately out of scope here
-and belongs in a shared gamut-core facility.
+requests (16-bit files as 8-bit layouts, dropping alpha or transparency) with an
+`ErrorKind::Unsupported` error. Format-agnostic *lossy* pixel conversion is deliberately out of
+scope here and belongs in a shared gamut-core facility.
 
 ## Status
 

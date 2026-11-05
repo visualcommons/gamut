@@ -86,7 +86,11 @@ fn gamut_decodes_libwebp_lossless_to_source() {
                 .decode_image(&webp)
                 .expect("gamut decode");
             let dims = got.dimensions();
-            assert_eq!((dims.width, dims.height), (w, h), "{label} dims at {w}x{h}");
+            assert_eq!(
+                (dims.width(), dims.height()),
+                (w, h),
+                "{label} dims at {w}x{h}"
+            );
             assert_eq!(
                 got.as_samples(),
                 rgba_to_rgb(&rgba).as_slice(),
@@ -121,14 +125,7 @@ fn assert_gamut_encode_libwebp_decode(rgb: &[u8], w: u32, h: u32, label: &str) {
     let mut webp = Vec::new();
     WebpEncoder::lossless()
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(rgb, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut webp,
         )
         .expect("gamut encode");
@@ -145,16 +142,7 @@ fn libwebp_decodes_a_file_carrying_a_c2pa_store_to_the_source_pixels() {
     // chunk appended — nothing ahead of it moved.
     let (w, h) = (32u32, 24u32);
     let rgb = rgba_to_rgb(&pattern_rgba(w, h));
-    let image = || {
-        ImageRef::<Rgb8>::new(
-            &rgb,
-            Dimensions {
-                width: w,
-                height: h,
-            },
-        )
-        .unwrap()
-    };
+    let image = || ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap();
     let store = &b"an opaque C2PA manifest store"[..];
     // Both files carry Exif, so both are already in the extended format and the only difference
     // between them is the store's own chunk rather than the `VP8X` promotion.
@@ -867,14 +855,7 @@ fn gamut_lossy_webp_decodes_correctly_in_libwebp() {
         let mut webp = Vec::new();
         WebpEncoder::lossy(90)
             .encode_image(
-                ImageRef::<Rgb8>::new(
-                    &rgb,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut webp,
             )
             .expect("gamut encode");
@@ -988,14 +969,7 @@ fn libwebp_decodes_gamut_lossy_alpha_exactly() {
         let mut file = Vec::new();
         WebpEncoder::lossy(70)
             .encode_image(
-                ImageRef::<Rgba8>::new(
-                    &rgba,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Rgba8>::new(&rgba, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut file,
             )
             .expect("gamut rgba encode");
@@ -1038,13 +1012,7 @@ fn gamut_decodes_libwebp_lossy_alpha_exactly() {
         let got: ImageBuf<Rgba8> = WebpDecoder::new()
             .decode_image(&webp)
             .expect("gamut decode libwebp lossy+alpha");
-        assert_eq!(
-            got.dimensions(),
-            Dimensions {
-                width: w,
-                height: h
-            }
-        );
+        assert_eq!(got.dimensions(), Dimensions::new(w, h).unwrap());
         let dec_alpha: Vec<u8> = got
             .as_samples()
             .as_chunks::<4>()
@@ -1075,10 +1043,7 @@ fn libwebp_reads_gamut_metadata_chunks_and_flags() {
     let exif: &[u8] = b"II\x2a\x00\x08\x00\x00\x00gamut-exif";
     let xmp: &[u8] = b"<?xpacket begin='\xef\xbb\xbf'?><x:xmpmeta/><?xpacket end='w'?>";
     let (w, h) = (48u32, 32u32);
-    let dims = Dimensions {
-        width: w,
-        height: h,
-    };
+    let dims = Dimensions::new(w, h).unwrap();
     let rgba = photo_like_rgba(w, h, 7);
 
     for (label, encoder) in [
@@ -1142,10 +1107,7 @@ fn libwebp_reads_gamut_metadata_alongside_alpha() {
             ]
         })
         .collect();
-    let dims = Dimensions {
-        width: w,
-        height: h,
-    };
+    let dims = Dimensions::new(w, h).unwrap();
     let exif: &[u8] = b"II\x2a\x00\x08\x00\x00\x00alpha-and-exif";
     let mut file = Vec::new();
     WebpEncoder::lossy(75)
@@ -1196,13 +1158,7 @@ fn gamut_reads_metadata_libwebp_embedded() {
         let got: ImageBuf<Rgba8> = WebpDecoder::new()
             .decode_image(&tagged)
             .expect("gamut decode libwebp-muxed file");
-        assert_eq!(
-            got.dimensions(),
-            Dimensions {
-                width: w,
-                height: h
-            }
-        );
+        assert_eq!(got.dimensions(), Dimensions::new(w, h).unwrap());
         assert_eq!(
             got.as_samples(),
             rgba.as_slice(),
@@ -1282,10 +1238,7 @@ fn libwebp_decodes_every_effort_levels_lossless_and_alpha() {
 
     let (w, h) = (48u32, 32u32);
     let rgba = pattern_rgba(w, h);
-    let dims = gamut_core::Dimensions {
-        width: w,
-        height: h,
-    };
+    let dims = gamut_core::Dimensions::new(w, h).unwrap();
     for level in 0..=6u8 {
         let effort = Effort::from_level(level).expect("0..=6");
         let mut lossless = Vec::new();

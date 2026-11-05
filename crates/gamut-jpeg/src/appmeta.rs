@@ -126,7 +126,8 @@ fn is_crate_owned(marker: u8, payload: &[u8]) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `stream` is not a complete, parsable interchange stream: no
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `stream` is
+/// not a complete, parsable interchange stream: no
 /// SOI, no trailing EOI, an unreadable marker or segment before the first scan, or a standalone
 /// marker where a segment was expected.
 pub(crate) fn patch_stream(stream: &[u8], meta: AppMetadata<'_>) -> Result<Vec<u8>> {
@@ -201,8 +202,8 @@ impl IccAssembler {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] on a truncated chunk header, a zero index or count, an index
-    /// beyond the count, a count that disagrees with earlier chunks, or a repeated index.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on a
+    /// truncated chunk header, a zero index or count, an index beyond the count, a count that disagrees with earlier chunks, or a repeated index.
     pub(crate) fn add(&mut self, payload: &[u8]) -> Result<()> {
         let Some(rest) = payload.strip_prefix(ICC_SIG) else {
             return Ok(());
@@ -243,7 +244,8 @@ impl IccAssembler {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if any chunk of the declared count is missing.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
+    /// chunk of the declared count is missing.
     pub(crate) fn finish(self) -> Result<Option<Vec<u8>>> {
         if self.chunks.is_empty() {
             return Ok(None);

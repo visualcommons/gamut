@@ -27,7 +27,7 @@ impl DecodeImage<Rgb8> for RawCodec {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
         let header = data
             .get(..8)
-            .ok_or(Error::InvalidInput("raw: truncated header"))?;
+            .ok_or_else(|| Error::invalid_input("raw", "truncated header"))?;
         let width = u32::from_be_bytes(header[0..4].try_into().expect("8-byte header"));
         let height = u32::from_be_bytes(header[4..8].try_into().expect("8-byte header"));
         let dims = Dimensions::new(width, height)?;
