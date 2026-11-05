@@ -171,7 +171,7 @@ exclude_re = [
     # the guard true merely repeats the failing call before propagating the same error.
     # Equivalent; the guard-false direction (pin errors must fall back, not propagate) is killed
     # by `unsatisfiable_pin_relocates_with_bytes_intact`.
-    '^crates/gamut-dng/src/rewrite\.rs:271:23: replace match guard pin\.is_some\(\) with true in DngRewrite::write$',
+    '^crates/gamut-dng/src/rewrite\.rs:272:23: replace match guard pin\.is_some\(\) with true in DngRewrite::write$',
     # gamut-dng decode_image_data — `row_factor > 1 || col_factor > 1` gates the deinterleave
     # call; at a factor of 1 the field mapping is the identity on that axis (each field offset
     # collapses to src == dst), so calling it anyway changes nothing observable: `>=` on either
