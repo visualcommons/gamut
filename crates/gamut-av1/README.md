@@ -71,7 +71,7 @@ encoder's reconstruction — takes an `Av1EncodeConfig` carrying every knob belo
   is refused below 4:4:4.
 - **Bit depth** comes from the buffer too: `Planar8` codes 8-bit, and `encode_still16` codes a
   `gamut_color::Planar16` at 10 or 12 bits. `BitDepth::Sixteen` is not an AV1 depth and is
-  rejected; superres (`Av1EncodeConfig::with_superres`) is coded for 8-bit sources only.
+  rejected; superres (`Av1EncodeConfig::with_superres`) is coded for lossy 8-bit 4:4:4 sources only.
 - **`seq_profile`** is a joint function of the two (Annex A.2): Main (0) for 4:2:0 and monochrome,
   High (1) for 4:4:4, and Professional (2) for 4:2:2 or any layout at 12 bits.
 - **Encode effort** is an `Effort` preset (`Av1EncodeConfig::with_effort`): each step down from

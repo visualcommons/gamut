@@ -1472,7 +1472,7 @@ fn monochrome_rejects_superres() {
         .expect_err("superres over a monochrome source is refused");
     assert_eq!(
         err.static_message(),
-        Some("AV1: superres over a monochrome source is not implemented")
+        Some("AV1: superres is implemented for 4:4:4 sources only")
     );
     // The same request succeeds for a 4:4:4 source, so the guard keys on the plane count.
     let rgb = planes(32, 16, |x, y| [x as u8, y as u8, 0]);

@@ -143,7 +143,7 @@ pub struct Av1EncodeConfig {
     /// Horizontal **superres** (§7.16), as `coded_denom` in `0..=7`, or `None` for none. The source
     /// is downscaled to `FrameWidth = (UpscaledWidth*8 + denom/2)/denom` (`denom = coded_denom +
     /// 9`), coded at that width, and the reconstruction is upscaled back to the display width.
-    /// Lossy, 8-bit, non-monochrome encodes only.
+    /// Lossy (`qindex > 0`), 8-bit, 4:4:4 encodes only; any other combination is refused.
     pub superres: Option<u8>,
     /// The tile layout to code the frame in (see [`Tiling`]). It changes the stream: more tiles
     /// are more parallelism, for the encoder and for a decoder, at some cost in size.
@@ -307,7 +307,7 @@ impl ReconImage {
 ///
 /// - [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) if the dimensions exceed AV1
 ///   level 6.0, for lossless (`qindex = 0`) planes that are neither 4:4:4 nor monochrome, and for
-///   superres over a monochrome source.
+///   superres at `qindex = 0` or over a source that is not 4:4:4.
 /// - [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) for the identity matrix on
 ///   anything but 4:4:4 planes (§6.4.2 — monochrome takes [`Av1Color::monochrome`]), for studio
 ///   range under the §5.5.2 sRGB shortcut, and for a superres `coded_denom` above 7.
@@ -632,17 +632,26 @@ fn encode_with(
                 "AV1: superres coded_denom must be in 0..=7",
             ));
         }
-        // Superres over a monochrome source is refused rather than half-supported: the downscale
-        // below is written for three luma-sized planes and relabels its result 4:4:4, so a
-        // monochrome buffer would read an empty chroma slice at luma dimensions and then hand
-        // `FrameEncoder` a plane count disagreeing with the `monochrome` the frame header was
-        // given. Checked *before* `check_layout`, whose matrix rule would otherwise fire first
-        // for a superres request left at the default identity colour and report a reason that
-        // is not the one that applies.
-        if planes.subsampling() == ChromaSubsampling::Cs400 {
+        // Superres is a lossy tool here: the lossless path returns the full-width source as its
+        // reconstruction, which is not what a decoder upscales from the downscaled coded frame,
+        // so `_with_recon` would no longer return the decoded samples.
+        if qindex == 0 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "AV1: superres over a monochrome source is not implemented",
+                "AV1: superres is coded on the lossy path only",
+            ));
+        }
+        // Superres over anything but 4:4:4 is refused rather than half-supported: the downscale
+        // below is written for three luma-sized planes and relabels its result 4:4:4, so a
+        // subsampled buffer's chroma planes would be read at luma dimensions (out of bounds) and a
+        // monochrome one would hand `FrameEncoder` a plane count disagreeing with the `monochrome`
+        // the frame header was given. Checked *before* `check_layout`, whose matrix rule would
+        // otherwise fire first for a superres request left at the default identity colour and
+        // report a reason that is not the one that applies.
+        if planes.subsampling() != ChromaSubsampling::Cs444 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AV1: superres is implemented for 4:4:4 sources only",
             ));
         }
     }
@@ -796,8 +805,8 @@ impl CodedFrame {
         // The planes loop restoration reads, and their stride: §7.4 upscales both the CDEF output
         // and the deblocked luma (which only multi-stripe frames read) before restoring. The
         // upscaled widths stay luma-derived: §7.16 scales them per plane by `Round2(w, subX)`,
-        // which only matters once a subsampled source can reach superres — `encode_with` rejects
-        // one today.
+        // which only matters once a subsampled source can reach superres — `encode_with` refuses
+        // every layout but 4:4:4 under superres.
         let (mut planes, deblocked, stride) = match superres {
             Some((_, frame_w)) => {
                 let up = |plane: &[u16], g: PlaneGeom| {
@@ -1021,6 +1030,95 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    /// `config` rejected by `encode_still` with `kind` and `message`.
+    fn assert_refused(
+        planes: &Planar8,
+        config: &Av1EncodeConfig,
+        kind: gamut_core::ErrorKind,
+        message: &str,
+    ) {
+        let err = encode_still(planes, config).expect_err(message);
+        assert_eq!((err.kind(), err.static_message()), (kind, Some(message)));
+    }
+
+    #[test]
+    fn superres_is_refused_over_subsampled_chroma() {
+        // The downscale reads three luma-sized planes, so a 4:2:0 or 4:2:2 chroma plane would be
+        // read out of bounds; the combination is refused under a luma-chroma matrix, which passes
+        // `check_layout`, before any plane is touched.
+        let bt709 = Av1Color::DEFAULT.with_matrix(gamut_color::cicp::MatrixCoefficients::Bt709);
+        let rgb: Vec<u8> = (0..32 * 16 * 3).map(|i| (i * 7) as u8).collect();
+        let img = ImageRef::<Rgb8>::new(&rgb, dims(32, 16)).unwrap();
+        let m = RgbToYcbcr::new(
+            gamut_color::cicp::MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            BitDepth::Eight,
+        )
+        .unwrap();
+        for sub in [ChromaSubsampling::Cs420, ChromaSubsampling::Cs422] {
+            let planes = Planar8::from_rgb8_matrix_subsampled(img, m, sub).unwrap();
+            let config = Av1EncodeConfig::new(40).with_color(bt709);
+            assert_refused(
+                &planes,
+                &config.with_superres(4),
+                gamut_core::ErrorKind::Unsupported,
+                "AV1: superres is implemented for 4:4:4 sources only",
+            );
+            // Without superres the same planes encode, so the refusal is keyed on superres.
+            assert!(encode_still(&planes, &config).is_ok(), "{sub:?}");
+        }
+    }
+
+    #[test]
+    fn superres_is_refused_on_the_lossless_path() {
+        // Lossless returns the full-width source as its reconstruction, which is not what a
+        // decoder upscales from a downscaled coded frame.
+        let p = planes(32, 16, |x, y| [x as u8, y as u8, (x ^ y) as u8]);
+        assert_refused(
+            &p,
+            &Av1EncodeConfig::lossless().with_superres(4),
+            gamut_core::ErrorKind::Unsupported,
+            "AV1: superres is coded on the lossy path only",
+        );
+        assert!(encode_still(&p, &Av1EncodeConfig::new(1).with_superres(4)).is_ok());
+    }
+
+    #[test]
+    fn superres_coded_denom_is_a_three_bit_field() {
+        // §5.9.8 codes `coded_denom` in `SUPERRES_DENOM_BITS = 3` bits: 7 is the last value the
+        // field holds, and 8 would corrupt the bits that follow it.
+        let p = planes(32, 16, |x, y| [x as u8, y as u8, (x ^ y) as u8]);
+        assert!(encode_still(&p, &Av1EncodeConfig::new(40).with_superres(7)).is_ok());
+        assert_refused(
+            &p,
+            &Av1EncodeConfig::new(40).with_superres(8),
+            gamut_core::ErrorKind::InvalidInput,
+            "AV1: superres coded_denom must be in 0..=7",
+        );
+    }
+
+    #[test]
+    fn encode_still16_refuses_superres() {
+        // The downscale is written for 8-bit samples; a request is refused, not silently ignored.
+        let p = planes(32, 16, |x, y| [x as u8, y as u8, (x ^ y) as u8]);
+        let deep = Planar16::from_planes(
+            dims(32, 16),
+            BitDepth::Ten,
+            std::array::from_fn(|i| p.planes()[i].iter().map(|&v| u16::from(v) << 2).collect()),
+        )
+        .unwrap();
+        let err = encode_still16(&deep, &Av1EncodeConfig::new(40).with_superres(4))
+            .expect_err("superres on a 16-bit buffer is refused");
+        assert_eq!(
+            (err.kind(), err.static_message()),
+            (
+                gamut_core::ErrorKind::Unsupported,
+                Some("AV1: superres is coded for 8-bit sources only")
+            )
+        );
+        assert!(encode_still16(&deep, &Av1EncodeConfig::new(40)).is_ok());
     }
 
     #[test]
