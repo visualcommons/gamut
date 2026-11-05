@@ -1024,6 +1024,38 @@ mod tests {
         assert_eq!(encode(&row, 4, 1, 1, 8).expect("encode"), expected);
     }
 
+    /// 64-bit FNV-1a, the digest [`encode_output_is_pinned_across_shapes`] compares streams by.
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| {
+            (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// Exact-output pin of the whole encoder over the shapes DNG writes (one CFA plane, linear
+    /// RGB, a two-component reshaped CFA row) at every depth it writes: each stream's length and
+    /// digest. Recorded before the encoder moved to `gamut-jpeg` (issue #1083), so the move can
+    /// be shown to change no byte; a deliberate change to the coded stream updates the table.
+    #[test]
+    fn encode_output_is_pinned_across_shapes() {
+        let cases: [(usize, usize, usize, u16, usize, u64); 6] = [
+            (17, 9, 1, 12, 252, 16_516_583_429_893_623_948),
+            (8, 8, 3, 16, 422, 14_924_464_246_093_301_445),
+            (5, 4, 2, 8, 101, 12_734_914_668_429_163_001),
+            (33, 21, 1, 14, 1346, 7_760_129_737_173_717_556),
+            (16, 3, 4, 10, 302, 11_667_049_296_083_088_565),
+            (1, 1, 1, 2, 50, 2_783_988_385_778_860_826),
+        ];
+        for (w, h, c, precision, len, digest) in cases {
+            let stream =
+                encode(&test_samples(w, h, c, precision), w, h, c, precision).expect("encode");
+            assert_eq!(
+                (stream.len(), fnv1a(&stream)),
+                (len, digest),
+                "{w}x{h}x{c} @ {precision}-bit"
+            );
+        }
+    }
+
     /// `differences` walks interleaved components across rows: every component of every pixel
     /// gets the predictor-1 error against its own component's neighbour (left on a row, above at
     /// the start of a later row), reduced mod 2^16.
