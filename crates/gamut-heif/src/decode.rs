@@ -544,3 +544,710 @@ fn assemble_plane(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use gamut_codec_abi::Registry;
+    use gamut_core::{ErrorKind, Orientation};
+    use gamut_isobmff::{
+        ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, OverlayOffset, Property,
+        PropertyKind,
+    };
+
+    use super::*;
+    use crate::invariants::{STUB_ORIGIN, StubBackend, StubCodec};
+    use crate::{BACKEND_POISONED, DIMENSION_LIMIT, NO_BACKEND};
+
+    /// The stub's `hvcC` body: `chroma` code (0 4:4:4, 3 monochrome), 8-bit, signalling
+    /// `matrix` at full range.
+    fn hvcc(chroma: u8, matrix: u8) -> Property {
+        Property::new(
+            true,
+            PropertyKind::CodecConfiguration {
+                kind: *b"hvcC",
+                data: vec![chroma, 8, matrix, 1],
+            },
+        )
+    }
+
+    /// A monochrome coded item the stub decodes from `payload` (its first two bytes the size).
+    fn coded(id: u32, payload: &[u8]) -> Item {
+        coded_as(id, payload, hvcc(3, 1))
+    }
+
+    fn coded_as(id: u32, payload: &[u8], config: Property) -> Item {
+        Item::new(id, *b"hvc1")
+            .with_properties(vec![config])
+            .with_payload(payload.to_vec())
+    }
+
+    fn with(item: Item, kind: PropertyKind) -> Item {
+        let mut properties = item.properties.clone();
+        properties.push(Property::new(false, kind));
+        item.with_properties(properties)
+    }
+
+    fn derived(id: u32, item_type: [u8; 4], payload: Vec<u8>, sources: &[u32]) -> Item {
+        Item::new(id, item_type)
+            .with_references(vec![ItemReference::new(*b"dimg", sources.to_vec())])
+            .with_payload(payload)
+    }
+
+    fn grid(id: u32, (columns, rows): (u16, u16), output: (u32, u32), tiles: &[u32]) -> Item {
+        let payload = ImageGrid {
+            rows,
+            columns,
+            output_width: output.0,
+            output_height: output.1,
+        }
+        .to_bytes()
+        .unwrap();
+        derived(id, *b"grid", payload, tiles)
+    }
+
+    fn image(items: Vec<Item>) -> HeifImage {
+        let primary = items[0].id;
+        HeifImage::new(IsoBmffImage::new(*b"heic", vec![*b"mif1"], primary, items)).unwrap()
+    }
+
+    fn planar(image: &HeifImage, id: u32, limits: DecodeLimits) -> Result<DecodedFrame> {
+        image.decode_item_planar::<StubCodec>(id, &StubBackend::registry(), limits)
+    }
+
+    fn rgba8(image: &HeifImage, id: u32) -> Result<ImageBuf<Rgba8>> {
+        image.decode_item_rgba8::<StubCodec>(id, &StubBackend::registry(), DecodeOptions::default())
+    }
+
+    /// The refusal `result` carries, checking it names the binding.
+    fn refusal<T: core::fmt::Debug>(result: Result<T>) -> (ErrorKind, Option<&'static str>) {
+        let error = result.unwrap_err();
+        assert_eq!(error.origin(), Some(STUB_ORIGIN), "{error}");
+        (error.kind(), error.static_message())
+    }
+
+    fn slot(declines: bool) -> Arc<Mutex<StubBackend>> {
+        Arc::new(Mutex::new(StubBackend {
+            declines,
+            decoded: 0,
+        }))
+    }
+
+    #[test]
+    fn a_coded_item_decodes_through_the_first_accepting_backend() {
+        let (declining, accepting, later) = (slot(true), slot(false), slot(false));
+        let mut backends = Registry::new();
+        for s in [&declining, &accepting, &later] {
+            backends.push(Arc::clone(s));
+        }
+        let image = image(vec![coded(1, &[2, 1, 50])]);
+        let frame = image
+            .decode_item_planar::<StubCodec>(1, &backends, DecodeLimits::default())
+            .unwrap();
+        assert_eq!((frame.width(), frame.height()), (3, 2));
+        assert_eq!(frame.y(), [2, 1, 50, 2, 1, 50]);
+        let decoded = |s: &Arc<Mutex<StubBackend>>| s.lock().unwrap().decoded;
+        assert_eq!(
+            (decoded(&declining), decoded(&accepting), decoded(&later)),
+            (0, 1, 0)
+        );
+    }
+
+    #[test]
+    fn no_accepting_or_a_poisoned_backend_is_the_bindings_refusal() {
+        let image = image(vec![coded(1, &[0, 0])]);
+        let mut declining = Registry::new();
+        declining.push(slot(true));
+        let none = image.decode_item_planar::<StubCodec>(1, &declining, DecodeLimits::default());
+        assert_eq!(refusal(none), (ErrorKind::Unsupported, Some(NO_BACKEND)));
+
+        let poisoned = slot(false);
+        let held = Arc::clone(&poisoned);
+        let _ = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("poison the backend's lock");
+        })
+        .join();
+        let mut backends = Registry::new();
+        backends.push(poisoned);
+        let result = image.decode_item_planar::<StubCodec>(1, &backends, DecodeLimits::default());
+        assert_eq!(
+            refusal(result),
+            (ErrorKind::Unsupported, Some(BACKEND_POISONED))
+        );
+    }
+
+    #[test]
+    fn a_backends_own_error_is_returned_unchanged() {
+        // The stub hands a 7-bit depth to `DecodedFrame::new`, which refuses it under its own
+        // origin: the pipeline must not re-attribute it.
+        let config = Property::new(
+            true,
+            PropertyKind::CodecConfiguration {
+                kind: *b"hvcC",
+                data: vec![3, 7, 1, 1],
+            },
+        );
+        let error = planar(
+            &image(vec![coded_as(1, &[0, 0], config)]),
+            1,
+            DecodeLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.origin(), Some("gamut-heif"));
+        assert_eq!(
+            error.static_message(),
+            Some("HEIF: frame bit depth out of range (8..=16)")
+        );
+    }
+
+    #[test]
+    fn items_the_planar_surface_cannot_decode_are_refused_by_kind() {
+        let unknown_essential = coded(2, &[0, 0]).with_properties(vec![
+            hvcc(3, 1),
+            Property::new(
+                true,
+                PropertyKind::Other {
+                    kind: *b"a1op",
+                    data: vec![],
+                },
+            ),
+        ]);
+        let overlay = ImageOverlay {
+            canvas_fill_value: [0; 4],
+            output_width: 1,
+            output_height: 1,
+            offsets: vec![OverlayOffset {
+                horizontal: 0,
+                vertical: 0,
+            }],
+        }
+        .to_bytes()
+        .unwrap();
+        let image = image(vec![
+            coded(1, &[0, 0]),
+            unknown_essential,
+            Item::new(3, *b"av01").with_properties(vec![hvcc(3, 1)]),
+            Item::new(4, *b"hvc1").with_payload(vec![0]),
+            derived(5, *b"iden", vec![], &[1, 1]),
+            derived(6, *b"iovl", overlay, &[1]),
+            Item::new(7, *b"Exif"),
+            coded(8, &[]),
+        ]);
+        let refused = |id| refusal(planar(&image, id, DecodeLimits::default()));
+        assert_eq!(
+            refused(99),
+            (ErrorKind::InvalidInput, Some("HEIF: item id names no item"))
+        );
+        assert_eq!(
+            refused(2),
+            (
+                ErrorKind::Unsupported,
+                Some("HEIF: item has an unrecognised essential property")
+            )
+        );
+        assert_eq!(
+            refused(3),
+            (
+                ErrorKind::Unsupported,
+                Some("HEIF: coded item is not of this binding's codec")
+            )
+        );
+        assert_eq!(
+            refused(4),
+            (
+                ErrorKind::InvalidInput,
+                Some("HEIF: coded item has no codec configuration")
+            )
+        );
+        assert_eq!(
+            refused(5),
+            (
+                ErrorKind::InvalidInput,
+                Some("HEIF: iden item must reference exactly one source")
+            )
+        );
+        assert_eq!(refused(6).0, ErrorKind::Unsupported);
+        assert_eq!(
+            refused(7),
+            (
+                ErrorKind::InvalidInput,
+                Some("HEIF: item is not a decodable image")
+            )
+        );
+        // The binding's own still-payload check runs before any backend.
+        assert_eq!(refused(8).1, Some("stub: empty payload"));
+    }
+
+    #[test]
+    fn a_configuration_of_another_box_type_is_not_this_codecs() {
+        let foreign = Property::new(
+            true,
+            PropertyKind::CodecConfiguration {
+                kind: *b"av1C",
+                data: vec![3, 8, 1, 1],
+            },
+        );
+        let image = image(vec![coded_as(1, &[0, 0], foreign)]);
+        assert_eq!(
+            refusal(planar(&image, 1, DecodeLimits::default())).1,
+            Some("HEIF: coded item has no codec configuration")
+        );
+    }
+
+    #[test]
+    fn a_derivation_cycle_and_an_overdeep_chain_are_refused() {
+        let cycle = image(vec![
+            derived(1, *b"iden", vec![], &[2]),
+            derived(2, *b"iden", vec![], &[1]),
+        ]);
+        assert_eq!(
+            refusal(planar(&cycle, 1, DecodeLimits::default())),
+            (
+                ErrorKind::InvalidInput,
+                Some("HEIF: derivation reference cycle")
+            )
+        );
+        // MAX_DERIVATION_DEPTH items on the branch is the most: a chain of that many `iden`s
+        // above a coded item puts one item too many on it.
+        let chain = |idens: u32| {
+            let mut items: Vec<Item> = (1..=idens)
+                .map(|id| derived(id, *b"iden", vec![], &[id + 1]))
+                .collect();
+            items.push(coded(idens + 1, &[0, 0]));
+            image(items)
+        };
+        let depth = MAX_DERIVATION_DEPTH as u32;
+        assert!(planar(&chain(depth - 1), 1, DecodeLimits::default()).is_ok());
+        assert_eq!(
+            refusal(planar(&chain(depth), 1, DecodeLimits::default())),
+            (
+                ErrorKind::Unsupported,
+                Some("HEIF: derivation nested too deeply")
+            )
+        );
+    }
+
+    #[test]
+    fn a_grid_assembles_its_tiles_row_major_and_crops_every_plane() {
+        // Two 2×1 4:4:4 tiles side by side, cropped to 3×1. The stub's planes are the payload
+        // read cyclically: luma from byte 0, Cb from byte 1, Cr from byte 2.
+        let config = || hvcc(0, 1);
+        let image = image(vec![
+            grid(1, (2, 1), (3, 1), &[2, 3]),
+            coded_as(2, &[1, 0], config()),
+            coded_as(3, &[17, 0], config()),
+        ]);
+        let frame = planar(&image, 1, DecodeLimits::default()).unwrap();
+        assert_eq!((frame.width(), frame.height()), (3, 1));
+        assert_eq!(frame.y(), [1, 0, 17]);
+        assert_eq!(frame.cb(), [0, 1, 0]);
+        assert_eq!(frame.cr(), [1, 0, 17]);
+        // Two rows of one column take the tiles top to bottom.
+        let image = self::image(vec![
+            grid(1, (1, 2), (2, 2), &[2, 3]),
+            coded(2, &[1, 0]),
+            coded(3, &[17, 0]),
+        ]);
+        assert_eq!(
+            planar(&image, 1, DecodeLimits::default()).unwrap().y(),
+            [1, 0, 17, 0]
+        );
+    }
+
+    #[test]
+    fn a_grid_of_mismatched_tiles_or_an_overhanging_output_is_refused() {
+        let mismatched = image(vec![
+            grid(1, (2, 1), (2, 1), &[2, 3]),
+            coded(2, &[0, 0]),
+            coded_as(3, &[0, 0], hvcc(0, 1)),
+        ]);
+        assert_eq!(
+            refusal(planar(&mismatched, 1, DecodeLimits::default())).1,
+            Some("HEIF: grid tiles are not uniform in dimensions, chroma, or bit depth")
+        );
+        // Two 1×1 tiles cannot fill a 3-wide output.
+        let overhang = image(vec![
+            grid(1, (2, 1), (3, 1), &[2, 3]),
+            coded(2, &[0, 0]),
+            coded(3, &[0, 0]),
+        ]);
+        assert_eq!(
+            refusal(planar(&overhang, 1, DecodeLimits::default())).1,
+            Some("HEIF: grid output dimensions exceed the tiled canvas")
+        );
+    }
+
+    #[test]
+    fn a_grid_canvas_past_the_limits_is_refused_though_its_output_is_inside_them() {
+        // Two 6×1 tiles make a 12×1 canvas cropped to 7×1: the output respects a 10-pixel cap,
+        // the canvas the tiles fill does not.
+        let image = |tile: u8| {
+            self::image(vec![
+                grid(1, (2, 1), (7, 1), &[2, 3]),
+                coded(2, &[tile, 0]),
+                coded(3, &[tile, 0]),
+            ])
+        };
+        assert_eq!(
+            refusal(planar(&image(5), 1, DecodeLimits::new(10, 100))),
+            (ErrorKind::Unsupported, Some(DIMENSION_LIMIT))
+        );
+        assert!(planar(&image(4), 1, DecodeLimits::new(10, 100)).is_ok());
+        // The declared output itself is checked before any tile is decoded.
+        assert_eq!(
+            refusal(planar(&image(5), 1, DecodeLimits::new(6, 100))).1,
+            Some(DIMENSION_LIMIT)
+        );
+    }
+
+    #[test]
+    fn a_declared_size_past_the_limits_is_refused_before_any_backend_runs() {
+        let backend = slot(false);
+        let mut backends = Registry::new();
+        backends.push(Arc::clone(&backend));
+        let declared = with(
+            coded(1, &[0, 0]),
+            PropertyKind::ImageSpatialExtents {
+                width: 11,
+                height: 1,
+            },
+        );
+        let result = image(vec![declared]).decode_item_planar::<StubCodec>(
+            1,
+            &backends,
+            DecodeLimits::new(10, 100),
+        );
+        assert_eq!(refusal(result).1, Some(DIMENSION_LIMIT));
+        assert_eq!(backend.lock().unwrap().decoded, 0);
+        // A delivered frame past the limits is refused too, whatever `ispe` said.
+        let result = planar(
+            &image(vec![coded(1, &[10, 0])]),
+            1,
+            DecodeLimits::new(10, 100),
+        );
+        assert_eq!(refusal(result).1, Some(DIMENSION_LIMIT));
+    }
+
+    #[test]
+    fn repeated_references_are_charged_against_the_work_caps() {
+        // A grid naming one tile twice decodes it twice.
+        let repeated = image(vec![grid(1, (2, 1), (2, 1), &[2, 2]), coded(2, &[0, 0])]);
+        let caps = |decoded, derived| DecodeLimits::default().with_item_limits(decoded, derived);
+        assert!(planar(&repeated, 1, caps(2, 1)).is_ok());
+        assert_eq!(
+            refusal(planar(&repeated, 1, caps(1, 1))).1,
+            Some(DECODED_ITEM_LIMIT)
+        );
+        assert_eq!(
+            refusal(planar(&repeated, 1, caps(2, 0))).1,
+            Some(DERIVED_ITEM_LIMIT)
+        );
+        // An `iden` is a derivation too.
+        let iden = image(vec![derived(1, *b"iden", vec![], &[2]), coded(2, &[0, 0])]);
+        assert!(planar(&iden, 1, caps(1, 1)).is_ok());
+        assert_eq!(
+            refusal(planar(&iden, 1, caps(1, 0))).1,
+            Some(DERIVED_ITEM_LIMIT)
+        );
+    }
+
+    /// A 1×1 4:4:4 item decoding to Y 0, Cb 0, Cr 10, its codestream signalling `matrix`.
+    fn pixel(id: u32, matrix: u8) -> Item {
+        coded_as(id, &[0, 0, 10], hvcc(0, matrix))
+    }
+
+    fn nclx(matrix_coefficients: u16) -> PropertyKind {
+        PropertyKind::Colour(ColourInformation::Nclx(Cicp {
+            colour_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients,
+            full_range: true,
+        }))
+    }
+
+    /// What [`pixel`] presents as under identity (GBR) and under full-range BT.601.
+    const AS_IDENTITY: [u8; 4] = [10, 0, 0, 255];
+
+    fn as_bt601() -> Vec<u8> {
+        let (r, g, b) = gamut_color::bt601_ycbcr_to_rgb(0, 0, 10, ColorRange::Full);
+        vec![r, g, b, 255]
+    }
+
+    #[test]
+    fn with_no_colr_the_codestreams_signalled_colour_presents() {
+        assert_eq!(
+            rgba8(&image(vec![pixel(1, 0)]), 1).unwrap().as_samples(),
+            AS_IDENTITY
+        );
+        assert_eq!(
+            rgba8(&image(vec![pixel(1, 6)]), 1).unwrap().as_samples(),
+            as_bt601()
+        );
+        // A grid presents with its first tile's signal, an `iden` with its source's.
+        let grid = image(vec![
+            grid(1, (2, 1), (1, 1), &[2, 3]),
+            pixel(2, 0),
+            pixel(3, 6),
+        ]);
+        assert_eq!(rgba8(&grid, 1).unwrap().as_samples(), AS_IDENTITY);
+        let iden = image(vec![derived(1, *b"iden", vec![], &[2]), pixel(2, 6)]);
+        assert_eq!(rgba8(&iden, 1).unwrap().as_samples(), as_bt601());
+    }
+
+    #[test]
+    fn an_nclx_colr_wins_over_the_signal_and_over_an_icc_colr_in_either_order() {
+        let icc = || PropertyKind::Colour(ColourInformation::UnrestrictedIcc(vec![1, 2]));
+        let nclx_first = with(with(pixel(1, 0), nclx(6)), icc());
+        let icc_first = with(with(pixel(1, 0), icc()), nclx(6));
+        for item in [nclx_first, icc_first] {
+            assert_eq!(
+                rgba8(&image(vec![item]), 1).unwrap().as_samples(),
+                as_bt601()
+            );
+        }
+        // An ICC-only colr is refused rather than presented under the signal.
+        assert_eq!(
+            refusal(rgba8(&image(vec![with(pixel(1, 0), icc())]), 1)),
+            (
+                ErrorKind::Unsupported,
+                Some(
+                    "HEIF: ICC-profile colr is not supported on the RGBA surface (use the planar \
+                     surface)"
+                )
+            )
+        );
+    }
+
+    /// An alpha auxiliary of `master` coded under `config`.
+    fn alpha_of(id: u32, master: u32, payload: &[u8], config: Property) -> Item {
+        let aux = PropertyKind::AuxiliaryType {
+            aux_type: "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha".to_owned(),
+            aux_subtype: vec![],
+        };
+        with(coded_as(id, payload, config), aux)
+            .with_hidden(true)
+            .with_references(vec![ItemReference::new(*b"auxl", vec![master])])
+    }
+
+    #[test]
+    fn the_alpha_auxiliary_fills_the_alpha_channel_under_the_bindings_policy() {
+        let master = coded(1, &[1, 0, 77]);
+        let alpha = alpha_of(2, 1, &[1, 0, 200], hvcc(3, 1));
+        let rgba = rgba8(&image(vec![master.clone(), alpha]), 1).unwrap();
+        // Luma [1, 0] presents as gray 1 and 0; the alpha luma [1, 0] becomes the alpha.
+        assert_eq!(rgba.as_samples(), [1, 1, 1, 1, 0, 0, 0, 0]);
+        // The stub binding accepts only a monochrome auxiliary.
+        let coloured = alpha_of(2, 1, &[1, 0, 200], hvcc(0, 1));
+        assert_eq!(
+            refusal(rgba8(&image(vec![master.clone(), coloured]), 1)).1,
+            Some("HEIF: alpha auxiliary must be monochrome")
+        );
+        let small = alpha_of(2, 1, &[0, 0], hvcc(3, 1));
+        assert_eq!(
+            refusal(rgba8(&image(vec![master, small]), 1)).1,
+            Some("HEIF: alpha auxiliary dimensions do not match the master image")
+        );
+    }
+
+    #[test]
+    fn transforms_apply_after_presentation() {
+        let rotated = with(coded(1, &[2, 0, 5]), PropertyKind::Rotation(1));
+        let image = image(vec![rotated]);
+        let rgba = rgba8(&image, 1).unwrap();
+        assert_eq!((rgba.width(), rgba.height()), (1, 3));
+        assert_eq!(image.primary_item().orientation(), Orientation::Rotate90Ccw);
+        // The planar surface does not transform.
+        let frame = planar(&image, 1, DecodeLimits::default()).unwrap();
+        assert_eq!((frame.width(), frame.height()), (3, 1));
+    }
+
+    fn overlay(id: u32, fill: [u16; 4], output: (u32, u32), inputs: &[(u32, i32, i32)]) -> Item {
+        let payload = ImageOverlay {
+            canvas_fill_value: fill,
+            output_width: output.0,
+            output_height: output.1,
+            offsets: inputs
+                .iter()
+                .map(|&(_, horizontal, vertical)| OverlayOffset {
+                    horizontal,
+                    vertical,
+                })
+                .collect(),
+        }
+        .to_bytes()
+        .unwrap();
+        let ids: Vec<u32> = inputs.iter().map(|&(id, _, _)| id).collect();
+        derived(id, *b"iovl", payload, &ids)
+    }
+
+    #[test]
+    fn an_overlay_composites_its_inputs_over_its_fill_on_the_rgba_surfaces() {
+        let image = image(vec![
+            overlay(1, [0x1000, 0x2000, 0x3000, 0xFFFF], (3, 1), &[(2, 1, 0)]),
+            coded(2, &[0, 0, 99]),
+        ]);
+        // The fill's top byte, then the opaque 1×1 input at x = 1.
+        assert_eq!(
+            rgba8(&image, 1).unwrap().as_samples(),
+            [0x10, 0x20, 0x30, 255, 0, 0, 0, 255, 0x10, 0x20, 0x30, 255]
+        );
+        let wide = image
+            .decode_item_rgba16::<StubCodec>(1, &StubBackend::registry(), DecodeOptions::default())
+            .unwrap();
+        assert_eq!(&wide.as_samples()[..4], &[0x1000, 0x2000, 0x3000, 0xFFFF]);
+        // Not on the planar surface, and not past the limits.
+        assert_eq!(
+            refusal(planar(&image, 1, DecodeLimits::default())).0,
+            ErrorKind::Unsupported
+        );
+        let tight = DecodeOptions::default().with_limits(DecodeLimits::new(2, 100));
+        let refused = image.decode_item_rgba8::<StubCodec>(1, &StubBackend::registry(), tight);
+        assert_eq!(refusal(refused).1, Some(DIMENSION_LIMIT));
+        let no_derivations =
+            DecodeOptions::default().with_limits(DecodeLimits::default().with_item_limits(10, 0));
+        let refused =
+            image.decode_item_rgba8::<StubCodec>(1, &StubBackend::registry(), no_derivations);
+        assert_eq!(refusal(refused).1, Some(DERIVED_ITEM_LIMIT));
+    }
+
+    #[test]
+    fn an_overlay_naming_itself_is_a_cycle() {
+        let image = image(vec![overlay(1, [0; 4], (1, 1), &[(1, 0, 0)])]);
+        assert_eq!(
+            refusal(rgba8(&image, 1)).1,
+            Some("HEIF: derivation reference cycle")
+        );
+    }
+
+    /// The pinned-seed driver of `invariants::decoding_stays_within_limits` over generated
+    /// coded, `grid` and `iovl` files.
+    mod limits_law {
+        use proptest::collection;
+        use proptest::prelude::{Strategy, prop_assert_eq, prop_oneof, proptest};
+        use proptest::test_runner::{Config, RngSeed};
+
+        use super::*;
+        use crate::invariants::decoding_stays_within_limits;
+
+        /// The looser run's limits: well past anything generated here.
+        const CEILING: DecodeLimits = DecodeLimits::new(1024, 1 << 20);
+
+        /// The workspace property-test configuration (`docs/testing.md`): pinned seed, bounded
+        /// shrinking, no failure persistence.
+        fn config() -> Config {
+            Config {
+                cases: 512,
+                max_shrink_iters: 2048,
+                max_shrink_time: 10_000,
+                rng_seed: RngSeed::Fixed(0x6761_6D75_745F_6866),
+                failure_persistence: None,
+                ..Config::default()
+            }
+        }
+
+        /// A monochrome coded item the stub decodes to `(1 + w % 16) × (1 + h % 16)`,
+        /// optionally declaring `ispe`.
+        fn coded_with(id: u32, (w, h): (u8, u8), ispe: Option<(u32, u32)>, hidden: bool) -> Item {
+            let mut item = coded(id, &[w, h, 0x80]).with_hidden(hidden);
+            if let Some((width, height)) = ispe {
+                item = with(item, PropertyKind::ImageSpatialExtents { width, height });
+            }
+            item
+        }
+
+        fn file(items: Vec<Item>) -> Vec<u8> {
+            IsoBmffImage::new(*b"heic", vec![*b"mif1"], 1, items)
+                .to_bytes()
+                .expect("the generated model is writable")
+        }
+
+        fn frame_bytes() -> impl Strategy<Value = (u8, u8)> {
+            (0u8..=255, 0u8..=255)
+        }
+
+        fn coded_file() -> impl Strategy<Value = Vec<u8>> {
+            let ispe = proptest::option::of((1u32..=48, 1u32..=48));
+            (frame_bytes(), ispe)
+                .prop_map(|(frame, ispe)| file(vec![coded_with(1, frame, ispe, false)]))
+        }
+
+        fn grid_file() -> impl Strategy<Value = Vec<u8>> {
+            (1u16..=3, 1u16..=3, frame_bytes(), 1u32..=48, 1u32..=48).prop_map(
+                |(rows, columns, frame, ow, oh)| {
+                    let tiles: Vec<u32> = (2..2 + u32::from(rows * columns)).collect();
+                    let mut items = vec![grid(1, (columns, rows), (ow, oh), &tiles)];
+                    items.extend(tiles.iter().map(|&id| coded_with(id, frame, None, true)));
+                    file(items)
+                },
+            )
+        }
+
+        fn overlay_file() -> impl Strategy<Value = Vec<u8>> {
+            let input = (frame_bytes(), -8i32..=40, -8i32..=40);
+            (1u32..=48, 1u32..=48, collection::vec(input, 1..=3)).prop_map(|(ow, oh, inputs)| {
+                let placed: Vec<(u32, i32, i32)> = inputs
+                    .iter()
+                    .zip(2..)
+                    .map(|(&(_, x, y), id)| (id, x, y))
+                    .collect();
+                let mut items = vec![overlay(1, [1000, 2000, 3000, 65535], (ow, oh), &placed)];
+                items.extend(
+                    placed
+                        .iter()
+                        .zip(&inputs)
+                        .map(|(&(id, _, _), &(frame, _, _))| coded_with(id, frame, None, true)),
+                );
+                file(items)
+            })
+        }
+
+        /// The property is vacuous if the generated files never decode: pin that one of each
+        /// shape does, at the size the stub and the derivation give it.
+        #[test]
+        fn the_generated_files_decode() {
+            let sizes = |bytes: Vec<u8>| {
+                let image = HeifImage::new(IsoBmffImage::parse(&bytes).unwrap()).unwrap();
+                let options = DecodeOptions::default().with_limits(CEILING);
+                let rgba = image
+                    .decode_item_rgba16::<StubCodec>(1, &StubBackend::registry(), options)
+                    .unwrap();
+                (rgba.width(), rgba.height())
+            };
+            assert_eq!(
+                sizes(file(vec![coded_with(1, (3, 4), None, false)])),
+                (4, 5)
+            );
+            assert_eq!(
+                sizes(file(vec![
+                    grid(1, (2, 1), (7, 5), &[2, 3]),
+                    coded_with(2, (3, 4), None, true),
+                    coded_with(3, (3, 4), None, true),
+                ])),
+                (7, 5)
+            );
+            assert_eq!(
+                sizes(file(vec![
+                    overlay(1, [0; 4], (9, 2), &[(2, 0, 0)]),
+                    coded_with(2, (3, 4), None, true),
+                ])),
+                (9, 2)
+            );
+        }
+
+        proptest! {
+            #![proptest_config(config())]
+
+            #[test]
+            fn decoding_never_returns_an_image_past_its_limits(
+                bytes in prop_oneof![coded_file(), grid_file(), overlay_file()],
+                max_dimension in 1u32..=40,
+                max_pixels in 1u64..=1600,
+            ) {
+                let limits = DecodeLimits::new(max_dimension, max_pixels);
+                prop_assert_eq!(decoding_stays_within_limits(&bytes, limits, CEILING), Ok(()));
+            }
+        }
+    }
+}
