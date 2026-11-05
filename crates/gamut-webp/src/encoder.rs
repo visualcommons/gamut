@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use gamut_color::{ColorRange, Yuv420};
 use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Pixel, Result, Rgb8, Rgba8};
 use gamut_riff::{
-    Chunk, FourCc, MetadataChunks, Vp8xHeader, WebpChunkId, c2pa_span, write_extended_preserving,
+    Chunk, FourCc, MetadataChunks, Vp8xHeader, WebpChunkId, write_extended_preserving,
     write_simple_lossless, write_simple_lossy,
 };
 
@@ -420,17 +420,20 @@ impl WebpEncoder {
                 WebpCodestream::Vp8l => write_simple_lossless(bitstream),
             };
         }
-        let mut image_data: Vec<(FourCc, &[u8])> = Vec::with_capacity(2);
+        let mut image_data: Vec<Chunk<'_>> = Vec::with_capacity(2);
         if let Some(alph) = alph {
-            image_data.push((FourCc::ALPH, alph));
+            image_data.push(Chunk {
+                fourcc: FourCc::ALPH,
+                payload: alph,
+            });
         }
-        image_data.push((
-            match codestream {
+        image_data.push(Chunk {
+            fourcc: match codestream {
                 WebpCodestream::Vp8 => FourCc::VP8,
                 WebpCodestream::Vp8l => FourCc::VP8L,
             },
-            bitstream,
-        ));
+            payload: bitstream,
+        });
         let header = Vp8xHeader {
             alpha: has_alpha,
             canvas_width: dims.width(),
@@ -607,7 +610,7 @@ impl WebpEncoder {
         // the payload back through the *other* reader as well turns that into a checked claim: the
         // range is returned only once the bytes inside it are known to be the configured store, so
         // a stray `C2PA` chunk could never make the report name somebody else's bytes.
-        let c2pa = c2pa_span(&file)?;
+        let c2pa = crate::metadata::c2pa_span(&file)?;
         if MetadataChunks::read(&file)?.c2pa != self.c2pa.as_deref() {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -633,7 +636,6 @@ impl EncodeImage<Rgba8> for WebpEncoder {
 #[cfg(test)]
 mod tests {
     use gamut_core::{DecodeImage, ErrorKind, ImageBuf};
-    use gamut_riff::C2PA_FOURCC;
 
     use super::*;
 
@@ -810,7 +812,7 @@ mod tests {
             .find(|c| matches!(WebpChunkId::from(c.fourcc), WebpChunkId::Vp8x))
             .expect("transparent lossy must emit a VP8X chunk");
         assert!(
-            Vp8xHeader::from_payload(vp8x.payload).unwrap().alpha,
+            Vp8xHeader::parse(vp8x.payload).unwrap().alpha,
             "VP8X must advertise alpha for a transparent image"
         );
     }
@@ -899,7 +901,7 @@ mod tests {
             FourCc::XMP,
             FourCc::ANIM,
             FourCc::ANMF,
-            C2PA_FOURCC,
+            FourCc::C2PA,
         ];
         for reserved in classified {
             let err = WebpEncoder::lossless()
@@ -920,7 +922,7 @@ mod tests {
         assert_eq!(ok.unknown, vec![(private, b"payload".to_vec())]);
         assert!(
             WebpEncoder::lossless()
-                .with_unknown_chunks(&[(private, b"a"), (C2PA_FOURCC, b"b")])
+                .with_unknown_chunks(&[(private, b"a"), (FourCc::C2PA, b"b")])
                 .is_err(),
             "a reserved FourCC is refused wherever it sits in the list"
         );

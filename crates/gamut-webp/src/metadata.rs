@@ -137,7 +137,9 @@ pub fn metadata(data: &[u8]) -> Result<WebpMetadata> {
 /// # Ok::<(), gamut_core::Error>(())
 /// ```
 pub fn c2pa_span(data: &[u8]) -> Result<Option<Range<usize>>> {
-    gamut_riff::c2pa_span(data)
+    // `gamut_riff` reports file offsets as `u64`; these index the slice `data`, so each fits in
+    // `usize` and the casts are exact.
+    Ok(gamut_riff::c2pa_span(data)?.map(|span| span.start as usize..span.end as usize))
 }
 
 // The non-validating C2PA report is `gamut-riff`'s — the chunk walk that locates the store is

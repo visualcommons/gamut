@@ -101,7 +101,7 @@ fn vp8x(file: &[u8]) -> Option<Vp8xHeader> {
         .expect("valid RIFF/WebP")
         .map(|c| c.expect("valid chunk"))
         .find(|c| c.fourcc == FourCc::VP8X)
-        .map(|c| Vp8xHeader::from_payload(c.payload).expect("valid VP8X payload"))
+        .map(|c| Vp8xHeader::parse(c.payload).expect("valid VP8X payload"))
 }
 
 /// Every encoder configuration that can carry metadata, as `(label, encoder)`.
@@ -385,7 +385,7 @@ fn metadata_reads_a_hand_built_file_first_chunk_wins() {
         ..Default::default()
     };
     let mut w = RiffWriter::new();
-    w.write_chunk(FourCc::VP8X, &header.to_payload().unwrap())
+    w.write_chunk(FourCc::VP8X, &header.to_bytes().unwrap())
         .unwrap();
     w.write_chunk(FourCc::ICCP, b"first-icc").unwrap();
     w.write_chunk(FourCc::ICCP, b"second-icc").unwrap();

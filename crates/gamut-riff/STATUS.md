@@ -46,24 +46,31 @@ Dev-only — the shipped library links no C.
 
 | Item | Shape | Openness |
 | ---- | ----- | -------- |
-| `FourCc` | `pub [u8; 4]` newtype + 11 associated constants, `Display` escaping non-printables | public field by design — a FourCC *is* its four bytes |
+| `FourCc` | `pub [u8; 4]` newtype + 12 associated constants (RFC 9649's eleven, plus C2PA 2.4 §A.3.7's `C2PA`), `Display` escaping non-printables | public field by design — a FourCC *is* its four bytes |
 | `Chunk<'a>` | `{ fourcc, payload: &'a [u8] }`, `Copy` | plain borrowed data; public fields |
 | `RiffReader<'a>` | `new` + `Iterator<Item = Result<Chunk>>` + `trailing_bytes` | permissive; iteration ends after the first error |
 | `RiffWriter` | `new`/`write_chunk`/`finish`, all fallible past the size fields | private buffer — internal representation stays free |
-| `Vp8xHeader` | 5 feature flags + 1-based canvas, `to_payload`/`from_payload` | public fields; both directions validate the canvas |
+| `Vp8xHeader` | 5 feature flags + 1-based canvas, `to_bytes`/`parse` | public fields; both directions validate the canvas |
 | `MetadataChunks<'a>` | borrowed `icc`/`exif`/`xmp`/`c2pa` + `read`/`is_empty` | public fields; payloads never parsed or reserialized |
 | `WebpLayout<'a>` | `parse` + the sorted roles, `#[non_exhaustive]` | strict reader; new roles can be added non-breakingly |
 | `WebpChunkId` | fieldless variants + `Unknown(FourCc)`, `#[non_exhaustive]` | new chunk kinds can be recognised non-breakingly |
 | `write_simple_lossless` / `write_simple_lossy` | one bitstream chunk, §2.5-§2.6 | free functions returning `Result<Vec<u8>>` |
-| `write_extended` / `write_extended_with_metadata` / `write_extended_preserving` | the extended format at three levels of assistance | as above |
-| `c2pa_span` | the `C2PA` chunk's whole byte span in a file, or `None` | free function returning `Result<Option<Range<usize>>>` |
-| `VP8X_PAYLOAD_LEN`, `MAX_CANVAS_DIMENSION`, `C2PA_FOURCC` | documented spec constants | literals the surface's own docs name |
+| `write_extended` / `write_extended_with_metadata` / `write_extended_preserving` | the extended format at three levels of assistance; every chunk list is a `&[Chunk]` | as above |
+| `c2pa_span` | the `C2PA` chunk's whole byte span in a file, or `None` | free function returning `Result<Option<Range<u64>>>` |
+| `VP8X_PAYLOAD_LEN`, `MAX_CANVAS_DIMENSION` | documented spec constants | literals the surface's own docs name |
 
 Adding chunk kinds, layout roles, writer helpers, or trait impls stays backward-compatible;
 removing or reshaping any of the above would not. `MetadataChunks` is the one exhaustive struct
 here, deliberately so — a new carrier should make every writer of a struct literal look at it — and
 adding `c2pa` for the manifest store is therefore a **breaking** change, the crate's first since v1.
 The migration is one line: `c2pa: None`, or `..Default::default()`.
+
+The pre-freeze pass (issue #1070) reshaped the surface once more, again breaking: the free
+`C2PA_FOURCC` constant became `FourCc::C2PA`; `Vp8xHeader::to_payload`/`from_payload` became
+`to_bytes`/`parse`; the `write_extended*` writers take `&[Chunk]` rather than `(FourCc, &[u8])`
+tuples; and `c2pa_span` and `C2paStoreSummary::size` report `u64`. The source moved from one
+`webp.rs` into `vp8x.rs` (header and writers), `layout.rs` (`WebpChunkId`, `MetadataChunks`,
+`WebpLayout`) and `c2pa.rs` (`c2pa_span`, `c2pa_summary` and their report types).
 
 ## Container coverage
 

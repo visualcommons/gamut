@@ -8,7 +8,7 @@ about the verdict the command turns those findings into.
 Source: `crates/gamut-cli/src/commands/inspect.rs`, `crates/gamut-cli/src/main.rs`,
 `crates/gamut-png/src/deconstruct.rs`, `crates/gamut-tiff/src/deconstruct.rs`,
 `crates/gamut-dng/src/deconstruct.rs`, `crates/gamut-heic/src/c2pa.rs`, `crates/gamut-avif/src/c2pa.rs`,
-`crates/gamut-riff/src/webp.rs`, `crates/gamut-ifd/src/c2pa.rs`, `crates/gamut-png/src/chunk.rs`.
+`crates/gamut-riff/src/c2pa.rs`, `crates/gamut-ifd/src/c2pa.rs`, `crates/gamut-png/src/chunk.rs`.
 
 ## There are two exit codes
 

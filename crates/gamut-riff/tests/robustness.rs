@@ -11,7 +11,7 @@
 //! fuzzing dependency.
 
 use gamut_riff::{
-    FourCc, MetadataChunks, RiffReader, Vp8xHeader, WebpLayout, write_extended_preserving,
+    Chunk, FourCc, MetadataChunks, RiffReader, Vp8xHeader, WebpLayout, write_extended_preserving,
 };
 
 /// A valid extended file exercising every chunk role the parsers distinguish: the `VP8X` header,
@@ -33,8 +33,14 @@ fn seed() -> Vec<u8> {
             c2pa: None,
         },
         &[
-            (FourCc::ALPH, &[0x00, 0x11]),
-            (FourCc::VP8L, &[0x2f, 0x00, 0x00]), // odd -> padded
+            Chunk {
+                fourcc: FourCc::ALPH,
+                payload: &[0x00, 0x11],
+            },
+            Chunk {
+                fourcc: FourCc::VP8L,
+                payload: &[0x2f, 0x00, 0x00], // odd -> padded
+            },
         ],
         &[],
     )

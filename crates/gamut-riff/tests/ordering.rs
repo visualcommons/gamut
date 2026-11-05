@@ -21,7 +21,7 @@ fn reconstruction_chunks() -> Vec<(FourCc, Vec<u8>)> {
         canvas_height: 8,
         ..Default::default()
     }
-    .to_payload()
+    .to_bytes()
     .expect("a valid canvas");
     vec![
         (FourCc::VP8X, vp8x.to_vec()),

@@ -80,7 +80,10 @@ fn libwebp_agrees_on_the_extended_container_and_its_metadata() {
             xmp: Some(xmp),
             c2pa: None,
         },
-        &[(FourCc::VP8L, &vp8l)],
+        &[Chunk {
+            fourcc: FourCc::VP8L,
+            payload: &vp8l,
+        }],
         &[],
     )
     .expect("write");
@@ -115,7 +118,10 @@ fn libwebp_tolerates_the_unknown_chunks_gamut_riff_preserves() {
             exif: Some(b"exif payload"),
             ..Default::default()
         },
-        &[(FourCc::VP8L, &vp8l)],
+        &[Chunk {
+            fourcc: FourCc::VP8L,
+            payload: &vp8l,
+        }],
         &[Chunk {
             fourcc: odd,
             payload: b"private payload",
@@ -155,7 +161,10 @@ fn an_odd_sized_payload_round_trips_through_libwebp() {
             xmp: Some(b"<x/>"),
             ..Default::default()
         },
-        &[(FourCc::VP8L, &vp8l)],
+        &[Chunk {
+            fourcc: FourCc::VP8L,
+            payload: &vp8l,
+        }],
         &[],
     )
     .expect("write");
@@ -190,8 +199,16 @@ fn libwebp_reads_a_file_carrying_a_c2pa_store_unchanged() {
         xmp: Some(b"<x:xmpmeta/>"),
         c2pa: None,
     };
-    let without = write_extended_preserving(&header, &metadata, &[(FourCc::VP8L, &vp8l)], &[])
-        .expect("write");
+    let without = write_extended_preserving(
+        &header,
+        &metadata,
+        &[Chunk {
+            fourcc: FourCc::VP8L,
+            payload: &vp8l,
+        }],
+        &[],
+    )
+    .expect("write");
     let store = &b"a C2PA manifest store"[..];
     let with_store = write_extended_preserving(
         &header,
@@ -199,7 +216,10 @@ fn libwebp_reads_a_file_carrying_a_c2pa_store_unchanged() {
             c2pa: Some(store),
             ..metadata
         },
-        &[(FourCc::VP8L, &vp8l)],
+        &[Chunk {
+            fourcc: FourCc::VP8L,
+            payload: &vp8l,
+        }],
         &[],
     )
     .expect("write");
@@ -226,8 +246,12 @@ fn libwebp_reads_a_file_carrying_a_c2pa_store_unchanged() {
     let span = c2pa_span(&with_store)
         .expect("parse")
         .expect("the store was embedded");
-    assert_eq!(&with_store[span.start..span.start + 4], b"C2PA");
-    assert_eq!(&with_store[span.start + 8..span.end], store);
+    let (start, end) = (
+        usize::try_from(span.start).unwrap(),
+        usize::try_from(span.end).unwrap(),
+    );
+    assert_eq!(&with_store[start..start + 4], b"C2PA");
+    assert_eq!(&with_store[start + 8..end], store);
 }
 
 #[test]
