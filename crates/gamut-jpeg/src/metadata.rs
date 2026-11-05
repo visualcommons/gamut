@@ -251,6 +251,43 @@ mod tests {
     }
 
     #[test]
+    fn an_iptc_iim_stream_is_reported_before_a_manifest_store() {
+        // Both unwritable carriers present: the IPTC-IIM refusal is the one returned.
+        let mut both = EncodedMetadata::default();
+        both.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
+        both.c2pa = Some(vec![0u8; 4]);
+        let err = JpegEncoder::new().with_encoded_metadata(&both).unwrap_err();
+        assert_eq!(
+            err.static_message(),
+            Some("JPEG: IPTC-IIM (APP13) embedding is not supported")
+        );
+    }
+
+    #[test]
+    fn a_writable_carrier_does_not_bypass_the_manifest_store_refusal() {
+        // An EXIF stream beside a C2PA store still fails the whole call: the refusal is decided
+        // before any carrier is routed, so no encoder with only the EXIF applied is handed back.
+        let mut both = EncodedMetadata::default();
+        both.exif = Some(b"Exif\0\0MM\0*\0\0\0\x08".to_vec());
+        both.c2pa = Some(vec![0u8; 4]);
+        let err = JpegEncoder::new().with_encoded_metadata(&both).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            err.static_message(),
+            Some("JPEG: C2PA manifest store (APP11) embedding is not supported")
+        );
+    }
+
+    #[test]
+    fn a_bare_exif_stream_is_written_unchanged() {
+        // A TIFF stream that never carried the `Exif\0\0` signature is stored as given.
+        let mut bare = EncodedMetadata::default();
+        bare.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
+        let jpeg = encode(JpegEncoder::new().with_encoded_metadata(&bare).unwrap());
+        assert_eq!(crate::metadata(&jpeg).unwrap().exif, bare.exif);
+    }
+
+    #[test]
     fn encoded_blocks_route_to_the_raw_setters() {
         // Each present field lands in its APP segment; an absent one leaves an earlier setting.
         let encoded = typed().encode().unwrap();
