@@ -3,7 +3,7 @@
 //! An embedded XMP packet is the RDF/XML body bracketed by `<?xpacket?>` processing instructions:
 //! `<?xpacket begin="…" id="…"?>` … body … optional whitespace padding … `<?xpacket end='r'|'w'?>`.
 //! [`XmpPacket::scan`] recovers the body and the `writable`/`padding` details from raw bytes, and
-//! [`XmpPacket::parse`] turns the body into a graph — [`crate::XmpMeta::from_packet`] is exactly
+//! [`XmpPacket::to_meta`] turns the body into a graph — [`crate::XmpMeta::parse`] is exactly
 //! that composition. Scanning first is how an in-place editor honors the envelope: parse, modify,
 //! then re-serialize with the original `writable`/`padding` on a [`crate::XmpWriter`].
 
@@ -17,8 +17,8 @@ const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 /// XMP is embedded as an `<?xpacket begin=… id=…?>` processing instruction, the `x:xmpmeta` /
 /// `rdf:RDF` body, then `<?xpacket end='r'|'w'?>`. A writable (`'w'`) packet carries trailing
 /// whitespace padding so it can be edited in place without rewriting the whole file. Build one from
-/// bytes with [`XmpPacket::scan`], parse its body into a graph with [`XmpPacket::parse`], and
-/// produce packet bytes from a graph with [`crate::XmpMeta::to_packet`] or a configured
+/// bytes with [`XmpPacket::scan`], parse its body into a graph with [`XmpPacket::to_meta`], and
+/// produce packet bytes from a graph with [`crate::XmpMeta::to_bytes`] or a configured
 /// [`crate::XmpWriter`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmpPacket {

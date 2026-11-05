@@ -12,7 +12,7 @@ const URL: &str = "https://example.com/manifests/photo.c2pa";
 fn xmp_with_provenance_text(url: &str) -> Vec<u8> {
     let mut xmp = XmpMeta::new();
     xmp.set_text(WellKnownNs::DcTerms.uri(), "provenance", url);
-    xmp.to_packet()
+    xmp.to_bytes()
 }
 
 /// An XMP packet with an unrelated property, so the graph is present but says nothing about
@@ -20,7 +20,7 @@ fn xmp_with_provenance_text(url: &str) -> Vec<u8> {
 fn xmp_without_provenance() -> Vec<u8> {
     let mut xmp = XmpMeta::new();
     xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
-    xmp.to_packet()
+    xmp.to_bytes()
 }
 
 /// Bytes shaped like a JUMBF superbox header; the facade never looks inside, so nothing here

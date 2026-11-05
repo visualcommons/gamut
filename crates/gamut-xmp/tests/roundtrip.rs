@@ -78,9 +78,7 @@ fn canonical_serialization_is_idempotent() {
         XmpMeta::new(),
     ] {
         let once = meta.to_rdf();
-        let twice = XmpMeta::from_packet(once.as_bytes())
-            .expect("reparse")
-            .to_rdf();
+        let twice = XmpMeta::parse(once.as_bytes()).expect("reparse").to_rdf();
         assert_eq!(once, twice, "canonical form must be a fixed point");
     }
 }
@@ -88,8 +86,8 @@ fn canonical_serialization_is_idempotent() {
 #[test]
 fn canonical_graph_survives_packet_roundtrip() {
     let meta = rich_meta();
-    let packet = meta.to_packet();
-    let parsed = XmpMeta::from_packet(&packet).expect("parse packet");
+    let packet = meta.to_bytes();
+    let parsed = XmpMeta::parse(&packet).expect("parse packet");
     assert_eq!(parsed, meta);
 }
 
@@ -106,7 +104,7 @@ fn control_characters_survive_roundtrip() {
         "BaseURL",
         XmpValue::Uri("http://example.com/a\tb\nc\rd".into()),
     ));
-    let parsed = XmpMeta::from_packet(&meta.to_packet()).expect("reparse");
+    let parsed = XmpMeta::parse(&meta.to_bytes()).expect("reparse");
     assert_eq!(parsed, meta);
 }
 
@@ -137,7 +135,7 @@ fn unwritable_local_names_leave_a_parseable_packet() {
                 XmpProperty::new(XMP, bad, simple("dropped")),
             ],
         });
-        let parsed = XmpMeta::from_packet(&meta.to_packet())
+        let parsed = XmpMeta::parse(&meta.to_bytes())
             .unwrap_or_else(|e| panic!("name {bad:?} broke the packet: {e}"));
         assert_eq!(parsed, rich_meta(), "name {bad:?}");
     }
@@ -154,12 +152,9 @@ fn registered_prefix_is_not_semantic() {
     let registered = XmpWriter::new()
         .with_namespace(Namespace::new("http://example.com/vocab/", "vocab"))
         .serialize(&meta);
-    let parsed = XmpMeta::from_packet(&registered).expect("parse registered-prefix packet");
+    let parsed = XmpMeta::parse(&registered).expect("parse registered-prefix packet");
     assert_eq!(parsed, meta);
-    assert_eq!(
-        parsed,
-        XmpMeta::from_packet(&meta.to_packet()).expect("default")
-    );
+    assert_eq!(parsed, XmpMeta::parse(&meta.to_bytes()).expect("default"));
 }
 
 #[test]
@@ -174,8 +169,8 @@ fn equivalent_input_forms_parse_to_the_same_graph() {
          <rdf:Description rdf:about=\"\" xmp:Rating=\"3\"/></rdf:RDF>"
     );
     assert_eq!(
-        XmpMeta::from_packet(element.as_bytes()).unwrap(),
-        XmpMeta::from_packet(attribute.as_bytes()).unwrap()
+        XmpMeta::parse(element.as_bytes()).unwrap(),
+        XmpMeta::parse(attribute.as_bytes()).unwrap()
     );
 
     // Nested rdf:Description vs. rdf:parseType="Resource" for a structure (Part 1 §7.9.2.3).
@@ -190,7 +185,7 @@ fn equivalent_input_forms_parse_to_the_same_graph() {
          </rdf:Description></rdf:RDF>"
     );
     assert_eq!(
-        XmpMeta::from_packet(nested.as_bytes()).unwrap(),
-        XmpMeta::from_packet(concise.as_bytes()).unwrap()
+        XmpMeta::parse(nested.as_bytes()).unwrap(),
+        XmpMeta::parse(concise.as_bytes()).unwrap()
     );
 }

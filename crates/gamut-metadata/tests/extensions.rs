@@ -24,7 +24,7 @@ fn exif_bytes() -> Vec<u8> {
 fn xmp_bytes() -> Vec<u8> {
     let mut xmp = XmpMeta::new();
     xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
-    xmp.to_packet()
+    xmp.to_bytes()
 }
 
 fn icc_bytes() -> Vec<u8> {

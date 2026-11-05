@@ -2,7 +2,7 @@
 
 /// An error encountered while parsing an XMP packet.
 ///
-/// Serialization is infallible (see [`crate::XmpMeta::to_packet`]); these errors arise only on the
+/// Serialization is infallible (see [`crate::XmpMeta::to_bytes`]); these errors arise only on the
 /// read path. Variants carry dynamic context — a detail string naming the offending construct or
 /// element — so a malformed packet is easy to diagnose.
 ///
@@ -47,11 +47,11 @@ pub enum XmpError {
 
     /// A sidecar file's document element was not `x:xmpmeta`; the string names the element found.
     ///
-    /// Raised only by [`crate::XmpSidecar::read`]. The wrapper is **optional** in an embedded
-    /// packet (Part 1 §7.3.3, and [`crate::XmpWriter::wrap_xmpmeta`] can omit it), so this is not
-    /// a prohibited construct — it is the one thing a standalone `.xmp` file needs beyond a packet
-    /// body, because §7.3.3 gives `x:xmpmeta` exactly the job of identifying XMP inside general
-    /// XML text. A bare `rdf:RDF` document is valid XMP for [`crate::XmpMeta::from_packet`].
+    /// Raised only by [`crate::XmpMeta::from_sidecar`]. The wrapper is **optional** in an embedded
+    /// packet (Part 1 §7.3.3, and [`crate::XmpWriter::with_xmpmeta_wrapper`] can omit it), so this
+    /// is not a prohibited construct — it is the one thing a standalone `.xmp` file needs beyond a
+    /// packet body, because §7.3.3 gives `x:xmpmeta` exactly the job of identifying XMP inside
+    /// general XML text. A bare `rdf:RDF` document is valid XMP for [`crate::XmpMeta::parse`].
     #[error("XMP: sidecar document element is <{0}>, not x:xmpmeta")]
     MissingXmpMeta(String),
 
@@ -59,8 +59,8 @@ pub enum XmpError {
     /// input as passed (a leading byte-order mark included), of the first `<?xpacket` instruction
     /// after the first packet's trailer.
     ///
-    /// Raised by [`crate::XmpPacket::scan`], and so by [`crate::XmpMeta::from_packet`] and
-    /// [`crate::XmpSidecar::read`] (issue #562). Adobe XMP Part 3 asks that a sidecar be written as
+    /// Raised by [`crate::XmpPacket::scan`], and so by [`crate::XmpMeta::parse`] and
+    /// [`crate::XmpMeta::from_sidecar`] (issue #562). Adobe XMP Part 3 asks that a sidecar be written as
     /// packets "extracted and catenated by a postprocessor", but no part of the specification says
     /// how a reader reconciles a property two packets both set, so this crate refuses the file
     /// rather than keep one packet and silently drop the rest — the reference engine (Adobe XMPCore)
@@ -134,7 +134,7 @@ mod tests {
             gamut_core::ErrorKind::InvalidInput
         );
         // A sidecar without its wrapper is bad input, not an unimplemented feature: the caller
-        // fixes it by handing the bytes to `XmpMeta::from_packet` or wrapping them.
+        // fixes it by handing the bytes to `XmpMeta::parse` or wrapping them.
         assert_eq!(
             classified(XmpError::MissingXmpMeta("RDF".into())),
             gamut_core::ErrorKind::InvalidInput

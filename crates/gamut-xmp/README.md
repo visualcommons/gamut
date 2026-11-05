@@ -43,42 +43,43 @@ meta.set_lang_alt(dc, "title", "x-default", "My Photo");
 meta.set_text(dc, "rights", "(c) 2026");
 
 // Canonical, embeddable packet bytes...
-let packet = meta.to_packet();
+let packet = meta.to_bytes();
 // ...read straight back into the same graph.
-let parsed = XmpMeta::from_packet(&packet).unwrap();
+let parsed = XmpMeta::parse(&packet).unwrap();
 assert_eq!(parsed.get_lang_alt(dc, "title", "x-default"), Some("My Photo"));
 ```
 
-`XmpMeta::from_packet` accepts a packet with or without the `<?xpacket?>` wrapper (and tolerates a
-leading UTF-8 BOM). `XmpMeta::to_packet` / `to_rdf` emit the canonical RDF/XML; `XmpWriter` exposes
-the wrapper / writability / padding knobs plus `with_namespace` to register a preferred prefix for
-a custom schema. `WellKnownNs` supplies the standard schema URIs and prefixes so you do not
-hand-write them. For in-place editing, `XmpPacket::scan` exposes the envelope (writability,
-padding) and `XmpPacket::parse` the graph — `from_packet` is exactly that composition.
+`XmpMeta::parse` accepts a packet with or without the `<?xpacket?>` wrapper (and tolerates a
+leading UTF-8 BOM). `XmpMeta::to_bytes` / `to_rdf` emit the canonical RDF/XML; `XmpWriter` exposes
+the wrapper / writability / padding knobs (`with_xmpmeta_wrapper`, `with_writable`,
+`with_padding`) plus `with_namespace` to register a preferred prefix for a custom schema.
+`WellKnownNs` supplies the standard schema URIs and prefixes so you do not hand-write them. For
+in-place editing, `XmpPacket::scan` exposes the envelope (writability, padding) and
+`XmpPacket::to_meta` the graph — `XmpMeta::parse` is exactly that composition.
 
-**Sidecars.** `XmpSidecar::write` / `XmpSidecar::read` are the bytes of a standalone `.xmp` file —
-the interchange RAW workflows use, since a camera's raw format is not extensible (Part 3, "External
-storage of metadata"). A sidecar is the packet as embedded, so `read` accepts everything
-`from_packet` does but **requires the `x:xmpmeta` document element** — a gamut rule that is stricter
-than the specification, not derived from it. Part 1 §7.3.3 calls the element optional and asks only
-that a processor tolerate one, and Part 3's external-storage bullets never mention it, so a
-wrapper-less `.xmp` file is spec-conformant and `read` rejects it anyway. What §7.3.3 supplies is
-the element's purpose — identifying XMP inside general XML text, which is what a standalone file is
-— so gamut takes it as the marker. (exiv2 draws its own line, accepting a file starting with
-`<?xpacket` *or* `<x:xmpmeta`. A caller who wants that latitude uses `XmpMeta::from_packet`, and the
+**Sidecars.** `XmpMeta::to_sidecar` / `XmpMeta::from_sidecar` are the bytes of a standalone `.xmp`
+file — the interchange RAW workflows use, since a camera's raw format is not extensible (Part 3,
+"External storage of metadata"). A sidecar is the packet as embedded, so `from_sidecar` accepts
+everything `parse` does but **requires the `x:xmpmeta` document element** — a gamut rule that is
+stricter than the specification, not derived from it. Part 1 §7.3.3 calls the element optional and
+asks only that a processor tolerate one, and Part 3's external-storage bullets never mention it, so
+a wrapper-less `.xmp` file is spec-conformant and `from_sidecar` rejects it anyway. What §7.3.3
+supplies is the element's purpose — identifying XMP inside general XML text, which is what a
+standalone file is — so gamut takes it as the marker. (exiv2 draws its own line, accepting a file starting with
+`<?xpacket` *or* `<x:xmpmeta`. A caller who wants that latitude uses `XmpMeta::parse`, and the
 rejection is its own `XmpError::MissingXmpMeta` rather than a claim that the wrapper-less form is
-prohibited.) `write` emits the XML declaration Part 3 asks for, then a read-only, unpadded packet in
-canonical form, so two sidecars of the same graph are byte-identical. The crate has no filesystem
-API; the naming convention — `photo.xmp` beside `photo.dng`, looked up in the image's directory — is
+prohibited.) `to_sidecar` emits the XML declaration Part 3 asks for, then a read-only, unpadded
+packet in canonical form, so two sidecars of the same graph are byte-identical. The crate has no
+filesystem API; the naming convention — `photo.xmp` beside `photo.dng`, looked up in the image's directory — is
 documented, not enforced, and the caller owns the path. One packet, not a catenation: Part 3's
 bullet asks for the file to be written "as though it were embedded and then had the XMP packets
 extracted **and catenated by a postprocessor**", so a conforming producer may emit several
-`<?xpacket?>` packets end to end. `write` emits exactly one; `read` refuses such a file with
-`XmpError::MultiplePackets`, as Adobe XMPCore does, rather than read the first packet and silently
+`<?xpacket?>` packets end to end. `to_sidecar` emits exactly one; `from_sidecar` refuses such a
+file with `XmpError::MultiplePackets`, as Adobe XMPCore does, rather than read the first packet and silently
 drop the rest — the specification gives no rule for a property two packets both set, so gamut does
 not guess one. The error carries the offset at which the next packet begins, so a caller who knows
 how its packets combine splits there and reads each one (issue
-[#562](https://github.com/visualcommons/gamut/issues/562)). `from_packet` refuses a catenation the
+[#562](https://github.com/visualcommons/gamut/issues/562)). `parse` refuses a catenation the
 same way.
 
 ## Scope

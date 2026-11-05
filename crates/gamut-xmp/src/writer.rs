@@ -16,7 +16,7 @@
 //!   in XML 1.0 §3, over XML 1.0 §2.3's `Name`) is dropped with its whole subtree, since no
 //!   well-formed element can carry it — see [`XmpWriter::serialize_body`].
 //!
-//! [`XmpMeta::to_packet`] / [`XmpMeta::to_rdf`] are the shortcuts; [`XmpWriter`] exposes the knobs
+//! [`XmpMeta::to_bytes`] / [`XmpMeta::to_rdf`] are the shortcuts; [`XmpWriter`] exposes the knobs
 //! (the `x:xmpmeta` wrapper, writability, padding, and namespace prefixes).
 
 use crate::model::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
@@ -32,7 +32,7 @@ const DEFAULT_PADDING: usize = 2048;
 ///
 /// Construct with [`XmpWriter::new`], adjust with the builder methods, then call
 /// [`XmpWriter::serialize`] for a full `<?xpacket?>` packet or [`XmpWriter::serialize_body`] for the
-/// RDF/XML alone. For the common cases reach for [`XmpMeta::to_packet`] / [`XmpMeta::to_rdf`].
+/// RDF/XML alone. For the common cases reach for [`XmpMeta::to_bytes`] / [`XmpMeta::to_rdf`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmpWriter {
     /// Whether to wrap `rdf:RDF` in the optional `x:xmpmeta` element (Part 1 §7.3.3).
@@ -65,7 +65,7 @@ impl XmpWriter {
 
     /// Sets whether the body is wrapped in the optional `x:xmpmeta` element.
     #[must_use]
-    pub fn wrap_xmpmeta(mut self, wrap: bool) -> Self {
+    pub fn with_xmpmeta_wrapper(mut self, wrap: bool) -> Self {
         self.wrap_xmpmeta = wrap;
         self
     }
@@ -73,14 +73,14 @@ impl XmpWriter {
     /// Sets whether the packet is writable in place (`end="w"` with padding) or read-only
     /// (`end="r"`, no padding).
     #[must_use]
-    pub fn writable(mut self, writable: bool) -> Self {
+    pub fn with_writable(mut self, writable: bool) -> Self {
         self.writable = writable;
         self
     }
 
     /// Sets the trailing padding, in bytes, for a writable packet. Ignored when read-only.
     #[must_use]
-    pub fn padding(mut self, bytes: usize) -> Self {
+    pub fn with_padding(mut self, bytes: usize) -> Self {
         self.padding = bytes;
         self
     }
@@ -203,9 +203,9 @@ impl XmpWriter {
 
 impl XmpMeta {
     /// Serializes to a full XMP packet with the default settings (`x:xmpmeta` wrapper, writable,
-    /// padded) — the inverse of [`XmpMeta::from_packet`].
+    /// padded) — the inverse of [`XmpMeta::parse`].
     #[must_use]
-    pub fn to_packet(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Vec<u8> {
         XmpWriter::new().serialize(self)
     }
 
@@ -626,7 +626,7 @@ mod tests {
     /// byte-exact assertions.
     fn body(properties: Vec<XmpProperty>) -> String {
         XmpWriter::new()
-            .wrap_xmpmeta(false)
+            .with_xmpmeta_wrapper(false)
             .serialize_body(&XmpMeta { properties })
     }
 
@@ -678,7 +678,9 @@ mod tests {
         let mut meta = XmpMeta::new();
         meta.set_lang_alt(DC, "title", "x-default", "Hi");
         meta.set_lang_alt(DC, "title", "fr", "Salut");
-        let out = XmpWriter::new().wrap_xmpmeta(false).serialize_body(&meta);
+        let out = XmpWriter::new()
+            .with_xmpmeta_wrapper(false)
+            .serialize_body(&meta);
         assert!(out.contains("<rdf:Alt>"));
         assert!(out.contains("<rdf:li xml:lang=\"x-default\">Hi</rdf:li>"));
         assert!(out.contains("<rdf:li xml:lang=\"fr\">Salut</rdf:li>"));
@@ -771,7 +773,7 @@ mod tests {
                 XmpValue::Simple("3".into()),
             )],
         };
-        let packet = String::from_utf8(meta.to_packet()).unwrap();
+        let packet = String::from_utf8(meta.to_bytes()).unwrap();
         assert!(packet.starts_with("<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n"));
         assert!(packet.contains("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">"));
         assert!(packet.ends_with("<?xpacket end=\"w\"?>"));
@@ -780,7 +782,7 @@ mod tests {
 
     #[test]
     fn read_only_writer_omits_padding() {
-        let writer = XmpWriter::new().writable(false);
+        let writer = XmpWriter::new().with_writable(false);
         let packet = String::from_utf8(writer.serialize(&XmpMeta::new())).unwrap();
         assert!(packet.ends_with("<?xpacket end=\"r\"?>"));
         // No run of padding spaces between the body and the trailer.
@@ -790,15 +792,15 @@ mod tests {
     #[test]
     fn writable_writer_emits_requested_padding() {
         let bare = XmpWriter::new()
-            .writable(false)
+            .with_writable(false)
             .serialize(&XmpMeta::new())
             .len();
         let small = XmpWriter::new()
-            .padding(10)
+            .with_padding(10)
             .serialize(&XmpMeta::new())
             .len();
         let big = XmpWriter::new()
-            .padding(1000)
+            .with_padding(1000)
             .serialize(&XmpMeta::new())
             .len();
         // Padding is applied verbatim: the size grows by exactly the requested byte count, so the
@@ -841,7 +843,7 @@ mod tests {
         let mut meta = XmpMeta::new();
         meta.set_text("http://example.com/vocab/", "kind", "demo");
         let out = XmpWriter::new()
-            .wrap_xmpmeta(false)
+            .with_xmpmeta_wrapper(false)
             .with_namespace(Namespace::new("http://example.com/vocab/", "vocab"))
             .serialize_body(&meta);
         assert!(
@@ -860,7 +862,7 @@ mod tests {
         let mut meta = XmpMeta::new();
         meta.set_text(DC, "format", "text/plain");
         let out = XmpWriter::new()
-            .wrap_xmpmeta(false)
+            .with_xmpmeta_wrapper(false)
             .with_namespace(Namespace::new(DC, "dublin"))
             .serialize_body(&meta);
         assert!(
@@ -878,7 +880,7 @@ mod tests {
         let mut meta = XmpMeta::new();
         meta.set_text("http://example.com/vocab/", "kind", "demo");
         let out = XmpWriter::new()
-            .wrap_xmpmeta(false)
+            .with_xmpmeta_wrapper(false)
             .with_namespace(Namespace::new("http://example.com/vocab/", "one"))
             .with_namespace(Namespace::new("http://example.com/vocab/", "two"))
             .serialize_body(&meta);
@@ -904,7 +906,7 @@ mod tests {
             let mut meta = XmpMeta::new();
             meta.set_text("http://example.com/vocab/", "kind", "demo");
             let out = XmpWriter::new()
-                .wrap_xmpmeta(false)
+                .with_xmpmeta_wrapper(false)
                 .with_namespace(Namespace::new("http://example.com/vocab/", bad))
                 .serialize_body(&meta);
             assert!(
@@ -922,7 +924,7 @@ mod tests {
         meta.set_text(DC, "format", "text/plain");
         meta.set_text("http://example.com/vocab/", "kind", "demo");
         let out = XmpWriter::new()
-            .wrap_xmpmeta(false)
+            .with_xmpmeta_wrapper(false)
             .with_namespace(Namespace::new("http://example.com/vocab/", "dc"))
             .serialize_body(&meta);
         assert!(out.contains("<dc:format>"), "got:\n{out}");
@@ -937,7 +939,7 @@ mod tests {
         meta.set_text("http://example.com/vocab/", "kind", "demo");
         meta.set_text(DC, "format", "text/plain");
         let out = XmpWriter::new()
-            .wrap_xmpmeta(false)
+            .with_xmpmeta_wrapper(false)
             .with_namespace(Namespace::new("http://example.com/vocab/", "dc"))
             .serialize_body(&meta);
         assert!(out.contains("<dc:kind>demo</dc:kind>"), "got:\n{out}");
@@ -952,7 +954,7 @@ mod tests {
         let mut meta = XmpMeta::new();
         meta.set_text(DC, "format", "text/plain");
         let out = XmpWriter::new()
-            .wrap_xmpmeta(false)
+            .with_xmpmeta_wrapper(false)
             .with_namespace(Namespace::new("http://example.com/vocab/", "vocab"))
             .serialize_body(&meta);
         assert!(
@@ -970,7 +972,7 @@ mod tests {
         meta.set_text("http://example.com/a/", "x", "1");
         meta.set_text("http://example.com/b/", "y", "2");
         let out = XmpWriter::new()
-            .wrap_xmpmeta(false)
+            .with_xmpmeta_wrapper(false)
             .with_namespace(Namespace::new("http://example.com/a/", "ns7"))
             .with_namespace(Namespace::new("http://example.com/b/", "nsx"))
             .serialize_body(&meta);
@@ -991,10 +993,12 @@ mod tests {
         let mut meta = XmpMeta::new();
         meta.set_text(DC, "format", "text/plain");
         let registered = XmpWriter::new()
-            .wrap_xmpmeta(false)
+            .with_xmpmeta_wrapper(false)
             .with_namespace(WellKnownNs::DublinCore)
             .serialize_body(&meta);
-        let plain = XmpWriter::new().wrap_xmpmeta(false).serialize_body(&meta);
+        let plain = XmpWriter::new()
+            .with_xmpmeta_wrapper(false)
+            .serialize_body(&meta);
         assert_eq!(registered, plain);
     }
 

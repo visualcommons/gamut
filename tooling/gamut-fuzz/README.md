@@ -161,7 +161,7 @@ defect, not a restatement of a documented default:
 | `av1_inspect` | `gamut-av1` | `Av1Decoder::inspect` | default `DecodeLimits` |
 | `icc_parse` | `gamut-icc` | `IccProfile::parse` | lenient (strict only adds refusals) |
 | `exif_parse` | `gamut-exif` | `ExifReader::parse_with_report`, then `gps`, `thumbnail_bytes`, `MakerNote::canon` | `recover_entries` and `audit_bytes` on: the widest walk |
-| `xmp_parse` | `gamut-xmp` | `XmpMeta::from_packet` | — |
+| `xmp_parse` | `gamut-xmp` | `XmpMeta::parse` | — |
 | `iptc_read_irb` | `gamut-iptc` | `IptcReader::read_irb`, then `read` | default conflict policy |
 
 `gamut-deflate` has no target because it has no decoder, and `gamut-av2`/`gamut-vvc` none because
@@ -452,7 +452,7 @@ written by the workspace's encoders over one 5 × 3 image — an odd width, so n
 a filter stride: `png_decode/` an RGB and an RGBA PNG; `webp_decode/` a lossless `VP8L` RGBA file
 and a lossy `VP8 ` RGB one; `riff_chunks/` a lossless `VP8X` file carrying the Exif golden above
 and an XMP packet as `EXIF` and `XMP ` chunks; `av1_inspect/` `encode_still_lossless_identity`'s
-4:4:4 temporal unit, the one profile the decoder accepts; `xmp_parse/` an `XmpMeta::to_packet`
+4:4:4 temporal unit, the one profile the decoder accepts; `xmp_parse/` an `XmpMeta::to_bytes`
 packet with two properties; and `iptc_read_irb/` `IptcWriter::write_irb`'s block for a headline and
 a city.
 

@@ -144,7 +144,7 @@
 //!     "provenance",
 //!     "https://example.com/manifests/photo.c2pa",
 //! );
-//! let packet = graph.to_packet();
+//! let packet = graph.to_bytes();
 //!
 //! let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(&packet)])?;
 //! assert_eq!(meta.c2pa, None); // nothing embedded...
@@ -183,7 +183,7 @@
 //! // A container crate located an XMP packet; build one here for the example.
 //! let mut graph = XmpMeta::new();
 //! graph.set_text(WellKnownNs::Photoshop.uri(), "City", "Kyoto");
-//! let packet = graph.to_packet();
+//! let packet = graph.to_bytes();
 //!
 //! // Extract a unified model from the located blocks...
 //! let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(&packet)])?;

@@ -9,7 +9,7 @@
 
 use gamut_xmp::{
     DWC_URI_TRAILING_SLASH, Namespace, WellKnownNs, XmpArray, XmpError, XmpItem, XmpMeta,
-    XmpProperty, XmpSidecar, XmpValue, XmpWriter,
+    XmpProperty, XmpValue, XmpWriter,
 };
 
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -39,7 +39,7 @@ fn sample() -> XmpMeta {
 
 #[test]
 fn gamut_output_is_valid_and_readable_by_exiv2() {
-    let packet = sample().to_packet();
+    let packet = sample().to_bytes();
     exiv2_oracle::validate(&packet).expect("exiv2 (Adobe XMPCore) must accept gamut's packet");
 
     // Specific values survive into the reference engine.
@@ -58,8 +58,8 @@ fn gamut_output_is_valid_and_readable_by_exiv2() {
 #[test]
 fn gamut_reads_exiv2_reserialization() {
     // exiv2 re-serializes via XMPCore; gamut must parse that back to the same values.
-    let canonical = exiv2_oracle::roundtrip(&sample().to_packet()).expect("exiv2 round-trip");
-    let parsed = XmpMeta::from_packet(&canonical).expect("gamut parses exiv2's output");
+    let canonical = exiv2_oracle::roundtrip(&sample().to_bytes()).expect("exiv2 round-trip");
+    let parsed = XmpMeta::parse(&canonical).expect("gamut parses exiv2's output");
 
     assert_eq!(parsed.get_text(DC, "format"), Some("text/plain"));
     // The URL's value survives the round-trip; exiv2 normalizes the URI form to element text, so we
@@ -77,7 +77,7 @@ fn gamut_reads_exiv2_reserialization() {
 #[test]
 fn empty_packet_round_trips_through_exiv2() {
     // A property-less packet is still valid XMP the toolkit accepts.
-    let packet = XmpMeta::new().to_packet();
+    let packet = XmpMeta::new().to_bytes();
     exiv2_oracle::validate(&packet).expect("exiv2 must accept an empty packet");
 }
 
@@ -114,11 +114,11 @@ fn every_well_known_namespace_survives_xmpcore() {
             XmpValue::Simple(ns.prefix().to_owned()),
         ));
     }
-    let packet = meta.to_packet();
+    let packet = meta.to_bytes();
     exiv2_oracle::validate(&packet).expect("exiv2 must accept all standard namespaces");
 
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
-    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let parsed = XmpMeta::parse(&out).expect("gamut parses exiv2's output");
     for ns in WellKnownNs::ALL {
         // `xmpcore_output_uri` is the identity for every schema but Darwin Core (see its doc).
         assert_eq!(
@@ -144,7 +144,7 @@ fn dcterms_provenance_reads_back_from_xmpcore_under_the_dcterms_key() {
         "provenance",
         XmpValue::Uri(url.into()),
     ));
-    let packet = meta.to_packet();
+    let packet = meta.to_bytes();
     assert!(
         std::str::from_utf8(&packet)
             .unwrap()
@@ -159,7 +159,7 @@ fn dcterms_provenance_reads_back_from_xmpcore_under_the_dcterms_key() {
     );
 
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
-    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let parsed = XmpMeta::parse(&out).expect("gamut parses exiv2's output");
     assert_eq!(parsed.get_text(dcterms, "provenance"), Some(url));
 }
 
@@ -176,7 +176,7 @@ fn registered_prefix_packet_is_valid_for_xmpcore() {
 
     exiv2_oracle::validate(&packet).expect("exiv2 must accept a registered-prefix packet");
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
-    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let parsed = XmpMeta::parse(&out).expect("gamut parses exiv2's output");
     assert_eq!(parsed.get_text(custom, "kind"), Some("demo"));
 }
 
@@ -194,7 +194,7 @@ fn default_xml_lang_on_description_matches_reference() {
     );
 
     // gamut reads dc:format unqualified…
-    let gamut = XmpMeta::from_packet(xml.as_bytes()).expect("gamut parses the packet");
+    let gamut = XmpMeta::parse(xml.as_bytes()).expect("gamut parses the packet");
     let prop = gamut.get(DC, "format").expect("dc:format");
     assert_eq!(prop.text(), Some("text/plain"));
     assert!(
@@ -204,7 +204,7 @@ fn default_xml_lang_on_description_matches_reference() {
 
     // …and so does the reference engine: its reserialization carries no per-property lang.
     let out = exiv2_oracle::roundtrip(xml.as_bytes()).expect("exiv2 round-trip");
-    let reference = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let reference = XmpMeta::parse(&out).expect("gamut parses exiv2's output");
     let ref_prop = reference.get(DC, "format").expect("dc:format via exiv2");
     assert_eq!(ref_prop.text(), Some("text/plain"));
     assert!(
@@ -237,7 +237,7 @@ fn default_xml_lang_on_description_matches_reference() {
 
 /// Serializes `meta`, asserts XMPCore accepts it, and returns the packet.
 fn packet_xmpcore_accepts(meta: &XmpMeta) -> Vec<u8> {
-    let packet = meta.to_packet();
+    let packet = meta.to_bytes();
     exiv2_oracle::validate(&packet).expect("exiv2 (Adobe XMPCore) must accept gamut's packet");
     packet
 }
@@ -260,7 +260,7 @@ fn text_property_survives_xmpcore(ns: WellKnownNs, name: &str, value: &str) {
         "{key} must read back from the reference engine"
     );
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
-    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let parsed = XmpMeta::parse(&out).expect("gamut parses exiv2's output");
     // The reference engine's output URI, as in `struct_field_survives_xmpcore`: the identity for
     // every schema but Darwin Core, so reading back under `ns.uri()` here would fail for a future
     // schema whose URI ends in neither `/` nor `#`, for a reason unrelated to that schema.
@@ -321,7 +321,7 @@ fn lightroom_hierarchical_subject_reads_back_under_the_lr_key() {
         "Places|Seoul"
     );
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
-    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let parsed = XmpMeta::parse(&out).expect("gamut parses exiv2's output");
     let XmpValue::Array(XmpArray::Bag(items)) =
         &parsed.get(lr.uri(), "hierarchicalSubject").unwrap().value
     else {
@@ -362,7 +362,7 @@ fn struct_field_survives_xmpcore(ns: WellKnownNs, name: &str, field: &str, value
         "{key} must read back from the reference engine"
     );
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
-    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let parsed = XmpMeta::parse(&out).expect("gamut parses exiv2's output");
     // The reference engine's output URI (differs from `ns.uri()` only for Darwin Core).
     let out_uri = xmpcore_output_uri(ns);
     let XmpValue::Structured(fields) = &parsed.get(&out_uri, name).unwrap().value else {
@@ -410,7 +410,7 @@ fn struct_bag_item_field_survives_xmpcore(
         "{key} must read back from the reference engine"
     );
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
-    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let parsed = XmpMeta::parse(&out).expect("gamut parses exiv2's output");
     // Compare under the engine's output URI (the identity for both MWG schemas; see
     // `xmpcore_output_uri`), so the helper stays correct for a `dwc`-style URI too.
     let out_uri = xmpcore_output_uri(ns);
@@ -516,7 +516,7 @@ fn darwin_core_record_field_reads_back_under_the_dwc_key() {
     // it with a `/` appended (`xmpcore_output_uri`) — an oracle normalization, not a defect in
     // either direction, so both halves are pinned here.
     let dwc = WellKnownNs::DarwinCore;
-    let packet = one_struct(dwc, "Record", &[("institutionID", "GAMUT")]).to_packet();
+    let packet = one_struct(dwc, "Record", &[("institutionID", "GAMUT")]).to_bytes();
     assert!(
         std::str::from_utf8(&packet)
             .unwrap()
@@ -545,7 +545,7 @@ fn an_xmpcore_written_dwc_graph_keeps_the_slashed_uri_it_declared() {
         "the fixture must be the slashed form XMPCore writes"
     );
 
-    let parsed = XmpMeta::from_packet(&written).expect("gamut parses exiv2's output");
+    let parsed = XmpMeta::parse(&written).expect("gamut parses exiv2's output");
     assert_eq!(
         parsed.get_text(DWC_URI_TRAILING_SLASH, "institutionCode"),
         Some("GAMUT"),
@@ -557,7 +557,7 @@ fn an_xmpcore_written_dwc_graph_keeps_the_slashed_uri_it_declared() {
         "reading does not rewrite the declared URI to the registered one"
     );
     assert!(
-        std::str::from_utf8(&parsed.to_packet())
+        std::str::from_utf8(&parsed.to_bytes())
             .unwrap()
             .contains("xmlns:dwc=\"http://rs.tdwg.org/dwc/index.htm/\""),
         "re-serialization keeps the declared URI under the `dwc` prefix the alias resolves"
@@ -573,7 +573,7 @@ fn an_xmpcore_written_dwc_graph_keeps_the_slashed_uri_it_declared() {
 fn sidecar_written_by_gamut_is_read_by_xmpcore() {
     // The whole file — XML declaration, read-only packet wrapper, x:xmpmeta — is handed to XMPCore
     // as-is, the way exiv2's sidecar reader passes a .xmp file's bytes to the parser.
-    let file = XmpSidecar::write(&sample());
+    let file = sample().to_sidecar();
     exiv2_oracle::validate(&file).expect("exiv2 (Adobe XMPCore) must accept gamut's sidecar");
     assert_eq!(
         exiv2_oracle::get_property(&file, "Xmp.dc.format").unwrap(),
@@ -590,12 +590,12 @@ fn gamut_reads_the_sidecar_xmpcore_writes() {
     // XMPCore's default serialization is the `<?xpacket?>` + `<x:xmpmeta>` form exiv2 stores in a
     // .xmp file (its sidecar writer only prepends the packet header when the packet lacks one), so
     // the reference engine's output is exactly what a sidecar on disk looks like.
-    let reference = exiv2_oracle::roundtrip(&sample().to_packet()).expect("exiv2 round-trip");
+    let reference = exiv2_oracle::roundtrip(&sample().to_bytes()).expect("exiv2 round-trip");
     assert!(
         String::from_utf8_lossy(&reference).contains("<x:xmpmeta"),
         "precondition: XMPCore's serialization carries the wrapper a sidecar requires"
     );
-    let parsed = XmpSidecar::read(&reference).expect("gamut reads XMPCore's sidecar");
+    let parsed = XmpMeta::from_sidecar(&reference).expect("gamut reads XMPCore's sidecar");
     assert_eq!(parsed.get_text(DC, "format"), Some("text/plain"));
     assert_eq!(parsed.get_lang_alt(DC, "title", "x-default"), Some("Hello"));
 }
@@ -605,18 +605,17 @@ fn xmpcore_rejects_the_catenated_sidecar_gamut_rejects() {
     // Issue #562: gamut refuses a sidecar holding two packets end to end rather than reading the
     // first and dropping the second. This pins that the reference engine draws the same line on
     // the same bytes, so the rejection is parity, not a gamut-only strictness.
-    let mut file = XmpSidecar::write(&one_text(WellKnownNs::Xmp, "Rating", "5"));
-    file.extend_from_slice(&XmpSidecar::write(&one_text(
-        WellKnownNs::Xmp,
-        "CreatorTool",
-        "gamut",
-    )));
+    let mut file = one_text(WellKnownNs::Xmp, "Rating", "5").to_sidecar();
+    file.extend_from_slice(&one_text(WellKnownNs::Xmp, "CreatorTool", "gamut").to_sidecar());
     assert!(
         exiv2_oracle::validate(&file).is_err(),
         "exiv2 (Adobe XMPCore) must reject a catenated two-packet sidecar"
     );
     assert!(
-        matches!(XmpSidecar::read(&file), Err(XmpError::MultiplePackets(_))),
+        matches!(
+            XmpMeta::from_sidecar(&file),
+            Err(XmpError::MultiplePackets(_))
+        ),
         "gamut must reject the same bytes"
     );
 }
