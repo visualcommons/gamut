@@ -13,7 +13,7 @@
 //! [`WebpCodestreamEncoder`] both carry a [`WebpCodestream`] discriminant, so a backend that handles
 //! only one of the two simply declines the other in `supports`. The decoded raster, by contrast,
 //! *is* split: VP8 reconstructs natively to YCbCr 4:2:0 and VP8L to packed ARGB, and there is no
-//! lossless common form, so [`DecodedRaster`] is an enum.
+//! lossless common form, so [`DecodedWebp`] is an enum.
 //!
 //! # `ALPH` is not part of the seam
 //!
@@ -39,28 +39,41 @@
 //! 2. If every backend declines, the built-in tail runs.
 //! 3. Once a backend accepts, it owns the job: an error it returns **propagates** to the caller and
 //!    the tail is *not* consulted, so a partial or wrong result is never silently masked.
+//!
+//! The list itself is [`gamut_codec_abi::Registry`], which implements those rules once for every
+//! format crate. Cloning a [`WebpDecoder`](crate::WebpDecoder) or
+//! [`WebpEncoder`](crate::WebpEncoder) copies the list: the clone shares the backend instances
+//! already added, but a backend added to one afterwards is not seen by the other.
 
-use std::sync::{Arc, Mutex};
-
-use gamut_codec_abi as abi;
+use gamut_codec_abi::{self as abi, Registry, RegistryError, codec_id, pixel_format};
 use gamut_color::{ChromaSubsampling, Planar8};
 use gamut_core::{Dimensions, Error, Result};
 use gamut_riff::FourCc;
 
 use crate::config::Effort;
 
+/// The `codec_id` of a lossy `VP8 ` codestream in a [`gamut_codec_abi::StreamConfig`] /
+/// [`gamut_codec_abi::EncodeConfig`]: the chunk FourCC, built big-endian by
+/// [`gamut_codec_abi::codec_id`].
+pub const VP8_CODEC_ID: u32 = codec_id(*b"VP8 ");
+
+/// The `codec_id` of a lossless `VP8L` codestream; see [`VP8_CODEC_ID`].
+pub const VP8L_CODEC_ID: u32 = codec_id(*b"VP8L");
+
 /// Which of WebP's two codestreams a job concerns — the discriminant that lets one trait pair serve
 /// both.
 ///
-/// The value is exactly the FourCC of the RIFF chunk carrying the codestream, so it round-trips
-/// through [`fourcc`](Self::fourcc) and through the `codec_id` field of the
-/// [`gamut_codec_abi`] descriptors ([`codec_id`](Self::codec_id)).
+/// Each value names the RIFF chunk carrying the codestream, so it round-trips through
+/// [`fourcc`](Self::fourcc) and through the `codec_id` field of the [`gamut_codec_abi`]
+/// descriptors ([`codec_id`](Self::codec_id)). The set is closed — RFC 9649 defines exactly these
+/// two — and the discriminants are permanent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum WebpCodestream {
     /// The lossy intra key-frame codestream of a `VP8 ` chunk (RFC 6386).
-    Vp8,
+    Vp8 = 0,
     /// The lossless codestream of a `VP8L` chunk (RFC 9649 §3).
-    Vp8l,
+    Vp8l = 1,
 }
 
 impl WebpCodestream {
@@ -74,27 +87,17 @@ impl WebpCodestream {
     }
 
     /// The `codec_id` this codestream uses in a [`gamut_codec_abi::StreamConfig`] /
-    /// [`gamut_codec_abi::EncodeConfig`]: the chunk FourCC read as a little-endian `u32`, so the two
-    /// codestreams are distinct ids that a C backend can compare against `'VP8 '` / `'VP8L'`.
+    /// [`gamut_codec_abi::EncodeConfig`]: [`VP8_CODEC_ID`] or [`VP8L_CODEC_ID`], so the two
+    /// codestreams are distinct ids and a backend that handles one can decline the other in
+    /// `supports`.
     #[must_use]
     pub const fn codec_id(self) -> u32 {
-        u32::from_le_bytes(*self.fourcc().as_bytes())
+        match self {
+            WebpCodestream::Vp8 => VP8_CODEC_ID,
+            WebpCodestream::Vp8l => VP8L_CODEC_ID,
+        }
     }
 }
-
-/// The `pixel_format` tag used for a planar YCbCr 4:2:0 [`gamut_codec_abi::ImageDesc`]: three planes
-/// (Y, then U, then V), 8 bits per sample.
-///
-/// This is deliberately **not** a [`gamut_core::PixelFormat`] discriminant — that enum has no planar
-/// YUV or packed-ARGB member — but it shares the same `u32` field, so the value is chosen well
-/// outside `PixelFormat`'s (small, contiguous) range: it is the FourCC `I420` read little-endian.
-pub const PIXEL_FORMAT_YUV420: u32 = u32::from_le_bytes(*b"I420");
-
-/// The `pixel_format` tag used for a packed-ARGB [`gamut_codec_abi::ImageDesc`]: one plane, four
-/// bytes per pixel in **memory order B, G, R, A** — the little-endian encoding of the `0xAARRGGBB`
-/// word this crate's VP8L code uses. The FourCC `BGRA` read little-endian; see
-/// [`PIXEL_FORMAT_YUV420`] for why these are not `gamut_core::PixelFormat` values.
-pub const PIXEL_FORMAT_ARGB: u32 = u32::from_le_bytes(*b"BGRA");
 
 /// What a decode backend is being asked to decode: which codestream, and at what size.
 ///
@@ -103,12 +106,12 @@ pub const PIXEL_FORMAT_ARGB: u32 = u32::from_le_bytes(*b"BGRA");
 /// output buffers from `info` alone. If those bytes cannot be parsed, no backend is offered the job
 /// at all and the built-in tail runs, producing the format's own parse error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CodestreamInfo {
+pub struct WebpStreamInfo {
     codestream: WebpCodestream,
     dimensions: Dimensions,
 }
 
-impl CodestreamInfo {
+impl WebpStreamInfo {
     /// Describes a `codestream` of `dimensions`.
     #[must_use]
     pub const fn new(codestream: WebpCodestream, dimensions: Dimensions) -> Self {
@@ -140,7 +143,7 @@ impl CodestreamInfo {
 /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than
 /// converting between the two.
 #[derive(Debug, Clone)]
-pub enum DecodedRaster {
+pub enum DecodedWebp {
     /// A `VP8 ` reconstruction: limited-range BT.601 YCbCr planes at visible resolution, laid out
     /// [`ChromaSubsampling::Cs420`] (any other layout is refused by
     /// [`dimensions`](Self::dimensions)).
@@ -154,13 +157,13 @@ pub enum DecodedRaster {
     },
 }
 
-impl DecodedRaster {
+impl DecodedWebp {
     /// The codestream this raster is the native output of.
     #[must_use]
     pub const fn codestream(&self) -> WebpCodestream {
         match self {
-            DecodedRaster::Yuv420(_) => WebpCodestream::Vp8,
-            DecodedRaster::Argb { .. } => WebpCodestream::Vp8l,
+            DecodedWebp::Yuv420(_) => WebpCodestream::Vp8,
+            DecodedWebp::Argb { .. } => WebpCodestream::Vp8l,
         }
     }
 
@@ -169,12 +172,12 @@ impl DecodedRaster {
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
-    /// [`Yuv420`](DecodedRaster::Yuv420) raster's planes are not 4:2:0, the only layout VP8
+    /// [`Yuv420`](DecodedWebp::Yuv420) raster's planes are not 4:2:0, the only layout VP8
     /// codes.
     pub fn dimensions(&self) -> Result<Dimensions> {
         match self {
-            DecodedRaster::Yuv420(yuv) => yuv420_dimensions(yuv),
-            DecodedRaster::Argb { dimensions, .. } => Ok(*dimensions),
+            DecodedWebp::Yuv420(yuv) => yuv420_dimensions(yuv),
+            DecodedWebp::Argb { dimensions, .. } => Ok(*dimensions),
         }
     }
 }
@@ -259,9 +262,9 @@ impl WebpEncodeRequest {
 }
 
 /// The source picture handed to an encode backend, borrowed in the raster its codestream consumes
-/// natively — the encode-side mirror of [`DecodedRaster`].
+/// natively — the encode-side mirror of [`DecodedWebp`].
 #[derive(Debug, Clone, Copy)]
-pub enum RasterRef<'a> {
+pub enum WebpRasterRef<'a> {
     /// Limited-range BT.601 YCbCr planes laid out [`ChromaSubsampling::Cs420`], the `VP8 `
     /// encoder's input (any other layout is refused by [`dimensions`](Self::dimensions)).
     Yuv420(&'a Planar8),
@@ -274,13 +277,13 @@ pub enum RasterRef<'a> {
     },
 }
 
-impl RasterRef<'_> {
+impl WebpRasterRef<'_> {
     /// The codestream this raster is the native input of.
     #[must_use]
     pub const fn codestream(&self) -> WebpCodestream {
         match self {
-            RasterRef::Yuv420(_) => WebpCodestream::Vp8,
-            RasterRef::Argb { .. } => WebpCodestream::Vp8l,
+            WebpRasterRef::Yuv420(_) => WebpCodestream::Vp8,
+            WebpRasterRef::Argb { .. } => WebpCodestream::Vp8l,
         }
     }
 
@@ -289,11 +292,11 @@ impl RasterRef<'_> {
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
-    /// [`Yuv420`](RasterRef::Yuv420) raster's planes are not 4:2:0, the only layout VP8 codes.
+    /// [`Yuv420`](WebpRasterRef::Yuv420) raster's planes are not 4:2:0, the only layout VP8 codes.
     pub fn dimensions(&self) -> Result<Dimensions> {
         match self {
-            RasterRef::Yuv420(yuv) => yuv420_dimensions(yuv),
-            RasterRef::Argb { dimensions, .. } => Ok(*dimensions),
+            WebpRasterRef::Yuv420(yuv) => yuv420_dimensions(yuv),
+            WebpRasterRef::Argb { dimensions, .. } => Ok(*dimensions),
         }
     }
 }
@@ -301,33 +304,33 @@ impl RasterRef<'_> {
 /// A pluggable decoder for one raw WebP codestream payload.
 ///
 /// Implement this to route `VP8 ` and/or `VP8L` chunks to a hardware or alternate software decoder,
-/// then install it with [`WebpDecoder::push_backend`](crate::WebpDecoder::push_backend). The
+/// then add it with [`WebpDecoder::with_backend`](crate::WebpDecoder::with_backend). The
 /// selection rules are the crate-level fallback contract: decline via
 /// [`supports`](Self::supports); once you accept, your error propagates.
 ///
-/// `Send` is required because the registry is shared behind an [`Arc`] when a
-/// [`WebpDecoder`](crate::WebpDecoder) is cloned.
-pub trait WebpCodestreamDecoder: Send {
+/// `Send` is not a supertrait: the decoder bounds it where a backend is added, so the trait itself
+/// stays implementable by a single-threaded backend.
+pub trait WebpCodestreamDecoder {
     /// Reports whether this backend will decode the described codestream. Returning `false` is the
     /// only way to fall through to the next backend (and ultimately to the built-in tail).
-    fn supports(&mut self, info: &CodestreamInfo) -> bool;
+    fn supports(&mut self, info: &WebpStreamInfo) -> bool;
 
     /// Decodes `payload` — the raw RIFF chunk payload, header byte included — into the raster
-    /// native to [`info.codestream()`](CodestreamInfo::codestream).
+    /// native to [`info.codestream()`](WebpStreamInfo::codestream).
     ///
     /// # Errors
     ///
     /// Any error propagates to the caller of the enclosing decode; the built-in decoder is not
     /// retried.
-    fn decode(&mut self, info: &CodestreamInfo, payload: &[u8]) -> Result<DecodedRaster>;
+    fn decode(&mut self, info: &WebpStreamInfo, payload: &[u8]) -> Result<DecodedWebp>;
 }
 
 /// A pluggable encoder for one WebP codestream.
 ///
 /// Implement this to route encoding to a hardware or alternate software encoder, then install it
-/// with [`WebpEncoder::push_backend`](crate::WebpEncoder::push_backend). Same fallback contract and
-/// same `Send` requirement as [`WebpCodestreamDecoder`].
-pub trait WebpCodestreamEncoder: Send {
+/// with [`WebpEncoder::with_backend`](crate::WebpEncoder::with_backend). Same fallback contract as
+/// [`WebpCodestreamDecoder`], and likewise no `Send` supertrait.
+pub trait WebpCodestreamEncoder {
     /// Reports whether this backend will satisfy the described encode job. Returning `false` is the
     /// only way to fall through to the next backend (and ultimately to the built-in tail).
     fn supports(&mut self, req: &WebpEncodeRequest) -> bool;
@@ -341,64 +344,48 @@ pub trait WebpCodestreamEncoder: Send {
     ///
     /// Any error propagates to the caller of the enclosing encode; the built-in encoder is not
     /// retried.
-    fn encode(&mut self, req: &WebpEncodeRequest, raster: &RasterRef<'_>) -> Result<Vec<u8>>;
+    fn encode(&mut self, req: &WebpEncodeRequest, raster: &WebpRasterRef<'_>) -> Result<Vec<u8>>;
 }
 
-/// A decode registry entry: shared so that cloning a [`WebpDecoder`](crate::WebpDecoder) shares the
-/// backend rather than duplicating it, and locked so `&self` decode methods can call `&mut self`
-/// backend methods.
-pub(crate) type SharedDecoder = Arc<Mutex<dyn WebpCodestreamDecoder + Send>>;
+/// The decoder's backend list; `Send` is bound here, where a backend is inserted.
+pub(crate) type DecoderRegistry = Registry<dyn WebpCodestreamDecoder + Send>;
 
-/// An encode registry entry; see [`SharedDecoder`].
-pub(crate) type SharedEncoder = Arc<Mutex<dyn WebpCodestreamEncoder + Send>>;
+/// The encoder's backend list; see [`DecoderRegistry`].
+pub(crate) type EncoderRegistry = Registry<dyn WebpCodestreamEncoder + Send>;
 
-/// The error a poisoned registry lock yields: another thread panicked inside a backend, so the
-/// backend's state cannot be trusted.
-fn poisoned() -> Error {
-    Error::invalid_input(
-        env!("CARGO_PKG_NAME"),
-        "WebP: a codestream backend panicked (registry lock poisoned)",
-    )
+/// Maps a registry run onto the host's result: `Ok(None)` when every backend declined (the caller
+/// then runs the built-in tail), the accepting backend's error unchanged, and a lock a panicking
+/// backend poisoned as an error of its own.
+fn registry_result<R>(run: core::result::Result<R, RegistryError<Error>>) -> Result<Option<R>> {
+    match run {
+        Ok(out) => Ok(Some(out)),
+        Err(RegistryError::Unsupported) => Ok(None),
+        Err(RegistryError::Backend(err)) => Err(err),
+        Err(RegistryError::Poisoned) => Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "WebP: a codestream backend panicked (registry lock poisoned)",
+        )),
+    }
 }
 
-/// Offers the decode job to each backend in push order, returning the first acceptance's outcome, or
-/// `None` when every backend declines (the caller then runs the built-in tail).
-pub(crate) fn dispatch_decode(
-    backends: &[SharedDecoder],
-    info: &CodestreamInfo,
+/// Offers the decode job to each backend in push order: the first acceptance's outcome, or
+/// `Ok(None)` when every backend declines.
+pub(crate) fn decode_with_backends(
+    backends: &DecoderRegistry,
+    info: &WebpStreamInfo,
     payload: &[u8],
-) -> Option<Result<DecodedRaster>> {
-    for backend in backends {
-        let mut guard = match backend.lock() {
-            Ok(guard) => guard,
-            Err(_) => return Some(Err(poisoned())),
-        };
-        if !guard.supports(info) {
-            continue;
-        }
-        return Some(guard.decode(info, payload));
-    }
-    None
+) -> Result<Option<DecodedWebp>> {
+    registry_result(backends.run(|b| b.supports(info), |b| b.decode(info, payload)))
 }
 
-/// Offers the encode job to each backend in push order, returning the first acceptance's outcome, or
-/// `None` when every backend declines (the caller then runs the built-in tail).
-pub(crate) fn dispatch_encode(
-    backends: &[SharedEncoder],
+/// Offers the encode job to each backend in push order: the first acceptance's outcome, or
+/// `Ok(None)` when every backend declines.
+pub(crate) fn encode_with_backends(
+    backends: &EncoderRegistry,
     req: &WebpEncodeRequest,
-    raster: &RasterRef<'_>,
-) -> Option<Result<Vec<u8>>> {
-    for backend in backends {
-        let mut guard = match backend.lock() {
-            Ok(guard) => guard,
-            Err(_) => return Some(Err(poisoned())),
-        };
-        if !guard.supports(req) {
-            continue;
-        }
-        return Some(guard.encode(req, raster));
-    }
-    None
+    raster: &WebpRasterRef<'_>,
+) -> Result<Option<Vec<u8>>> {
+    registry_result(backends.run(|b| b.supports(req), |b| b.encode(req, raster)))
 }
 
 /// Reads the coded dimensions out of a codestream payload without decoding it: the VP8 key-frame
@@ -449,19 +436,32 @@ fn status_error(status: abi::Status, unsupported: &'static str, failed: &'static
 /// decide, so one adapter serves `VP8 `-only, `VP8L`-only, and both-codestream backends alike.
 ///
 /// The `out` [`abi::ImageDesc`] it hands the backend is:
-/// - `VP8 ` — [`PIXEL_FORMAT_YUV420`], three 8-bit planes (Y, U, V), tightly packed at visible
+/// - `VP8 ` — [`pixel_format::I420`], three 8-bit planes (Y, U, V), tightly packed at visible
 ///   resolution (strides `width`, `chroma_width`, `chroma_width`);
-/// - `VP8L` — [`PIXEL_FORMAT_ARGB`], one plane, stride `width * 4`, bytes in B, G, R, A order.
+/// - `VP8L` — [`pixel_format::BGRA`], one plane, stride `width * 4`: each `0xAARRGGBB` pixel
+///   little-endian, so the bytes are B, G, R, A.
 #[derive(Debug, Clone)]
-pub struct AbiDecoderBackend<D> {
+pub struct AbiWebpDecoder<D> {
     inner: D,
 }
 
-impl<D: abi::Decoder> AbiDecoderBackend<D> {
+impl<D> AbiWebpDecoder<D> {
     /// Wraps an ABI decoder backend.
     #[must_use]
     pub const fn new(inner: D) -> Self {
         Self { inner }
+    }
+
+    /// Borrows the wrapped backend.
+    #[must_use]
+    pub const fn get_ref(&self) -> &D {
+        &self.inner
+    }
+
+    /// Mutably borrows the wrapped backend.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut D {
+        &mut self.inner
     }
 
     /// Returns the wrapped backend.
@@ -471,12 +471,12 @@ impl<D: abi::Decoder> AbiDecoderBackend<D> {
     }
 }
 
-impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
-    fn supports(&mut self, info: &CodestreamInfo) -> bool {
+impl<D: abi::Decoder> WebpCodestreamDecoder for AbiWebpDecoder<D> {
+    fn supports(&mut self, info: &WebpStreamInfo) -> bool {
         self.inner.supports(&stream_config(info))
     }
 
-    fn decode(&mut self, info: &CodestreamInfo, payload: &[u8]) -> Result<DecodedRaster> {
+    fn decode(&mut self, info: &WebpStreamInfo, payload: &[u8]) -> Result<DecodedWebp> {
         let cfg = stream_config(info);
         let dims = info.dimensions();
         let (w, h) = (dims.width() as usize, dims.height() as usize);
@@ -489,7 +489,7 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
                 let mut u = vec![0u8; cw * ch];
                 let mut v = vec![0u8; cw * ch];
                 let desc = abi::ImageDesc::new(
-                    PIXEL_FORMAT_YUV420,
+                    pixel_format::I420,
                     dims.width(),
                     dims.height(),
                     8,
@@ -510,7 +510,7 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
                         "WebP: codec-abi decode backend failed",
                     ));
                 }
-                Ok(DecodedRaster::Yuv420(Planar8::from_planes_subsampled(
+                Ok(DecodedWebp::Yuv420(Planar8::from_planes_subsampled(
                     dims,
                     ChromaSubsampling::Cs420,
                     [y, u, v],
@@ -519,7 +519,7 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
             WebpCodestream::Vp8l => {
                 let mut bytes = vec![0u8; w * h * 4];
                 let desc = abi::ImageDesc::new(
-                    PIXEL_FORMAT_ARGB,
+                    pixel_format::BGRA,
                     dims.width(),
                     dims.height(),
                     8,
@@ -546,7 +546,7 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
                     .iter()
                     .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]]))
                     .collect();
-                Ok(DecodedRaster::Argb {
+                Ok(DecodedWebp::Argb {
                     dimensions: dims,
                     pixels,
                 })
@@ -556,20 +556,32 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
 }
 
 /// Adapts a [`gamut_codec_abi::Encoder`] into a [`WebpCodestreamEncoder`], mirroring
-/// [`AbiDecoderBackend`]: the job's [`codec_id`](WebpCodestream::codec_id) and quality go into the
+/// [`AbiWebpDecoder`]: the job's [`codec_id`](WebpCodestream::codec_id) and quality go into the
 /// [`abi::EncodeConfig`], the source picture into an [`abi::ImageDesc`] with the same plane layout
 /// the decode adapter uses, and the streamed output chunks are concatenated into the returned chunk
 /// payload.
 #[derive(Debug, Clone)]
-pub struct AbiEncoderBackend<E> {
+pub struct AbiWebpEncoder<E> {
     inner: E,
 }
 
-impl<E: abi::Encoder> AbiEncoderBackend<E> {
+impl<E> AbiWebpEncoder<E> {
     /// Wraps an ABI encoder backend.
     #[must_use]
     pub const fn new(inner: E) -> Self {
         Self { inner }
+    }
+
+    /// Borrows the wrapped backend.
+    #[must_use]
+    pub const fn get_ref(&self) -> &E {
+        &self.inner
+    }
+
+    /// Mutably borrows the wrapped backend.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut E {
+        &mut self.inner
     }
 
     /// Returns the wrapped backend.
@@ -579,18 +591,18 @@ impl<E: abi::Encoder> AbiEncoderBackend<E> {
     }
 }
 
-impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
+impl<E: abi::Encoder> WebpCodestreamEncoder for AbiWebpEncoder<E> {
     fn supports(&mut self, req: &WebpEncodeRequest) -> bool {
         self.inner.supports(&encode_config(req))
     }
 
-    fn encode(&mut self, req: &WebpEncodeRequest, raster: &RasterRef<'_>) -> Result<Vec<u8>> {
+    fn encode(&mut self, req: &WebpEncodeRequest, raster: &WebpRasterRef<'_>) -> Result<Vec<u8>> {
         let cfg = encode_config(req);
         let dims = raster.dimensions()?;
         // Owned byte staging for the ARGB case; the YUV case borrows the planes in place.
         let mut argb_bytes = Vec::new();
         let desc = match raster {
-            RasterRef::Yuv420(yuv) => {
+            WebpRasterRef::Yuv420(yuv) => {
                 // `raster.dimensions()` above refused every layout but 4:2:0, so these strides
                 // describe the planes exactly.
                 let (cw, _) =
@@ -598,7 +610,7 @@ impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
                 let cw = cw as usize;
                 let [y, u, v] = yuv.planes();
                 abi::ImageDesc::new(
-                    PIXEL_FORMAT_YUV420,
+                    pixel_format::I420,
                     dims.width(),
                     dims.height(),
                     8,
@@ -612,10 +624,10 @@ impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
                     [dims.width() as usize, cw, cw, 0],
                 )
             }
-            RasterRef::Argb { pixels, .. } => {
+            WebpRasterRef::Argb { pixels, .. } => {
                 argb_bytes.extend(pixels.iter().flat_map(|p| p.to_le_bytes()));
                 abi::ImageDesc::new(
-                    PIXEL_FORMAT_ARGB,
+                    pixel_format::BGRA,
                     dims.width(),
                     dims.height(),
                     8,
@@ -649,7 +661,7 @@ impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
 
 /// Builds the ABI stream descriptor for a decode job (no extradata: a WebP codestream is
 /// self-contained, with no out-of-band parameter sets).
-fn stream_config(info: &CodestreamInfo) -> abi::StreamConfig {
+fn stream_config(info: &WebpStreamInfo) -> abi::StreamConfig {
     let dims = info.dimensions();
     abi::StreamConfig::new(info.codestream().codec_id(), dims.width(), dims.height(), 8)
 }
@@ -668,33 +680,39 @@ mod tests {
     }
 
     #[test]
-    fn codestream_ids_are_the_chunk_fourccs_and_are_distinct() {
+    fn codestream_ids_are_the_big_endian_chunk_fourccs() {
         assert_eq!(WebpCodestream::Vp8.fourcc(), FourCc::VP8);
         assert_eq!(WebpCodestream::Vp8l.fourcc(), FourCc::VP8L);
-        assert_eq!(WebpCodestream::Vp8.codec_id(), u32::from_le_bytes(*b"VP8 "));
-        assert_eq!(
-            WebpCodestream::Vp8l.codec_id(),
-            u32::from_le_bytes(*b"VP8L")
-        );
-        assert_ne!(
-            WebpCodestream::Vp8.codec_id(),
-            WebpCodestream::Vp8l.codec_id()
-        );
+        assert_eq!(VP8_CODEC_ID, 0x5650_3820);
+        assert_eq!(VP8L_CODEC_ID, 0x5650_384C);
+        assert_eq!(WebpCodestream::Vp8.codec_id(), VP8_CODEC_ID);
+        assert_eq!(WebpCodestream::Vp8l.codec_id(), VP8L_CODEC_ID);
+        assert_eq!(WebpCodestream::Vp8 as u8, 0);
+        assert_eq!(WebpCodestream::Vp8l as u8, 1);
     }
 
     #[test]
-    fn pixel_format_tags_are_fourccs_outside_the_pixelformat_range() {
-        assert_eq!(PIXEL_FORMAT_YUV420, u32::from_le_bytes(*b"I420"));
-        assert_eq!(PIXEL_FORMAT_ARGB, u32::from_le_bytes(*b"BGRA"));
-        assert_ne!(PIXEL_FORMAT_YUV420, PIXEL_FORMAT_ARGB);
-        // Well clear of gamut_core::PixelFormat's 0..=10 discriminants.
-        const { assert!(PIXEL_FORMAT_YUV420 > 1000) };
-        const { assert!(PIXEL_FORMAT_ARGB > 1000) };
+    fn registry_result_maps_each_outcome() {
+        assert_eq!(registry_result::<u8>(Ok(7)).unwrap(), Some(7));
+        assert_eq!(
+            registry_result::<u8>(Err(RegistryError::Unsupported)).unwrap(),
+            None
+        );
+        let refusal = Error::unsupported("test", "a backend's own refusal");
+        let err = registry_result::<u8>(Err(RegistryError::Backend(refusal))).unwrap_err();
+        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(err.static_message(), Some("a backend's own refusal"));
+        let err = registry_result::<u8>(Err(RegistryError::Poisoned)).unwrap_err();
+        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.static_message(),
+            Some("WebP: a codestream backend panicked (registry lock poisoned)")
+        );
     }
 
     #[test]
     fn info_and_request_expose_their_fields() {
-        let info = CodestreamInfo::new(WebpCodestream::Vp8l, dims(7, 5));
+        let info = WebpStreamInfo::new(WebpCodestream::Vp8l, dims(7, 5));
         assert_eq!(info.codestream(), WebpCodestream::Vp8l);
         assert_eq!(info.dimensions(), dims(7, 5));
 
@@ -714,22 +732,22 @@ mod tests {
             [vec![0; 4], vec![0; 1], vec![0; 1]],
         )
         .unwrap();
-        let raster = DecodedRaster::Yuv420(yuv.clone());
+        let raster = DecodedWebp::Yuv420(yuv.clone());
         assert_eq!(raster.codestream(), WebpCodestream::Vp8);
         assert_eq!(raster.dimensions().unwrap(), dims(2, 2));
 
-        let argb = DecodedRaster::Argb {
+        let argb = DecodedWebp::Argb {
             dimensions: dims(3, 1),
             pixels: vec![1, 2, 3],
         };
         assert_eq!(argb.codestream(), WebpCodestream::Vp8l);
         assert_eq!(argb.dimensions().unwrap(), dims(3, 1));
 
-        let yref = RasterRef::Yuv420(&yuv);
+        let yref = WebpRasterRef::Yuv420(&yuv);
         assert_eq!(yref.codestream(), WebpCodestream::Vp8);
         assert_eq!(yref.dimensions().unwrap(), dims(2, 2));
         let pixels = [1u32, 2, 3];
-        let aref = RasterRef::Argb {
+        let aref = WebpRasterRef::Argb {
             dimensions: dims(3, 1),
             pixels: &pixels,
         };
@@ -755,8 +773,8 @@ mod tests {
             )
             .unwrap();
             for err in [
-                DecodedRaster::Yuv420(yuv.clone()).dimensions().unwrap_err(),
-                RasterRef::Yuv420(&yuv).dimensions().unwrap_err(),
+                DecodedWebp::Yuv420(yuv.clone()).dimensions().unwrap_err(),
+                WebpRasterRef::Yuv420(&yuv).dimensions().unwrap_err(),
             ] {
                 assert_eq!(
                     err.kind(),
@@ -796,7 +814,7 @@ mod tests {
 
     #[test]
     fn configs_carry_the_codec_id_quality_and_depth() {
-        let cfg = stream_config(&CodestreamInfo::new(WebpCodestream::Vp8, dims(64, 48)));
+        let cfg = stream_config(&WebpStreamInfo::new(WebpCodestream::Vp8, dims(64, 48)));
         assert_eq!(cfg.codec_id, WebpCodestream::Vp8.codec_id());
         assert_eq!(cfg.width, 64);
         assert_eq!(cfg.height, 48);

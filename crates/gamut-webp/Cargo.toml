@@ -16,7 +16,7 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-gamut-codec-abi.workspace = true
+gamut-codec-abi = { workspace = true, features = ["std"] }
 gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-dsp.workspace = true
@@ -29,16 +29,14 @@ gamut-metadata = { workspace = true, optional = true }
 
 [features]
 default = []
-# Typed metadata wiring: `WebpMetadata::blocks` / `WebpMetadata::metadata` (the facade's
-# `TypedMetadata` trait) and `WebpEncoder::with_metadata` / `with_encoded_metadata`.
+# Typed metadata wiring: `WebpEncoder` becomes a `gamut_metadata::MetadataSink`
+# (`with_metadata` / `with_encoded_metadata`), and the facade's `TypedMetadata` reads the
+# `RawMetadata` that `WebpDecoder::metadata` returns.
 metadata = ["dep:gamut-metadata"]
 
 [dev-dependencies]
 # libwebp as the differential-test oracle (FFI). Dev-only: the shipped library is C-free.
 libwebp-sys2.workspace = true
-# Used by the lossy oracle tests to build YUV inputs and wrap raw VP8 bitstreams.
-gamut-color.workspace = true
-gamut-riff.workspace = true
 divan.workspace = true
 # exiv2 as the container-level metadata oracle (FFI to a vendored, statically-linked exiv2 built
 # from the `third_party/exiv2` + `third_party/expat` submodules): it reads what the `metadata`

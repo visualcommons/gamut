@@ -1077,10 +1077,13 @@ fn json_output_lists_a_webp_chunk_too_short_for_a_store_as_unread() {
         .with_c2pa(b"STORE-BYTES-NEVER-PRINTED")
         .encode_image(rgb_image(&rgb), &mut file)
         .expect("encode");
-    let at = gamut::webp::c2pa_span(&file)
-        .expect("walk")
-        .expect("a chunk")
-        .start;
+    let at = usize::try_from(
+        gamut::webp::c2pa_span(&file)
+            .expect("walk")
+            .expect("a chunk")
+            .start,
+    )
+    .unwrap();
     let short = [&b"C2PA"[..], &4u32.to_le_bytes(), b"abcd"].concat();
     file.splice(at..at, short);
     let riff_size = u32::try_from(file.len() - 8).unwrap();
@@ -1118,10 +1121,7 @@ fn json_output_reports_a_webp_store_as_the_chunk_payload() {
     assert_eq!(doc["format"], "webp");
     let stores = &doc["c2pa"]["stores"];
     assert_eq!(stores.as_array().map(Vec::len), Some(1), "{doc}");
-    assert_eq!(
-        stores[0]["range"],
-        json_range(span.start as u64 + 8, span.end as u64)
-    );
+    assert_eq!(stores[0]["range"], json_range(span.start + 8, span.end));
     assert_eq!(stores[0]["position"], "last");
     assert_eq!(doc["c2pa"]["unread"], serde_json::json!([]));
     assert_eq!(

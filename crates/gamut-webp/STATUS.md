@@ -37,8 +37,8 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
 - **M4** — Color & metadata (**in scope**, embed on encode + preserve on decode): `ICCP` ICC
   profiles and `EXIF` / `XMP ` metadata are ✅ **done** (issue #302) — `WebpEncoder::with_icc_profile`
   / `with_exif` / `with_xmp` embed the payloads verbatim (promoting a simple file to `VP8X` and
-  deriving the feature flags from the chunks present), and the `gamut_webp::metadata` free function
-  reads them back without decoding pixels; libwebp's own muxer is the oracle in both directions.
+  deriving the feature flags from the chunks present), and `WebpDecoder::metadata` reads them back
+  as a `gamut_core::RawMetadata` without decoding pixels; libwebp's own muxer is the oracle in both directions.
   Read-side chunk-order enforcement and unknown-chunk round-trip preservation closed with
   `gamut-riff` v1 (issue #186): `gamut_riff::WebpLayout::parse` is the single container walk behind
   both decode paths, and `WebpEncoder::with_unknown_chunks` re-emits preserved chunks — refusing any
@@ -46,12 +46,13 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
   passed through and written twice. The C2PA
   manifest store joined them on the same verbatim terms (issue #445): `WebpEncoder::with_c2pa` /
   `with_c2pa_reserved` embed or reserve it, `encode_with_report` and `gamut_webp::c2pa_span` report
-  the byte range a `c2pa.hash.data` assertion excludes, and `WebpMetadata::c2pa` reads it back.
-  gamut carries the store and never parses, hashes, signs or validates it; the behavioural `c2pa-rs`
-  oracle is issue #447. Typed metadata (issue #510), behind the optional `metadata` feature:
-  `WebpMetadata` implements `gamut_metadata::TypedMetadata`, and `WebpEncoder::with_metadata` /
-  `with_encoded_metadata` embed a facade `Metadata`, refusing IPTC-IIM and a C2PA store as
-  `Unsupported`; exiv2 is the container-level oracle in both directions.
+  the byte range a `c2pa.hash.data` assertion excludes (the store is that range less its 8-byte
+  chunk header). gamut carries the store and never parses, hashes, signs or validates it; the
+  behavioural `c2pa-rs` oracle is issue #447. Typed metadata (issue #510), behind the optional
+  `metadata` feature: the facade's `TypedMetadata` reads the `RawMetadata` that
+  `WebpDecoder::metadata` returns, and `WebpEncoder` is a `gamut_metadata::MetadataSink`, whose
+  `with_metadata` / `with_encoded_metadata` embed a facade `Metadata`, refusing IPTC-IIM and a C2PA
+  store as `Unsupported`; exiv2 is the container-level oracle in both directions.
 - **M5** — Animation: `ANIM` / `ANMF` — **out of scope** (decision 2026-06-09). Multi-frame
   sequences fall outside the image-first charter and the single-image `gamut_core` traits; WebP
   animation needs no codec work (each frame is an independent keyframe) but does need a non-trait
@@ -293,15 +294,16 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | tier-1 oracle: internal forward/inverse round-trips (transforms, coders) | — | ✅ | M0 |
 | tier-2 oracle: hermetic native decoder reproduces encoder output | — | ✅ | M0 |
 | tier-3 oracle: `libwebp-sys` differential (enc→libwebp-dec, libwebp-enc→dec) | — | ✅ | M0 |
-| embedded-metadata API (`metadata` / `WebpMetadata`; `with_icc_profile`/`with_exif`/`with_xmp`) | issue #302 | ✅ | M4 |
+| embedded-metadata API (`WebpDecoder::metadata` → `RawMetadata`; `with_icc_profile`/`with_exif`/`with_xmp`) | issue #302 | ✅ | M4 |
 | tier-3 oracle: libwebpmux metadata differential (gamut↔libwebp `ICCP`/`EXIF`/`XMP `, flags + order) | — | ✅ | M4 |
 | CLI `gamut convert … .webp` (encode) + `.webp` decode input | gamut-cli | ✅ | M0 |
 | codestream backend registries (`WebpCodestreamDecoder`/`WebpCodestreamEncoder`, push order + built-in tails) | issue #275 | ✅ | M6 |
-| `gamut-codec-abi` adapters (`AbiDecoderBackend` / `AbiEncoderBackend`, `VP8 `/`VP8L` codec ids) | issue #241 | ✅ | M6 |
+| `gamut-codec-abi` adapters (`AbiWebpDecoder` / `AbiWebpEncoder`, big-endian `VP8_CODEC_ID` / `VP8L_CODEC_ID`) | issue #241 | ✅ | M6 |
 | `Effort` compression ladder (libwebp `method` `0..=6`) on both codestreams | issue #261 | ✅ | M4 |
-| decoder resource limits (`with_max_dimensions` / `with_max_image_bytes`, 64 MiB default at 4 B/px), checked on the `VP8 `/`VP8L` header before allocation and backend dispatch | issue #1025 | ✅ | M6 |
+| decoder resource limits (`with_limits(DecodeLimits)`, 64 MiB default at 4 B/px, sides at 16384), checked on the `VP8 `/`VP8L` header before allocation and backend dispatch | issue #1025 | ✅ | M6 |
 | VP8L candidate-plan search: transform chain, palette order, cache size, grouping, LZ77 depth | issue #31 | ✅ | M4 |
 | VP8 two-pass entropy: derived coefficient probabilities + measured skip probability | issue #32 | ✅ | M4 |
 | VP8 dead-zone quantizer (AC only; DC stays round-to-nearest) | issue #32 | ✅ | M4 |
 | near-lossless preprocessing (`NearLossless`, host-side RGB quantization before VP8L) | issue #261 | ✅ | M4 |
 | wasm / ffi bindings for WebP | gamut-{wasm,ffi} | ☐ | future |
+| codec internals private: `alpha` and `vp8l` are; `vp8` is still `#[doc(hidden)] pub` because the libwebp differential suite (`tests/oracle.rs`) drives its frame coder and cannot move inline under `#![forbid(unsafe_code)]` until the libwebp FFI wrappers move to a `tooling/` oracle crate — not supported surface | de-slop | ◐ | — |

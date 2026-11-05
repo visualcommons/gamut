@@ -454,4 +454,33 @@ mod tests {
         );
         assert_eq!(read_alph(&chunk, w, h).unwrap(), plane);
     }
+
+    #[test]
+    fn alph_lossless_decode_survives_malformed() {
+        // The headerless VP8L path that backs compressed (`C=1`) `ALPH` alpha: `read_alph` must
+        // survive a garbage payload (advertising compression, then random bytes) without
+        // panicking, for a range of declared dimensions.
+        for &(w, h) in &[(1usize, 1usize), (16, 16), (24, 18), (33, 7)] {
+            for seed in 0..128u32 {
+                // Fuzz the ALPH header byte (covers raw `C=0`, VP8L `C=1`, and the reserved
+                // methods, plus every filter) followed by random body bytes — the C=1 path runs the
+                // headerless VP8L decoder on arbitrary prefix/transform/LZ77 data, which must
+                // error, not panic.
+                let mut payload = vec![(seed & 0xff) as u8];
+                payload.extend(pseudo_random_bytes(seed ^ 0x1234, 48));
+                let _ = read_alph(&payload, w, h);
+            }
+        }
+    }
+
+    /// A cheap deterministic byte generator (an LCG), so the corpus above is reproducible.
+    fn pseudo_random_bytes(seed: u32, len: usize) -> Vec<u8> {
+        let mut state = seed ^ 0x9e37_79b9;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
 }

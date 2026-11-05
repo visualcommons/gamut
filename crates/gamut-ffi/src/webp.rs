@@ -26,7 +26,9 @@ seam_handle! {
     host = gamut::webp::WebpDecoder,
     new = gamut::webp::WebpDecoder::new(),
     seam = decoder,
-    push = |host, backend| { host.push_backend(gamut::webp::AbiDecoderBackend::new(backend)); },
+    push = |host, backend| {
+        *host = core::mem::take(host).with_backend(gamut::webp::AbiWebpDecoder::new(backend));
+    },
     fns = (gamut_webp_decoder_new, gamut_webp_decoder_free, gamut_webp_decoder_push_backend),
     tests = webp_decoder_tests,
 }
@@ -36,7 +38,9 @@ seam_handle! {
     host = gamut::webp::WebpEncoder,
     new = gamut::webp::WebpEncoder::new(),
     seam = encoder,
-    push = |host, backend| { host.push_backend(gamut::webp::AbiEncoderBackend::new(backend)); },
+    push = |host, backend| {
+        *host = core::mem::take(host).with_backend(gamut::webp::AbiWebpEncoder::new(backend));
+    },
     fns = (gamut_webp_encoder_new, gamut_webp_encoder_free, gamut_webp_encoder_push_backend),
     tests = webp_encoder_tests,
 }

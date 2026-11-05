@@ -54,20 +54,21 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   `NearLossless::max_deviation()`; **alpha is never touched**. Turning it on can never enlarge a
   file: the encoder codes both ways and keeps the smaller.
 - **Decode limits** — a few header bytes can declare a 16384×16384 frame (1 GiB of RGBA), so
-  `WebpDecoder` refuses, with `Unsupported`, any frame over its byte budget — 64 MiB by default
-  (`with_max_image_bytes`), charged at four bytes per pixel whether or not the file is opaque — or
-  its dimension caps (`with_max_dimensions`, default the format's 16384). Both are checked against
+  `WebpDecoder` refuses, with `Unsupported`, any frame over the `DecodeLimits` set with
+  `with_limits`: a byte budget — 64 MiB by default, charged at four bytes per pixel whether or not
+  the file is opaque — and dimension caps, by default the format's 16384. All are checked against
   the `VP8 `/`VP8L` header before any frame-sized allocation and before a backend sees the job.
 - **Embedded metadata** — `WebpEncoder::with_icc_profile` / `with_exif` / `with_xmp` embed the `ICCP`,
-  `EXIF`, and `XMP ` chunks; the `gamut_webp::metadata` free function reads them back out of any WebP
-  file without decoding pixels. Payloads are carried **verbatim** — never parsed or reserialized — so
-  they can be borrowed straight into [`gamut-metadata`](../gamut-metadata)'s `MetadataBlock`.
+  `EXIF`, and `XMP ` chunks; `WebpDecoder::metadata` reads them back out of any WebP file, as a
+  `RawMetadata`, without decoding pixels. Payloads are carried **verbatim** — never parsed or
+  reserialized — so they can be borrowed straight into [`gamut-metadata`](../gamut-metadata)'s
+  `MetadataBlock`; with the `metadata` feature `WebpEncoder` is that facade's `MetadataSink`.
   Embedding promotes a simple file to the extended format, derives the `VP8X` feature flags from the
   chunks present, and emits everything in the spec's canonical order.
 - **C2PA manifest stores** — `WebpEncoder::with_c2pa` embeds a finished manifest store as a `C2PA`
   chunk (C2PA 2.4 §A.3.7) and `with_c2pa_reserved` leaves room for one that cannot exist yet,
-  because its hard binding digests the finished file. `encode_with_report` returns the file together
-  with the chunk's whole byte range, header included (which conflicts with C2PA 2.4 §18.5.1's rule
+  because its hard binding digests the finished file. `encode_with_report` appends the file to the
+  caller's buffer and reports its length and the chunk's whole byte range, header included (which conflicts with C2PA 2.4 §18.5.1's rule
   that a `c2pa.hash.data` exclusion not overlap a header or length field; open), and
   `gamut_webp::c2pa_span` recovers that range from any WebP file. The chunk goes last, as §A.3.7
   requires, and no `VP8X` flag advertises it, RFC 9649 defining no C2PA feature bit. A file carries
@@ -78,15 +79,16 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
 
 ### Pluggable codestream backends
 
-The container and the coded picture are separable. `WebpDecoder::push_backend` /
-`WebpEncoder::push_backend` install a `WebpCodestreamDecoder` / `WebpCodestreamEncoder` — one trait
+The container and the coded picture are separable. `WebpDecoder::with_backend` /
+`WebpEncoder::with_backend` add a `WebpCodestreamDecoder` / `WebpCodestreamEncoder` — one trait
 pair, discriminated by `WebpCodestream` (`Vp8` or `Vp8l`) — that handles the raw `VP8 ` / `VP8L`
 chunk payload: a stateless-V4L2-style hardware VP8 decoder, say, or libwebp as an alternate VP8L
-software path. Backends are tried in **push order**; `supports() == false` is the only fall-through;
-the crate's own `vp8`/`vp8l` codecs are the implicit tails, so the default output is unchanged.
-Backends written against the shared [`gamut-codec-abi`](../gamut-codec-abi) seam plug in through
-`AbiDecoderBackend` / `AbiEncoderBackend`. `ALPH` alpha stays container-side and never crosses the
-seam.
+software path. Backends are tried in the order they are added; `supports() == false` is the only
+fall-through, and a backend that accepts and then fails returns its error unchanged; the crate's
+own `vp8`/`vp8l` codecs are the implicit tails, so the default output is unchanged. Backends
+written against the shared [`gamut-codec-abi`](../gamut-codec-abi) seam plug in through
+`AbiWebpDecoder` / `AbiWebpEncoder`, under the big-endian codec ids `VP8_CODEC_ID` /
+`VP8L_CODEC_ID`. `ALPH` alpha stays container-side and never crosses the seam.
 
 ## Status
 

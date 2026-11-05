@@ -2,14 +2,14 @@
 //! (RFC 9649 §2.7.2-§2.7.3), plus the `C2PA` manifest store (C2PA 2.4 §A.3.7).
 //!
 //! The contract under test is byte fidelity plus container conformance — a payload handed to
-//! `WebpEncoder::with_*` comes back from `gamut_webp::metadata` unchanged, the `VP8X` feature flags
+//! `WebpEncoder::with_*` comes back from `WebpDecoder::metadata` unchanged, the `VP8X` feature flags
 //! match the chunks actually present, the chunks appear in the spec's canonical order, and attaching
 //! metadata changes nothing about the pixels. The differential check against libwebp's own muxer
 //! lives in `oracle.rs`.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Result, Rgb8, Rgba8};
-use gamut_riff::{FourCc, RiffReader, RiffWriter, Vp8xHeader, WebpLayout};
-use gamut_webp::{WebpDecoder, WebpEncoder, WebpMetadata};
+use gamut_riff::{FourCc, MetadataChunks, RiffReader, RiffWriter, Vp8xHeader, WebpLayout};
+use gamut_webp::{Chunk, RawMetadata, WebpDecoder, WebpEncoder};
 
 /// A 200-byte "ICC profile": opaque bytes, even length.
 const ICC: &[u8] = &[0x5a; 200];
@@ -71,11 +71,22 @@ fn encode_rgba(encoder: &WebpEncoder, pixels: &[u8], d: Dimensions) -> Vec<u8> {
 /// The `(exif, xmp, icc)` payloads of a file, as owned bytes.
 type Payloads = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// Reads `file`'s metadata as a comparable triple. `WebpMetadata` is `#[non_exhaustive]`, so a test
+/// Reads `file`'s metadata as a comparable triple. `RawMetadata` is `#[non_exhaustive]`, so a test
 /// outside the crate cannot build one to compare against.
 fn read(file: &[u8]) -> Payloads {
-    let meta = gamut_webp::metadata(file).expect("read metadata");
+    let meta = WebpDecoder::new().metadata(file).expect("read metadata");
     (meta.exif, meta.xmp, meta.icc)
+}
+
+/// The `C2PA` chunk payload of `file` — the manifest store — through `gamut-riff`'s chunk reader,
+/// which `WebpDecoder::metadata` does not surface.
+fn store(file: &[u8]) -> Option<&[u8]> {
+    MetadataChunks::read(file).expect("valid RIFF/WebP").c2pa
+}
+
+/// An unknown chunk to pass through.
+fn chunk(fourcc: FourCc, payload: &[u8]) -> Chunk<'_> {
+    Chunk { fourcc, payload }
 }
 
 /// Builds the expected `(exif, xmp, icc)` triple from borrowed literals.
@@ -263,8 +274,8 @@ fn no_metadata_leaves_the_simple_format_alone() {
         assert_eq!(chunks(&file).len(), 1, "{label}: simple format");
         assert!(vp8x(&file).is_none(), "{label}: no VP8X chunk");
         assert_eq!(
-            gamut_webp::metadata(&file).unwrap(),
-            WebpMetadata::default(),
+            WebpDecoder::new().metadata(&file).unwrap(),
+            RawMetadata::default(),
             "{label}: no metadata"
         );
     }
@@ -330,7 +341,7 @@ fn setters_keep_the_last_payload() {
         chunks(&file),
         vec![FourCc::VP8X, FourCc::ICCP, FourCc::VP8L, FourCc::EXIF]
     );
-    let meta = gamut_webp::metadata(&file).unwrap();
+    let meta = WebpDecoder::new().metadata(&file).unwrap();
     assert_eq!(meta.exif.as_deref(), Some(EXIF));
     assert_eq!(meta.icc.as_deref(), Some(ICC));
 }
@@ -360,7 +371,7 @@ fn payloads_larger_than_a_16_bit_length_round_trip() {
         dims(4, 4),
     );
     assert_eq!(
-        gamut_webp::metadata(&file).unwrap().icc.as_deref(),
+        WebpDecoder::new().metadata(&file).unwrap().icc.as_deref(),
         Some(profile.as_slice())
     );
 }
@@ -405,7 +416,7 @@ fn metadata_reads_a_hand_built_file_first_chunk_wins() {
 
 #[test]
 fn metadata_rejects_input_that_is_not_a_webp_file() {
-    let err: Result<WebpMetadata> = gamut_webp::metadata(b"definitely not a WebP file");
+    let err: Result<RawMetadata> = WebpDecoder::new().metadata(b"definitely not a WebP file");
     assert!(err.is_err());
 }
 
@@ -424,7 +435,7 @@ fn unknown_chunks_survive_a_decode_re_encode_cycle() {
     let mut original = Vec::new();
     WebpEncoder::lossless()
         .with_exif(b"exif payload")
-        .with_unknown_chunks(&[(odd, b"private payload")])
+        .with_unknown_chunks(&[chunk(odd, b"private payload")])
         .expect("a private FourCC is accepted")
         .encode_image(image, &mut original)
         .expect("encode");
@@ -439,15 +450,10 @@ fn unknown_chunks_survive_a_decode_re_encode_cycle() {
     assert_eq!(layout.unknown[0].payload, b"private payload");
 
     // Re-encode, feeding the recovered chunks straight back in.
-    let carried: Vec<(FourCc, &[u8])> = layout
-        .unknown
-        .iter()
-        .map(|c| (c.fourcc, c.payload))
-        .collect();
     let mut rewritten = Vec::new();
     WebpEncoder::lossless()
         .with_exif(b"exif payload")
-        .with_unknown_chunks(&carried)
+        .with_unknown_chunks(&layout.unknown)
         .expect("carried chunks are private")
         .encode_image(
             ImageRef::<Rgb8>::new(decoded.as_samples(), decoded.dimensions()).unwrap(),
@@ -474,7 +480,7 @@ fn an_unknown_chunk_alone_promotes_a_file_to_the_extended_format() {
     let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2).unwrap()).unwrap();
     let mut file = Vec::new();
     WebpEncoder::lossless()
-        .with_unknown_chunks(&[(FourCc::from(PRIVATE), b"payload")])
+        .with_unknown_chunks(&[chunk(FourCc::from(PRIVATE), b"payload")])
         .expect("a private FourCC is accepted")
         .encode_image(image, &mut file)
         .expect("encode");
@@ -514,7 +520,7 @@ fn a_store_alone_promotes_a_file_to_the_extended_format_and_goes_last() {
                 .with_xmp(XMP)
                 .with_icc_profile(ICC)
                 .with_c2pa(C2PA)
-                .with_unknown_chunks(&[(FourCc::from(*b"XYZW"), b"private")])
+                .with_unknown_chunks(&[chunk(FourCc::from(*b"XYZW"), b"private")])
                 .expect("a private FourCC is accepted"),
             &rgb(16, 16),
             dims(16, 16),
@@ -547,8 +553,7 @@ fn the_store_round_trips_byte_exactly_and_sets_no_vp8x_flag() {
     assert_eq!(odd.len() % 2, 1);
     for (label, encoder) in encoders() {
         let file = encode_rgb(&encoder.clone().with_c2pa(odd), &rgb(16, 16), dims(16, 16));
-        let meta = gamut_webp::metadata(&file).expect("read metadata");
-        assert_eq!(meta.c2pa.as_deref(), Some(odd), "{label}: verbatim");
+        assert_eq!(store(&file), Some(odd), "{label}: verbatim");
         assert_eq!(
             read(&file),
             want(None, None, None),
@@ -558,7 +563,7 @@ fn the_store_round_trips_byte_exactly_and_sets_no_vp8x_flag() {
         let flagged = encode_rgb(
             &encoder
                 .clone()
-                .with_unknown_chunks(&[(FourCc::from(*b"XYZW"), b"x")])
+                .with_unknown_chunks(&[chunk(FourCc::from(*b"XYZW"), b"x")])
                 .expect("a private FourCC is accepted"),
             &rgb(16, 16),
             dims(16, 16),
@@ -584,9 +589,11 @@ fn c2pa_span_reads_back_the_range_the_store_occupies() {
     let span = gamut_webp::c2pa_span(&file)
         .expect("parse")
         .expect("the store was embedded");
-    assert_eq!(&file[span.start..span.start + 4], b"C2PA");
-    assert_eq!(&file[span.start + 8..span.end], C2PA);
-    assert_eq!(span.len(), 8 + C2PA.len());
+    let (start, end) = (span.start as usize, span.end as usize);
+    assert_eq!(&file[start..start + 4], b"C2PA");
+    assert_eq!(&file[start + 8..end], C2PA);
+    assert_eq!(end - start, 8 + C2PA.len());
+    assert_eq!(store(&file), Some(C2PA), "the chunk reader agrees");
 }
 
 #[test]
@@ -598,7 +605,7 @@ fn a_file_without_a_store_reports_no_span_and_no_store() {
         dims(8, 8),
     );
     assert_eq!(gamut_webp::c2pa_span(&file).expect("parse"), None);
-    assert_eq!(gamut_webp::metadata(&file).expect("read").c2pa, None);
+    assert_eq!(store(&file), None);
 }
 
 #[test]
@@ -616,15 +623,10 @@ fn a_store_survives_a_decode_re_encode_cycle_exactly_once() {
         "the store is not an unknown chunk"
     );
 
-    let carried: Vec<(FourCc, &[u8])> = layout
-        .unknown
-        .iter()
-        .map(|c| (c.fourcc, c.payload))
-        .collect();
     let again = encode_rgb(
         &WebpEncoder::lossless()
             .with_c2pa(layout.metadata.c2pa.expect("the store was read back"))
-            .with_unknown_chunks(&carried)
+            .with_unknown_chunks(&layout.unknown)
             .expect("carried chunks are private"),
         &rgb(8, 8),
         dims(8, 8),

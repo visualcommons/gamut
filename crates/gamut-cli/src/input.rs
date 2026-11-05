@@ -161,13 +161,23 @@ impl InputMetadata {
 /// absent rather than failing the conversion.
 pub(crate) fn read_metadata(bytes: &[u8]) -> InputMetadata {
     if is_webp(bytes) {
-        return gamut::webp::metadata(bytes)
+        // `WebpDecoder::metadata` returns the three metadata carriers; the manifest store is the
+        // `C2PA` chunk's payload, the span `c2pa_span` reports less its 8-byte chunk header.
+        let c2pa = gamut::webp::c2pa_span(bytes)
+            .ok()
+            .flatten()
+            .and_then(|span| {
+                let start = usize::try_from(span.start).ok()?.checked_add(8)?;
+                bytes.get(start..usize::try_from(span.end).ok()?)
+            });
+        return WebpDecoder::new()
+            .metadata(bytes)
             .map(|m| {
                 InputMetadata::from_fields(
                     m.exif.as_deref(),
                     m.xmp.as_deref(),
                     m.icc.as_deref(),
-                    m.c2pa.as_deref(),
+                    c2pa,
                 )
             })
             .unwrap_or_default();
@@ -280,7 +290,7 @@ pub(crate) fn decode_native(path: &Path, bytes: &[u8]) -> Result<NativeImage, Cl
             Ok(rgb) => NativeImage::Rgb8(rgb),
             Err(err) if err.kind() == ErrorKind::Unsupported => NativeImage::Rgba8(
                 WebpDecoder::new()
-                    .convert_policy(lossy)
+                    .with_convert_policy(lossy)
                     .decode_image(bytes)?,
             ),
             Err(err) => return Err(err.into()),
@@ -415,7 +425,7 @@ pub(crate) fn decode_bytes(
 
     if is_webp(bytes) {
         return Ok(decode_with!(
-            WebpDecoder::new().convert_policy(lossy),
+            WebpDecoder::new().with_convert_policy(lossy),
             bytes,
             want_alpha
         ));

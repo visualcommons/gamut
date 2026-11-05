@@ -155,27 +155,39 @@ impl NearLossless {
 /// Which WebP bitstream the encoder produces.
 ///
 /// `#[non_exhaustive]`: modes are an open set — variants for deferred coding strategies are added
-/// as they ship, so match with a wildcard arm.
+/// as they ship, so match with a wildcard arm. The discriminants are permanent and append-only, so
+/// the mode crosses a C or FFI boundary as its `u8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum WebpMode {
     /// VP8L lossless coding — the input is reproduced bit-exactly (the default; gamut's M0 path).
     #[default]
-    Lossless,
+    Lossless = 0,
     /// VP8 lossy coding — smaller output at a quality/size tradeoff set by [`WebpConfig::quality`].
-    Lossy,
+    Lossy = 1,
 }
 
 /// Configuration for a [`WebpEncoder`](crate::WebpEncoder).
 ///
 /// `quality` ranges `0..=100` and applies only to [`WebpMode::Lossy`], where it is the usual quality
 /// factor (higher = larger output, closer to the source). [`WebpMode::Lossless`] reproduces the
-/// input exactly and ignores `quality`. Build one with the [`WebpEncoder`](crate::WebpEncoder)
-/// constructors and builders rather than by hand — they keep the fields consistent.
+/// input exactly and ignores `quality`.
 ///
 /// `#[non_exhaustive]`: the configuration is an open set — fields for deferred encoder knobs are
-/// added as they ship. Read it as the snapshot returned by
-/// [`WebpEncoder::config`](crate::WebpEncoder::config).
+/// added as they ship. Start from [`WebpConfig::default`] (or the snapshot
+/// [`WebpEncoder::config`](crate::WebpEncoder::config) returns), set the fields you want, and build
+/// an encoder from it with [`WebpEncoder::from_config`](crate::WebpEncoder::from_config):
+///
+/// ```
+/// use gamut_webp::{Effort, WebpConfig, WebpEncoder, WebpMode};
+///
+/// let mut config = WebpConfig::default();
+/// config.mode = WebpMode::Lossy;
+/// config.quality = 60;
+/// config.effort = Effort::Slowest;
+/// assert_eq!(WebpEncoder::from_config(config).config(), config);
+/// ```
 ///
 /// `Copy`: every knob here is plain scalar data; the owned payloads (ICC profiles, Exif/XMP) live
 /// on [`WebpEncoder`](crate::WebpEncoder) rather than in the config.
@@ -223,6 +235,12 @@ mod tests {
         assert_eq!(c.effort, Effort::Default);
         assert_eq!(c.near_lossless, None);
         assert_eq!(WebpMode::default(), WebpMode::Lossless);
+    }
+
+    #[test]
+    fn mode_discriminants_are_permanent() {
+        assert_eq!(WebpMode::Lossless as u8, 0);
+        assert_eq!(WebpMode::Lossy as u8, 1);
     }
 
     #[test]

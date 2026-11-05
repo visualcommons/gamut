@@ -19,8 +19,8 @@ use gamut_riff::{
 
 use crate::alpha;
 use crate::backend::{
-    RasterRef, SharedEncoder, WebpCodestream, WebpCodestreamEncoder, WebpEncodeRequest,
-    dispatch_encode,
+    EncoderRegistry, WebpCodestream, WebpCodestreamEncoder, WebpEncodeRequest, WebpRasterRef,
+    encode_with_backends,
 };
 use crate::config::{Effort, NearLossless, WebpConfig, WebpMode};
 use crate::vp8::frame::{EncodeOptions, encode_frame_filtered};
@@ -74,10 +74,9 @@ fn reservation_len(len: usize) -> Result<u32> {
 /// reserved with [`with_c2pa_reserved`](Self::with_c2pa_reserved), and
 /// [`encode_with_report`](Self::encode_with_report) reports where in the finished file it landed.
 ///
-/// The codestream itself may be produced by a pluggable backend installed with
-/// [`push_backend`](Self::push_backend); with none installed (the default) the crate's own
-/// `vp8`/`vp8l` encoders produce byte-identical output to before the seam existed. See
-/// [`crate::backend`] for the fallback contract.
+/// The codestream itself may be produced by a pluggable backend added with
+/// [`with_backend`](Self::with_backend); with none added (the default) the crate's own
+/// `vp8`/`vp8l` encoders run. See the crate docs for the fallback contract.
 #[derive(Clone, Default)]
 pub struct WebpEncoder {
     /// Encoder configuration (mode + quality).
@@ -94,7 +93,7 @@ pub struct WebpEncoder {
     /// Unknown chunks to re-emit after the metadata, in the order given (RFC 9649 §2.7.1.6).
     unknown: Vec<(FourCc, Vec<u8>)>,
     /// Pluggable codestream encoders, tried in push order ahead of the built-in tails.
-    backends: Vec<SharedEncoder>,
+    backends: EncoderRegistry,
 }
 
 impl fmt::Debug for WebpEncoder {
@@ -128,12 +127,20 @@ impl WebpEncoder {
     /// Creates an encoder that produces a lossy VP8 bitstream at the given `quality` (`0..=100`).
     #[must_use]
     pub fn lossy(quality: u8) -> Self {
+        Self::from_config(WebpConfig {
+            mode: WebpMode::Lossy,
+            quality,
+            ..WebpConfig::default()
+        })
+    }
+
+    /// Creates an encoder with every knob [`WebpConfig`] holds — mode, quality, effort and
+    /// near-lossless strength — and no metadata or backends. The inverse of
+    /// [`config`](Self::config).
+    #[must_use]
+    pub fn from_config(config: WebpConfig) -> Self {
         Self {
-            config: WebpConfig {
-                mode: WebpMode::Lossy,
-                quality,
-                ..WebpConfig::default()
-            },
+            config,
             ..Self::default()
         }
     }
@@ -142,7 +149,7 @@ impl WebpEncoder {
     /// extended (`VP8X`) format and setting the Exif feature flag.
     ///
     /// `exif` is stored **verbatim**: a WebP `EXIF` chunk carries the bare payload — unlike a JPEG
-    /// APP1 segment, there is no `"Exif\0\0"` signature to add or strip — so [`crate::metadata`]
+    /// APP1 segment, there is no `"Exif\0\0"` signature to add or strip — so [`WebpDecoder::metadata`](crate::WebpDecoder::metadata)
     /// reads back exactly these bytes. Calling this twice keeps the last payload.
     #[must_use]
     pub fn with_exif(mut self, exif: &[u8]) -> Self {
@@ -154,7 +161,7 @@ impl WebpEncoder {
     /// extended (`VP8X`) format and setting the XMP feature flag.
     ///
     /// Takes bytes rather than `&str` because a packet may open with a BOM. The payload is stored
-    /// verbatim, so [`crate::metadata`] reads back exactly these bytes. Calling this twice keeps the
+    /// verbatim, so [`WebpDecoder::metadata`](crate::WebpDecoder::metadata) reads back exactly these bytes. Calling this twice keeps the
     /// last payload.
     #[must_use]
     pub fn with_xmp(mut self, xmp: &[u8]) -> Self {
@@ -166,7 +173,7 @@ impl WebpEncoder {
     /// the extended (`VP8X`) format and setting the ICC feature flag.
     ///
     /// The profile is stored verbatim and placed before the image data, as the spec requires, so
-    /// [`crate::metadata`] reads back exactly these bytes. With no profile embedded, readers assume
+    /// [`WebpDecoder::metadata`](crate::WebpDecoder::metadata) reads back exactly these bytes. With no profile embedded, readers assume
     /// sRGB. Calling this twice keeps the last payload.
     #[must_use]
     pub fn with_icc_profile(mut self, profile: &[u8]) -> Self {
@@ -310,33 +317,34 @@ impl WebpEncoder {
     /// error names the offending FourCC in its detail, escaping any non-printable byte.
     /// Use [`with_icc_profile`](Self::with_icc_profile), [`with_exif`](Self::with_exif),
     /// [`with_xmp`](Self::with_xmp) or [`with_c2pa`](Self::with_c2pa) instead.
-    pub fn with_unknown_chunks(mut self, chunks: &[(FourCc, &[u8])]) -> Result<Self> {
-        if let Some((fourcc, _)) = chunks.iter().find(|(fourcc, _)| !is_unknown_chunk(*fourcc)) {
+    pub fn with_unknown_chunks(mut self, chunks: &[Chunk<'_>]) -> Result<Self> {
+        if let Some(chunk) = chunks.iter().find(|chunk| !is_unknown_chunk(chunk.fourcc)) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "WebP: this chunk is written by the encoder itself and cannot be passed through as \
                  an unknown chunk",
             )
-            .with_detail(format!("{fourcc}")));
+            .with_detail(format!("{}", chunk.fourcc)));
         }
         self.unknown = chunks
             .iter()
-            .map(|(fourcc, payload)| (*fourcc, payload.to_vec()))
+            .map(|chunk| (chunk.fourcc, chunk.payload.to_vec()))
             .collect();
         Ok(self)
     }
 
-    /// Installs a codestream encoder backend, returning `&mut self` so pushes chain.
+    /// Adds a codestream encoder backend, returning the updated encoder so calls chain.
     ///
-    /// Backends are tried in **push order**, ahead of the built-in `vp8`/`vp8l` encoders, which
-    /// remain the implicit tails and cannot be removed. A backend declines a job by returning
-    /// `false` from [`supports`](WebpCodestreamEncoder::supports); once it accepts, its error
-    /// propagates and no other encoder is tried.
+    /// Backends are tried in the order they are added, ahead of the built-in `vp8`/`vp8l`
+    /// encoders, which remain the implicit tails and cannot be removed. A backend declines a job
+    /// by returning `false` from [`supports`](WebpCodestreamEncoder::supports); once it accepts,
+    /// its error propagates unchanged and no other encoder is tried.
     ///
-    /// **Cloning a `WebpEncoder` shares its backends**: the registry holds each backend behind an
-    /// [`Arc`], so a clone dispatches to the very same backend objects (and the same interior
-    /// state), it does not copy them.
-    pub fn push_backend(&mut self, backend: impl WebpCodestreamEncoder + 'static) -> &mut Self {
+    /// Cloning a `WebpEncoder` copies its backend list: the clone shares the backend instances
+    /// already added (the same objects, and the same interior state), but a backend added to one
+    /// afterwards is not seen by the other.
+    #[must_use]
+    pub fn with_backend(mut self, backend: impl WebpCodestreamEncoder + Send + 'static) -> Self {
         self.backends.push(Arc::new(Mutex::new(backend)));
         self
     }
@@ -346,12 +354,12 @@ impl WebpEncoder {
     fn encode_vp8l_codestream(&self, argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
         let req = WebpEncodeRequest::new(WebpCodestream::Vp8l, dims, self.config.quality)
             .with_effort(self.config.effort);
-        let raster = RasterRef::Argb {
+        let raster = WebpRasterRef::Argb {
             dimensions: dims,
             pixels: argb,
         };
-        match dispatch_encode(&self.backends, &req, &raster) {
-            Some(result) => result,
+        match encode_with_backends(&self.backends, &req, &raster)? {
+            Some(payload) => Ok(payload),
             None => encode_vp8l(argb, dims, self.config.effort),
         }
     }
@@ -361,9 +369,9 @@ impl WebpEncoder {
     fn encode_vp8_codestream(&self, yuv: &Planar8, dims: Dimensions) -> Result<Vec<u8>> {
         let req = WebpEncodeRequest::new(WebpCodestream::Vp8, dims, self.config.quality)
             .with_effort(self.config.effort);
-        let raster = RasterRef::Yuv420(yuv);
-        match dispatch_encode(&self.backends, &req, &raster) {
-            Some(result) => result,
+        let raster = WebpRasterRef::Yuv420(yuv);
+        match encode_with_backends(&self.backends, &req, &raster)? {
+            Some(payload) => Ok(payload),
             None => {
                 let opts = EncodeOptions {
                     effort: self.config.effort,
@@ -541,8 +549,11 @@ impl WebpEncoder {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct WebpEncodeReport {
-    /// The byte range the `C2PA` chunk occupies in the encoded file, or `None` when no manifest
-    /// store was configured.
+    /// The number of bytes appended to the output — the whole WebP file.
+    pub len: usize,
+    /// The byte range the `C2PA` chunk occupies, as offsets from the first byte of this WebP file
+    /// (not of the output buffer it was appended to), or `None` when no manifest store was
+    /// configured.
     ///
     /// The range covers the chunk's **whole** span — the four identifier bytes, the four-byte size
     /// field and the payload — as [`gamut_riff::c2pa_span`] reports it; that function's docs state
@@ -551,16 +562,18 @@ pub struct WebpEncodeReport {
     /// C2PA 2.4 §18.5.1 forbids a data-hash exclusion to do (the §18.5.1 range is
     /// `start + 8..end`). The RIFF pad byte that follows an odd-length store (RFC 9649 §2.3) is
     /// outside the range; it is framing the container adds, not store.
-    pub c2pa: Option<Range<usize>>,
+    pub c2pa: Option<Range<u64>>,
 }
 
 impl WebpEncoder {
-    /// Encodes `image` and reports where the encoder placed what it was asked to place.
+    /// Encodes `image`, appending it to `out` as [`EncodeImage::encode_image`] does, and reports
+    /// how many bytes the file took and where the encoder placed what it was asked to place.
     ///
     /// The bytes are exactly the bytes [`EncodeImage::encode_image`] produces for the same encoder
     /// and image — this is the same code path, not a second one — so the report can be taken as a
     /// description of any file this encoder writes. It is a separate entry point because the
-    /// object-safe `EncodeImage` seam carries no channel for one.
+    /// object-safe `EncodeImage` seam carries no channel for one. The report's offsets count from
+    /// the first byte of this file, not of `out`.
     ///
     /// # Errors
     ///
@@ -586,37 +599,42 @@ impl WebpEncoder {
     ///
     /// let pixels = [10u8, 20, 30];
     /// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(1, 1)?)?;
-    /// let (file, report) = WebpEncoder::lossless()
+    /// let mut file = Vec::new();
+    /// let report = WebpEncoder::lossless()
     ///     .with_c2pa_reserved(64)?
-    ///     .encode_with_report(image)?;
+    ///     .encode_with_report(image, &mut file)?;
     ///
+    /// assert_eq!(report.len, file.len());
     /// let span = report.c2pa.expect("a store was reserved");
-    /// assert_eq!(&file[span.start..span.start + 4], b"C2PA");
-    /// assert_eq!(span.len(), 8 + 64);
-    /// # Ok::<(), gamut_core::Error>(())
+    /// let start = usize::try_from(span.start)?;
+    /// assert_eq!(&file[start..start + 4], b"C2PA");
+    /// assert_eq!(span.end - span.start, 8 + 64);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
-    ) -> Result<(Vec<u8>, WebpEncodeReport)>
+        out: &mut Vec<u8>,
+    ) -> Result<WebpEncodeReport>
     where
         Self: EncodeImage<P>,
     {
-        let mut file = Vec::new();
-        self.encode_image(image, &mut file)?;
+        let start = out.len();
+        let len = self.encode_image(image, out)?;
+        let file = &out[start..];
         // The range is read back out of the finished bytes with the very locator the read side uses
         // (`gamut_riff::c2pa_span`), so a writer and a reader can never disagree about it. Reading
         // the payload back through the *other* reader as well turns that into a checked claim: the
         // range is returned only once the bytes inside it are known to be the configured store, so
         // a stray `C2PA` chunk could never make the report name somebody else's bytes.
-        let c2pa = crate::metadata::c2pa_span(&file)?;
-        if MetadataChunks::read(&file)?.c2pa != self.c2pa.as_deref() {
+        let c2pa = gamut_riff::c2pa_span(file)?;
+        if MetadataChunks::read(file)?.c2pa != self.c2pa.as_deref() {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "WebP: the C2PA chunk in the encoder's own output is not the configured store",
             ));
         }
-        Ok((file, WebpEncodeReport { c2pa }))
+        Ok(WebpEncodeReport { len, c2pa })
     }
 }
 
@@ -649,6 +667,17 @@ mod tests {
         let lossy = WebpEncoder::lossy(40);
         assert_eq!(lossy.config().mode, WebpMode::Lossy);
         assert_eq!(lossy.config().quality, 40);
+    }
+
+    #[test]
+    fn from_config_takes_every_knob() {
+        let config = WebpConfig {
+            mode: WebpMode::Lossy,
+            quality: 33,
+            effort: Effort::Fast,
+            near_lossless: NearLossless::from_libwebp_strength(40),
+        };
+        assert_eq!(WebpEncoder::from_config(config).config(), config);
     }
 
     #[test]
@@ -888,6 +917,10 @@ mod tests {
     /// own setter" left them out, and the encoder then accepted an `ANIM` chunk and wrote a file
     /// `WebpLayout::parse` refuses as having its reconstruction chunks out of order — an encoder
     /// steered into producing a file it cannot read back.
+    fn chunk(fourcc: FourCc, payload: &[u8]) -> Chunk<'_> {
+        Chunk { fourcc, payload }
+    }
+
     #[test]
     fn with_unknown_chunks_refuses_every_chunk_the_container_defines() {
         let classified = [
@@ -904,7 +937,7 @@ mod tests {
         ];
         for reserved in classified {
             let err = WebpEncoder::lossless()
-                .with_unknown_chunks(&[(reserved, b"payload")])
+                .with_unknown_chunks(&[chunk(reserved, b"payload")])
                 .err()
                 .unwrap_or_else(|| panic!("{reserved} must be refused"));
             assert_eq!(err.kind(), ErrorKind::InvalidInput, "{reserved}");
@@ -916,12 +949,12 @@ mod tests {
         // A genuinely unknown FourCC is still accepted, and the check does not depend on position.
         let private = FourCc::from(*b"XYZW");
         let ok = WebpEncoder::lossless()
-            .with_unknown_chunks(&[(private, b"payload")])
+            .with_unknown_chunks(&[chunk(private, b"payload")])
             .expect("a private chunk is accepted");
         assert_eq!(ok.unknown, vec![(private, b"payload".to_vec())]);
         assert!(
             WebpEncoder::lossless()
-                .with_unknown_chunks(&[(private, b"a"), (FourCc::C2PA, b"b")])
+                .with_unknown_chunks(&[chunk(private, b"a"), chunk(FourCc::C2PA, b"b")])
                 .is_err(),
             "a reserved FourCC is refused wherever it sits in the list"
         );
@@ -977,10 +1010,44 @@ mod tests {
         encoder
             .encode_image(image(), &mut expected)
             .expect("encode");
-        let (file, report) = encoder.encode_with_report(image()).expect("encode");
+        let (file, report) = reported(&encoder, image());
         assert_eq!(file, expected);
-        assert_eq!(report, WebpEncodeReport::default());
+        assert_eq!(report.len, expected.len());
         assert_eq!(report.c2pa, None, "no store was configured");
+    }
+
+    /// Like `encode_image`, the report form appends; its length and range describe the appended
+    /// file alone, so a caller writing several files into one buffer gets each file's own offsets.
+    #[test]
+    fn encode_with_report_appends_and_counts_from_its_own_file() {
+        let rgb = [4u8, 5, 6].repeat(4);
+        let encoder = WebpEncoder::lossless().with_c2pa(b"store");
+        let (alone, alone_report) =
+            reported(&encoder, ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap());
+        let mut out = b"prefix".to_vec();
+        let report = encoder
+            .encode_with_report(ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap(), &mut out)
+            .expect("encode");
+        assert_eq!(&out[..6], b"prefix");
+        assert_eq!(&out[6..], alone.as_slice());
+        assert_eq!(report, alone_report);
+    }
+
+    /// Encodes `image` through `encode_with_report` into a fresh buffer, checking the reported
+    /// length against it.
+    fn reported(encoder: &WebpEncoder, image: ImageRef<'_, Rgb8>) -> (Vec<u8>, WebpEncodeReport) {
+        let mut file = Vec::new();
+        let report = encoder
+            .encode_with_report(image, &mut file)
+            .expect("encode");
+        assert_eq!(report.len, file.len());
+        (file, report)
+    }
+
+    /// The reported `C2PA` range, as indices into the encoded file.
+    fn span(report: &WebpEncodeReport) -> Range<usize> {
+        let span = report.c2pa.clone().expect("a store was configured");
+        span.start as usize..span.end as usize
     }
 
     /// The reported range is the chunk's whole span (as #445 specifies): identifier, size field and
@@ -991,12 +1058,12 @@ mod tests {
         let store = &store[..29];
         assert_eq!(store.len() % 2, 1, "the fixture must exercise the pad byte");
         let rgb = [9u8, 8, 7].repeat(4);
-        let (file, report) = WebpEncoder::lossless()
-            .with_c2pa(store)
-            .encode_with_report(ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap())
-            .expect("encode");
+        let (file, report) = reported(
+            &WebpEncoder::lossless().with_c2pa(store),
+            ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap(),
+        );
 
-        let span = report.c2pa.expect("a store was configured");
+        let span = span(&report);
         assert_eq!(&file[span.start..span.start + 4], b"C2PA", "identifier");
         assert_eq!(
             &file[span.start + 4..span.start + 8],
@@ -1021,15 +1088,15 @@ mod tests {
     fn the_reported_span_always_contains_the_configured_store() {
         let rgb = [1u8, 2, 3].repeat(4);
         for store in [&b""[..], &b"x"[..], &b"even"[..], &[0xff; 64][..]] {
-            let (file, report) = WebpEncoder::lossless()
-                .with_c2pa(store)
-                .encode_with_report(ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap())
-                .expect("encode");
-            let span = report.c2pa.expect("a store was configured");
+            let (file, report) = reported(
+                &WebpEncoder::lossless().with_c2pa(store),
+                ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap(),
+            );
+            let span = span(&report);
             assert_eq!(span.len(), 8 + store.len(), "{store:?}: whole-chunk span");
             assert_eq!(&file[span.start + 8..span.end], store, "{store:?}: payload");
             assert_eq!(
-                crate::metadata(&file).unwrap().c2pa.as_deref(),
+                MetadataChunks::read(&file).unwrap().c2pa,
                 Some(store),
                 "{store:?}: and the reader agrees"
             );
@@ -1043,24 +1110,18 @@ mod tests {
     fn filling_a_reservation_changes_only_the_reported_span() {
         let rgb = [3u8, 5, 7].repeat(9);
         let image = || ImageRef::<Rgb8>::new(&rgb, dims(3, 3)).unwrap();
-        let encode = |store: &[u8]| {
-            WebpEncoder::lossless()
-                .with_c2pa(store)
-                .encode_with_report(image())
-                .expect("encode")
-        };
+        let encode = |store: &[u8]| reported(&WebpEncoder::lossless().with_c2pa(store), image());
 
-        let (reserved, report) = WebpEncoder::lossless()
-            .with_c2pa_reserved(8)
-            .unwrap()
-            .encode_with_report(image())
-            .expect("encode");
-        let span = report.c2pa.expect("a store was reserved");
+        let (reserved, report) = reported(
+            &WebpEncoder::lossless().with_c2pa_reserved(8).unwrap(),
+            image(),
+        );
         let (first, first_report) = encode(b"11111111");
         let (second, second_report) = encode(b"22222222");
 
-        assert_eq!(first_report.c2pa, Some(span.clone()));
-        assert_eq!(second_report.c2pa, Some(span.clone()));
+        assert_eq!(first_report.c2pa, report.c2pa);
+        assert_eq!(second_report.c2pa, report.c2pa);
+        let span = span(&report);
         assert_eq!(first.len(), reserved.len());
         assert_eq!(second.len(), reserved.len());
         for (label, filled) in [

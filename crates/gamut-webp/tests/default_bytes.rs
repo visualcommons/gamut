@@ -209,7 +209,7 @@ fn convert_policy_reaches_the_typed_decode() {
     assert_eq!(refused.kind(), gamut_core::ErrorKind::Unsupported);
 
     let dropped: ImageBuf<Rgb8> = WebpDecoder::new()
-        .convert_policy(ConvertPolicy::lossless().with_alpha(AlphaPolicy::Drop))
+        .with_convert_policy(ConvertPolicy::lossless().with_alpha(AlphaPolicy::Drop))
         .decode_image(&webp)
         .expect("drop decode");
     let expected: Vec<u8> = rgba
@@ -223,7 +223,7 @@ fn convert_policy_reaches_the_typed_decode() {
     // Compositing is a different answer to the same question, so it must not agree with dropping
     // on the pixels that are actually transparent.
     let composited: ImageBuf<Rgb8> = WebpDecoder::new()
-        .convert_policy(
+        .with_convert_policy(
             ConvertPolicy::lossless()
                 .with_alpha(AlphaPolicy::CompositeOver)
                 .with_background([u16::MAX; 3]),
