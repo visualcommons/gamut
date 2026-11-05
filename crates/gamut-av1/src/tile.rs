@@ -739,8 +739,8 @@ impl<'a> FrameEncoder<'a> {
                 let replayed = replayed.unwrap_or_default();
                 self.decided = replayed.blocks;
                 self.decided_partitions = replayed.partitions;
-                // A lossless frame never has `Self::lr` set (only the lossy path in `encoder.rs`
-                // re-codes with restoration units), so `write_lr` codes nothing for it; a
+                // A lossless frame never has `Self::lr` set (only the lossy path in
+                // `encoder/pipeline.rs` re-codes with restoration units), so `write_lr` codes nothing for it; a
                 // `qindex > 0` guard here would be a second copy of that fact, and an equivalent
                 // `>` → `>=` mutant.
                 self.write_lr(r, c);
