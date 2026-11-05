@@ -759,6 +759,17 @@ fn the_encode_request_mirrors_every_encoder_setting_and_the_raster() {
     assert_eq!((w, h, fmt), (W, H, PixelFormat::Rgb8));
     assert_eq!(len, (W * H * 3) as usize);
     assert_eq!(first, c[0]);
+
+    // Optimized tables are a process too: the backend is told, rather than offered what looks
+    // like a plain baseline job.
+    let seen = Arc::new(Mutex::new(None));
+    JpegEncoder::new()
+        .with_process(Process::Optimized)
+        .with_backend(CapturingEncoder(seen.clone()))
+        .encode_to_vec(gi)
+        .unwrap();
+    let (req, ..) = seen.lock().unwrap().unwrap();
+    assert_eq!(req.process(), Process::Optimized);
 }
 
 // ---------------------------------------------------------------------------------------------
