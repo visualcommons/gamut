@@ -7,9 +7,10 @@
 //! these cannot live in either crate they check.
 //!
 //! **These tests are mutation-invisible, and that cost is accepted here rather than overlooked.**
-//! `.cargo/mutants.toml` sets `test_workspace = false` and excludes `crates/gamut/**`, so nothing
-//! in this file can kill a mutant in `gamut-jpeg`, `gamut-webp`, `gamut-metadata`, `gamut-color`
-//! or `gamut-tonemap`. What each test pins, and where the mutation-visible coverage of the same
+//! `.cargo/mutants.toml` sets `test_workspace = false`, so a mutant in another crate runs only
+//! that crate's own tests, and nothing in this file can kill a mutant in `gamut-jpeg`,
+//! `gamut-webp`, `gamut-metadata`, `gamut-color` or `gamut-tonemap` (the umbrella's own mutants,
+//! in its `capability` table, are the only ones these tests see). What each test pins, and where the mutation-visible coverage of the same
 //! machinery lives:
 //!
 //! - `metadata_facade_round_trips_through_a_jpeg_stream` and its WebP counterpart pin that the

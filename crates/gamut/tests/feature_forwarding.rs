@@ -6,8 +6,9 @@
 //! metadata gets the wiring between them, while neither half drags the other in on its own.
 //!
 //! **Why this cannot live in a lower crate.** `AGENTS.md` forbids pinning anything under
-//! `crates/gamut/tests/` *by choice*, because `.cargo/mutants.toml` sets `test_workspace = false`
-//! and excludes `crates/gamut/**`, so nothing here can kill a mutant. This file is not here by
+//! `crates/gamut/tests/` *by choice*, because `.cargo/mutants.toml` sets `test_workspace = false`,
+//! so nothing here can kill a mutant in any crate but the umbrella — and the forwards this file
+//! pins are `Cargo.toml` feature entries, which no mutant touches. This file is not here by
 //! choice: what it pins is an edge in the umbrella's own feature graph, and no lower crate can
 //! observe that edge — `gamut-jpeg` cannot see who enabled its `metadata` feature, and the three
 //! format crates must not gain dev-dependency edges on one another or on the umbrella
