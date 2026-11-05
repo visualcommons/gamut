@@ -12,8 +12,8 @@ use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::c2pa::{self, C2paExclusions};
 use gamut_ifd::tags::STANDARD_POINTER_TAGS;
 use gamut_ifd::{
-    ByteOrder, Ifd, IfdReader, SubtreeScope, TiffFile, Value, Variant, read, read_ifd_at,
-    resolve_subtree,
+    ByteOrder, Ifd, IfdReader, SubtreeScope, TiffFile, Value, Variant, ZeroRowsPerStrip,
+    extent_slices, read, read_ifd_at, resolve_subtree, rows_per_strip,
 };
 use gamut_metadata::exif::Exif;
 
@@ -28,7 +28,8 @@ use crate::subimage::{
     DepthInfo, MaskSubArea, SemanticMaskInfo, SubImage, SubImageData, SubImageKind,
 };
 use crate::values::{
-    CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy, SampleFormat,
+    CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy,
+    SampleFormat, dng_compression, dng_photometric,
 };
 use crate::{bitpack, compression, lossless_jpeg, tags};
 
@@ -374,12 +375,11 @@ impl DngDecoder {
         };
 
         let raw_ifd = &tracked[raw_index];
-        let compression =
-            Compression::from_code(raw_ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
-                .ok_or_else(|| {
-                    Error::unsupported(env!("CARGO_PKG_NAME"), "DNG: unknown compression")
-                })?;
-        let computed = if compression.is_lossy() {
+        let compression = dng_compression(raw_ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
+            .ok_or_else(|| {
+            Error::unsupported(env!("CARGO_PKG_NAME"), "DNG: unknown compression")
+        })?;
+        let computed = if compression::is_lossy(compression) {
             let grid = chunk_grid(
                 raw_ifd,
                 raw_ifd.get_u32(tags::IMAGE_WIDTH).unwrap_or(0) as usize,
@@ -680,7 +680,7 @@ fn is_raw_ifd(ifd: &Ifd) -> bool {
     matches!(
         ifd.get_u32(tags::PHOTOMETRIC_INTERPRETATION)
             .and_then(|c| u16::try_from(c).ok())
-            .and_then(PhotometricInterpretation::from_code),
+            .and_then(dng_photometric),
         Some(PhotometricInterpretation::Cfa | PhotometricInterpretation::LinearRaw)
     )
 }
@@ -863,7 +863,7 @@ fn undecoded_chunks(ifd: &TrackedIfd, data: &[u8]) -> Option<Vec<Vec<u8>>> {
     };
     let offsets = ifd.get_u64_vec(offset_tag)?;
     let counts = ifd.get_u64_vec(count_tag)?;
-    let chunks = byte_chunks(&offsets, &counts, data).ok()?;
+    let chunks = extent_slices(&offsets, &counts, data, env!("CARGO_PKG_NAME")).ok()?;
     Some(chunks.into_iter().map(<[u8]>::to_vec).collect())
 }
 
@@ -935,7 +935,8 @@ fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<R
     // JPEG XL data decodes to full-range 16-bit whatever precision the codestream stores (the
     // reference SDK's semantics; Apple ProRAW declares BitsPerSample 10 with WhiteLevel 65535).
     // The reconstructed image therefore carries 16 significant bits.
-    let bits = if ifd.get_u32(tags::COMPRESSION) == Some(u32::from(Compression::JpegXl.code())) {
+    let bits = if ifd.get_u32(tags::COMPRESSION) == Some(u32::from(u16::from(Compression::JpegXl)))
+    {
         16
     } else {
         bits
@@ -943,7 +944,7 @@ fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<R
     let photometric = ifd
         .get_u32(tags::PHOTOMETRIC_INTERPRETATION)
         .and_then(|c| u16::try_from(c).ok())
-        .and_then(PhotometricInterpretation::from_code)
+        .and_then(dng_photometric)
         .ok_or_else(|| {
             Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -1257,16 +1258,14 @@ fn chunk_grid(ifd: &TrackedIfd, width: usize, height: usize) -> Result<ChunkGrid
             down: height.div_ceil(tile_height),
         })
     } else {
-        let rows_per_strip = match ifd.get_u32(tags::ROWS_PER_STRIP) {
-            Some(0) => {
-                return Err(Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "DNG: RowsPerStrip must be non-zero",
-                ));
-            }
-            Some(r) => r as usize,
-            None => height,
-        };
+        // DNG 1.7.1 gives a zero `RowsPerStrip` no reading, so it is refused rather than read as
+        // one strip the way gamut-tiff does.
+        let rows_per_strip = rows_per_strip(
+            ifd.get_u32(tags::ROWS_PER_STRIP),
+            height,
+            ZeroRowsPerStrip::Refuse,
+            env!("CARGO_PKG_NAME"),
+        )?;
         Ok(ChunkGrid::Strips { rows_per_strip })
     }
 }
@@ -1282,16 +1281,10 @@ fn decode_image_data(
     spp: usize,
     bits: u16,
 ) -> Result<Vec<u16>> {
-    let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
+    let compression = dng_compression(ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
         .ok_or_else(|| Error::unsupported(env!("CARGO_PKG_NAME"), "DNG: unknown compression"))?;
     // Reject an undecodable scheme up front, so an empty chunk list cannot mask it.
-    if !matches!(
-        compression,
-        Compression::Uncompressed
-            | Compression::Deflate
-            | Compression::LosslessJpeg
-            | Compression::JpegXl
-    ) {
+    if !compression::is_decodable(compression) {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
             "DNG: this compression is not yet decodable",
@@ -1302,7 +1295,10 @@ fn decode_image_data(
     // u16 sample model represents. Anything else must fail cleanly, not silently misdecode.
     if let Some(formats) = ifd.get_u32_vec(tags::SAMPLE_FORMAT) {
         for format in formats {
-            match u16::try_from(format).ok().and_then(SampleFormat::from_code) {
+            match u16::try_from(format)
+                .ok()
+                .and_then(|f| SampleFormat::try_from(f).ok())
+            {
                 Some(SampleFormat::UnsignedInteger) => {}
                 Some(SampleFormat::FloatingPoint) => {
                     return Err(Error::unsupported(
@@ -1535,7 +1531,7 @@ fn decode_chunk_samples(
         .and_then(|n| n.checked_mul(spp))
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow"))?;
     match compression {
-        Compression::Uncompressed | Compression::Deflate => {
+        Compression::None | Compression::Deflate => {
             // Cap inflation at the packed length this chunk's geometry implies: a Deflate chunk
             // that expands past it cannot be a valid sample stream, and the cap is what keeps a
             // hostile zlib stream from allocating without bound.
@@ -1569,7 +1565,7 @@ fn decode_chunk_samples(
         // components need not match the chunk's geometry — only the total sample count must
         // (DNG 1.7.1, "Compression": real CFA writers store a two-component stream at half
         // width).
-        Compression::LosslessJpeg => {
+        Compression::Jpeg => {
             let jpeg = lossless_jpeg::decode(chunk)?;
             if jpeg.samples.len() != want {
                 return Err(Error::invalid_input(
@@ -1611,34 +1607,7 @@ fn grid_chunks<'a>(ifd: &TrackedIfd, data: &'a [u8], grid: &ChunkGrid) -> Result
     let counts = ifd
         .get_u64_vec(count_tag)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), missing))?;
-    byte_chunks(&offsets, &counts, data)
-}
-
-/// Resolves parallel offset/byte-count arrays into in-bounds byte slices.
-fn byte_chunks<'a>(offsets: &[u64], counts: &[u64], data: &'a [u8]) -> Result<Vec<&'a [u8]>> {
-    if offsets.len() != counts.len() {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "DNG: image-data offset/count length mismatch",
-        ));
-    }
-    let mut chunks = Vec::with_capacity(offsets.len());
-    for (&offset, &count) in offsets.iter().zip(counts) {
-        let start = usize::try_from(offset).map_err(|_| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: image data out of bounds")
-        })?;
-        let end = count
-            .try_into()
-            .ok()
-            .and_then(|count: usize| start.checked_add(count))
-            .ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: image-data extent overflow")
-            })?;
-        chunks.push(data.get(start..end).ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: image data out of bounds")
-        })?);
-    }
-    Ok(chunks)
+    extent_slices(&offsets, &counts, data, env!("CARGO_PKG_NAME"))
 }
 
 /// Reconstructs the [`CameraProfile`] from IFD 0's identity and calibration tags, or `None` when
@@ -2453,61 +2422,23 @@ mod tests {
     }
 
     /// A strip IFD's `RowsPerStrip` of 0 is refused, unlike `gamut-tiff`, which reads it as one
-    /// full-height strip; an absent tag still means one strip of the whole height.
+    /// full-height strip; an absent tag still means one strip of the whole height. This pins the
+    /// policy `chunk_grid` passes to `gamut_ifd::rows_per_strip`, whose own tests pin the rest;
+    /// the extent checks the chunks then pass through are `gamut_ifd::extent_slices`'s, pinned
+    /// there.
     #[test]
     fn chunk_grid_refuses_zero_rows_per_strip_and_defaults_an_absent_one_to_the_height() {
         let mut ifd = Ifd::new();
         ifd.set(tags::ROWS_PER_STRIP, Value::Long(vec![0]));
         let err = chunk_grid(&TrackedIfd::new(&ifd), 4, 3).unwrap_err();
         assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput, "{err:?}");
-        assert_eq!(
-            err.static_message(),
-            Some("DNG: RowsPerStrip must be non-zero")
-        );
+        assert_eq!(err.static_message(), Some("RowsPerStrip must be non-zero"));
+        assert_eq!(err.origin(), Some(env!("CARGO_PKG_NAME")), "{err:?}");
 
         let grid = chunk_grid(&TrackedIfd::new(&Ifd::new()), 4, 3).expect("strips");
         assert!(
             matches!(grid, ChunkGrid::Strips { rows_per_strip: 3 }),
             "{grid:?}"
-        );
-    }
-
-    /// Asserts `got` is an `InvalidInput` error carrying exactly `message`.
-    fn assert_byte_chunks_refused(got: Result<Vec<&[u8]>>, message: &str) {
-        let err = got.expect_err("expected an error");
-        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput, "{err:?}");
-        assert_eq!(err.static_message(), Some(message), "{err:?}");
-    }
-
-    #[test]
-    fn byte_chunks_refuses_offset_and_count_arrays_of_different_lengths() {
-        assert_byte_chunks_refused(
-            byte_chunks(&[0, 1], &[1], &[0; 4]),
-            "DNG: image-data offset/count length mismatch",
-        );
-    }
-
-    /// `offset + count` past `usize::MAX` is an overflow, reported as such rather than wrapped.
-    #[test]
-    fn byte_chunks_refuses_an_extent_that_overflows_usize() {
-        let offset = u64::try_from(usize::MAX).expect("usize fits u64");
-        assert_byte_chunks_refused(
-            byte_chunks(&[offset], &[1], &[0; 4]),
-            "DNG: image-data extent overflow",
-        );
-    }
-
-    /// An extent that ends one byte past the data is out of bounds; one that ends on it is not.
-    #[test]
-    fn byte_chunks_refuses_an_extent_past_the_data() {
-        let data = [1, 2, 3, 4];
-        assert_byte_chunks_refused(
-            byte_chunks(&[2], &[3], &data),
-            "DNG: image data out of bounds",
-        );
-        assert_eq!(
-            byte_chunks(&[0, 2], &[2, 2], &data).expect("in bounds"),
-            [&data[..2], &data[2..]]
         );
     }
 

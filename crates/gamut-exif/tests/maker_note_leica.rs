@@ -144,7 +144,10 @@ fn leica_stream(note: &[u8]) -> Vec<u8> {
     let mut exif = Exif::new(ORDER);
     exif.set_tag(ExifTag::Make, Value::Ascii("Leica Camera AG".into()));
     exif.set_tag(ExifTag::MakerNote, Value::Undefined(note.to_vec()));
-    ExifWriter::new().marker(false).write(&exif).expect("write")
+    ExifWriter::new()
+        .with_marker(false)
+        .write(&exif)
+        .expect("write")
 }
 
 /// The model's own path resolves the vendor from `Make`, and a note-relative view reads whole
@@ -176,7 +179,10 @@ fn an_unmodified_leica_stream_round_trips_byte_identically() {
         let at = exif.maker_note_offset().expect("an offset");
         let _ = maker.leica(exif.byte_order(), at).expect("reads");
         assert_eq!(maker.bytes, note);
-        let rewritten = ExifWriter::new().marker(false).write(&exif).expect("write");
+        let rewritten = ExifWriter::new()
+            .with_marker(false)
+            .write(&exif)
+            .expect("write");
         assert_eq!(rewritten, stream);
     }
 }

@@ -144,7 +144,7 @@ fn fujifilm_note() -> Vec<u8> {
 
 /// A bare TIFF stream of byte order `order` whose Exif sub-IFD carries the Fujifilm note.
 fn fujifilm_stream(order: ByteOrder) -> Vec<u8> {
-    let writer = ExifWriter::new().marker(false);
+    let writer = ExifWriter::new().with_marker(false);
     let mut exif = Exif::new(order);
     exif.set_tag(ExifTag::Make, Value::Ascii("FUJIFILM".into()));
     exif.set_tag(ExifTag::Model, Value::Ascii("X-T5".into()));
@@ -296,7 +296,10 @@ fn an_unmodified_fujifilm_stream_round_trips_byte_identically() {
         let stream = fujifilm_stream(order);
         let exif = Exif::parse(&stream).expect("parse");
         let _ = view(&stream);
-        let rewritten = ExifWriter::new().marker(false).write(&exif).expect("write");
+        let rewritten = ExifWriter::new()
+            .with_marker(false)
+            .write(&exif)
+            .expect("write");
         assert_eq!(rewritten, stream);
     }
 }

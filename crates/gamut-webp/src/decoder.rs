@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn decodes_extended_container_with_inner_bitstream() {
-        use gamut_riff::{Vp8xHeader, write_extended};
+        use gamut_riff::{Chunk, Vp8xHeader, write_extended};
         // A VP8X feature header followed by a VP8L bitstream decodes to the inner image (the alpha
         // flag's `ALPH` chunk is handled in a later milestone).
         let inner = solid_lossless_webp(2, 2, 0x11, 0x22, 0x33);
@@ -426,7 +426,14 @@ mod tests {
             canvas_height: 2,
             ..Default::default()
         };
-        let file = write_extended(&header, &[(FourCc::VP8L, &vp8l)]).unwrap();
+        let file = write_extended(
+            &header,
+            &[Chunk {
+                fourcc: FourCc::VP8L,
+                payload: &vp8l,
+            }],
+        )
+        .unwrap();
         let got: ImageBuf<Rgb8> = WebpDecoder::new()
             .decode_image(&file)
             .expect("decode VP8X file");

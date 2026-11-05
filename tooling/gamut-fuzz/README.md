@@ -160,7 +160,7 @@ defect, not a restatement of a documented default:
 | `jxl_decode` | `gamut-jxl` | `info`, `embedded_icc_profile`, `metadata_boxes`, `DecodeImage<Rgba8>`, and `decode_partial_image` where the full decode fails | `decode` feature only (no libjxl build); `permissive` policy |
 | `av1_inspect` | `gamut-av1` | `Av1Decoder::inspect` | default `DecodeLimits` |
 | `icc_parse` | `gamut-icc` | `IccProfile::parse` | lenient (strict only adds refusals) |
-| `exif_parse` | `gamut-exif` | `ExifReader::parse_with_report`, then `gps`, `thumbnail_bytes`, `MakerNote::canon` | `recover_entries` and `audit_bytes` on: the widest walk |
+| `exif_parse` | `gamut-exif` | `ExifReader::parse_with_report`, then `gps`, `thumbnail_bytes`, `MakerNote::canon` | `with_entry_recovery` and `with_byte_audit` on: the widest walk |
 | `xmp_parse` | `gamut-xmp` | `XmpMeta::parse` | — |
 | `iptc_read_irb` | `gamut-iptc` | `IptcReader::read_irb`, then `read` | default conflict policy |
 

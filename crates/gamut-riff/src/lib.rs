@@ -43,19 +43,26 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+mod c2pa;
 mod chunk;
 mod fourcc;
+mod layout;
 mod reader;
-mod webp;
+#[cfg(test)]
+mod test_support;
+mod vp8x;
 mod writer;
 
+pub use c2pa::{
+    C2PA_NOT_VALIDATED, C2paChunkPosition, C2paStoreSummary, C2paSummary, C2paUnreadChunk,
+    c2pa_span, c2pa_summary,
+};
 pub use chunk::Chunk;
 pub use fourcc::FourCc;
+pub use layout::{MetadataChunks, WebpChunkId, WebpLayout};
 pub use reader::RiffReader;
-pub use webp::{
-    C2PA_FOURCC, C2PA_NOT_VALIDATED, C2paChunkPosition, C2paStoreSummary, C2paSummary,
-    C2paUnreadChunk, MAX_CANVAS_DIMENSION, MetadataChunks, VP8X_PAYLOAD_LEN, Vp8xHeader,
-    WebpChunkId, WebpLayout, c2pa_span, c2pa_summary, write_extended, write_extended_preserving,
+pub use vp8x::{
+    MAX_CANVAS_DIMENSION, VP8X_PAYLOAD_LEN, Vp8xHeader, write_extended, write_extended_preserving,
     write_extended_with_metadata, write_simple_lossless, write_simple_lossy,
 };
 pub use writer::RiffWriter;

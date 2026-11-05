@@ -250,7 +250,7 @@ impl DngRewrite {
         let opts = |pin: Option<u64>| {
             let mut o = WriteOptions::default().with_preamble(preamble_bytes.clone());
             if let Some(at) = pin {
-                o = o.pin(ifd_tags::MAKER_NOTE, at);
+                o = o.with_pin(ifd_tags::MAKER_NOTE, at);
             }
             o
         };

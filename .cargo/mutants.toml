@@ -178,13 +178,13 @@ exclude_re = [
     # comparison is equivalent. The *stricter* mutations (`==`/`<`, generated separately) skip a
     # real factor-2 deinterleave and are killed by the single-axis interleave goldens. (gamut-webp
     # has a `decode_image_data` too; its comparisons are not this claim and stay in the survey.)
-    '^crates/gamut-dng/src/decoder\.rs:(1443:19|1443:37): replace > with >= in decode_image_data$',
+    '^crates/gamut-dng/src/decoder\.rs:(1439:19|1439:37): replace > with >= in decode_image_data$',
     # gamut-dng version computation — `if v > *version { *version = v }` (and the analogous
     # `if backward_version > required` pick in encode): at equality both branches produce the
     # same version value, so `>=` cannot change the written tag: equivalent.
-    '^crates/gamut-dng/src/encoder\.rs:617:14: replace > with >= in backward_version_for$',
-    '^crates/gamut-dng/src/encoder\.rs:647:14: replace > with >= in required_dng_version$',
-    '^crates/gamut-dng/src/encoder\.rs:406:33: replace > with >= in DngEncoder::encode_with_report$',
+    '^crates/gamut-dng/src/encoder\.rs:618:14: replace > with >= in backward_version_for$',
+    '^crates/gamut-dng/src/encoder\.rs:648:14: replace > with >= in required_dng_version$',
+    '^crates/gamut-dng/src/encoder\.rs:407:33: replace > with >= in DngEncoder::encode_with_report$',
     # gamut-av1 quant::dequant — `sign = if dq < 0 { -1 } else { 1 }`. The sign multiplies
     # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
     # `<` and `<=` disagree. `±0 == 0`, so the reconstruction is identical: equivalent.
@@ -281,18 +281,18 @@ exclude_re = [
     # distinct cap messages rather than a bare `is_err()`.
     '^crates/gamut-tiff/src/decoder\.rs:72:14: replace > with == in within_size_limit$',
     '^crates/gamut-tiff/src/decoder\.rs:72:14: replace > with >= in within_size_limit$',
-    # gamut-riff `Vp8xHeader::to_payload`: the feature-flag byte ORs five single bits each shifted to
+    # gamut-riff `Vp8xHeader::to_bytes`: the feature-flag byte ORs five single bits each shifted to
     # a distinct position (`icc<<5 | alpha<<4 | ...`), so the operands are disjoint and `|` == `^`.
-    # gamut-riff `Vp8xHeader::from_payload`: the `le24` closure ORs three bytes at offsets 0/8/16
+    # gamut-riff `Vp8xHeader::parse`: the `le24` closure ORs three bytes at offsets 0/8/16
     # (`b[0] | (b[1]<<8) | (b[2]<<16)`), again disjoint. Both functions' `| -> ^` are equivalent.
     # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    '^crates/gamut-riff/src/webp\.rs:(78:13|79:13|80:13|81:13): replace \| with \^ in Vp8xHeader::to_payload$',
-    '^crates/gamut-riff/src/webp\.rs:(138:47|138:72): replace \| with \^ in Vp8xHeader::from_payload$',
+    '^crates/gamut-riff/src/vp8x\.rs:(62:13|63:13|64:13|65:13): replace \| with \^ in Vp8xHeader::to_bytes$',
+    '^crates/gamut-riff/src/vp8x\.rs:(122:47|122:72): replace \| with \^ in Vp8xHeader::parse$',
     # gamut-ifd `Value::decode`: the DOUBLE assembly OR's a 32-bit low half with a 32-bit high half
     # shifted up by 32 (`u64::from(a) | (u64::from(b) << 32)`). The operands occupy disjoint bits, so
     # `|` is identical to `^`; both `| -> ^` mutations are equivalent.
     # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    '^crates/gamut-ifd/src/value\.rs:(604:65|605:62): replace \| with \^ in Value::decode$',
+    '^crates/gamut-ifd/src/value\.rs:(608:65|609:62): replace \| with \^ in Value::decode$',
     # gamut-dsp `adst_output_permute`: the index is `(d << 3) | (c << 2) | (b << 1) | a`, where each
     # of a/b/c/d is a single bit (0 or 1) shifted to a distinct position, so the OR'd operands never
     # share bits and `|` is identical to `^`. The three `| -> ^` mutations are therefore equivalent.

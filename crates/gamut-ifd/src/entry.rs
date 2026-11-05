@@ -9,7 +9,11 @@ use crate::value::Value;
 /// value count) from 32 to 64 bits so a file may exceed 4 GiB (`references/tiff/bigtiff.html`).
 /// The [`Variant::Big`] arm — and every 64-bit width it selects — exists only when the `bigtiff`
 /// feature is enabled.
+///
+/// Non-exhaustive because that feature adds a variant, and Cargo feature unification would
+/// otherwise let another crate in the build break a dependent's exhaustive `match`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Variant {
     /// Classic TIFF 6.0: magic `42`, an 8-byte header, 12-byte IFD entries, 32-bit offsets.
     Classic,

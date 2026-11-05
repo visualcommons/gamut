@@ -12,6 +12,10 @@ use crate::fourcc::FourCc;
 /// is part of the v1 surface.
 pub(crate) const CHUNK_HEADER_LEN: usize = 8;
 
+/// Byte length of a RIFF/WebP file header: the `RIFF` magic, the `uint32` file size, and the `WEBP`
+/// form type (RFC 9649 §2.4). Chunks begin here.
+pub(crate) const RIFF_HEADER_LEN: usize = 12;
+
 /// Number of pad bytes that follow a payload of `size` bytes: RIFF pads an odd-sized payload to an
 /// even boundary with a single zero byte, so this is `1` for odd `size` and `0` otherwise.
 pub(crate) const fn pad_len(size: u32) -> usize {

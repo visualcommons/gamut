@@ -74,7 +74,7 @@ fn marker_form_matches_golden() {
 #[test]
 fn bare_form_matches_golden() {
     let bare = ExifWriter::new()
-        .marker(false)
+        .with_marker(false)
         .write(&golden_model())
         .expect("write");
     check_fixture("golden_bare_le.bin", &bare);

@@ -6,17 +6,12 @@
 //! sized placeholder offsets to learn where the value pool ends, places each image's strips after
 //! it, fills in the `StripOffsets`/`StripByteCounts` (or tile equivalents), and writes again. The
 //! re-write is byte-stable because only the *values* of the offset fields change, not their sizes.
+//! That layout is [`gamut_ifd::write_with_blocks`], shared with gamut-tiff.
 
 use gamut_core::Result;
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, align_word, write};
+use gamut_ifd::{BlockRun, ByteOrder, Ifd, Variant, write_with_blocks};
 
 use crate::tags;
-
-/// Rounds `n` up to the next even (word) boundary — [`gamut_ifd::write`]'s documented value-pool
-/// alignment — so block data begins on a word boundary.
-fn even(n: usize) -> usize {
-    align_word(n as u64) as usize
-}
 
 /// One image's data blocks (strips or tiles) plus the tags that reference them.
 pub(crate) struct ImageBlocks {
@@ -29,34 +24,10 @@ pub(crate) struct ImageBlocks {
 }
 
 impl ImageBlocks {
-    /// Stores the byte counts and a correctly-typed placeholder offset array into `ifd`, so the
-    /// directory layout is final before the real offsets are known.
-    fn install_placeholders(&self, ifd: &mut Ifd, variant: Variant) -> Result<()> {
-        let counts: Vec<u32> = self.blocks.iter().map(|b| b.len() as u32).collect();
-        ifd.set(self.bytecount_tag, Value::Long(counts));
-        ifd.set(
-            self.offset_tag,
-            Value::offset_array(variant, &vec![0; self.blocks.len()])?,
-        );
-        Ok(())
+    /// The blocks as the run [`write_with_blocks`] lays out.
+    fn run(&self) -> BlockRun<'_> {
+        BlockRun::new(self.offset_tag, self.bytecount_tag, &self.blocks)
     }
-}
-
-/// Assigns each block in `image` a file offset starting at `*cursor`, advancing it past the data,
-/// and records the offsets under the image's offset tag in `ifd`.
-fn place_blocks(
-    cursor: &mut usize,
-    image: &ImageBlocks,
-    ifd: &mut Ifd,
-    variant: Variant,
-) -> Result<()> {
-    let mut offsets = Vec::with_capacity(image.blocks.len());
-    for block in &image.blocks {
-        offsets.push(*cursor as u64);
-        *cursor += block.len();
-    }
-    ifd.set(image.offset_tag, Value::offset_array(variant, &offsets)?);
-    Ok(())
 }
 
 /// Serialises a DNG whose IFD 0 carries `preview` image data and whose single raw sub-IFD
@@ -67,50 +38,27 @@ fn place_blocks(
 pub(crate) fn write_cfa_dng(
     order: ByteOrder,
     variant: Variant,
-    mut ifd0: Ifd,
+    ifd0: Ifd,
     preview: &ImageBlocks,
-    mut raw_ifd: Ifd,
+    raw_ifd: Ifd,
     raw: &ImageBlocks,
 ) -> Result<Vec<u8>> {
-    // Install correctly-sized placeholders so the directory tree's byte layout is final.
-    preview.install_placeholders(&mut ifd0, variant)?;
-    raw.install_placeholders(&mut raw_ifd, variant)?;
-    ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw_ifd.clone()]);
-
-    // Writing the tree alone yields header + IFDs + value pool, so its length is where the image
-    // data begins (rounded up to a word boundary).
-    let base = even(
-        write(&TiffFile {
-            order,
-            variant,
-            ifds: vec![ifd0.clone()],
-        })?
-        .len(),
-    );
-
-    // Lay the preview strips out first, then the raw strips, recording the real offsets.
-    let mut cursor = base;
-    place_blocks(&mut cursor, preview, &mut ifd0, variant)?;
-    place_blocks(&mut cursor, raw, &mut raw_ifd, variant)?;
-    ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw_ifd]);
-
-    let mut out = write(&TiffFile {
-        order,
-        variant,
-        ifds: vec![ifd0],
-    })?;
-    out.resize(base, 0); // pad to the even base (a no-op unless the value pool ended odd)
-    for block in &preview.blocks {
-        out.extend_from_slice(block);
-    }
-    for block in &raw.blocks {
-        out.extend_from_slice(block);
-    }
-    Ok(out)
+    // The preview strips are laid out first, then the raw strips; the raw run is installed on the
+    // sub-IFD that references it.
+    write_with_blocks(order, variant, &[preview.run(), raw.run()], |placed| {
+        let mut ifd0 = ifd0.clone();
+        placed[0].install(&mut ifd0);
+        let mut raw_ifd = raw_ifd.clone();
+        placed[1].install(&mut raw_ifd);
+        ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw_ifd]);
+        vec![ifd0]
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use gamut_ifd::Value;
+
     use super::*;
 
     /// A one-strip image's blocks under the strip tags.

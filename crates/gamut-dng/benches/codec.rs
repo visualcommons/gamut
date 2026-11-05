@@ -282,16 +282,16 @@ impl Case {
     /// does not,
     /// so the same arithmetic would over-credit gamut and the correction is suppressed.
     fn preview_correction_is_measured(self) -> bool {
-        matches!(self.compression, Compression::Uncompressed)
+        matches!(self.compression, Compression::None)
     }
 }
 
 impl std::fmt::Display for Case {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let scheme = match self.compression {
-            Compression::Uncompressed => "uncompressed".to_string(),
+            Compression::None => "uncompressed".to_string(),
             Compression::Deflate => "deflate".to_string(),
-            Compression::LosslessJpeg => "lossless-jpeg".to_string(),
+            Compression::Jpeg => "lossless-jpeg".to_string(),
             Compression::JpegXl => "jpeg-xl".to_string(),
             other => format!("{other:?}"),
         };
@@ -316,7 +316,7 @@ const PHOTOMETRIES: [Photometry; 2] = [Photometry::Cfa, Photometry::LinearRaw];
 const CASES: &[Case] = &[
     Case {
         photometry: Photometry::Cfa,
-        compression: Compression::Uncompressed,
+        compression: Compression::None,
     },
     Case {
         photometry: Photometry::Cfa,
@@ -324,7 +324,7 @@ const CASES: &[Case] = &[
     },
     Case {
         photometry: Photometry::Cfa,
-        compression: Compression::LosslessJpeg,
+        compression: Compression::Jpeg,
     },
     #[cfg(feature = "jxl-encode")]
     Case {
@@ -333,7 +333,7 @@ const CASES: &[Case] = &[
     },
     Case {
         photometry: Photometry::LinearRaw,
-        compression: Compression::Uncompressed,
+        compression: Compression::None,
     },
     Case {
         photometry: Photometry::LinearRaw,
@@ -341,7 +341,7 @@ const CASES: &[Case] = &[
     },
     Case {
         photometry: Photometry::LinearRaw,
-        compression: Compression::LosslessJpeg,
+        compression: Compression::Jpeg,
     },
     #[cfg(feature = "jxl-encode")]
     Case {

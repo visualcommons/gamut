@@ -8,7 +8,12 @@
 /// internationalised text. The BigTIFF 64-bit additions (`Long8`/`SLong8`/`Ifd8`, codes
 /// `16`–`18`) appear only when the `bigtiff` feature is enabled, so the set stays additive and
 /// a classic-only build treats those codes as unknown.
+///
+/// Non-exhaustive because the `bigtiff` feature adds variants: Cargo unifies features across a
+/// build graph, so a dependent's exhaustive `match` would break the moment any other crate in the
+/// same build enabled it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FieldType {
     /// `1` — an 8-bit unsigned integer.
     Byte,

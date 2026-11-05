@@ -4,7 +4,7 @@ Leica has never published the layout of its `MakerNote` (`0x927C`) payload, and 
 Leica module (`TiffMnCreator::registry_` in `third_party/exiv2/src/makernote_int.cpp` has no Leica
 row), so `tooling/exiv2-oracle` cannot serve as the oracle. This directory stakes what
 `gamut-exif`'s Leica dialects (`MakerNoteLayout::detect`) and its Leica view
-(`gamut_exif::maker_note::leica`) are held to, as the parent table in
+(`gamut_exif::LeicaMakerNote`) are held to, as the parent table in
 [`../README.md`](../README.md#makernote-dialects-not-a-specification-issue-418) asks of every
 vendor.
 

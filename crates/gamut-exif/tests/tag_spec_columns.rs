@@ -183,7 +183,7 @@ fn every_dc008_row_matches_its_catalogued_tag() {
 fn every_tag_claiming_a_dc008_type_has_exactly_one_row() {
     // The converse direction: a catalogued tag with a non-empty Type list claims DC-008 defines
     // it, so it must have a row — and one only, or a duplicate could mask a disagreement. A tag
-    // with an empty list claims nothing (tag.rs module docs) and must have none.
+    // with an empty list claims nothing (`ExifTag`'s docs) and must have none.
     let rows = rows();
     for &tag in ExifTag::ALL {
         let matching = rows

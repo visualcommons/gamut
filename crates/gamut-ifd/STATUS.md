@@ -4,7 +4,10 @@
 `references/tiff/bigtiff.html` for BigTIFF) out as a shared primitive consumed by both
 [`gamut-tiff`](../gamut-tiff) (the TIFF codec, issue #107) and [`gamut-exif`](../gamut-exif) (EXIF
 metadata, issue #34). It models *structure only* — byte order, field types, values, the IFD chain,
-and the offset-driven read/write spine — never pixels, compression, or photometry.
+and the offset-driven read/write spine — never pixels, compression, or photometry. It names the
+codes those tags carry (`tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat}`,
+since #1133) so the codecs spell them alike; what a code does, and whether a codec supports it,
+stays the codec's.
 
 **Keystone:** the **two-pass offset layout** in the writer ([`write`](src/writer.rs)). Out-of-line
 values and following IFDs need absolute offsets that are only known after sizes are fixed, so the
@@ -83,6 +86,23 @@ The API was frozen after a full-surface review; the additions and breaks:
   (plus, since P9, the [`tags`](src/tags.rs) module — the one *named* module, holding the
   structural pointer-tag constants).
 
+## Shared TIFF-family codec pieces (issue #1071)
+
+What gamut-tiff and gamut-dng had each copied now lives here once:
+
+- **The deconstruct report** — `DeconstructReport`, `Anomaly`, `Severity`, `UnknownTag`,
+  `UnknownFieldType` — with constructors, since the types stay `#[non_exhaustive]`. Which
+  checks a codec runs stays the codec's (TIFF checks `Predictor`, DNG checks colour matrices).
+- **Image-data extents** — `extent_slices` resolves offset/byte-count pairs in checked 64-bit
+  arithmetic, and `rows_per_strip` reads `RowsPerStrip` under a `ZeroRowsPerStrip` policy
+  (gamut-tiff reads a zero as one strip, gamut-dng refuses it). Both report under the caller's
+  origin.
+- **The data layout after the tree** — `write_with_blocks` writes placeholder offsets, measures,
+  places every `BlockRun` from the next word boundary and writes again.
+- `Variant`, `FieldType` and `Value` are `#[non_exhaustive]`: the `bigtiff` feature adds variants,
+  and Cargo feature unification would otherwise let any crate in a build break a dependent's
+  exhaustive `match`. `WriteOptions` is built only through its `with_*` builders.
+
 ## P9 — RAW-grade streaming (issue #252)
 
 Downstream RAW decoding (rawshift's ARW/CR2/NEF/DNG engines) parses multi-hundred-MB camera
@@ -137,7 +157,7 @@ convention:
   construction), the audit reclassifies only byte-inspected plausible zero-fill, and
   `SegmentReport::is_fully_classified` is a zero-tolerance verdict. `write_with` also **pins**
   named values at exact absolute offsets — the maker-note preservation primitive — and **reserves**
-  a leading vendor preamble, the positional counterpart (`WriteOptions::preamble`, #350).
+  a leading vendor preamble, the positional counterpart (`WriteOptions::with_preamble`, #350).
 
 ### Intentional drops (the complete ledger)
 
@@ -148,8 +168,8 @@ convention:
 2. **Layout re-canonicalisation.** `write` produces a canonical layout (word-aligned, tag-sorted,
    tight value pool): original offsets, entry order, and padding of arbitrary *input* are not
    reproduced — `read(write(f)) == f` and the audit closed loop are the contract, not whole-file
-   byte identity of foreign input. Pinned spans (`WriteOptions::pinned`) are the per-value
-   escape hatch, and `WriteOptions::preamble` is its counterpart for the one *positional* run a
+   byte identity of foreign input. Pinned spans (`WriteOptions::with_pin`) are the per-value
+   escape hatch, and `WriteOptions::with_preamble` is its counterpart for the one *positional* run a
    rebuilt layout can reproduce — the header/first-directory gap a vendor signature sits in
    (issue #350).
 3. **Cross-order/variant transcoding of unknown-type values is refused** (a typed error), since

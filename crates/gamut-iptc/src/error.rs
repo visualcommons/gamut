@@ -25,3 +25,44 @@ pub enum IptcError {
 
 /// A [`Result`](core::result::Result) whose error is [`IptcError`].
 pub type Result<T> = core::result::Result<T, IptcError>;
+
+impl From<IptcError> for gamut_core::Error {
+    /// Funnels an [`IptcError`] into the workspace's unified [`gamut_core::Error`], so a caller that
+    /// speaks the core error can `?` an IPTC result. [`IptcError::Malformed`] classifies as
+    /// [`gamut_core::ErrorKind::InvalidInput`] and [`IptcError::Unsupported`] as
+    /// [`gamut_core::ErrorKind::Unsupported`]; the static message is kept unchanged and the origin
+    /// names this crate.
+    fn from(err: IptcError) -> Self {
+        match err {
+            IptcError::Malformed(message) => {
+                gamut_core::Error::invalid_input(env!("CARGO_PKG_NAME"), message)
+            }
+            IptcError::Unsupported(message) => {
+                gamut_core::Error::unsupported(env!("CARGO_PKG_NAME"), message)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gamut_core::ErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn malformed_converts_to_core_invalid_input_with_its_message() {
+        let core = gamut_core::Error::from(IptcError::Malformed("IIM: truncated dataset"));
+        assert_eq!(core.kind(), ErrorKind::InvalidInput);
+        assert_eq!(core.static_message(), Some("IIM: truncated dataset"));
+        assert_eq!(core.origin(), Some("gamut-iptc"));
+    }
+
+    #[test]
+    fn unsupported_converts_to_core_unsupported_with_its_message() {
+        let core = gamut_core::Error::from(IptcError::Unsupported("1:90 charset"));
+        assert_eq!(core.kind(), ErrorKind::Unsupported);
+        assert_eq!(core.static_message(), Some("1:90 charset"));
+        assert_eq!(core.origin(), Some("gamut-iptc"));
+    }
+}

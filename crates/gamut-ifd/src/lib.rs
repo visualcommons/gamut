@@ -8,23 +8,30 @@
 //! [`gamut-exif`](https://crates.io/crates/gamut-exif) (issue #34) and
 //! [`gamut-tiff`](https://crates.io/crates/gamut-tiff) (issue #107) build on. It models only the
 //! structure (byte order, field types, values, IFD chains, offset layout) — never pixels,
-//! compression, or photometry, which stay in the codec.
+//! compression, or photometry, which stay in the codec. It names the codes those tags carry
+//! ([`tags::Compression`] and its three siblings) so the codecs spell them alike; what a code
+//! does to the pixels, and whether a codec supports it, is still the codec's.
 //!
 //! Structure follows **TIFF 6.0** (`references/tiff/tiff6.pdf`, Adobe/Aldus, Final — June 3 1992,
 //! §2). [`read`] / [`read_header`] parse a stream into a [`TiffFile`]; [`write()`] serialises one
 //! back, laying out the IFD chain and out-of-line value pool with the two-pass offset machinery.
+//! A codec storing strips or tiles after the tree hands them to [`write_with_blocks`], and a
+//! decoder resolves them back with [`extent_slices`] and [`rows_per_strip`].
 //! [`read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
 //! well-known structural ones live in [`tags`]); [`resolve_subtree`] runs the same guarded walk
 //! over **one** directory a caller already holds, scoped per level by a [`SubtreeScope`]. The
 //! same [`tags`] module holds the shared tag registry — each tag TIFF 6.0 and DNG 1.7.1.0 define,
 //! with its name, permitted field types and component count — that gamut-tiff, gamut-dng and
-//! gamut-exif read rather than each keeping a copy. The
+//! gamut-exif read rather than each keeping a copy, and the value codes of the `Compression`,
+//! `PhotometricInterpretation`, `Predictor` and `SampleFormat` tags. The
 //! one cross-format payload a TIFF-based file carries by tag — the C2PA manifest store — has its
 //! placement rule and exclusion ranges stated once, in [`c2pa`], for every TIFF-based codec to
 //! share. For strict archival decoding, [`audit`] classifies **every byte** of a stream into typed
 //! segments ([`SegmentReport`]) under a dual-ledger cross-check: a [`Tracked`] source records what
 //! the parse physically read, and the claims must match — byte accounting as a machine-checked
-//! proof, not a promise (issue #263).
+//! proof, not a promise (issue #263). A codec layers its own tag knowledge on top and reports it
+//! in the shared [`DeconstructReport`] vocabulary ([`Anomaly`], [`Severity`], [`UnknownTag`],
+//! [`UnknownFieldType`]), so gamut-tiff and gamut-dng report alike.
 //!
 //! ## Streaming
 //!
@@ -81,9 +88,11 @@
 struct ReadmeDoctests;
 
 mod audit;
+mod blocks;
 mod byte_order;
 pub mod c2pa;
 mod entry;
+mod extent;
 // Executable laws over this crate's own types, shared by the property tests and the fuzz tier
 // (`docs/testing.md`). Always available to the crate's own tests; `test-support` exposes it to an
 // out-of-tree fuzz driver. Never enabled by the `gamut` umbrella, so it stays out of the shipped
@@ -103,11 +112,13 @@ mod value;
 mod writer;
 
 pub use audit::{
-    Audit, AuditFinding, AuditSpec, Auditor, SkipReason, StandardAuditSpec, audit,
-    standard_data_extents,
+    Anomaly, Audit, AuditFinding, AuditSpec, Auditor, DeconstructReport, Severity, SkipReason,
+    StandardAuditSpec, UnknownFieldType, UnknownTag, audit, standard_data_extents,
 };
+pub use blocks::{BlockRun, PlacedRun, write_with_blocks};
 pub use byte_order::ByteOrder;
 pub use entry::{Field, Ifd, SubIfd, Variant};
+pub use extent::{ZeroRowsPerStrip, extent_slices, rows_per_strip};
 pub use reader::{
     SubtreeScope, TiffFile, read, read_audited, read_header, read_ifd_at, read_tree,
     resolve_subtree,
@@ -120,4 +131,4 @@ pub use stream::{IfdChain, IfdReader, RawEntry, RawIfd};
 pub use track::{ReadLedger, Tracked};
 pub use types::FieldType;
 pub use value::{UnknownValue, Value};
-pub use writer::{PinnedSpan, WriteOptions, align_word, write, write_with};
+pub use writer::{WriteOptions, align_word, write, write_with};

@@ -174,7 +174,7 @@ impl SubImage {
     /// The typed photometric interpretation, when the code is one the crate models.
     #[must_use]
     pub fn interpretation(&self) -> Option<crate::values::PhotometricInterpretation> {
-        crate::values::PhotometricInterpretation::from_code(self.photometric)
+        crate::values::dng_photometric(self.photometric)
     }
 }
 

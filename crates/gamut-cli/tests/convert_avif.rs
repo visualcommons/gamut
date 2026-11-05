@@ -31,7 +31,7 @@ fn exif() -> Vec<u8> {
 
     let mut exif = Exif::new(ByteOrder::LittleEndian);
     exif.set_tag(ExifTag::Make, Value::Ascii("gamut".into()));
-    ExifWriter::new().marker(false).write(&exif).unwrap()
+    ExifWriter::new().with_marker(false).write(&exif).unwrap()
 }
 
 /// An RGB profile, which the command carries verbatim onto RGB samples.

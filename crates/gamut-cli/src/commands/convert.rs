@@ -1203,7 +1203,7 @@ fn carry(
              nor uncompressed strips) did not read from the input"
         );
     }
-    match ExifWriter::new().marker(false).write(&exif) {
+    match ExifWriter::new().with_marker(false).write(&exif) {
         Ok(bytes) => carried.exif = Some(bytes),
         Err(err) => {
             tracing::warn!(
