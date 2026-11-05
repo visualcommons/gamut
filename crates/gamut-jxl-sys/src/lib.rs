@@ -7,8 +7,10 @@
 //! "C"` function signatures — and no function bodies of its own. That keeps it free of any coverage
 //! regions or mutation targets; the *safe* wrapper logic and all error handling live in
 //! [`gamut-jxl`]. The declared surface is deliberately pruned to the subset the wrapper uses, plus a
-//! decode subset (see [`decode`]) that serves as [`gamut-jxl`]'s differential-test *oracle* — the
-//! same static archive contains both halves, and the linker strips whatever is unused.
+//! decode subset (the `decode` module, behind the non-default **`oracle`** feature) that serves as
+//! [`gamut-jxl`]'s differential-test *oracle* — the same static archive contains both halves, and
+//! the linker strips whatever is unused. The feature only adds declarations: the native build is
+//! the same with or without it.
 //!
 //! # Layout & ABI
 //!
@@ -19,7 +21,12 @@
 //!   future status code) is representable and never triggers the undefined behaviour a `#[repr(i32)]`
 //!   Rust `enum` would on an unlisted discriminant.
 //! - [`encode`] — the encoder API subset ([`encode::JxlEncoder`] and friends).
-//! - [`decode`] — the decoder API subset used only as the differential-test oracle.
+//! - `decode` (`oracle` feature) — the decoder API subset used only as the differential-test
+//!   oracle; a test-only surface, so a normal dependent never sees it.
+//!
+//! Every opaque handle (`JxlEncoder`, `JxlEncoderFrameSettings`, and the oracle's `JxlDecoder`) is
+//! `!Send`, `!Sync` and `!Unpin`: libjxl owns the pointee and documents no thread affinity for it, so
+//! a wrapper that moves one across threads states that guarantee itself.
 //!
 //! # Safety
 //!
@@ -63,6 +70,7 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+#[cfg(feature = "oracle")]
 pub mod decode;
 pub mod encode;
 pub mod types;

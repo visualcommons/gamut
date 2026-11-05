@@ -42,11 +42,11 @@ gamut-metadata = { workspace = true, optional = true }
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))'.dependencies]
 gamut-jxl-sys = { workspace = true, optional = true }
 
-# The oracle for the encoder tests: the same static libjxl archive also exposes a decode surface,
-# which the integration tests use to read encoded streams back. Available exactly where the encoder
+# The oracle for the encoder tests: the same static libjxl archive also exposes a decode surface
+# (gamut-jxl-sys's non-default `oracle` feature), which the integration tests use to read encoded streams back. Available exactly where the encoder
 # is (see above), including emscripten — the wasm test lane runs the full differential suite.
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))'.dev-dependencies]
-gamut-jxl-sys.workspace = true
+gamut-jxl-sys = { workspace = true, features = ["oracle"] }
 
 [features]
 default = ["decode", "encode"]

@@ -20,6 +20,13 @@ links = "jxl"
 [lints]
 workspace = true
 
+[features]
+default = []
+# Declares libjxl's decoder subset (`gamut_jxl_sys::decode`): gamut-jxl's differential-test oracle,
+# enabled by its dev-dependency. Declarations only — the static archive already holds the decoder,
+# so the native build is identical with or without it.
+oracle = []
+
 [build-dependencies]
 # BSD-3-Clause. Vendors the full libjxl v0.12.0 source (including highway, brotli and skcms) inside
 # the published package and performs a hermetic, static-only cmake build entirely under `OUT_DIR`

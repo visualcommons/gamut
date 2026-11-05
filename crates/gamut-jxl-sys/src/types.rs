@@ -323,7 +323,7 @@ pub struct JxlColorEncoding {
 /// Memory manager struct (`JxlMemoryManager`, `jxl/memory_manager.h`).
 ///
 /// Passed (as `*const`) to [`crate::encode::JxlEncoderCreate`] and
-/// [`crate::decode::JxlDecoderCreate`]. This crate only ever passes a null pointer (the default
+/// the `oracle` feature's `JxlDecoderCreate`. This crate only ever passes a null pointer (the default
 /// malloc/free allocator), so the allocator callback fields are typed as opaque
 /// [`core::ffi::c_void`] pointers rather than transcribed function-pointer types.
 #[repr(C)]
