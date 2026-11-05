@@ -1,0 +1,35 @@
+[package]
+name = "gamut-heif"
+description = "The shared HEIF/MIAF still-image layer under gamut-avif and gamut-heic: the role-typed item model, the derivation walk, decode limits, planar-to-RGBA presentation and the C2PA summary, generic over a codec binding."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Exposes the `invariants` module (the decode-limit law and its stub codec binding) to an
+# out-of-tree fuzz driver. `doc(hidden)`, no SemVer guarantee, and never enabled by the `gamut`
+# umbrella; the crate's own tests get it via `cfg(test)`.
+test-support = []
+
+[dependencies]
+gamut-core.workspace = true
+gamut-color.workspace = true
+# libavif's bilinear chroma upsampling kernel (`upsample::libavif`) behind
+# `ChromaUpsampling::Interpolated` on the RGBA presentation surfaces.
+gamut-dsp.workspace = true
+gamut-isobmff.workspace = true
+# The one backend `Registry` (behind its `std` feature) the coded-item decode runs through.
+gamut-codec-abi = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+proptest.workspace = true

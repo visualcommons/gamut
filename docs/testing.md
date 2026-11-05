@@ -28,8 +28,8 @@ Placement is mechanical. Two questions, in order:
    public boundary is killable *only* from inside the crate's own lib target.
 2. **Is there a hard linkage reason it cannot compile in the lib target?** → `crates/<crate>/tests/`.
    There are exactly three:
-   - the assertion needs `unsafe` and the crate is `#![forbid(unsafe_code)]` — which is 21 of the
-     32 crates, so this is the common case: `gamut-heic`'s `tests/backend.rs` and
+   - the assertion needs `unsafe` and the crate is `#![forbid(unsafe_code)]` — which is 22 of the
+     33 crates, so this is the common case: `gamut-heic`'s `tests/backend.rs` and
      `tests/abi_borrowed_backend.rs`, `gamut-webp`'s `tests/backends.rs`, `gamut-avif`'s
      `tests/backend.rs`, and the FFI wrappers in `gamut-riff`/`gamut-webp`'s
      `tests/common/mod.rs`. The six hot-path crates (`gamut-png`, `gamut-deflate`, `gamut-dsp`,
