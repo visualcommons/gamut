@@ -22,6 +22,8 @@ workspace = true
 # need of a profile
 # serializer; see `STATUS.md`, "Built-in profiles".
 gamut-color.workspace = true
+# The workspace's shared vocabulary: `Cicp` models the `cicpType` element, and `IccError` converts
+# into `Error`.
 gamut-core.workspace = true
 md-5.workspace = true
 thiserror.workspace = true

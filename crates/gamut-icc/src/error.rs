@@ -7,7 +7,8 @@ use crate::primitives::Signature;
 /// Every failure the ICC reader and writer raise is a malformed input or a violated spec
 /// invariant; the message names the specific structure at fault (e.g. `"icc: duplicate tag
 /// signature"`). Exposing the crate's own type — rather than the shared [`gamut_core::Error`] —
-/// keeps the failing carrier identifiable when embedded in a wider metadata pipeline.
+/// keeps the failing carrier identifiable when embedded in a wider metadata pipeline, and
+/// `From<IccError> for gamut_core::Error` funnels it into that shared type where one is wanted.
 ///
 /// A failure raised while parsing a whole profile ([`crate::IccProfile::parse`],
 /// [`crate::IccReader::parse`], [`crate::ProfileHeader::parse`]) is
@@ -105,6 +106,24 @@ impl IccError {
 /// A [`Result`](core::result::Result) whose error is [`IccError`].
 pub type Result<T> = core::result::Result<T, IccError>;
 
+impl From<IccError> for gamut_core::Error {
+    /// Funnels an [`IccError`] into the workspace's unified [`gamut_core::Error`].
+    ///
+    /// Every ICC failure is a malformed input or a violated spec invariant, so the result is
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind) with the ICC
+    /// [`message`](IccError::message) as its static message and the full diagnostic — location
+    /// and tag included — as [`detail`](gamut_core::Error::detail). An error located in parsed
+    /// bytes also sets the [`byte_offset`](gamut_core::Error::byte_offset).
+    fn from(err: IccError) -> Self {
+        let core = gamut_core::Error::invalid_input(env!("CARGO_PKG_NAME"), err.message())
+            .with_detail(err.to_string());
+        match err.offset() {
+            Some(offset) => core.with_byte_offset(offset),
+            None => core,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +151,23 @@ mod tests {
         assert_eq!(e.offset(), None);
         assert_eq!(e.tag(), None);
         assert_eq!(e.to_string(), "icc: x");
+    }
+
+    #[test]
+    fn converts_to_core_invalid_input_with_the_location() {
+        let located: gamut_core::Error = IccError::Malformed("icc: x")
+            .located(200, Some(Signature(*b"rTRC")))
+            .into();
+        assert_eq!(located.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(located.origin(), Some("gamut-icc"));
+        assert_eq!(located.static_message(), Some("icc: x"));
+        assert_eq!(located.byte_offset(), Some(200));
+        assert_eq!(located.detail(), Some("icc: x (at byte 200 in tag 'rTRC')"));
+
+        let unlocated: gamut_core::Error = IccError::Malformed("icc: y").into();
+        assert_eq!(unlocated.static_message(), Some("icc: y"));
+        assert_eq!(unlocated.byte_offset(), None);
+        assert_eq!(unlocated.detail(), Some("icc: y"));
     }
 
     #[test]
