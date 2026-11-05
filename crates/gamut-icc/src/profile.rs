@@ -64,8 +64,8 @@ impl IccProfile {
     ///
     /// Returns [`IccError::Malformed`] if the model violates an invariant serialization relies on:
     /// a duplicate tag signature, LUT tables or curve sets whose lengths contradict their declared
-    /// channel counts, an 8-bit CLUT sample over 255, an over-long fixed-width name field, or
-    /// non-ASCII text in an ASCII element. These are only reachable with hand-built data — the
+    /// channel counts, an 8-bit CLUT sample over 255, a `cicp` code point over 255, an over-long
+    /// fixed-width name field, or non-ASCII text in an ASCII element. These are only reachable with hand-built data — the
     /// decoder establishes every such invariant, so a profile produced by [`IccProfile::parse`]
     /// always serializes.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
