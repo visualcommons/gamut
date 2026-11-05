@@ -52,8 +52,8 @@ fn every_type_ifd(order: ByteOrder, variant: Variant) -> Ifd {
     next(Value::Utf8("café — 日本語".to_owned()), &mut ifd);
     let word: &[u8] = match variant {
         Variant::Classic => &[0xDE, 0xAD, 0xBE, 0xEF],
-        #[cfg(feature = "bigtiff")]
-        Variant::Big => &[1, 2, 3, 4, 5, 6, 7, 8],
+        // BigTIFF's 8-byte word (`Variant` is non-exhaustive, so the arm is a wildcard).
+        _ => &[1, 2, 3, 4, 5, 6, 7, 8],
     };
     next(
         Value::Unknown(UnknownValue::new(0xF0, 3, word, order, variant).expect("capture")),

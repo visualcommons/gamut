@@ -187,6 +187,9 @@ fn canonical_value(ty: FieldType) -> Value {
         FieldType::Long8 => Value::Long8(vec![8]),
         FieldType::SLong8 => Value::SLong8(vec![8]),
         FieldType::Ifd8 => Value::Ifd8(vec![8]),
+        // `FieldType` is non-exhaustive: a type added upstream reaches this arm through the
+        // derived code sweep and fails the run rather than being skipped.
+        other => panic!("no canonical value for field type {other:?}: extend this sweep"),
     }
 }
 

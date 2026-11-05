@@ -870,9 +870,11 @@ mod tests {
 
     /// One value of every on-disk field type, keyed by the type's code.
     ///
-    /// Exhaustive over [`gamut_ifd::FieldType`] by construction: the compiler rejects this match
-    /// the day a field type is added upstream, so no caller of it can silently sweep a set short
-    /// by one — which is exactly the defect that produced the pointer-field regression.
+    /// Covers every [`gamut_ifd::FieldType`]: the type is `#[non_exhaustive]`, so the compiler can
+    /// no longer reject this match when a field type is added upstream, and the wildcard arm panics
+    /// instead. [`every_type_code`] sweeps the whole code space through `from_code`, so the first
+    /// run after such an addition fails here rather than silently sweeping a set short by one —
+    /// which is exactly the defect that produced the pointer-field regression.
     fn canonical_value(ty: gamut_ifd::FieldType) -> Value {
         use gamut_ifd::FieldType as T;
         match ty {
@@ -893,6 +895,7 @@ mod tests {
             T::Long8 => Value::Long8(vec![8]),
             T::SLong8 => Value::SLong8(vec![8]),
             T::Ifd8 => Value::Ifd8(vec![8]),
+            other => panic!("no canonical value for field type {other:?}: extend this sweep"),
         }
     }
 
