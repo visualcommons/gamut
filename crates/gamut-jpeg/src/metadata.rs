@@ -129,6 +129,33 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_exif_stream_is_written_unchanged() {
+        // A TIFF stream that never carried the `Exif\0\0` signature is stored as given.
+        let mut bare = EncodedMetadata::default();
+        bare.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
+        let raw = read(&encode(
+            JpegEncoder::new().with_encoded_metadata(&bare).unwrap(),
+        ));
+        assert_eq!(raw.exif, bare.exif);
+    }
+
+    #[test]
+    fn carriers_without_an_app_segment_are_refused() {
+        // `CARRIERS` lists exactly the three APP carriers: an IPTC-IIM stream (no APP13 writer)
+        // and a manifest store are refused, and nothing is applied.
+        let mut iim = EncodedMetadata::default();
+        iim.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
+        let mut c2pa = EncodedMetadata::default();
+        c2pa.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
+        for blocks in [iim, c2pa] {
+            let err = JpegEncoder::new()
+                .with_encoded_metadata(&blocks)
+                .unwrap_err();
+            assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
     fn encoded_blocks_route_to_the_raw_setters() {
         // Each present field lands in its APP segment; an absent one leaves an earlier setting.
         let encoded = typed().to_blocks().unwrap();
