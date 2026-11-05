@@ -25,7 +25,7 @@
 //!   input.
 //! - **Dimensions are never empty.** [`Dimensions`] has private fields and two constructors:
 //!   [`Dimensions::new`], which rejects a zero width or height, and the infallible `const`
-//!   [`Dimensions::from_nonzero`], whose [`NonZeroU32`](core::num::NonZeroU32) arguments already
+//!   [`Dimensions::from_nonzero`], whose [`NonZeroU32`] arguments already
 //!   carry that invariant; the buffers then enforce
 //!   `len == width * height * channels` once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs
 //!   receive a known-good buffer.
