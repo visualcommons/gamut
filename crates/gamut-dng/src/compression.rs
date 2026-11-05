@@ -12,6 +12,31 @@ use miniz_oxide::inflate::TINFLStatus;
 
 use crate::values::Compression;
 
+/// Whether `gamut-dng` can decode `scheme`: uncompressed, lossless JPEG, Deflate and JPEG XL.
+/// Lossy JPEG is out of codec scope (see `STATUS.md`), and the TIFF-only schemes are not DNG's.
+///
+/// Every decodable scheme also encodes, with two caveats: [`Compression::JpegXl`] encoding needs
+/// the `jxl-encode` cargo feature, and [`Compression::Deflate`] encoding is limited to 8/16-bit
+/// samples.
+pub(crate) fn is_decodable(scheme: Compression) -> bool {
+    matches!(
+        scheme,
+        Compression::None | Compression::Jpeg | Compression::Deflate | Compression::JpegXl
+    )
+}
+
+/// Whether `scheme` stores the raw image **lossily**, which changes how its `NewRawImageDigest`
+/// is computed: lossy storage digests the compressed chunks (the SDK's
+/// `dng_lossy_compressed_image::FindDigest`) rather than the decoded samples. See
+/// [`DngDecoder::verify_new_raw_image_digest`](crate::DngDecoder::verify_new_raw_image_digest).
+///
+/// JPEG XL counts as lossy storage for digest purposes whether or not the codestream itself was
+/// encoded losslessly — the reference implementation routes every JXL image through the
+/// compressed-chunk path.
+pub(crate) fn is_lossy(scheme: Compression) -> bool {
+    matches!(scheme, Compression::LossyJpeg | Compression::JpegXl)
+}
+
 /// Compresses one already-packed strip with `scheme`.
 ///
 /// # Errors
@@ -20,7 +45,7 @@ use crate::values::Compression;
 /// gamut-dng cannot yet encode.
 pub(crate) fn compress(scheme: Compression, packed: &[u8]) -> Result<Vec<u8>> {
     match scheme {
-        Compression::Uncompressed => Ok(packed.to_vec()),
+        Compression::None => Ok(packed.to_vec()),
         // Encoding goes through the workspace's own space-optimising zlib encoder at its default
         // level (lazy matching + per-block dynamic Huffman), the same choice `gamut-tiff` makes for
         // Adobe Deflate. Inflation stays with `miniz_oxide` — see [`decompress`].
@@ -50,7 +75,7 @@ pub(crate) fn compress(scheme: Compression, packed: &[u8]) -> Result<Vec<u8>> {
 /// cannot yet decode.
 pub(crate) fn decompress(scheme: Compression, bytes: &[u8], max_out: usize) -> Result<Vec<u8>> {
     match scheme {
-        Compression::Uncompressed => Ok(bytes.to_vec()),
+        Compression::None => Ok(bytes.to_vec()),
         Compression::Deflate => miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(
             bytes, max_out,
         )
@@ -74,6 +99,36 @@ pub(crate) fn decompress(scheme: Compression, bytes: &[u8], max_out: usize) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `is_lossy` splits the compressions that route through the compressed-chunk digest path
+    /// from the ones that do not. Nothing asserted it, so it could be replaced by either constant
+    /// (#110) -- which needs cases on both sides to close.
+    #[test]
+    fn is_lossy_names_the_compressed_chunk_compressions() {
+        assert!(is_lossy(Compression::LossyJpeg));
+        // JPEG XL counts as lossy storage whether or not its codestream was lossless.
+        assert!(is_lossy(Compression::JpegXl));
+
+        assert!(!is_lossy(Compression::None));
+        assert!(!is_lossy(Compression::Jpeg));
+        assert!(!is_lossy(Compression::Deflate));
+    }
+
+    /// Each decodable scheme is named separately (one per or-pattern alternative), and the
+    /// out-of-scope lossy JPEG and a TIFF-only scheme are not decodable.
+    #[test]
+    fn is_decodable_names_the_four_decoded_schemes() {
+        for scheme in [
+            Compression::None,
+            Compression::Jpeg,
+            Compression::Deflate,
+            Compression::JpegXl,
+        ] {
+            assert!(is_decodable(scheme), "{scheme:?}");
+        }
+        assert!(!is_decodable(Compression::LossyJpeg));
+        assert!(!is_decodable(Compression::Lzw));
+    }
 
     #[test]
     fn deflate_roundtrips() {
@@ -122,17 +177,17 @@ mod tests {
     #[test]
     fn uncompressed_is_passthrough() {
         assert_eq!(
-            compress(Compression::Uncompressed, &[1, 2, 3]).unwrap(),
+            compress(Compression::None, &[1, 2, 3]).unwrap(),
             vec![1, 2, 3]
         );
         assert_eq!(
-            decompress(Compression::Uncompressed, &[1, 2, 3], 3).unwrap(),
+            decompress(Compression::None, &[1, 2, 3], 3).unwrap(),
             vec![1, 2, 3]
         );
     }
 
     #[test]
     fn lossless_jpeg_not_yet_encodable() {
-        assert!(compress(Compression::LosslessJpeg, &[0; 16]).is_err());
+        assert!(compress(Compression::Jpeg, &[0; 16]).is_err());
     }
 }

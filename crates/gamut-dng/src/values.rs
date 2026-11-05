@@ -1,145 +1,56 @@
-//! Enumerated DNG tag *values* — the codes stored in the `Compression`,
-//! `PhotometricInterpretation`, `CalibrationIlluminant`, `CFALayout`, `Predictor`, `SampleFormat`,
+//! Enumerated DNG tag *values* — the codes stored in the `CalibrationIlluminant`, `CFALayout`,
 //! `ProfileEmbedPolicy`, `PreviewColorSpace`, and `TableEncoding` tags, plus the
 //! `NewSubFileType` bit values.
 //!
 //! Values come from the **DNG 1.7.1.0** specification and the Adobe DNG SDK's `dng_tag_values.h`.
 //! Each enum mirrors the structural-codec pattern used elsewhere in the workspace: a `from_code`
 //! that rejects unknown codes (`None`) and a `code` that returns the on-disk value.
+//!
+//! The `Compression`, `PhotometricInterpretation`, `Predictor` and `SampleFormat` codes are
+//! gamut-ifd's, shared with gamut-tiff and re-exported here: each is a `#[repr(u16)]` enum read
+//! with `TryFrom<u16>` and written with `u16::from`. Their union carries codes only TIFF assigns
+//! (CCITT, LZW and PackBits compression, the palette and CMYK photometries, …), and what stays
+//! here is which of them a DNG reader admits.
 
-/// The compression scheme of an image's data, stored in the `Compression` tag (259).
+pub use gamut_ifd::tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat};
+
+/// Reads an on-disk `Compression` code (tag 259) as one of the five DNG 1.7.1.0 assigns —
+/// uncompressed, JPEG, Deflate, lossy JPEG and JPEG XL — or `None`.
 ///
-/// `gamut-dng` encodes and decodes [`Uncompressed`](Self::Uncompressed),
-/// [`LosslessJpeg`](Self::LosslessJpeg), [`Deflate`](Self::Deflate), and
-/// [`JpegXl`](Self::JpegXl) (encode behind the `jxl-encode` feature).
-/// [`LossyJpeg`](Self::LossyJpeg) is recognised but out of codec scope (see `STATUS.md`).
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Compression {
-    /// `1` — uncompressed sample data.
-    #[default]
-    Uncompressed,
-    /// `7` — lossless JPEG (Huffman + predictor); the standard DNG raw compression.
-    LosslessJpeg,
-    /// `8` — Deflate/ZIP (RFC 1951), used for integer and floating-point data.
-    Deflate,
-    /// `34892` — DNG lossy JPEG (8-bit `LinearRaw`/mask only). Out of codec scope.
-    LossyJpeg,
-    /// `52546` — JPEG XL (DNG 1.7); what Apple ProRAW uses. Decoded via the pure-Rust jxl-rs
-    /// path; encoding needs the `jxl-encode` cargo feature.
-    JpegXl,
+/// Only a scheme's own code is admitted: the legacy Adobe Deflate alias `32946`, which gamut-ifd
+/// reads as [`Compression::Deflate`] for TIFF, is not DNG's.
+pub(crate) fn dng_compression(code: u16) -> Option<Compression> {
+    Compression::try_from(code).ok().filter(|&compression| {
+        u16::from(compression) == code
+            && matches!(
+                compression,
+                Compression::None
+                    | Compression::Jpeg
+                    | Compression::Deflate
+                    | Compression::LossyJpeg
+                    | Compression::JpegXl
+            )
+    })
 }
 
-impl Compression {
-    /// Returns the compression for an on-disk tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u16) -> Option<Self> {
-        Some(match code {
-            1 => Compression::Uncompressed,
-            7 => Compression::LosslessJpeg,
-            8 => Compression::Deflate,
-            34892 => Compression::LossyJpeg,
-            52546 => Compression::JpegXl,
-            _ => return None,
+/// Reads an on-disk `PhotometricInterpretation` code (tag 262) as one DNG 1.7.1.0 assigns, or
+/// `None` — the photometries of DNG's raw images, previews and masks.
+pub(crate) fn dng_photometric(code: u16) -> Option<PhotometricInterpretation> {
+    PhotometricInterpretation::try_from(code)
+        .ok()
+        .filter(|photometric| {
+            matches!(
+                photometric,
+                PhotometricInterpretation::BlackIsZero
+                    | PhotometricInterpretation::Rgb
+                    | PhotometricInterpretation::TransparencyMask
+                    | PhotometricInterpretation::YCbCr
+                    | PhotometricInterpretation::Cfa
+                    | PhotometricInterpretation::LinearRaw
+                    | PhotometricInterpretation::Depth
+                    | PhotometricInterpretation::PhotometricMask
+            )
         })
-    }
-
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u16 {
-        match self {
-            Compression::Uncompressed => 1,
-            Compression::LosslessJpeg => 7,
-            Compression::Deflate => 8,
-            Compression::LossyJpeg => 34892,
-            Compression::JpegXl => 52546,
-        }
-    }
-
-    /// Whether `gamut-dng` can decode this scheme. Every decodable scheme also encodes, with two
-    /// caveats: [`JpegXl`](Self::JpegXl) encoding needs the `jxl-encode` cargo feature, and
-    /// [`Deflate`](Self::Deflate) encoding is limited to 8/16-bit samples.
-    #[must_use]
-    pub fn is_decodable(self) -> bool {
-        matches!(
-            self,
-            Compression::Uncompressed
-                | Compression::LosslessJpeg
-                | Compression::Deflate
-                | Compression::JpegXl
-        )
-    }
-
-    /// Whether this scheme stores the raw image **lossily**, which changes how its
-    /// `NewRawImageDigest` is computed: lossy storage digests the compressed chunks (the SDK's
-    /// `dng_lossy_compressed_image::FindDigest`) rather than the decoded samples. See
-    /// [`DngDecoder::verify_new_raw_image_digest`](crate::DngDecoder::verify_new_raw_image_digest).
-    ///
-    /// JPEG XL counts as lossy storage for digest purposes whether or not the codestream itself
-    /// was encoded losslessly — the reference implementation routes every JXL image through the
-    /// compressed-chunk path.
-    #[must_use]
-    pub fn is_lossy(self) -> bool {
-        matches!(self, Compression::LossyJpeg | Compression::JpegXl)
-    }
-}
-
-/// How pixel samples map to colour / raw photometry, stored in `PhotometricInterpretation` (262).
-///
-/// Only the DNG-relevant interpretations are modelled.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhotometricInterpretation {
-    /// `1` — grayscale where `0` is black (used by previews and masks).
-    BlackIsZero,
-    /// `2` — full-colour RGB (used by previews and as `LinearRaw`'s base for demosaiced RGB).
-    Rgb,
-    /// `4` — a transparency mask.
-    TransparencyMask,
-    /// `6` — YCbCr, the colour space of the baseline-JPEG previews real cameras embed. Raw
-    /// images never use it; it appears on preview and thumbnail sub-images.
-    YCbCr,
-    /// `32803` — a colour-filter-array (mosaic) raw image.
-    Cfa,
-    /// `34892` — a demosaiced ("linear") raw image, one sample per plane per pixel.
-    LinearRaw,
-    /// `51177` — a depth map.
-    Depth,
-    /// `52527` — a photometric (per-channel) mask.
-    PhotometricMask,
-}
-
-impl PhotometricInterpretation {
-    /// Returns the interpretation for an on-disk tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u16) -> Option<Self> {
-        Some(match code {
-            1 => PhotometricInterpretation::BlackIsZero,
-            2 => PhotometricInterpretation::Rgb,
-            4 => PhotometricInterpretation::TransparencyMask,
-            6 => PhotometricInterpretation::YCbCr,
-            32803 => PhotometricInterpretation::Cfa,
-            34892 => PhotometricInterpretation::LinearRaw,
-            51177 => PhotometricInterpretation::Depth,
-            52527 => PhotometricInterpretation::PhotometricMask,
-            _ => return None,
-        })
-    }
-
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u16 {
-        match self {
-            PhotometricInterpretation::BlackIsZero => 1,
-            PhotometricInterpretation::Rgb => 2,
-            PhotometricInterpretation::TransparencyMask => 4,
-            PhotometricInterpretation::YCbCr => 6,
-            PhotometricInterpretation::Cfa => 32803,
-            PhotometricInterpretation::LinearRaw => 34892,
-            PhotometricInterpretation::Depth => 51177,
-            PhotometricInterpretation::PhotometricMask => 52527,
-        }
-    }
 }
 
 /// A calibration illuminant, stored in `CalibrationIlluminant1/2/3` (and equal to the EXIF
@@ -320,98 +231,6 @@ impl CfaLayout {
     }
 }
 
-/// The prediction scheme applied before compression, stored in the `Predictor` tag (317).
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Predictor {
-    /// `1` — no prediction.
-    #[default]
-    None,
-    /// `2` — horizontal differencing (each sample minus the one to its left).
-    HorizontalDifference,
-    /// `3` — floating-point horizontal differencing.
-    FloatingPoint,
-    /// `34892` — horizontal differencing with a stride of 2 samples.
-    HorizontalDifferenceX2,
-    /// `34893` — horizontal differencing with a stride of 4 samples.
-    HorizontalDifferenceX4,
-    /// `34894` — floating-point differencing with a stride of 2 samples.
-    FloatingPointX2,
-    /// `34895` — floating-point differencing with a stride of 4 samples.
-    FloatingPointX4,
-}
-
-impl Predictor {
-    /// Returns the predictor for an on-disk tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u16) -> Option<Self> {
-        Some(match code {
-            1 => Predictor::None,
-            2 => Predictor::HorizontalDifference,
-            3 => Predictor::FloatingPoint,
-            34892 => Predictor::HorizontalDifferenceX2,
-            34893 => Predictor::HorizontalDifferenceX4,
-            34894 => Predictor::FloatingPointX2,
-            34895 => Predictor::FloatingPointX4,
-            _ => return None,
-        })
-    }
-
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u16 {
-        match self {
-            Predictor::None => 1,
-            Predictor::HorizontalDifference => 2,
-            Predictor::FloatingPoint => 3,
-            Predictor::HorizontalDifferenceX2 => 34892,
-            Predictor::HorizontalDifferenceX4 => 34893,
-            Predictor::FloatingPointX2 => 34894,
-            Predictor::FloatingPointX4 => 34895,
-        }
-    }
-}
-
-/// How each sample is encoded, stored in the `SampleFormat` tag (339).
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SampleFormat {
-    /// `1` — unsigned integer (the default for raw mosaic and linear-raw data).
-    #[default]
-    UnsignedInteger,
-    /// `2` — signed integer.
-    SignedInteger,
-    /// `3` — IEEE floating point.
-    FloatingPoint,
-    /// `4` — undefined.
-    Undefined,
-}
-
-impl SampleFormat {
-    /// Returns the sample format for an on-disk tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u16) -> Option<Self> {
-        Some(match code {
-            1 => SampleFormat::UnsignedInteger,
-            2 => SampleFormat::SignedInteger,
-            3 => SampleFormat::FloatingPoint,
-            4 => SampleFormat::Undefined,
-            _ => return None,
-        })
-    }
-
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u16 {
-        match self {
-            SampleFormat::UnsignedInteger => 1,
-            SampleFormat::SignedInteger => 2,
-            SampleFormat::FloatingPoint => 3,
-            SampleFormat::Undefined => 4,
-        }
-    }
-}
-
 /// The embedding/usage policy of a camera profile, stored in `ProfileEmbedPolicy` (50941).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -560,53 +379,43 @@ pub mod new_subfile_type {
 mod tests {
     use super::*;
 
-    /// `is_lossy` splits the compressions that route through the compressed-chunk digest path
-    /// from the ones that do not. Nothing asserted it, so it could be replaced by either constant
-    /// (#110) -- which needs cases on both sides to close.
+    /// DNG reads exactly its five schemes, by their own codes; the TIFF-only schemes and the
+    /// legacy Deflate alias gamut-ifd reads for TIFF are refused.
     #[test]
-    fn is_lossy_names_the_compressed_chunk_compressions() {
-        assert!(Compression::LossyJpeg.is_lossy());
-        // JPEG XL counts as lossy storage whether or not its codestream was lossless.
-        assert!(Compression::JpegXl.is_lossy());
-
-        assert!(!Compression::Uncompressed.is_lossy());
-        assert!(!Compression::LosslessJpeg.is_lossy());
-        assert!(!Compression::Deflate.is_lossy());
+    fn dng_compression_reads_only_dngs_codes() {
+        for (code, c) in [
+            (1, Compression::None),
+            (7, Compression::Jpeg),
+            (8, Compression::Deflate),
+            (34892, Compression::LossyJpeg),
+            (52546, Compression::JpegXl),
+        ] {
+            assert_eq!(dng_compression(code), Some(c), "{code}");
+        }
+        for bad in [0, 2, 3, 4, 5, 6, 9, 32773, 32946] {
+            assert_eq!(dng_compression(bad), None, "{bad}");
+        }
     }
 
+    /// DNG reads exactly its eight photometries; TIFF 6.0's others are refused.
     #[test]
-    fn compression_codes_round_trip() {
-        for c in [
-            Compression::Uncompressed,
-            Compression::LosslessJpeg,
-            Compression::Deflate,
-            Compression::LossyJpeg,
-            Compression::JpegXl,
+    fn dng_photometric_reads_only_dngs_codes() {
+        for (code, p) in [
+            (1, PhotometricInterpretation::BlackIsZero),
+            (2, PhotometricInterpretation::Rgb),
+            (4, PhotometricInterpretation::TransparencyMask),
+            (6, PhotometricInterpretation::YCbCr),
+            (32803, PhotometricInterpretation::Cfa),
+            (34892, PhotometricInterpretation::LinearRaw),
+            (51177, PhotometricInterpretation::Depth),
+            (52527, PhotometricInterpretation::PhotometricMask),
         ] {
-            assert_eq!(Compression::from_code(c.code()), Some(c));
+            assert_eq!(dng_photometric(code), Some(p), "{code}");
         }
-        assert_eq!(Compression::from_code(2), None); // CCITT etc. are not DNG raw schemes
-        assert!(Compression::default().is_decodable());
-        assert!(Compression::LosslessJpeg.is_decodable());
-        assert!(Compression::JpegXl.is_decodable());
-        assert!(!Compression::LossyJpeg.is_decodable());
-    }
-
-    #[test]
-    fn photometric_codes_round_trip() {
-        for p in [
-            PhotometricInterpretation::BlackIsZero,
-            PhotometricInterpretation::Rgb,
-            PhotometricInterpretation::TransparencyMask,
-            PhotometricInterpretation::YCbCr,
-            PhotometricInterpretation::Cfa,
-            PhotometricInterpretation::LinearRaw,
-            PhotometricInterpretation::Depth,
-            PhotometricInterpretation::PhotometricMask,
-        ] {
-            assert_eq!(PhotometricInterpretation::from_code(p.code()), Some(p));
+        // WhiteIsZero, Palette, CMYK, the unassigned 7, and CIE L*a*b* are not DNG photometries.
+        for bad in [0, 3, 5, 7, 8] {
+            assert_eq!(dng_photometric(bad), None, "{bad}");
         }
-        assert_eq!(PhotometricInterpretation::from_code(3), None); // Palette is not a DNG photometry
     }
 
     #[test]
@@ -633,35 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn predictor_codes_round_trip() {
-        for p in [
-            Predictor::None,
-            Predictor::HorizontalDifference,
-            Predictor::FloatingPoint,
-            Predictor::HorizontalDifferenceX2,
-            Predictor::HorizontalDifferenceX4,
-            Predictor::FloatingPointX2,
-            Predictor::FloatingPointX4,
-        ] {
-            assert_eq!(Predictor::from_code(p.code()), Some(p));
-        }
-        assert_eq!(Predictor::default(), Predictor::None);
-        assert_eq!(Predictor::from_code(0), None);
-    }
-
-    #[test]
     fn other_enums_round_trip() {
-        for s in [
-            SampleFormat::UnsignedInteger,
-            SampleFormat::SignedInteger,
-            SampleFormat::FloatingPoint,
-            SampleFormat::Undefined,
-        ] {
-            assert_eq!(SampleFormat::from_code(s.code()), Some(s));
-        }
-        assert_eq!(SampleFormat::default(), SampleFormat::UnsignedInteger);
-        assert_eq!(SampleFormat::from_code(0), None);
-
         for p in [
             ProfileEmbedPolicy::AllowCopying,
             ProfileEmbedPolicy::EmbedIfUsed,
