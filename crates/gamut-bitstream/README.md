@@ -44,9 +44,10 @@ assert_eq!(leb128_len(300), 2);
 ## Status
 
 Ships both directions of the AV1 primitives — [`BitReader`] / [`BitWriter`], LEB128
-([`write_leb128`] / [`leb128_len`]), and the [`SymbolDecoder`] / [`SymbolEncoder`] range coder —
-used by `gamut-av1` (and [`BitWriter`] by `gamut-tiff`'s CCITT coders); the MSB-first sample
-packing used by `gamut-dng`; and the T.81
+([`write_leb128`] / [`leb128_len`]), and the [`SymbolDecoder`] / [`SymbolEncoder`] range coder.
+`gamut-av1` uses [`BitReader`], [`BitWriter`], [`write_leb128`] and [`SymbolEncoder`];
+[`SymbolDecoder`] has no workspace consumer yet. [`BitWriter`] also backs `gamut-tiff`'s CCITT
+coders. The crate further ships the MSB-first sample packing used by `gamut-dng`, and the T.81
 Huffman table side ([`build_optimal_table`], [`CanonicalCodes`]) behind `gamut-jpeg`'s optimized
 tables and `gamut-dng`'s lossless JPEG.
 
