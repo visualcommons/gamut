@@ -18,13 +18,14 @@ use gamut_core::{
     Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Indexed8, Palette, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
-use crate::ancillary::{PhysicalUnit, SrgbIntent, sbit_for, time_in_range};
+use crate::ancillary::{PhysicalUnit, SrgbIntent, time_in_range};
 use crate::chunk::CABX;
 use crate::color::ColorType;
 use crate::decoder::{TransparencyKey, depth_mask};
 use crate::ihdr::Ihdr;
 use crate::inflate;
 use crate::pack::gray8_scale;
+use crate::written::sbit_for;
 
 /// The parsed image header (IHDR, §11.2.1), reported as stored in the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

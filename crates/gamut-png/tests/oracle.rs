@@ -298,7 +298,7 @@ fn a_cleaned_palette_still_resolves_to_the_colours_the_caller_supplied() {
 /// through.
 ///
 /// An RGB triple names a palette entry as surely as an index does (§11.3.4.1,
-/// `ancillary::background_entry`), so cleaning has to keep that entry even though no pixel names
+/// `written::background_entry`), so cleaning has to keep that entry even though no pixel names
 /// it. It fails for one reason: the entry the background named was not kept — visible here as the
 /// index depth, which follows the entry count and drops back to the four entries the pixels name.
 ///

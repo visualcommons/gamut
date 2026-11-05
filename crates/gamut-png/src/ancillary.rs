@@ -19,27 +19,21 @@
 //! whose offsets a signer depends on holds only for a file that has not been edited since this
 //! encoder wrote it.
 //!
-//! Two of them, `bKGD` and `sBIT`, have a payload whose shape is the image's colour type, and the
-//! encoder does not always write the colour type the caller set them for: auto-reduce may write a
-//! palette, a greyscale or a colour-keyed truecolour image in place of the input's layout, and the
-//! palette and colour-key candidates are *raced* against the unreduced encoding on compressed
-//! size, so which one lands is not knowable when the chunk is set. Both are therefore emitted for
-//! the header actually written — converted across colour types where a lossless conversion
-//! exists, omitted otherwise ([`bkgd_for`], [`sbit_for`]) — rather than verbatim, because a
-//! payload shaped for the wrong colour type is a chunk a reader rejects and drops.
-//!
-//! The same holds on the depth axis. A `bKGD` sample is expressed at the image's bit depth
-//! (§11.3.4.1), and the caller set it at the *input's* depth; auto-reduce may write a lower one
-//! (16→8 where every sample is `k·257`, sub-byte grey where every sample is a multiple of the
-//! depth's scale). The sample is therefore mapped exactly as the pixels were — a value that the
-//! mapping cannot carry exactly is omitted with the chunk ([`WrittenHeader::source_depth`]).
+//! Two concerns live beside this accumulator rather than in it. The text-field rules — what
+//! §11.3.3 says about a keyword, a profile name or a text string, and the framing of the text
+//! chunks — are [`crate::text`]'s. The conversion of the colour-type-shaped `bKGD` and `sBIT`
+//! payloads to the header actually written is [`crate::written`]'s.
 
 use gamut_core::{Error, Result};
 use gamut_deflate::{DeflateEncoder, Level};
 
+use crate::carry::MetadataNotice;
+use crate::chunk;
 use crate::decoded::{Background, Cicp, ModificationTime, PhysicalDimensions, XMP_KEYWORD};
-use crate::encoder::MetadataNotice;
-use crate::{ColorType, chunk};
+use crate::text::{
+    DEFAULT_ICC_PROFILE_NAME, IccpName, TextEntry, TextKind, profile_name_verdict, write_text,
+};
+use crate::written::{WrittenHeader, bkgd_for, sbit_for};
 
 /// The rendering intent for an `sRGB` chunk (PNG spec §11.3.2.5).
 ///
@@ -109,263 +103,6 @@ impl PhysicalUnit {
     }
 }
 
-/// How a text chunk is encoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TextKind {
-    /// `tEXt`: uncompressed Latin-1.
-    Latin1,
-    /// `zTXt`: zlib-compressed Latin-1.
-    Compressed,
-    /// `iTXt`: uncompressed UTF-8.
-    International,
-    /// `iTXt` with the compression flag set: zlib-compressed UTF-8.
-    InternationalCompressed,
-}
-
-impl TextKind {
-    /// The `iTXt` kind that carries the same compression choice.
-    ///
-    /// §11.3.3.2 sends text outside Latin-1's repertoire to `iTXt`, and §11.3.3.4 gives `iTXt` a
-    /// compression flag of its own, so a promotion changes the character set and nothing else —
-    /// a compressed annotation stays compressed.
-    fn international(self) -> Self {
-        match self {
-            Self::Latin1 | Self::International => Self::International,
-            Self::Compressed | Self::InternationalCompressed => Self::InternationalCompressed,
-        }
-    }
-}
-
-/// One accumulated text annotation, already **in the byte form its chunk carries**.
-///
-/// The distinction is the whole point of holding bytes rather than `String`s. PNG's three text
-/// chunks do not share a character set: §11.3.3.1 restricts a keyword to Latin-1
-/// ([ISO_8859-1]) in *every* one of them, §11.3.3.2 says a `tEXt` text string "is interpreted
-/// according to the Latin-1 character set" (and §11.3.3.3 that inflating a `zTXt` "yields
-/// Latin-1 text that is identical to the text that would be stored in an equivalent `tEXt`
-/// chunk"), while §11.3.3.4 gives `iTXt` UTF-8. A Rust `String` is UTF-8, so writing its bytes
-/// into a `tEXt` chunk stores mojibake for every code point above U+007F — `é` (U+00E9) becomes
-/// the two bytes `C3 A9`, which a conforming reader shows as `Ã©`. Converting once, at the point
-/// the caller sets the text, makes that unrepresentable: an entry's bytes are always already
-/// right for its `kind`, or it carries the [`fault`](Self::fault) that stops it being written.
-#[derive(Debug, Clone)]
-struct TextEntry {
-    /// The keyword, Latin-1 (§11.3.3.1). Empty when the keyword had no Latin-1 encoding at all,
-    /// which is also when [`emit`](Self::emit) is clear.
-    keyword: Vec<u8>,
-    /// The text: Latin-1 for `tEXt`/`zTXt`, UTF-8 for `iTXt`.
-    text: Vec<u8>,
-    /// The `iTXt` language tag (§11.3.3.4, BCP 47); empty for the other kinds and for an
-    /// unspecified language.
-    language: Vec<u8>,
-    /// The `iTXt` translated keyword (UTF-8, §11.3.3.4); empty for the other kinds.
-    translated: Vec<u8>,
-    kind: TextKind,
-    /// Whether this entry came from [`Ancillary::begin_carry`] rather than a direct setter, so a
-    /// second carry can replace exactly what the first contributed.
-    carried: bool,
-    /// Whether the entry is written at all. A cleared flag keeps the entry in the list purely to
-    /// carry its [`notices`](Self::notices) — a payload dropped in silence is the defect this
-    /// module exists to remove.
-    emit: bool,
-    /// What §11.3.3 says about this annotation that the caller has to hear.
-    ///
-    /// Which things those are is [`MetadataNotice`]'s own list of variants, deliberately not
-    /// copied here: a copy written out once is what goes stale when a variant is added. An entry
-    /// records every notice its fields earn — some meaning the annotation was left behind, some
-    /// that it was written with a deviation on it — and
-    /// [`MetadataNotice::carried`](crate::MetadataNotice::carried) is which of the two a variant
-    /// means. Whether *this* entry reached the output is [`emit`](Self::emit), which
-    /// [`Ancillary::text_notices`] takes as the authority when the two disagree. Surfaced by
-    /// [`PngEncoder::metadata_notices`](crate::PngEncoder::metadata_notices).
-    notices: Vec<MetadataNotice>,
-    /// Why this annotation must not be written *at all*, if it must not — a null in the keyword
-    /// or in the `iTXt` translated keyword, the two fields a null separator ends, and nothing
-    /// else. It refuses the encode only while [`emit`](Self::emit) is set: an entry that is
-    /// dropped anyway writes no chunk to re-frame. Recorded here rather than returned from the setter because the
-    /// setters sit behind `#[must_use]` builder methods that have no error channel;
-    /// [`Ancillary::validate`] reports it at the encode chokepoint.
-    fault: Option<TextFault>,
-}
-
-impl TextEntry {
-    /// Whether a reader will take this entry as the XMP packet: an `iTXt` under the keyword
-    /// §11.3.3.1 Table 21 reserves for one — the writer's half of
-    /// [`TextChunk::is_xmp_packet`](crate::TextChunk), decided on the kind actually written, so
-    /// a Latin-1 request promoted to `iTXt` counts too.
-    fn is_xmp_packet(&self) -> bool {
-        self.keyword == XMP_KEYWORD.as_bytes()
-            && matches!(
-                self.kind,
-                TextKind::International | TextKind::InternationalCompressed
-            )
-    }
-}
-
-/// Why one accumulated text annotation cannot be written, and which annotation it was.
-#[derive(Debug, Clone)]
-struct TextFault {
-    /// The keyword exactly as the caller gave it, for the refusal message — including a keyword
-    /// that is itself the fault.
-    keyword: String,
-    /// The clause the annotation breaks, phrased for the caller.
-    reason: &'static str,
-}
-
-/// §11.3.3.2 and §11.3.3.4 lay all three text chunks out as "Keyword … Null separator … ", so
-/// the keyword is the field that *ends* at its first zero byte. An embedded null there does not
-/// merely offend the grammar — the chunk re-parses as a *different* annotation, `Auth\0or`
-/// becoming the keyword `Auth` with `or` for its text. It is the one thing here that makes a
-/// file **mean** something else, and so the one thing that refuses the encode.
-///
-/// The *text string* is the opposite case and is **not** covered by this: §11.3.3.2 says of it
-/// "The text string is not null-terminated (the length of the chunk defines the ending)", and
-/// §11.3.3.4 "The text, unlike other textual data in this chunk, is not null-terminated; its
-/// length is derived from the chunk length". A null there re-frames nothing, so it is reported
-/// as [`MetadataNotice::TextStringNull`] instead.
-const KEYWORD_NUL: &str = "a keyword may not contain a null character (§11.3.3.2, §11.3.3.4)";
-/// §11.3.3.4: "The translated keyword and text both use the UTF-8 encoding, and neither shall
-/// contain a zero byte (null character)." Null-terminated like the language tag, so an embedded
-/// one re-frames every field after it.
-const TRANSLATED_NUL: &str =
-    "an iTXt translated keyword may not contain a null character (§11.3.3.4)";
-
-/// Whether `c` is a printable Latin-1 character or a space, the repertoire §11.3.3.1 spells out
-/// as "only code points 0x20-7E and 0xA1-FF".
-fn printable_latin1(c: char) -> bool {
-    matches!(u32::from(c), 0x20..=0x7E | 0xA1..=0xFF)
-}
-
-/// The Latin-1 byte of `c`: Latin-1 is the first 256 Unicode code points, so the encoding is
-/// `u8::try_from` — the exact inverse of the decoder's `latin1`, which maps byte *n* to U+00*nn*.
-fn latin1_byte(c: char) -> Option<u8> {
-    u8::try_from(u32::from(c)).ok()
-}
-
-/// What §11.3.3.1 has to say about one keyword, resolved into what the writer does with it.
-///
-/// Three outcomes, because the clause mixes three kinds of statement and §15 gives them different
-/// force ("when, and only when, they appear in all capitals"). Everything §11.3.3.1 says about a
-/// keyword's *shape* is lowercase — "Keywords shall contain only printable Latin-1", "leading
-/// spaces, trailing spaces, and consecutive spaces are not permitted", "Keywords are restricted
-/// to 1 to 79 bytes" — so none of it is binding, and this crate's own reader accepts every shape
-/// of keyword the length allows. What separates the outcomes is therefore not the wording but
-/// the consequence:
-///
-/// - a **null** is the field separator, so the chunk re-parses as a different annotation. Refuse;
-/// - a keyword **no chunk can hold** — outside Latin-1, or outside the 1–79 bytes all three
-///   chunks fix — is one this crate's reader and libpng both *drop*, so writing it loses the
-///   annotation with nothing said. Drop it here instead, and say so;
-/// - anything else round-trips through this crate's reader byte for byte, so the keyword is
-///   written exactly as it arrived and the deviation is reported. Refusing it would fail a
-///   conversion over a file whose pixels are fine, and the only escape would be discarding all
-///   of its metadata.
-enum Keyword {
-    /// Write these Latin-1 bytes, reporting the recommendation the keyword does not meet.
-    Write(Vec<u8>, Option<MetadataNotice>),
-    /// Do not write the annotation; report why.
-    Drop(MetadataNotice),
-    /// Refuse the encode: the keyword holds the field separator.
-    Refuse,
-}
-
-/// What the rule §11.3.3.1 gives a text keyword and §11.3.2.3 gives an `iCCP` profile name — word
-/// for word the same rule — says about one name, before either field decides what to do with it.
-///
-/// §11.3.2.3: "Profile name — 1-79 bytes (character string) … Profile names shall contain only
-/// printable Latin-1 characters and spaces (only code points 0x20-7E and 0xA1-FF are allowed).
-/// Leading, trailing, and consecutive spaces are not permitted." Same repertoire, same length,
-/// same spacing as the keyword; and both fields end at their null separator.
-enum Name {
-    /// The name holds a null, the separator that ends it.
-    Null,
-    /// A character Latin-1 cannot encode.
-    NotLatin1,
-    /// Empty, or longer than 79 Latin-1 bytes.
-    Length,
-    /// Storable: these Latin-1 bytes, with the advisory rule they break, if any.
-    Write(Vec<u8>, Option<Shape>),
-}
-
-/// Which advisory shape rule a storable [`Name`] breaks.
-enum Shape {
-    /// A character outside "code points 0x20-7E and 0xA1-FF".
-    Repertoire,
-    /// A leading, trailing or consecutive space.
-    Spacing,
-}
-
-/// Resolves `name` against the rule §11.3.3.1 and §11.3.2.3 share.
-///
-/// Latin-1 representability is settled before the length so that the bound counts *stored*
-/// bytes: every character that passes is one Latin-1 byte, which a UTF-8 `str::len` is not.
-fn name_verdict(name: &str) -> Name {
-    if name.contains('\0') {
-        return Name::Null;
-    }
-    let Some(bytes) = name.chars().map(latin1_byte).collect::<Option<Vec<u8>>>() else {
-        return Name::NotLatin1;
-    };
-    if bytes.is_empty() || bytes.len() > 79 {
-        return Name::Length;
-    }
-    if !name.chars().all(printable_latin1) {
-        return Name::Write(bytes, Some(Shape::Repertoire));
-    }
-    let spacing = name.starts_with(' ') || name.ends_with(' ') || name.contains("  ");
-    Name::Write(bytes, spacing.then_some(Shape::Spacing))
-}
-
-/// Resolves `keyword` against §11.3.3.1.
-fn keyword_verdict(keyword: &str) -> Keyword {
-    match name_verdict(keyword) {
-        Name::Null => Keyword::Refuse,
-        Name::NotLatin1 => Keyword::Drop(MetadataNotice::TextKeywordNotLatin1),
-        Name::Length => Keyword::Drop(MetadataNotice::TextKeywordLength),
-        Name::Write(bytes, shape) => Keyword::Write(
-            bytes,
-            shape.map(|shape| match shape {
-                Shape::Repertoire => MetadataNotice::TextKeywordRepertoire,
-                Shape::Spacing => MetadataNotice::TextKeywordSpacing,
-            }),
-        ),
-    }
-}
-
-/// Resolves an `iCCP` profile name against §11.3.2.3: the Latin-1 bytes to write with the notice
-/// they carry, or the notice that explains why the chunk is not written.
-///
-/// The outcomes follow [`Keyword`]'s consequence rule, with one difference. A name outside Latin-1
-/// or outside 1–79 bytes is one this crate's reader refuses (`split_keyword`), so writing it would
-/// lose the profile between a write and a read with nothing said: **dropped**, and reported. A null
-/// is dropped too rather than refusing the encode as a keyword's does: the name ends at it, so
-/// the byte after it is read as the compression method and the reader refuses the chunk — the
-/// profile is lost, not re-read as a different one, which is the same consequence as the two
-/// above. A repertoire or spacing deviation round-trips through this crate's reader byte for byte,
-/// so it is **written verbatim** and the non-conformance (§15.3.1) is reported.
-fn profile_name_verdict(name: &str) -> core::result::Result<IccpName, MetadataNotice> {
-    match name_verdict(name) {
-        Name::Null => Err(MetadataNotice::IccpNameNull),
-        Name::NotLatin1 => Err(MetadataNotice::IccpNameNotLatin1),
-        Name::Length => Err(MetadataNotice::IccpNameLength),
-        Name::Write(bytes, shape) => Ok((
-            bytes,
-            shape.map(|shape| match shape {
-                Shape::Repertoire => MetadataNotice::IccpNameRepertoire,
-                Shape::Spacing => MetadataNotice::IccpNameSpacing,
-            }),
-        )),
-    }
-}
-
-/// A writable `iCCP` profile name: its Latin-1 bytes, and the advisory notice it carries.
-type IccpName = (Vec<u8>, Option<MetadataNotice>);
-
-/// The `iCCP` profile name written when none is set: 1–79 printable Latin-1 characters with no
-/// leading, trailing or consecutive space, as §11.3.2.3 requires, so a profile set without a name
-/// draws no notice.
-pub(crate) const DEFAULT_ICC_PROFILE_NAME: &str = "ICC profile";
-
 /// Whether a `tIME`'s month, day, hour, minute and second each lie within the range §11.3.5.1's
 /// Table 26 gives it (1–12, 1–31, 0–23, 0–59, 0–60; the year is any two-byte value). The one rule
 /// both directions apply: the reader skips a chunk outside it as malformed (§13.1), and the writer
@@ -377,35 +114,6 @@ pub(crate) fn time_in_range(month: u8, day: u8, hour: u8, minute: u8, second: u8
         && hour <= 23
         && minute <= 59
         && second <= 60
-}
-
-/// The Latin-1 bytes of a `tEXt`/`zTXt` text string, or `None` when a character has no Latin-1
-/// encoding at all — the signal to promote the annotation to `iTXt`.
-///
-/// **The specification contradicts itself here, and the more specific clause wins.**
-/// §11.3.3.1's closing paragraph says of `tEXt`/`zTXt` that "There are also tEXt and zTXt chunks,
-/// whose content is restricted to the printable Latin-1 character set plus U+000A LINE FEED
-/// (LF)". §11.3.3.2, the clause that defines `tEXt` itself, says the opposite one sentence after
-/// naming the same character set: "Text is interpreted according to the Latin-1 character set
-/// [ISO_8859-1]. The text string may contain any Latin-1 character." — adding only that
-/// "Characters other than those defined in Latin-1 plus the linefeed character have no defined
-/// meaning in tEXt chunks", which is a statement about characters *outside* Latin-1, not inside
-/// it. §11.3.3.2 is the more specific and the more permissive of the two, so it is the one taken:
-/// every Latin-1 character is written into the chunk that already interprets it as Latin-1, and
-/// only a character Latin-1 cannot encode promotes to `iTXt` — which is what §11.3.3.2 itself
-/// directs ("Text containing characters outside the repertoire of ISO/IEC 8859-1 should be
-/// encoded using the iTXt chunk").
-fn text_bytes(text: &str) -> Option<Vec<u8>> {
-    text.chars().map(latin1_byte).collect()
-}
-
-/// Whether `language` has the shape §11.3.3.4 requires: "The language tag is a well-formed
-/// language tag defined by \[BCP47\]", whose subtags are ASCII letters and digits joined by
-/// hyphens. This checks the character set, not full BCP 47 well-formedness.
-fn well_formed_language(language: &str) -> bool {
-    language
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Accumulated ancillary metadata to emit alongside the image.
@@ -582,45 +290,15 @@ impl Ancillary {
         text: &str,
         compressed: bool,
     ) {
-        let entry = self.itxt_entry(keyword, language, translated, text, compressed);
+        let entry = TextEntry::itxt(
+            keyword,
+            language,
+            translated,
+            text,
+            compressed,
+            self.carrying,
+        );
         self.texts.push(entry);
-    }
-
-    /// Builds one `iTXt` entry with its §11.3.3.4 fields, shared by the tagged text setter and
-    /// the XMP packet.
-    ///
-    /// A language tag outside §11.3.3.4's ASCII shape is **dropped, not refused**: written as
-    /// UTF-8 into a field a reader takes as Latin-1 it would not survive the trip, but the
-    /// annotation itself would, and an unspecified language is what §11.3.3.4 already means by
-    /// an empty tag. A null in the translated keyword is a different thing — it re-frames every
-    /// field after it — so it refuses, like every other null.
-    fn itxt_entry(
-        &self,
-        keyword: &str,
-        language: &str,
-        translated: &str,
-        text: &str,
-        compressed: bool,
-    ) -> TextEntry {
-        let kind = if compressed {
-            TextKind::InternationalCompressed
-        } else {
-            TextKind::International
-        };
-        let mut entry = self.text_entry(keyword, text, kind);
-        if entry.fault.is_none() && translated.contains('\0') {
-            entry.fault = Some(TextFault {
-                keyword: keyword.to_string(),
-                reason: TRANSLATED_NUL,
-            });
-        }
-        if well_formed_language(language) {
-            entry.language = language.as_bytes().to_vec();
-        } else {
-            entry.notices.push(MetadataNotice::ItxtLanguageTag);
-        }
-        entry.translated = translated.as_bytes().to_vec();
-        entry
     }
 
     /// Sets the XMP packet: the `iTXt` §11.3.3.1 Table 21 reserves for it, in the framing Table
@@ -636,7 +314,7 @@ impl Ancillary {
     /// packet set *last* would be the one ignored.
     pub(crate) fn add_xmp(&mut self, packet: &str) {
         self.drop_xmp();
-        let entry = self.itxt_entry(XMP_KEYWORD, "", "", packet, false);
+        let entry = TextEntry::itxt(XMP_KEYWORD, "", "", packet, false, self.carrying);
         self.texts.push(entry);
     }
 
@@ -698,65 +376,8 @@ impl Ancillary {
     }
 
     fn push_text(&mut self, keyword: &str, text: &str, kind: TextKind) {
-        let entry = self.text_entry(keyword, text, kind);
+        let entry = TextEntry::new(keyword, text, kind, self.carrying);
         self.texts.push(entry);
-    }
-
-    /// Builds the entry for one text annotation, choosing the chunk that can actually carry it
-    /// and recording the clause it breaks if no chunk can.
-    ///
-    /// The caller's `kind` is a *preference*, not a guarantee: §11.3.3.2 says outright that "text
-    /// containing characters outside the repertoire of ISO/IEC 8859-1 should be encoded using the
-    /// `iTXt` chunk", so a `tEXt`/`zTXt` request whose text [`text_bytes`] cannot encode is
-    /// promoted rather than written as bytes a Latin-1 reader mis-renders. The promotion keeps
-    /// the caller's *other* choice, compression, because §11.3.3.4 gives `iTXt` a flag of its own.
-    ///
-    /// A null is forbidden in both fields (§11.3.3.2, §11.3.3.4), and the two are not the same
-    /// kind of forbidden. The **keyword** ends at its first null, so a null there makes the chunk
-    /// re-parse as a *different* annotation and nothing can undo it: it becomes a [`TextFault`]
-    /// the entry carries to [`Self::validate`], and the encode refuses. The **text string** is
-    /// last and length-delimited — see [`KEYWORD_NUL`] for both clauses — so a null there
-    /// re-frames nothing, and this crate's own reader hands such a text back intact; refusing it
-    /// would make the writer stricter than its own reader over a file the reader accepts. It is
-    /// not written either, because readers disagree about what the chunk then holds (libpng
-    /// truncates the text at the null), so the annotation is dropped and reported as
-    /// [`MetadataNotice::TextStringNull`]. Every *other* way a keyword can fall short of
-    /// §11.3.3.1 is a [`MetadataNotice`] too: see [`Keyword`] for where that line falls.
-    fn text_entry(&self, keyword: &str, text: &str, kind: TextKind) -> TextEntry {
-        let (keyword_bytes, mut emit, notice, keyword_nul) = match keyword_verdict(keyword) {
-            Keyword::Write(bytes, notice) => (bytes, true, notice, false),
-            Keyword::Drop(notice) => (Vec::new(), false, Some(notice), false),
-            Keyword::Refuse => (Vec::new(), true, None, true),
-        };
-        let mut notices: Vec<MetadataNotice> = notice.into_iter().collect();
-        if text.contains('\0') {
-            emit = false;
-            notices.push(MetadataNotice::TextStringNull);
-        }
-        // An iTXt was asked for as UTF-8 and stays UTF-8; only a Latin-1 request has a
-        // repertoire to leave.
-        let latin1 = match kind {
-            TextKind::Latin1 | TextKind::Compressed => text_bytes(text),
-            TextKind::International | TextKind::InternationalCompressed => None,
-        };
-        let (kind, text_bytes) = match latin1 {
-            Some(bytes) => (kind, bytes),
-            None => (kind.international(), text.as_bytes().to_vec()),
-        };
-        TextEntry {
-            keyword: keyword_bytes,
-            text: text_bytes,
-            language: Vec::new(),
-            translated: Vec::new(),
-            kind,
-            carried: self.carrying,
-            emit,
-            notices,
-            fault: keyword_nul.then(|| TextFault {
-                keyword: keyword.to_string(),
-                reason: KEYWORD_NUL,
-            }),
-        }
     }
 
     /// Refuses an accumulation the spec forbids, before any byte is emitted.
@@ -911,311 +532,11 @@ impl C2paStore {
     }
 }
 
-/// Whose palette an indexed image is written with — which decides what a caller's palette
-/// *index* refers to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PaletteOrigin {
-    /// The caller's own palette (`encode_indexed8`): an index the caller set names one of its
-    /// entries.
-    Caller,
-    /// A palette the encoder derived from the pixels under auto-reduce, in an order the caller
-    /// never saw (transparent entries first, then by luma): an index the caller set names nothing
-    /// in it.
-    Derived,
-}
-
-/// The palette an indexed image is written with.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct WrittenPalette<'a> {
-    /// The `PLTE` payload: RGB triples.
-    pub plte: &'a [u8],
-    /// The `tRNS` payload — one alpha per leading entry, entries past its end being opaque
-    /// (§11.3.1.1) — or `None` when every entry is opaque.
-    pub trns: Option<&'a [u8]>,
-    /// Whose palette it is.
-    pub origin: PaletteOrigin,
-}
-
-impl WrittenPalette<'_> {
-    /// The number of entries.
-    fn len(self) -> usize {
-        self.plte.len() / 3
-    }
-
-    /// Entry `index`'s alpha: its `tRNS` byte, or 255 past the end of `tRNS`.
-    fn alpha(self, index: usize) -> u8 {
-        self.trns
-            .and_then(|trns| trns.get(index).copied())
-            .unwrap_or(255)
-    }
-
-    /// The index of the entry holding `rgb`, preferring an opaque one.
-    ///
-    /// A background is a colour a viewer sees, so where a triple appears both as an opaque entry
-    /// and as a transparent one — which the encoder's transparent-first ordering puts *first*,
-    /// and which transparent cleanup manufactures whenever the image has opaque black — the
-    /// opaque entry is the one meant. A triple that appears only under transparency still names
-    /// that entry: its RGB is what a compositing reader paints.
-    fn index_of(self, rgb: [u8; 3]) -> Option<usize> {
-        let matches = || {
-            self.plte
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .enumerate()
-                .filter(move |(_, entry)| **entry == rgb)
-                .map(|(index, _)| index)
-        };
-        matches()
-            .find(|&index| self.alpha(index) == 255)
-            .or_else(|| matches().next())
-    }
-}
-
-/// The IHDR — and, for an indexed image, the palette — the ancillary chunks are written under:
-/// what a colour-type-shaped payload has to agree with.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct WrittenHeader<'a> {
-    /// The colour type IHDR declares.
-    pub color: ColorType,
-    /// The bit depth IHDR declares.
-    pub bit_depth: u8,
-    /// The palette for [`ColorType::Indexed`]; `None` otherwise.
-    pub palette: Option<WrittenPalette<'a>>,
-    /// The bit depth the caller's `bKGD` samples are expressed at: the input's sample depth, which
-    /// auto-reduce may have lowered to `bit_depth` (or, under a palette, to the 8-bit entries).
-    pub source_depth: u8,
-}
-
-impl WrittenHeader<'static> {
-    /// A header without a palette — every colour type but [`ColorType::Indexed`] — written at
-    /// the input's own depth.
-    pub(crate) const fn new(color: ColorType, bit_depth: u8) -> Self {
-        Self {
-            color,
-            bit_depth,
-            palette: None,
-            source_depth: bit_depth,
-        }
-    }
-}
-
-impl WrittenHeader<'_> {
-    /// The same header, for an input whose samples were `source_depth` bits before auto-reduce
-    /// lowered them.
-    pub(crate) const fn reduced_from(self, source_depth: u8) -> Self {
-        Self {
-            source_depth,
-            ..self
-        }
-    }
-}
-
-/// The palette entry a `bKGD` payload names in `palette`, or `None` if it names none.
-///
-/// The payload names its own form by its length (§11.3.4.1): one byte is an index into the
-/// palette the caller supplied, two a grey sample and six an RGB triple, each sample 16-bit
-/// big-endian. A colour names the entry holding it, preferring an opaque entry over a transparent
-/// twin of the same triple ([`WrittenPalette::index_of`]); an index names the entry it numbers,
-/// and names nothing under a palette the encoder derived ([`PaletteOrigin::Derived`]) or past that
-/// palette's end.
-///
-/// One owner for the rule, because two callers need the same answer and a rule restated beside the
-/// rule is a rule that drifts: [`bkgd_for`] converts the chunk for the header being written, and
-/// [`crate::PngEncoder::encode_indexed8`] marks the entry this names as used, so cleaning the
-/// caller's palette keeps it instead of dropping the background's colour out from under the chunk.
-/// Restating "an index, and only an index, names an entry" beside this is what let a colour-form
-/// background lose its entry.
-pub(crate) fn background_entry(
-    bkgd: &[u8],
-    palette: WrittenPalette<'_>,
-    source_depth: u8,
-) -> Option<u8> {
-    let sample = |hi: u8, lo: u8| u16::from_be_bytes([hi, lo]);
-    let rgb: [u16; 3] = match *bkgd {
-        [index] => {
-            return (palette.origin == PaletteOrigin::Caller && usize::from(index) < palette.len())
-                .then_some(index);
-        }
-        [hi, lo] => [sample(hi, lo); 3],
-        [r1, r0, g1, g0, b1, b0] => [sample(r1, r0), sample(g1, g0), sample(b1, b0)],
-        _ => return None,
-    };
-    // A colour is at the input's depth, the palette's entries at 8 bits ([`rescale`]).
-    let entry = rgb.map(|v| rescale(v, source_depth, 8).and_then(|v| u8::try_from(v).ok()));
-    let index = palette.index_of([entry[0]?, entry[1]?, entry[2]?])?;
-    u8::try_from(index).ok()
-}
-
-/// The `bKGD` payload for the header actually written (§11.3.4.1), or `None` to omit the chunk.
-///
-/// The caller's payload names its own colour type by its length — one byte is a palette index,
-/// two a grey sample, six an RGB triple, each sample 16-bit big-endian — and is converted where
-/// the written header can carry the same colour losslessly:
-///
-/// - a grey sample and an RGB triple whose channels agree are the same colour, either way round;
-/// - an RGB or grey colour under a palette becomes the index of the entry holding it — which
-///   exists whenever the background colour occurs in the image, since the palette is built from
-///   the image — preferring an opaque entry over a transparent twin of the same triple
-///   ([`WrittenPalette::index_of`]), and is omitted when no entry does;
-/// - a palette index names a colour only inside the palette the caller supplied. It is kept,
-///   when in range, on the `encode_indexed8` path, whose palette is the caller's; under an
-///   encoder-derived palette ([`PaletteOrigin::Derived`]) it names an entry in an order the
-///   caller never saw, and under any other colour type there is no palette at all, so in both
-///   cases it is omitted;
-/// - a grey or RGB sample is at the input's depth ([`WrittenHeader::source_depth`]) and is
-///   rescaled to the written one — the written depth, or 8 for a palette entry — exactly as
-///   auto-reduce mapped the pixels ([`rescale`]); one past the input's depth, or one the mapping
-///   cannot carry exactly, is omitted rather than written as a different colour or as a chunk the
-///   reader rejects.
-///
-/// The rules are the ones a reader applies before honouring the chunk — libpng's
-/// `png_handle_bKGD` rejects a wrong length, an index past the palette and a sample past the
-/// depth — so "converted or omitted" means "never dropped on read".
-///
-/// Which palette entry a payload names — in any of its three forms — is [`background_entry`]'s to
-/// decide, not this function's; this one only says which colour types can carry the answer.
-pub(crate) fn bkgd_for(bkgd: &[u8], written: WrittenHeader<'_>) -> Option<Vec<u8>> {
-    let sample = |hi: u8, lo: u8| u16::from_be_bytes([hi, lo]);
-    let rgb: [u16; 3] = match *bkgd {
-        [_] => {
-            // An index names an entry only in the palette the caller supplied.
-            let index = background_entry(bkgd, written.palette?, written.source_depth)?;
-            return (written.color == ColorType::Indexed).then(|| vec![index]);
-        }
-        [hi, lo] => [sample(hi, lo); 3],
-        [r1, r0, g1, g0, b1, b0] => [sample(r1, r0), sample(g1, g0), sample(b1, b0)],
-        _ => return None,
-    };
-    let at = |depth: u8| -> Option<[u16; 3]> {
-        let [r, g, b] = rgb.map(|v| rescale(v, written.source_depth, depth));
-        Some([r?, g?, b?])
-    };
-    match written.color {
-        ColorType::Indexed => {
-            background_entry(bkgd, written.palette?, written.source_depth).map(|index| vec![index])
-        }
-        ColorType::Grayscale | ColorType::GrayscaleAlpha => {
-            let grey = (rgb[0] == rgb[1] && rgb[1] == rgb[2]).then_some(rgb[0])?;
-            rescale(grey, written.source_depth, written.bit_depth).map(|v| v.to_be_bytes().to_vec())
-        }
-        ColorType::Truecolor | ColorType::TruecolorAlpha => Some(
-            at(written.bit_depth)?
-                .iter()
-                .flat_map(|v| v.to_be_bytes())
-                .collect(),
-        ),
-    }
-}
-
-/// A `bKGD` sample at `from` bits, as the sample at `to` bits that denotes the same intensity —
-/// `value · (2^to − 1) / (2^from − 1)` — or `None` when `value` is past `from`'s range
-/// (libpng rejects `buf[0] != 0 || buf[1] >= 1 << bit_depth`) or the quotient is not exact.
-///
-/// That is exactly the mapping auto-reduce applies to the pixels, which it applies only where it
-/// is exact for every sample: 16→8 is `v / 257` for `v = k·257`, and 8-bit grey packed to depth
-/// `d` is `v / (255 / (2^d − 1))` (§13.12's scale, run backwards). A sample it cannot carry
-/// exactly is a colour the reduced image has no code for, so the chunk is omitted rather than
-/// rounded to a neighbour. At `from == to` it is the identity on the in-range values.
-fn rescale(value: u16, from: u8, to: u8) -> Option<u16> {
-    let max = |depth: u8| (1u32 << depth) - 1;
-    let value = u32::from(value);
-    if value > max(from) {
-        return None;
-    }
-    let scaled = value * max(to);
-    scaled
-        .is_multiple_of(max(from))
-        .then(|| scaled / max(from))
-        .and_then(|v| u16::try_from(v).ok())
-}
-
-/// The `sBIT` payload for the header actually written (§11.3.2.4), or `None` to omit the chunk.
-///
-/// The caller's payload names its own colour type by its length — one entry for grey, two for
-/// grey+alpha, three for RGB (and for a palette, whose entries are RGB), four for RGBA — and is
-/// converted where every channel the written image has is described:
-///
-/// - dropping a channel the written image no longer has is lossless — RGBA to RGB or to a palette
-///   drops the alpha entry, RGB to grey keeps the one value the three agreed on;
-/// - grey and RGB are interchangeable where the three RGB entries agree;
-/// - an alpha entry cannot be invented, so a payload without one is omitted under an alpha
-///   colour type — a case no reduction reaches, since reductions only drop channels.
-///
-/// Every entry must then be `1..=depth`, where a palette's depth is that of its 8-bit entries
-/// (libpng rejects `buf[i] == 0 || buf[i] > maxbits`). An entry the written depth cannot hold is
-/// omitted with the chunk: a claim of twelve significant bits over an image demoted to eight is
-/// not one the file can carry.
-pub(crate) fn sbit_for(sbit: &[u8], color: ColorType, bit_depth: u8) -> Option<Vec<u8>> {
-    let (rgb, alpha) = match *sbit {
-        [g] => ([g; 3], None),
-        [g, a] => ([g; 3], Some(a)),
-        [r, g, b] => ([r, g, b], None),
-        [r, g, b, a] => ([r, g, b], Some(a)),
-        _ => return None,
-    };
-    let grey = || (rgb[0] == rgb[1] && rgb[1] == rgb[2]).then_some(rgb[0]);
-    let entries = match color {
-        ColorType::Grayscale => vec![grey()?],
-        ColorType::GrayscaleAlpha => vec![grey()?, alpha?],
-        ColorType::Truecolor | ColorType::Indexed => rgb.to_vec(),
-        ColorType::TruecolorAlpha => vec![rgb[0], rgb[1], rgb[2], alpha?],
-    };
-    let max_bits = if color == ColorType::Indexed {
-        8
-    } else {
-        bit_depth
-    };
-    entries
-        .iter()
-        .all(|&bits| (1..=max_bits).contains(&bits))
-        .then_some(entries)
-}
-
-/// Serialises one text annotation. `entry.text` is already in the chunk's character set — Latin-1
-/// for `tEXt`/`zTXt` (§11.3.3.2, §11.3.3.3), UTF-8 for `iTXt` (§11.3.3.4) — because
-/// [`Ancillary::text_entry`] converted it when the caller set it, so this function only frames
-/// the bytes.
-fn write_text(out: &mut Vec<u8>, entry: &TextEntry, effort: u8) {
-    let compress = |payload: &[u8], data: &mut Vec<u8>| {
-        DeflateEncoder::new()
-            .with_level(Level::Best)
-            .with_deflate_passes(effort)
-            .zlib_compress(payload, data);
-    };
-    let mut data = entry.keyword.clone();
-    data.push(0); // null separator
-    match entry.kind {
-        TextKind::Latin1 => {
-            data.extend_from_slice(&entry.text);
-            chunk::write_chunk(out, *b"tEXt", &data);
-        }
-        TextKind::Compressed => {
-            data.push(0); // compression method: 0 = zlib/deflate
-            compress(&entry.text, &mut data);
-            chunk::write_chunk(out, *b"zTXt", &data);
-        }
-        TextKind::International | TextKind::InternationalCompressed => {
-            let compressed = entry.kind == TextKind::InternationalCompressed;
-            data.push(u8::from(compressed)); // compression flag
-            data.push(0); // compression method: 0 = zlib/deflate
-            data.extend_from_slice(&entry.language);
-            data.push(0); // language tag terminator
-            data.extend_from_slice(&entry.translated);
-            data.push(0); // translated keyword terminator
-            if compressed {
-                compress(&entry.text, &mut data);
-            } else {
-                data.extend_from_slice(&entry.text);
-            }
-            chunk::write_chunk(out, *b"iTXt", &data);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ColorType;
+    use crate::written::tests::{header, indexed};
 
     /// The header the pre-existing serialisation tests were written against: 8-bit truecolour.
     const RGB8: WrittenHeader<'static> = WrittenHeader::new(ColorType::Truecolor, 8);
@@ -1530,254 +851,6 @@ mod tests {
         assert_eq!(data[9], 0x78); // the zlib CMF byte begins the compressed text
     }
 
-    fn header(color: ColorType, bit_depth: u8) -> WrittenHeader<'static> {
-        WrittenHeader::new(color, bit_depth)
-    }
-
-    /// Three entries: red, a grey, blue.
-    const PLTE: [u8; 9] = [200, 30, 60, 77, 77, 77, 20, 90, 220];
-
-    fn palette(origin: PaletteOrigin, trns: Option<&'static [u8]>) -> WrittenHeader<'static> {
-        WrittenHeader {
-            color: ColorType::Indexed,
-            bit_depth: 8,
-            palette: Some(WrittenPalette {
-                plte: &PLTE,
-                trns,
-                origin,
-            }),
-            source_depth: 8,
-        }
-    }
-
-    /// The caller's own opaque palette, at index depth 8.
-    fn indexed(bit_depth: u8) -> WrittenHeader<'static> {
-        WrittenHeader {
-            bit_depth,
-            ..palette(PaletteOrigin::Caller, None)
-        }
-    }
-
-    #[test]
-    fn a_background_index_survives_only_inside_the_callers_palette() {
-        assert_eq!(bkgd_for(&[2], indexed(2)), Some(vec![2]));
-        assert_eq!(bkgd_for(&[3], indexed(2)), None, "past the palette");
-        // An encoder-derived palette is in an order the caller never saw.
-        assert_eq!(bkgd_for(&[2], palette(PaletteOrigin::Derived, None)), None);
-        // And under any other colour type there is no palette at all.
-        assert_eq!(bkgd_for(&[0], header(ColorType::TruecolorAlpha, 8)), None);
-        assert_eq!(bkgd_for(&[0], header(ColorType::Grayscale, 8)), None);
-    }
-
-    #[test]
-    fn a_colour_with_a_transparent_twin_names_the_opaque_entry() {
-        // Two black entries: the transparent one first, as the encoder orders them.
-        const BLACKS: [u8; 9] = [0, 0, 0, 0, 0, 0, 20, 90, 220];
-        let twins = |trns: Option<&'static [u8]>| WrittenHeader {
-            color: ColorType::Indexed,
-            bit_depth: 8,
-            palette: Some(WrittenPalette {
-                plte: &BLACKS,
-                trns,
-                origin: PaletteOrigin::Derived,
-            }),
-            source_depth: 8,
-        };
-        assert_eq!(
-            bkgd_for(&[0, 0, 0, 0, 0, 0], twins(Some(&[0]))),
-            Some(vec![1])
-        );
-        // Past the end of tRNS every entry is opaque, so the first match is opaque and wins.
-        assert_eq!(bkgd_for(&[0, 0, 0, 0, 0, 0], twins(None)), Some(vec![0]));
-        // A triple that exists only under transparency still names that entry: its RGB is what a
-        // compositing reader paints.
-        assert_eq!(
-            bkgd_for(&[0, 0, 0, 0, 0, 0], twins(Some(&[0, 0]))),
-            Some(vec![0])
-        );
-        // Derivation is independent of the origin: an RGB colour resolves against either.
-        assert_eq!(
-            bkgd_for(&[0, 20, 0, 90, 0, 220], twins(Some(&[0]))),
-            Some(vec![2])
-        );
-    }
-
-    #[test]
-    fn a_colour_under_a_palette_becomes_the_index_of_its_entry() {
-        // RGB (20, 90, 220) is entry 2; grey 77 is entry 1; (1, 2, 3) is nowhere.
-        assert_eq!(bkgd_for(&[0, 20, 0, 90, 0, 220], indexed(8)), Some(vec![2]));
-        assert_eq!(bkgd_for(&[0, 77], indexed(8)), Some(vec![1]));
-        assert_eq!(bkgd_for(&[0, 1, 0, 2, 0, 3], indexed(8)), None);
-        // A 16-bit sample has no 8-bit palette entry.
-        assert_eq!(bkgd_for(&[1, 0, 1, 0, 1, 0], indexed(8)), None);
-    }
-
-    #[test]
-    fn grey_and_rgb_backgrounds_convert_where_the_channels_agree() {
-        assert_eq!(
-            bkgd_for(&[0, 77, 0, 77, 0, 77], header(ColorType::Grayscale, 8)),
-            Some(vec![0, 77])
-        );
-        assert_eq!(
-            bkgd_for(&[0, 77, 0, 77, 0, 78], header(ColorType::GrayscaleAlpha, 8)),
-            None,
-            "not a grey"
-        );
-        assert_eq!(
-            bkgd_for(&[0, 77], header(ColorType::Truecolor, 8)),
-            Some(vec![0, 77, 0, 77, 0, 77])
-        );
-        // Same colour type: byte for byte.
-        assert_eq!(
-            bkgd_for(&[0, 1, 0, 2, 0, 3], header(ColorType::TruecolorAlpha, 8)),
-            Some(vec![0, 1, 0, 2, 0, 3])
-        );
-        // A wrong-length payload has no colour type at all.
-        assert_eq!(bkgd_for(&[1, 2, 3], header(ColorType::Truecolor, 8)), None);
-    }
-
-    #[test]
-    fn a_background_sample_must_fit_its_own_depth() {
-        // 256 is past depth 8 in either framing; anything fits depth 16.
-        assert_eq!(bkgd_for(&[1, 0], header(ColorType::Grayscale, 8)), None);
-        assert_eq!(
-            bkgd_for(&[1, 0], header(ColorType::Grayscale, 16)),
-            Some(vec![1, 0])
-        );
-        assert_eq!(
-            bkgd_for(&[0, 1, 0, 2, 1, 0], header(ColorType::Truecolor, 8)),
-            None
-        );
-        // Sub-byte grey written at its own depth (bilevel): 1 is the last code, 2 is not one.
-        assert_eq!(
-            bkgd_for(&[0, 1], header(ColorType::Grayscale, 1)),
-            Some(vec![0, 1])
-        );
-        assert_eq!(bkgd_for(&[0, 2], header(ColorType::Grayscale, 1)), None);
-    }
-
-    /// A header auto-reduce lowered from `source_depth` input samples.
-    fn reduced(color: ColorType, bit_depth: u8, source_depth: u8) -> WrittenHeader<'static> {
-        header(color, bit_depth).reduced_from(source_depth)
-    }
-
-    #[test]
-    fn a_background_sample_is_rescaled_with_the_pixels() {
-        // 8-bit grey packed to depth 2 maps v to v / 85: 170 is code 2, and 3 — a near-black
-        // 8-bit sample that is white at depth 2 — has no code at all.
-        assert_eq!(
-            bkgd_for(&[0, 170], reduced(ColorType::Grayscale, 2, 8)),
-            Some(vec![0, 2])
-        );
-        assert_eq!(bkgd_for(&[0, 3], reduced(ColorType::Grayscale, 2, 8)), None);
-        // Depth 1 maps v to v / 255: an 8-bit 1 is near black, not the white code 1.
-        assert_eq!(bkgd_for(&[0, 1], reduced(ColorType::Grayscale, 1, 8)), None);
-        assert_eq!(
-            bkgd_for(&[0, 255], reduced(ColorType::Grayscale, 1, 8)),
-            Some(vec![0, 1])
-        );
-        // 16→8 maps k·257 to k, and nothing else to anything.
-        assert_eq!(
-            bkgd_for(
-                &[0x14, 0x14, 0x5A, 0x5A, 0xDC, 0xDC],
-                reduced(ColorType::Truecolor, 8, 16)
-            ),
-            Some(vec![0, 20, 0, 90, 0, 220])
-        );
-        assert_eq!(
-            bkgd_for(
-                &[0, 200, 0, 200, 0, 200],
-                reduced(ColorType::Truecolor, 8, 16)
-            ),
-            None,
-            "16-bit 200 is near black; 8-bit 200 is not"
-        );
-        // ...including into a derived palette's 8-bit entries: 16-bit (20, 90, 220)·257 is entry 2.
-        assert_eq!(
-            bkgd_for(
-                &[0x14, 0x14, 0x5A, 0x5A, 0xDC, 0xDC],
-                palette(PaletteOrigin::Derived, None).reduced_from(16)
-            ),
-            Some(vec![2])
-        );
-    }
-
-    #[test]
-    fn rescaling_is_exact_or_nothing() {
-        // The identity at equal depths, up to and including the top code.
-        assert_eq!(rescale(255, 8, 8), Some(255));
-        assert_eq!(rescale(65535, 16, 16), Some(65535));
-        assert_eq!(rescale(256, 8, 8), None, "past the source depth");
-        // The 16→8 and 8→sub-byte scales, both ways round the divisibility test.
-        assert_eq!(rescale(77 * 257, 16, 8), Some(77));
-        assert_eq!(rescale(77 * 257 + 1, 16, 8), None);
-        assert_eq!(rescale(2 * 85, 8, 2), Some(2));
-        assert_eq!(rescale(2 * 85 + 1, 8, 2), None);
-        // 16-bit demoted then packed: 21845 = 85·257 is depth-2 code 1.
-        assert_eq!(rescale(21845, 16, 2), Some(1));
-    }
-
-    #[test]
-    fn significant_bits_follow_the_written_channels() {
-        // Dropping a channel the written image no longer has.
-        assert_eq!(
-            sbit_for(&[5, 6, 5, 4], ColorType::Truecolor, 8),
-            Some(vec![5, 6, 5])
-        );
-        assert_eq!(
-            sbit_for(&[5, 6, 5, 4], ColorType::Indexed, 1),
-            Some(vec![5, 6, 5]),
-            "a palette's sBIT is three entries at any index depth"
-        );
-        assert_eq!(
-            sbit_for(&[7, 7, 7, 4], ColorType::GrayscaleAlpha, 8),
-            Some(vec![7, 4])
-        );
-        assert_eq!(sbit_for(&[7, 7, 7], ColorType::Grayscale, 8), Some(vec![7]));
-        assert_eq!(sbit_for(&[7, 4], ColorType::Grayscale, 8), Some(vec![7]));
-        // Grey to RGB where the channels agree, and never to a differing RGB.
-        assert_eq!(sbit_for(&[7], ColorType::Truecolor, 8), Some(vec![7, 7, 7]));
-        assert_eq!(sbit_for(&[5, 6, 5], ColorType::Grayscale, 8), None);
-        // All three must agree, not any two: one agreeing pair is still not a grey.
-        assert_eq!(sbit_for(&[5, 5, 6], ColorType::Grayscale, 8), None);
-        assert_eq!(sbit_for(&[6, 5, 5], ColorType::GrayscaleAlpha, 8), None);
-        // An alpha entry cannot be invented.
-        assert_eq!(sbit_for(&[5, 6, 5], ColorType::TruecolorAlpha, 8), None);
-        assert_eq!(sbit_for(&[7], ColorType::GrayscaleAlpha, 8), None);
-        // Same colour type: byte for byte; a wrong length has no colour type.
-        assert_eq!(
-            sbit_for(&[5, 6, 5, 4], ColorType::TruecolorAlpha, 8),
-            Some(vec![5, 6, 5, 4])
-        );
-        assert_eq!(sbit_for(&[], ColorType::Truecolor, 8), None);
-        assert_eq!(sbit_for(&[1, 2, 3, 4, 5], ColorType::Truecolor, 8), None);
-    }
-
-    #[test]
-    fn a_significant_bit_count_is_one_to_the_written_depth() {
-        assert_eq!(sbit_for(&[8], ColorType::Grayscale, 8), Some(vec![8]));
-        assert_eq!(
-            sbit_for(&[9], ColorType::Grayscale, 8),
-            None,
-            "past the depth"
-        );
-        assert_eq!(
-            sbit_for(&[0], ColorType::Grayscale, 8),
-            None,
-            "zero is not a count"
-        );
-        assert_eq!(sbit_for(&[12], ColorType::Grayscale, 16), Some(vec![12]));
-        // A palette's entries are 8-bit whatever the index depth.
-        assert_eq!(
-            sbit_for(&[8, 8, 8], ColorType::Indexed, 1),
-            Some(vec![8, 8, 8])
-        );
-        assert_eq!(sbit_for(&[9, 8, 8], ColorType::Indexed, 8), None);
-        // Sub-byte grey: the count cannot exceed the depth.
-        assert_eq!(sbit_for(&[2], ColorType::Grayscale, 2), Some(vec![2]));
-        assert_eq!(sbit_for(&[3], ColorType::Grayscale, 2), None);
-    }
-
     #[test]
     fn the_writers_emit_the_converted_chunk_or_none() {
         // The two `write_*` entry points route through the conversions rather than emitting the
@@ -1840,7 +913,7 @@ mod tests {
     /// encoded using the iTXt chunk." A `tEXt` request whose text has no Latin-1 encoding is
     /// therefore promoted rather than mangled or dropped.
     ///
-    /// Kills the `None` arm of [`Ancillary::text_entry`]'s promotion. The keyword stays Latin-1
+    /// Kills the `None` arm of [`TextEntry::new`]'s promotion. The keyword stays Latin-1
     /// either way (§11.3.3.1 binds it in every text chunk).
     #[test]
     fn text_outside_latin1_is_promoted_to_itxt() {
@@ -1929,7 +1002,7 @@ mod tests {
     /// therefore lose the annotation without a word, so it is dropped here and reported.
     ///
     /// Kills the length guard in [`keyword_verdict`], including a mutant that shifts either bound
-    /// by one, and the `Drop` arm of [`Ancillary::text_entry`] that keeps the chunk out.
+    /// by one, and the `Drop` arm of [`TextEntry::new`] that keeps the chunk out.
     #[test]
     fn a_keyword_outside_one_to_seventy_nine_bytes_is_dropped_with_a_notice() {
         let mut ok = Ancillary::default();
@@ -2051,7 +1124,7 @@ mod tests {
     /// own reader accepts. It is not written either, because libpng truncates such a text at the
     /// null, so the chunk would mean different things to different readers.
     ///
-    /// Kills the text-null guard in [`Ancillary::text_entry`], in both the Latin-1 and the UTF-8
+    /// Kills the text-null guard in [`TextEntry::new`], in both the Latin-1 and the UTF-8
     /// request — a mutant that checks only one leaves the other writing the disputed chunk — and
     /// a mutant that turns the drop back into a refusal.
     #[test]
@@ -2098,7 +1171,7 @@ mod tests {
     /// contain a zero byte (null character)" — the translated keyword is null-terminated too, so
     /// an embedded null re-frames everything after it.
     ///
-    /// Kills the translated-keyword null check in [`Ancillary::itxt_entry`].
+    /// Kills the translated-keyword null check in [`TextEntry::itxt`].
     #[test]
     fn a_null_in_a_translated_keyword_is_refused() {
         let mut a = Ancillary::default();
@@ -2136,7 +1209,7 @@ mod tests {
     /// and the annotation stays, an empty tag being §11.3.3.4's own way of saying the language is
     /// unspecified.
     ///
-    /// Kills the language arm of [`Ancillary::itxt_entry`]; the empty case pins that
+    /// Kills the language arm of [`TextEntry::itxt`]; the empty case pins that
     /// "unspecified" is not itself a deviation.
     #[test]
     fn a_language_tag_outside_bcp_47_is_dropped_with_a_notice() {
