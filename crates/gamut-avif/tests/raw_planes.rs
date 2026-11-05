@@ -17,7 +17,7 @@ use gamut_avif::{
     AlphaMode, Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, DecodedFrame, RawPlanes,
 };
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
+    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients, Planar8,
     Planar16, TransferCharacteristics,
 };
 use gamut_core::{Error, ErrorKind, Result};
@@ -237,7 +237,7 @@ fn colr_nclx_states_the_planes_declaration_not_the_encoders_knobs() {
         .with_matrix(MatrixCoefficients::Bt709)
         .with_color_range(ColorRange::Full)
         .with_chroma(ChromaSubsampling::Cs444)
-        .with_primaries(ColourPrimaries::Bt2020)
+        .with_primaries(ColorPrimaries::Bt2020)
         .with_transfer(TransferCharacteristics::Pq);
     for (matrix, range, full_range) in [
         (MatrixCoefficients::Bt601, ColorRange::Limited, false),
@@ -253,7 +253,7 @@ fn colr_nclx_states_the_planes_declaration_not_the_encoders_knobs() {
         assert_eq!(
             (s.color_primaries, s.transfer_characteristics),
             (
-                ColourPrimaries::Bt2020 as u16,
+                ColorPrimaries::Bt2020 as u16,
                 TransferCharacteristics::Pq as u16
             )
         );

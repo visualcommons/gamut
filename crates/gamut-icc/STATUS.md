@@ -47,7 +47,7 @@ so no profile is rejected for carrying an unmodelled tag.
 `IccProfile::builtin`, `gray_with_gamma`, `from_cicp` and `from_source_profile` construct
 spec-valid v4 three-component matrix/TRC display profiles (§8.4). All four return `Option`: the
 colorimetry they resolve is **gamut-color's, and whatever gamut-color can supply is never retyped
-here** — primaries and white point come from `ColourPrimaries::chromaticities` for a CICP code
+here** — primaries and white point come from `ColorPrimaries::chromaticities` for a CICP code
 point and from `Gamut::chromaticities` for a named space, the RGB→XYZ
 construction and Bradford adaptation from `gamut_color::matrix`, the ST 2084 curve and H.273
 §8.2's BT.709-family α and β (`BT709_ALPHA` / `BT709_BETA`) from `gamut_color::transfer` — and

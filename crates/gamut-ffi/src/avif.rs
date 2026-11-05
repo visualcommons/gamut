@@ -35,7 +35,7 @@ use gamut::avif::{
 use gamut::core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16};
 use gamut_codec_abi::EncoderVTable;
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients,
+    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients,
     TransferCharacteristics,
 };
 
@@ -296,7 +296,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_primaries(
     encoder: *mut GamutAvifEncoder,
     code_point: u16,
 ) -> GamutStatus {
-    let value = ColourPrimaries::from_code_point(code_point);
+    let value = ColorPrimaries::from_code_point(code_point);
     unsafe {
         GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, p| {
             e.with_primaries(p)
@@ -1656,9 +1656,9 @@ mod tests {
         assert_setter(
             gamut_avif_encoder_set_primaries,
             &[
-                (1, |e| e.with_primaries(ColourPrimaries::Bt709)),
-                (9, |e| e.with_primaries(ColourPrimaries::Bt2020)),
-                (12, |e| e.with_primaries(ColourPrimaries::DisplayP3)),
+                (1, |e| e.with_primaries(ColorPrimaries::Bt709)),
+                (9, |e| e.with_primaries(ColorPrimaries::Bt2020)),
+                (12, |e| e.with_primaries(ColorPrimaries::DisplayP3)),
             ],
             Layout::Rgba8,
         );

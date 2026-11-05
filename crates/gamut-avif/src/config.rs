@@ -2,7 +2,7 @@
 //! encoding.
 
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients,
+    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients,
     TransferCharacteristics,
 };
 
@@ -87,8 +87,8 @@ pub struct AvifConfig {
     ///
     /// Unlike `matrix` and `range`, this is a **pure tag**: no sample is touched by it, so
     /// [`AvifMode::Lossless`] honours it rather than ignoring it. Defaults to
-    /// [`ColourPrimaries::Bt709`] — sRGB's gamut.
-    pub primaries: ColourPrimaries,
+    /// [`ColorPrimaries::Bt709`] — sRGB's gamut.
+    pub primaries: ColorPrimaries,
     /// The CICP transfer characteristics the samples are tagged with — the transfer function
     /// already applied to them.
     ///
@@ -135,7 +135,7 @@ impl Default for AvifConfig {
             matrix: MatrixCoefficients::Identity,
             range: ColorRange::Full,
             chroma: ChromaSubsampling::Cs444,
-            primaries: ColourPrimaries::Bt709,
+            primaries: ColorPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
             bit_depth: None,
             clean_alpha: false,
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(c.alpha_quality, None);
         assert_eq!(c.matrix, MatrixCoefficients::Identity);
         assert_eq!(c.range, ColorRange::Full);
-        assert_eq!(c.primaries, ColourPrimaries::Bt709);
+        assert_eq!(c.primaries, ColorPrimaries::Bt709);
         assert_eq!(c.transfer, TransferCharacteristics::Srgb);
         // Unset: each input codes at its own default depth (8 for 8-bit, 12 for 16-bit), so the
         // default encoder's 8-bit bytes predate the knob reaching 8-bit inputs.

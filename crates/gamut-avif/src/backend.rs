@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, SequenceHeader, Speed, Subsampling};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status, codec_id, pixel_format};
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
+    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients, Planar8,
     Planar16, TransferCharacteristics,
 };
 use gamut_core::{Dimensions, Error, Result};
@@ -490,7 +490,7 @@ impl SeqHeaderParams {
         // codes that triple explicitly says the same thing and is refused the same way.
         if (colour.0, colour.1, colour.2)
             == (
-                ColourPrimaries::Unspecified.code_point(),
+                ColorPrimaries::Unspecified.code_point(),
                 TransferCharacteristics::Unspecified.code_point(),
                 MatrixCoefficients::Unspecified.code_point(),
             )

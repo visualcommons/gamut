@@ -7,7 +7,7 @@
 //! means "BT.2020 primaries **and** PQ **and** Reinhard@203". A [`SourceProfile`]
 //! is that bundle: it carries the `(gamut, transfer)` pair, the convenience
 //! gamma-RGB → OKLab pipeline, and accessors that decompose it into
-//! [`ColourPrimaries`] / [`TransferCharacteristics`].
+//! [`ColorPrimaries`] / [`TransferCharacteristics`].
 //!
 //! The HDR (BT.2020 PQ) path folds its Reinhard tone map into the encoder-exact
 //! transfer (see [`crate::transfer::bt2020_pq_to_sdr`]); the general-purpose
@@ -15,7 +15,7 @@
 //! needs no field here — it is already baked into the per-gamut `M1` matrix
 //! (ProPhoto's D50→D65; see [`crate::matrix`]).
 
-use crate::cicp::{ColourPrimaries, TransferCharacteristics};
+use crate::cicp::{ColorPrimaries, TransferCharacteristics};
 use crate::oklab::{Gamut, linear_rgb_to_oklab};
 use crate::transfer::{
     adobe_rgb_eotf, bt2020_pq_to_sdr, linear_eotf, prophoto_rgb_eotf, srgb_eotf,
@@ -73,9 +73,9 @@ impl SourceTransfer {
 ///
 /// ```
 /// use gamut_color::SourceProfile;
-/// use gamut_color::cicp::{ColourPrimaries, TransferCharacteristics};
+/// use gamut_color::cicp::{ColorPrimaries, TransferCharacteristics};
 /// let p = SourceProfile::SRGB;
-/// assert_eq!(p.colour_primaries(), Some(ColourPrimaries::Bt709));
+/// assert_eq!(p.color_primaries(), Some(ColorPrimaries::Bt709));
 /// assert_eq!(p.transfer_characteristics(), Some(TransferCharacteristics::Srgb));
 /// // Convenience pipeline: gamma-encoded sRGB → OKLab.
 /// let lab = p.gamma_rgb_to_oklab([1.0, 1.0, 1.0]);
@@ -122,15 +122,15 @@ impl SourceProfile {
         transfer: SourceTransfer::ProPhotoRgb,
     };
 
-    /// The CICP [`ColourPrimaries`] code point, when one exists. Adobe RGB and
+    /// The CICP [`ColorPrimaries`] code point, when one exists. Adobe RGB and
     /// ProPhoto RGB have no CICP primaries code point.
     #[must_use]
-    pub fn colour_primaries(self) -> Option<ColourPrimaries> {
+    pub fn color_primaries(self) -> Option<ColorPrimaries> {
         match self.gamut {
             // BT.709 and sRGB share primaries (CICP code point 1).
-            Gamut::Srgb => Some(ColourPrimaries::Bt709),
-            Gamut::DisplayP3 => Some(ColourPrimaries::DisplayP3),
-            Gamut::Bt2020 => Some(ColourPrimaries::Bt2020),
+            Gamut::Srgb => Some(ColorPrimaries::Bt709),
+            Gamut::DisplayP3 => Some(ColorPrimaries::DisplayP3),
+            Gamut::Bt2020 => Some(ColorPrimaries::Bt2020),
             Gamut::AdobeRgb | Gamut::ProPhotoRgb => None,
         }
     }
@@ -166,7 +166,7 @@ mod tests {
         // points, and Display P3 reuses the sRGB transfer with its own primaries. (The Reinhard
         // tone map folded into the BT.2020 transfer is exercised by
         // `eotf_is_encoder_exact_per_gamut`.)
-        use ColourPrimaries as Cp;
+        use ColorPrimaries as Cp;
         use TransferCharacteristics as Tc;
         let cases: &[(SourceProfile, Option<Cp>, Option<Tc>)] = &[
             (SourceProfile::SRGB, Some(Cp::Bt709), Some(Tc::Srgb)),
@@ -187,7 +187,7 @@ mod tests {
         for &(p, primaries, transfer) in cases {
             // Labelled with the whole profile, not just the gamut: SRGB and LINEAR_SRGB
             // share `Gamut::Srgb` and differ only in transfer.
-            assert_eq!(p.colour_primaries(), primaries, "{p:?} primaries");
+            assert_eq!(p.color_primaries(), primaries, "{p:?} primaries");
             assert_eq!(p.transfer_characteristics(), transfer, "{p:?} transfer");
         }
     }

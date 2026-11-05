@@ -7,9 +7,9 @@
 //! identity and the `Bt709` / `Bt601` / `Bt470Bg` / `Bt2020Ncl` luma–chroma matrices at 8, 10 and
 //! 12 bits, with `YCgCo` modeled only — is listed under the crate root's *Implemented vs. modeled*.
 //!
-//! Naming follows each identifier's source spec: the H.273 types keep the spec's British
-//! spelling ([`ColourPrimaries`], as published), while AV1-derived names use the AV1 spec's
-//! American spelling ([`ColorRange`], after `color_range`).
+//! Identifiers use one spelling, American, throughout the crate: [`ColorPrimaries`] is H.273's
+//! `ColourPrimaries` (searchable under that name as a doc alias), and [`ColorRange`] is AV1's
+//! `color_range`.
 
 /// Matrix coefficients (CICP `MatrixCoefficients`). `Identity` (0) carries RGB directly with no
 /// colour transform and requires 4:4:4 — the basis for lossless RGB AVIF.
@@ -71,12 +71,12 @@ impl MatrixCoefficients {
 /// Colour primaries (CICP `ColourPrimaries`).
 ///
 /// `#[non_exhaustive]`: H.273 defines further code points, added here as a gamut codec needs them.
-#[doc(alias = "ColorPrimaries")]
+#[doc(alias = "ColourPrimaries")]
 #[repr(u16)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum ColourPrimaries {
+pub enum ColorPrimaries {
     /// BT.709 (also sRGB primaries). (Code point 1.)
     Bt709 = 1,
     /// Unspecified. (Code point 2.)
@@ -91,25 +91,25 @@ pub enum ColourPrimaries {
     DisplayP3 = 12,
 }
 
-impl ColourPrimaries {
+impl ColorPrimaries {
     /// The CICP code point.
     #[must_use]
     pub fn code_point(self) -> u16 {
         self as u16
     }
 
-    /// The [`ColourPrimaries`] for `code_point`, or `None` for any point not modeled here (a
+    /// The [`ColorPrimaries`] for `code_point`, or `None` for any point not modeled here (a
     /// later minor release may turn a `None` into `Some`). The inverse of
-    /// [`ColourPrimaries::code_point`].
+    /// [`ColorPrimaries::code_point`].
     #[must_use]
     pub fn from_code_point(code_point: u16) -> Option<Self> {
         match code_point {
-            1 => Some(ColourPrimaries::Bt709),
-            2 => Some(ColourPrimaries::Unspecified),
-            5 => Some(ColourPrimaries::Bt601Pal),
-            6 => Some(ColourPrimaries::Smpte170m),
-            9 => Some(ColourPrimaries::Bt2020),
-            12 => Some(ColourPrimaries::DisplayP3),
+            1 => Some(ColorPrimaries::Bt709),
+            2 => Some(ColorPrimaries::Unspecified),
+            5 => Some(ColorPrimaries::Bt601Pal),
+            6 => Some(ColorPrimaries::Smpte170m),
+            9 => Some(ColorPrimaries::Bt2020),
+            12 => Some(ColorPrimaries::DisplayP3),
             _ => None,
         }
     }
@@ -117,11 +117,11 @@ impl ColourPrimaries {
     /// The CIE 1931 chromaticities this code point names: the `[R, G, B]` primaries as `(x, y)`
     /// pairs, and the white point, exactly as [`crate::matrix::rgb_to_xyz_matrix`] takes them.
     ///
-    /// `None` for [`ColourPrimaries::Unspecified`], which by definition names no chromaticities
+    /// `None` for [`ColorPrimaries::Unspecified`], which by definition names no chromaticities
     /// (a later minor release may turn a `None` into `Some` as further code points are modeled).
     ///
-    /// Values are ITU-T H.273 Table 2. Note that [`ColourPrimaries::Bt601Pal`] (625-line, EBU
-    /// Tech. 3213-E) and [`ColourPrimaries::Smpte170m`] (525-line) are **different** primary
+    /// Values are ITU-T H.273 Table 2. Note that [`ColorPrimaries::Bt601Pal`] (625-line, EBU
+    /// Tech. 3213-E) and [`ColorPrimaries::Smpte170m`] (525-line) are **different** primary
     /// sets, unlike the [`MatrixCoefficients::Bt470Bg`]/[`MatrixCoefficients::Bt601`] pair, whose
     /// coefficients are identical.
     ///
@@ -130,15 +130,15 @@ impl ColourPrimaries {
     /// Build the linear-RGB → XYZ matrix for a CICP-tagged image:
     ///
     /// ```
-    /// use gamut_color::cicp::ColourPrimaries;
+    /// use gamut_color::cicp::ColorPrimaries;
     /// use gamut_color::matrix::rgb_to_xyz_matrix;
     ///
-    /// let (primaries, white) = ColourPrimaries::Bt2020.chromaticities().unwrap();
+    /// let (primaries, white) = ColorPrimaries::Bt2020.chromaticities().unwrap();
     /// let m = rgb_to_xyz_matrix(&primaries, white).unwrap();
     /// // Row 1 of an RGB→XYZ matrix is the luminance (Y) weighting, so it sums to 1.
     /// assert!((m[1].iter().sum::<f64>() - 1.0).abs() < 1e-12);
     ///
-    /// assert_eq!(ColourPrimaries::Unspecified.chromaticities(), None);
+    /// assert_eq!(ColorPrimaries::Unspecified.chromaticities(), None);
     /// ```
     #[must_use]
     pub fn chromaticities(self) -> Option<([[f64; 2]; 3], [f64; 2])> {
@@ -148,12 +148,12 @@ impl ColourPrimaries {
         };
         match self {
             // BT.709 and sRGB share one set of primaries.
-            ColourPrimaries::Bt709 => Some((SRGB_PRIMARIES, D65)),
-            ColourPrimaries::Bt601Pal => Some((BT601_625_PRIMARIES, D65)),
-            ColourPrimaries::Smpte170m => Some((BT601_525_PRIMARIES, D65)),
-            ColourPrimaries::Bt2020 => Some((BT2020_PRIMARIES, D65)),
-            ColourPrimaries::DisplayP3 => Some((DISPLAY_P3_PRIMARIES, D65)),
-            ColourPrimaries::Unspecified => None,
+            ColorPrimaries::Bt709 => Some((SRGB_PRIMARIES, D65)),
+            ColorPrimaries::Bt601Pal => Some((BT601_625_PRIMARIES, D65)),
+            ColorPrimaries::Smpte170m => Some((BT601_525_PRIMARIES, D65)),
+            ColorPrimaries::Bt2020 => Some((BT2020_PRIMARIES, D65)),
+            ColorPrimaries::DisplayP3 => Some((DISPLAY_P3_PRIMARIES, D65)),
+            ColorPrimaries::Unspecified => None,
         }
     }
 }
@@ -263,11 +263,11 @@ mod tests {
         assert_eq!(MatrixCoefficients::Bt470Bg.code_point(), 5);
         assert_eq!(MatrixCoefficients::Bt601.code_point(), 6);
         assert_eq!(MatrixCoefficients::Bt2020Ncl.code_point(), 9);
-        assert_eq!(ColourPrimaries::Bt709.code_point(), 1);
+        assert_eq!(ColorPrimaries::Bt709.code_point(), 1);
         // A second, non-1 primaries value pins `self as u16` (a constant `1` would pass on Bt709
         // alone).
-        assert_eq!(ColourPrimaries::Bt2020.code_point(), 9);
-        assert_eq!(ColourPrimaries::DisplayP3.code_point(), 12);
+        assert_eq!(ColorPrimaries::Bt2020.code_point(), 9);
+        assert_eq!(ColorPrimaries::DisplayP3.code_point(), 12);
         assert_eq!(TransferCharacteristics::Linear.code_point(), 8);
         assert_eq!(TransferCharacteristics::Srgb.code_point(), 13);
         assert_eq!(TransferCharacteristics::Pq.code_point(), 16);
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn code_point_inverses_round_trip() {
-        use ColourPrimaries as Cp;
+        use ColorPrimaries as Cp;
         use MatrixCoefficients as Mc;
         use TransferCharacteristics as Tc;
         for mc in [
@@ -329,28 +329,28 @@ mod tests {
     /// mode here, and checking `matrix.rs`'s consts against `matrix.rs`'s consts proves nothing.
     #[test]
     fn chromaticities_match_h273_table_2() {
-        let (p, w) = ColourPrimaries::Bt709
+        let (p, w) = ColorPrimaries::Bt709
             .chromaticities()
             .expect("BT.709 is modeled");
         assert_eq!(p, [[0.640, 0.330], [0.300, 0.600], [0.150, 0.060]]);
         assert_eq!(w, [0.3127, 0.3290]);
 
-        let (p, _) = ColourPrimaries::Bt601Pal
+        let (p, _) = ColorPrimaries::Bt601Pal
             .chromaticities()
             .expect("625-line is modeled");
         assert_eq!(p, [[0.640, 0.330], [0.290, 0.600], [0.150, 0.060]]);
 
-        let (p, _) = ColourPrimaries::Smpte170m
+        let (p, _) = ColorPrimaries::Smpte170m
             .chromaticities()
             .expect("525-line is modeled");
         assert_eq!(p, [[0.630, 0.340], [0.310, 0.595], [0.155, 0.070]]);
 
-        let (p, _) = ColourPrimaries::Bt2020
+        let (p, _) = ColorPrimaries::Bt2020
             .chromaticities()
             .expect("BT.2020 is modeled");
         assert_eq!(p, [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]]);
 
-        let (p, _) = ColourPrimaries::DisplayP3
+        let (p, _) = ColorPrimaries::DisplayP3
             .chromaticities()
             .expect("P3 is modeled");
         assert_eq!(p, [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]]);
@@ -362,7 +362,7 @@ mod tests {
         }
 
         // "Unspecified" names no chromaticities by definition.
-        assert_eq!(ColourPrimaries::Unspecified.chromaticities(), None);
+        assert_eq!(ColorPrimaries::Unspecified.chromaticities(), None);
     }
 
     /// The two "BT.601" primary sets are genuinely different — the one distinction in this table
@@ -372,8 +372,8 @@ mod tests {
     /// is shown to be observable downstream.
     #[test]
     fn bt601_625_and_525_are_distinct_primaries() {
-        let (p625, w) = ColourPrimaries::Bt601Pal.chromaticities().expect("modeled");
-        let (p525, _) = ColourPrimaries::Smpte170m
+        let (p625, w) = ColorPrimaries::Bt601Pal.chromaticities().expect("modeled");
+        let (p525, _) = ColorPrimaries::Smpte170m
             .chromaticities()
             .expect("modeled");
         assert_ne!(p625, p525);
@@ -388,7 +388,7 @@ mod tests {
     /// sRGB→XYZ matrix. Gate matches `matrix.rs`'s own Lindbloom comparison (5e-4).
     #[test]
     fn bt709_chromaticities_derive_the_published_srgb_matrix() {
-        let (primaries, white) = ColourPrimaries::Bt709.chromaticities().expect("modeled");
+        let (primaries, white) = ColorPrimaries::Bt709.chromaticities().expect("modeled");
         let m = crate::matrix::rgb_to_xyz_matrix(&primaries, white).expect("non-degenerate");
         // Bruce Lindbloom's published sRGB (D65) RGB→XYZ matrix.
         let expected = [
@@ -422,22 +422,22 @@ mod tests {
     #[test]
     fn only_unspecified_lacks_chromaticities() {
         for code in 0..=u16::from(u8::MAX) {
-            if let Some(cp) = ColourPrimaries::from_code_point(code) {
+            if let Some(cp) = ColorPrimaries::from_code_point(code) {
                 assert_eq!(
                     cp.chromaticities().is_none(),
-                    cp == ColourPrimaries::Unspecified,
+                    cp == ColorPrimaries::Unspecified,
                     "{cp:?} disagrees with the Unspecified-only rule"
                 );
             }
         }
     }
 
-    /// Every `ColourPrimaries` that names real chromaticities.
-    const MODELED_PRIMARIES: [ColourPrimaries; 5] = [
-        ColourPrimaries::Bt709,
-        ColourPrimaries::Bt601Pal,
-        ColourPrimaries::Smpte170m,
-        ColourPrimaries::Bt2020,
-        ColourPrimaries::DisplayP3,
+    /// Every `ColorPrimaries` that names real chromaticities.
+    const MODELED_PRIMARIES: [ColorPrimaries; 5] = [
+        ColorPrimaries::Bt709,
+        ColorPrimaries::Bt601Pal,
+        ColorPrimaries::Smpte170m,
+        ColorPrimaries::Bt2020,
+        ColorPrimaries::DisplayP3,
     ];
 }

@@ -8,7 +8,7 @@ use gamut_av1::{
     encode_still_intra16_with_options,
 };
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
+    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients, Planar8,
     Planar16, RgbToYcbcr, TransferCharacteristics,
 };
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy, convert, premultiply_alpha};
@@ -534,7 +534,7 @@ impl AvifEncoder {
     }
 
     /// Tags the image with CICP colour **primaries** — the gamut its R'G'B' values are interpreted
-    /// in. Defaults to [`ColourPrimaries::Bt709`] (sRGB's gamut).
+    /// in. Defaults to [`ColorPrimaries::Bt709`] (sRGB's gamut).
     ///
     /// This is a **tag, not a conversion**: the encoder does not gamut-map anything, so it declares
     /// what the caller's samples already are. Unlike [`with_matrix`](Self::with_matrix) and
@@ -544,7 +544,7 @@ impl AvifEncoder {
     /// The value reaches both the AV1 sequence header's `color_config()` and the container's `colr`
     /// box, which are required to agree (AV1-ISOBMFF v1.3.0 §2.3.4).
     #[must_use]
-    pub fn with_primaries(mut self, primaries: ColourPrimaries) -> Self {
+    pub fn with_primaries(mut self, primaries: ColorPrimaries) -> Self {
         self.config.primaries = primaries;
         self
     }
@@ -2680,7 +2680,7 @@ mod tests {
             // reach `colr` on **both** paths. Lossless keeps identity/full alongside them.
             (
                 AvifEncoder::lossless()
-                    .with_primaries(ColourPrimaries::Bt2020)
+                    .with_primaries(ColorPrimaries::Bt2020)
                     .with_transfer(TransferCharacteristics::Pq),
                 9,
                 16,
@@ -2690,7 +2690,7 @@ mod tests {
             ),
             (
                 AvifEncoder::lossy(50)
-                    .with_primaries(ColourPrimaries::DisplayP3)
+                    .with_primaries(ColorPrimaries::DisplayP3)
                     .with_transfer(TransferCharacteristics::Hlg)
                     .with_matrix(MatrixCoefficients::Bt2020Ncl),
                 12,

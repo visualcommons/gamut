@@ -14,7 +14,7 @@
 //! v1.2.0 §9.1.2 and ISO/IEC 23008-12.
 
 use gamut_avif::{AvifContainer, AvifEncoder, ContentLightLevel, MasteringDisplay, Rotation};
-use gamut_color::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::{ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_isobmff::PropertyKind;
 
@@ -84,7 +84,7 @@ fn libavif_reads_back_the_selected_cicp_code_points() {
     let cases = [
         (
             AvifEncoder::lossless()
-                .with_primaries(ColourPrimaries::Bt2020)
+                .with_primaries(ColorPrimaries::Bt2020)
                 .with_transfer(TransferCharacteristics::Pq),
             9u16,
             16u16,
@@ -93,7 +93,7 @@ fn libavif_reads_back_the_selected_cicp_code_points() {
         ),
         (
             AvifEncoder::lossy(50)
-                .with_primaries(ColourPrimaries::DisplayP3)
+                .with_primaries(ColorPrimaries::DisplayP3)
                 .with_transfer(TransferCharacteristics::Hlg)
                 .with_matrix(MatrixCoefficients::Bt2020Ncl),
             12,
@@ -166,7 +166,7 @@ const MDCV: MasteringDisplay = MasteringDisplay {
 /// A PQ-tagged BT.2020 encoder carrying both HDR properties — the configuration they describe.
 fn hdr_encoder() -> AvifEncoder {
     AvifEncoder::lossless()
-        .with_primaries(ColourPrimaries::Bt2020)
+        .with_primaries(ColorPrimaries::Bt2020)
         .with_transfer(TransferCharacteristics::Pq)
         .with_content_light_level(CLLI)
         .with_mastering_display(MDCV)

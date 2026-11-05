@@ -71,13 +71,13 @@ pub const M1_INV_SRGB: [[f64; 3]; 3] = [
 
 /// Source RGB gamut, selecting the linear-RGB → LMS (`M1`) matrix.
 ///
-/// This is a colour-science gamut, distinct from CICP [`ColourPrimaries`] —
+/// This is a colour-science gamut, distinct from CICP [`ColorPrimaries`] —
 /// Adobe RGB and ProPhoto RGB have no CICP primaries code point. See
 /// [`crate::profile`] for the mapping onto CICP axes.
 ///
 /// `#[non_exhaustive]`: more gamuts (with their derived `M1` matrices) may be added later.
 ///
-/// [`ColourPrimaries`]: crate::cicp::ColourPrimaries
+/// [`ColorPrimaries`]: crate::cicp::ColorPrimaries
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gamut {
@@ -108,7 +108,7 @@ impl Gamut {
 
     /// The CIE 1931 chromaticities of this gamut: `([R, G, B], white)`, each an `(x, y)` pair.
     ///
-    /// Total, unlike [`ColourPrimaries::chromaticities`](crate::cicp::ColourPrimaries::chromaticities):
+    /// Total, unlike [`ColorPrimaries::chromaticities`](crate::cicp::ColorPrimaries::chromaticities):
     /// every `Gamut` has primaries, including the two with no ITU-T H.273 code point (Adobe RGB
     /// and ProPhoto RGB). Where a gamut *does* have a code point the two accessors return the same
     /// numbers. ProPhoto RGB is the one gamut whose white is D50 rather than D65.
@@ -182,7 +182,7 @@ mod tests {
     /// states, and the ROMM RGB white paper (`references/color/romm-rgb.pdf`, the free stand-in
     /// for ISO 22028-2) to *its* four places — the crate carries ProPhoto to six, so the ROMM
     /// gate is half the paper's last digit. These are the only two `Gamut`s
-    /// `ColourPrimaries::chromaticities` cannot vouch for.
+    /// `ColorPrimaries::chromaticities` cannot vouch for.
     #[test]
     fn uncoded_gamuts_carry_their_published_chromaticities() {
         assert_eq!(
@@ -203,12 +203,12 @@ mod tests {
     /// Where a gamut has an H.273 primaries code point, the total accessor agrees with the
     /// code-point one: the two must never become two copies of the same colorimetry.
     #[test]
-    fn coded_gamuts_agree_with_their_colour_primaries() {
-        use crate::cicp::ColourPrimaries;
+    fn coded_gamuts_agree_with_their_color_primaries() {
+        use crate::cicp::ColorPrimaries;
         for (gamut, primaries) in [
-            (Gamut::Srgb, ColourPrimaries::Bt709),
-            (Gamut::DisplayP3, ColourPrimaries::DisplayP3),
-            (Gamut::Bt2020, ColourPrimaries::Bt2020),
+            (Gamut::Srgb, ColorPrimaries::Bt709),
+            (Gamut::DisplayP3, ColorPrimaries::DisplayP3),
+            (Gamut::Bt2020, ColorPrimaries::Bt2020),
         ] {
             assert_eq!(
                 Some(gamut.chromaticities()),

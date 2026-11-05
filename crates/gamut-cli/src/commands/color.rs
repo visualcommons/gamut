@@ -2,7 +2,7 @@
 
 use clap::Subcommand;
 use gamut::color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients,
+    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients,
     TransferCharacteristics,
 };
 use gamut::core::{Cmyk8, Gray8, Pixel, Rgb8, Rgba8};
@@ -52,12 +52,12 @@ fn list() {
 
     println!("colour primaries (CICP code point):");
     for cp in [
-        ColourPrimaries::Bt709,
-        ColourPrimaries::Unspecified,
-        ColourPrimaries::Bt601Pal,
-        ColourPrimaries::Smpte170m,
-        ColourPrimaries::Bt2020,
-        ColourPrimaries::DisplayP3,
+        ColorPrimaries::Bt709,
+        ColorPrimaries::Unspecified,
+        ColorPrimaries::Bt601Pal,
+        ColorPrimaries::Smpte170m,
+        ColorPrimaries::Bt2020,
+        ColorPrimaries::DisplayP3,
     ] {
         println!("  {:>3}  {cp:?}", cp.code_point());
     }

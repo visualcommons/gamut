@@ -22,7 +22,7 @@ use gamut_av1::{
     encode_still_intra_with, encode_still_intra_with_options, encode_still_intra_with_speed,
     encode_still_intra16_with, encode_still_intra16_with_options, encode_still_intra16_with_speed,
 };
-use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::cicp::{ColorRange, ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16, RgbToYcbcr};
 use gamut_core::{Dimensions, ImageRef, Rgb8};
 
@@ -62,7 +62,7 @@ fn planes_subsampled(
 /// The colour a subsampled stream must carry: identity is not conformant below 4:4:4 (§6.4.2).
 fn colour_for(matrix: MatrixCoefficients, range: ColorRange) -> Av1Colour {
     Av1Colour {
-        primaries: ColourPrimaries::Bt709,
+        primaries: ColorPrimaries::Bt709,
         transfer: TransferCharacteristics::Srgb,
         matrix,
         range,
@@ -979,21 +979,21 @@ fn non_identity_colour_config_matches_dav1d() {
     let colours = [
         // BT.709 full range — what the AVIF encoder's lossy default signals.
         Av1Colour {
-            primaries: ColourPrimaries::Bt709,
+            primaries: ColorPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
             matrix: MatrixCoefficients::Bt709,
             range: ColorRange::Full,
         },
         // …and studio range, so the coded bit is exercised at both values.
         Av1Colour {
-            primaries: ColourPrimaries::Bt709,
+            primaries: ColorPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
             matrix: MatrixCoefficients::Bt709,
             range: ColorRange::Limited,
         },
         // A non-BT.709 primaries/matrix pair, so the shortcut is missed on more than one field.
         Av1Colour {
-            primaries: ColourPrimaries::Bt2020,
+            primaries: ColorPrimaries::Bt2020,
             transfer: TransferCharacteristics::Srgb,
             matrix: MatrixCoefficients::Bt2020Ncl,
             range: ColorRange::Full,

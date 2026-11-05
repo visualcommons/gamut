@@ -9,7 +9,7 @@ the `f64` colour-science layer (transfer functions, OKLab, gamut mapping, source
 Part of the [gamut](../../README.md) workspace, this crate exists to:
 
 - **Centralize color management.** One place defines [`BitDepth`], [`ChromaSubsampling`], the CICP
-  enums ([`ColourPrimaries`], [`TransferCharacteristics`], [`MatrixCoefficients`], [`ColorRange`]),
+  enums ([`ColorPrimaries`], [`TransferCharacteristics`], [`MatrixCoefficients`], [`ColorRange`]),
   and the [`Planar8`] / [`Planar16`] buffers — so a color bug is fixed once, not re-implemented
   per format. (The interleaved pixel layouts are the typed `Pixel` markers in `gamut-core`.)
 - **Model the full spec surface up front.** The enums cover every AV1 bit depth and subsampling and

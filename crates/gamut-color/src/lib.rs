@@ -95,7 +95,7 @@ pub mod xyb;
 pub mod ycbcr;
 
 pub use cct::cct_from_xy;
-pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+pub use cicp::{ColorRange, ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
 pub use format::{BitDepth, ChromaSubsampling};
 pub use lab::{delta_e_76, delta_e_2000};
 pub use oklab::Gamut;

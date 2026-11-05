@@ -43,8 +43,9 @@ tolerance-level, not bit-for-bit.
 
 ## API policies frozen at v1
 
-- **Per-source-spec naming.** H.273 identifiers keep the spec's British spelling
-  (`ColourPrimaries`); AV1-derived names use American spelling (`ColorRange`, `clip_pixel`).
+- **One identifier spelling.** Every identifier uses American spelling (`ColorPrimaries`,
+  `ColorRange`), whatever its source spec spells it; H.273's `ColourPrimaries` survives only as
+  a `doc(alias)` (issue #1066).
 - **Growth-bound enums are `#[non_exhaustive]`** (CICP code points, `BitDepth`,
   `ChromaSubsampling`, `Gamut`, `SourceTransfer`); `ColorRange` is deliberately exhaustive (a
   spec-complete single bit). New variants and `from_code_point` `None`→`Some` promotions are

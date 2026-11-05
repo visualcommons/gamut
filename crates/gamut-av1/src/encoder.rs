@@ -1759,11 +1759,11 @@ mod tests {
 
     #[test]
     fn colour_is_mirrored_into_the_config_and_the_sequence_header() {
-        use gamut_color::cicp::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+        use gamut_color::cicp::{ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
 
         let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
         let colour = Av1Colour {
-            primaries: ColourPrimaries::Bt2020,
+            primaries: ColorPrimaries::Bt2020,
             transfer: TransferCharacteristics::Srgb,
             matrix: MatrixCoefficients::Bt2020Ncl,
             range: ColorRange::Limited,
@@ -1793,14 +1793,14 @@ mod tests {
 
     #[test]
     fn colour_range_bit_is_coded_only_outside_the_srgb_shortcut() {
-        use gamut_color::cicp::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+        use gamut_color::cicp::{ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
 
         // AV1 §5.5.2: with BT.709 primaries + sRGB transfer + identity matrix, `color_range` is
         // inferred and *no* bit is coded; any other combination codes it explicitly. Flipping only
         // the range must therefore change the payload for a real matrix…
         let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
         let base = Av1Colour {
-            primaries: ColourPrimaries::Bt709,
+            primaries: ColorPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
             matrix: MatrixCoefficients::Bt709,
             range: ColorRange::Full,
