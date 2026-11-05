@@ -195,7 +195,8 @@ exclusion ranges. Now:
   carriers, a store is bound to one exact file — it is a signed hash over the bytes around it —
   so the only valid input is one an external signer computed over *this* encoder's output;
   `gamut_metadata::Metadata::encode` never hands one back (`C2paPolicy::Drop`).
-- **Placement** is `gamut_ifd::c2pa`'s (the shared statement of §A.3.6, reused by #446): the
+- **Placement** is gamut-ifd's (`reserve_c2pa_entry` / `append_c2pa_store`, the shared
+  statement of §A.3.6, reused by #446): the
   entry goes in IFD 0 — the last and only IFD of this crate's main chain, the form the Adobe
   SDK reads without surprise — as an inline placeholder while the tree is laid out, and the
   store's bytes are appended **after the image data, last in the file**, with only the entry's
@@ -210,13 +211,13 @@ exclusion ranges. Now:
   "nothing after placement moves a byte" criterion, tested exactly. `encode` is unchanged (it
   delegates), and `EncodeImage` is untouched. A store and a reservation together, or a store
   shorter than a JUMBF box header (8 bytes), are typed errors before any pixel work.
-- **Decode.** `DecodedDng::c2pa_exclusions` carries the ranges `gamut_ifd::c2pa::locate` finds,
+- **Decode.** `DecodedDng::c2pa_exclusions` carries the ranges `gamut_ifd::c2pa_exclusions` finds,
   alongside the bytes in `metadata.c2pa`. A tag-52545 entry of another type is not a store and
   stays in `ifd0_extra`; so does one in IFD 0 when the main chain continues past it.
 - **Byte accounting.** `deconstruct` claims the store as IFD 0's `Value { tag: 52545 }` span and
   the alignment filler before it as `Padding` — a store at the end of the file is never a
   `Trailer` — so a store-carrying file is fully classified. 52545 is in `tags::KNOWN_TAGS`
-  (aliasing `gamut_ifd::c2pa::C2PA_MANIFEST_STORE`, where the clause is stated), so
+  (aliasing `gamut_ifd::C2PA_MANIFEST_STORE`, where the clause is stated), so
   `is_fully_accounted()` stays **true** for a file this encoder writes: a manifest store gamut
   itself embedded is not a private tag.
 - **Lengths.** A store shorter than a JUMBF box header (8 bytes) is refused by the encoder and

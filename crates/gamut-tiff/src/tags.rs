@@ -91,9 +91,10 @@ pub const INTEROPERABILITY_IFD: u16 = gamut_ifd::tags::INTEROPERABILITY_IFD;
 /// `C2PA` (52545, `0xCD41`) — the C2PA manifest store, type `UNDEFINED` (C2PA 2.4 §A.3.6).
 ///
 /// A private tag in TIFF 6.0 §7 terms, but one this crate now reads and writes, so
-/// [`is_known_tag`] recognises it. Its placement and exclusion rules are [`gamut_ifd::c2pa`]'s;
+/// [`is_known_tag`] recognises it. Its placement and exclusion rules are gamut-ifd's
+/// ([`gamut_ifd::append_c2pa_store`], [`gamut_ifd::C2paExclusions`]);
 /// the payload is carried verbatim ([`TiffMetadata::c2pa`](crate::TiffMetadata::c2pa)).
-pub const C2PA_MANIFEST_STORE: u16 = gamut_ifd::c2pa::C2PA_MANIFEST_STORE;
+pub const C2PA_MANIFEST_STORE: u16 = gamut_ifd::C2PA_MANIFEST_STORE;
 
 /// Whether `tag` is one this crate recognises — every tag TIFF 6.0 defines, read from the shared
 /// [`gamut_ifd::tags::TIFF6`] registry, plus the pointer and metadata tags this crate reads and

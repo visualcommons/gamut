@@ -111,24 +111,25 @@ pub use deconstruct::{
 };
 pub use encoder::{DngEncodeReport, DngEncoder};
 pub use gain_map::{GainValues, ProfileGainTableMap};
-pub use gamut_core::{Dimensions, Error, Result};
 // The C2PA surface (C2PA 2.4 §A.3.6, §18.5.5) is `gamut-ifd`'s — the placement and exclusion
 // rules are stated once there for every TIFF-based codec — re-exported whole so a signer
 // reading `DngEncodeReport`/`DecodedDng`, or checking the tag and the minimum store length this
-// crate's own docs name, needs no direct `gamut-ifd` dependency (the re-export closure of
-// `STATUS.md`'s freeze decisions).
+// crate's own docs name (the latter `gamut-core`'s), needs no direct `gamut-ifd` dependency (the
+// re-export closure of `STATUS.md`'s freeze decisions).
 // The non-validating report a host prints — `c2pa_summary`, the store `DecodedDng::c2pa_exclusions`
-// names plus every tag-52545 entry that yields none, with the reason — is the same module's, so it
+// names plus every tag-52545 entry that yields none, with the reason — is gamut-ifd's too, so it
 // is stated once for TIFF and DNG alike (issue #530).
-pub use gamut_ifd::c2pa::{
-    C2PA_MANIFEST_STORE, C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary,
-    C2paUnreadEntry, C2paUnreadReason, MIN_STORE_LEN, summarize as c2pa_summary,
-};
+pub use gamut_core::c2pa::MIN_STORE_LEN;
+pub use gamut_core::{Dimensions, Error, Result};
 // `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum;
 // `Segment`/`SpanKind` are part of the preservation surface, naming the byte runs a real camera
 // file carries that its own structures do not account for (their ranges, like the ones
 // `C2paExclusions` measures in, are plain `core::ops::Range<u64>`).
 pub use gamut_ifd::{ByteOrder, Segment, SpanKind, Value};
+pub use gamut_ifd::{
+    C2PA_MANIFEST_STORE, C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary,
+    C2paUnreadEntry, C2paUnreadReason, c2pa_summary,
+};
 // The shared metadata facade supplies this crate's metadata models rather than a DNG-local
 // restatement of them: `DngMetadata::exif` *is* the facade's `Exif`, and its `TypedMetadata` impl
 // hands the byte carriers over as `MetadataBlock`s. Re-exported so a caller can build and read

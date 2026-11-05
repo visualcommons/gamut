@@ -2,12 +2,14 @@
 
 use std::borrow::Cow;
 
+use gamut_core::c2pa::MIN_STORE_LEN;
 use gamut_core::{
     Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, Gray16, ImageRef, Indexed8, Pixel,
     Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
-use gamut_ifd::c2pa::{self, C2paExclusions};
-use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
+use gamut_ifd::{
+    ByteOrder, C2paExclusions, Ifd, Value, Variant, append_c2pa_store, reserve_c2pa_entry,
+};
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
@@ -178,7 +180,7 @@ impl TiffEncoder {
     /// [`encode_with_report`](Self::encode_with_report) (or [`c2pa_exclusions`] over the produced
     /// bytes) reports its two exclusion ranges (§18.5.5). A signer hashes the file around those
     /// ranges and overwrites the reservation in place; nothing else in the file moves. `len` must
-    /// be at least [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header, 8 bytes) **and longer
+    /// be at least [`gamut_core::c2pa::MIN_STORE_LEN`] (a JUMBF box header, 8 bytes) **and longer
     /// than the container's inline threshold**, so BigTIFF's true minimum is 9 — a value of 8 or
     /// less would be packed into the entry's own value word rather than placed out of line at the
     /// end of the file. It must also be a length a buffer can hold: past `isize::MAX` a `Vec<u8>`
@@ -189,7 +191,7 @@ impl TiffEncoder {
     /// combined with a store supplied through [`with_tiff_metadata`](Self::with_tiff_metadata). Each of
     /// those is a typed error raised before any pixel work, not after the image has been
     /// compressed. What the length alone cannot settle stays with
-    /// [`gamut_ifd::c2pa::append_store`]: a store whose *offset* would pass classic TIFF's 4 GiB
+    /// [`gamut_ifd::append_c2pa_store`]: a store whose *offset* would pass classic TIFF's 4 GiB
     /// limit depends on the size of the file it lands after, so it is refused there, once the
     /// file exists. What is left outside this crate's
     /// reach is the allocator's: a reservation the machine has no memory for aborts, as any
@@ -202,14 +204,14 @@ impl TiffEncoder {
 
     /// The shortest manifest store this encoder can place, for the container variant it writes.
     ///
-    /// Two lower bounds apply and the larger wins. [`c2pa::MIN_STORE_LEN`] (8) is the format's: a
+    /// Two lower bounds apply and the larger wins. [`MIN_STORE_LEN`] (8) is the format's: a
     /// manifest store is a JUMBF superbox, so nothing shorter than an `LBox` + `TBox` could be
     /// one. The container's is the variant's **inline threshold** — 4 bytes in classic TIFF, 8 in
     /// BigTIFF — because a value that fits inline is packed into the entry's value word instead of
     /// being placed out of line, which is not where §A.3.6 puts a store and would make the two
     /// exclusion ranges overlap. So classic TIFF's minimum is 8 and BigTIFF's is **9**.
     fn min_store_len(&self) -> usize {
-        c2pa::MIN_STORE_LEN.max(self.variant().inline_threshold() + 1)
+        MIN_STORE_LEN.max(self.variant().inline_threshold() + 1)
     }
 
     /// The C2PA manifest store to write, if any: the caller's, or a zero-filled reservation.
@@ -244,7 +246,7 @@ impl TiffEncoder {
         }
         // Classic TIFF counts an `UNDEFINED` value with a 32-bit `LONG` and addresses it with a
         // 32-bit offset; BigTIFF's words are 64-bit. A store no `LONG` can count is one
-        // `gamut_ifd::c2pa::append_store` refuses — but only once the whole image has been
+        // `gamut_ifd::append_c2pa_store` refuses — but only once the whole image has been
         // compressed and the reservation zero-filled, and with a message about the file's 4 GiB
         // limit rather than about the length the caller passed. Comparing two lengths costs
         // nothing, so the refusal is taken here as well. It is *necessary*, not sufficient: the
@@ -284,7 +286,7 @@ impl TiffEncoder {
     /// returning the number of bytes written.
     ///
     /// The store lands after everything else, and the reserved entry is re-pointed at it, by
-    /// [`gamut_ifd::c2pa::append_store`] — so a store of a different size moves no other offset.
+    /// [`gamut_ifd::append_c2pa_store`] — so a store of a different size moves no other offset.
     fn emit(
         &self,
         mut bytes: Vec<u8>,
@@ -292,7 +294,7 @@ impl TiffEncoder {
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         if let Some(store) = store {
-            c2pa::append_store(&mut bytes, &store)?;
+            append_c2pa_store(&mut bytes, &store)?;
         }
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
@@ -325,7 +327,7 @@ impl TiffEncoder {
     ///   a sub-IFD group;
     /// * both a manifest store and a reservation
     ///   ([`with_c2pa_reserved`](Self::with_c2pa_reserved)) were configured;
-    /// * the store or reservation is shorter than [`gamut_ifd::c2pa::MIN_STORE_LEN`] (8 bytes),
+    /// * the store or reservation is shorter than [`gamut_core::c2pa::MIN_STORE_LEN`] (8 bytes),
     ///   or, in BigTIFF, not longer than the entry's 8-byte inline threshold — BigTIFF's minimum
     ///   is **9**;
     /// * in a classic TIFF, its length exceeds what the entry's 32-bit `LONG` count can describe
@@ -333,7 +335,7 @@ impl TiffEncoder {
     /// * a reservation is longer than a buffer can hold (past `isize::MAX`), refused rather than
     ///   allocated.
     ///
-    /// Once the image is encoded, [`gamut_ifd::c2pa::append_store`] refuses a store whose
+    /// Once the image is encoded, [`gamut_ifd::append_c2pa_store`] refuses a store whose
     /// *offset* would pass classic TIFF's 4 GiB limit, which depends on the size of the file it
     /// lands after; and this method alone additionally returns any error [`c2pa_exclusions`]
     /// raises re-reading the bytes just written.
@@ -495,7 +497,7 @@ impl TiffEncoder {
         let (mut ifd, strips) = self.build_strip_image(packed, dims, layout, extra_fields)?;
         self.metadata.apply(&mut ifd);
         if store.is_some() {
-            c2pa::reserve_entry(&mut ifd);
+            reserve_c2pa_entry(&mut ifd);
         }
         let bytes = writer::write_image(self.order, self.variant(), &ifd, &strips)?;
         self.emit(bytes, store, out)
@@ -631,7 +633,7 @@ impl TiffEncoder {
         if store.is_some()
             && let Some((last, _)) = images.last_mut()
         {
-            c2pa::reserve_entry(last);
+            reserve_c2pa_entry(last);
         }
         let bytes = writer::write_multipage(self.order, self.variant(), &images)?;
         self.emit(bytes, store, out)
@@ -788,7 +790,7 @@ impl TiffEncoder {
         }
         self.metadata.apply(&mut ifd);
         if store.is_some() {
-            c2pa::reserve_entry(&mut ifd);
+            reserve_c2pa_entry(&mut ifd);
         }
 
         let bytes = writer::write_image_tiled(self.order, self.variant(), &ifd, &tiles)?;

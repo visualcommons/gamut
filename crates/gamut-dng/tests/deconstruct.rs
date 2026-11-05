@@ -92,7 +92,7 @@ fn linear_raw_dng_is_accounted() {
 #[test]
 fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
     use gamut_dng::{DngMetadata, Segment, SpanKind};
-    use gamut_ifd::c2pa::C2PA_MANIFEST_STORE;
+    use gamut_ifd::C2PA_MANIFEST_STORE;
 
     for &order in &[ByteOrder::LittleEndian, ByteOrder::BigEndian] {
         // An 8-bit 33×23 mosaic: an odd-length raw strip, so the store needs alignment filler.

@@ -1,7 +1,7 @@
 //! `gamut-tiff` and `gamut-dng` against c2pa-rs: the C2PA 2.4 §A.3.6 tag-52545 store, bound by
 //! `c2pa.hash.data` around the **two** disjoint ranges §18.5.5 names (issue #534).
 //!
-//! Both crates report their exclusions through the one `gamut_ifd::c2pa::C2paExclusions` — the
+//! Both crates report their exclusions through the one `gamut_ifd::C2paExclusions` — the
 //! store's bytes and the `count` field of its IFD entry — so both are driven by the same tests
 //! here, once per container. §18.7.3.3 removed box hash for TIFF, so `c2pa.hash.data` is the only
 //! binding either has, and the second range is exactly what the oracle should check rather than

@@ -1,7 +1,7 @@
 //! The C2PA manifest store in a TIFF: where the encoder puts it, what it reports, and what a
 //! reader gets back (C2PA 2.4 §A.3.6, §18.5.5).
 //!
-//! Placement and exclusion are `gamut_ifd::c2pa`'s and are pinned there; what this file pins is
+//! Placement and exclusion are gamut-ifd's and are pinned there; what this file pins is
 //! this crate's use of them — that a store survives an encode of a real image, in the right
 //! directory, at the end of the file, verbatim.
 

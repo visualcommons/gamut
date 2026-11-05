@@ -98,15 +98,6 @@ pub use compression::Compression;
 pub use decoder::TiffDecoder;
 pub use deconstruct::deconstruct;
 pub use encoder::{TiffEncodeReport, TiffEncoder};
-// The C2PA exclusion set is `gamut_ifd::c2pa`'s — §A.3.6 and §18.5.5 are stated once, for this
-// crate and `gamut-dng` alike — but it is reachable from `TiffEncodeReport` and
-// [`c2pa_exclusions`], so it is re-exported here too and needs no direct gamut-ifd dependency.
-// The non-validating report [`c2pa_summary`] returns is the same module's, re-exported whole for
-// the same reason (issue #530).
-pub use gamut_ifd::c2pa::{
-    C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary, C2paUnreadEntry,
-    C2paUnreadReason,
-};
 // The structural IFD core lives in gamut-ifd; re-export the types a gamut-tiff user can touch —
 // the read/write spine plus every type reachable from this crate's own public items
 // (`DeconstructReport` exposes `SegmentReport`, which exposes `Segment`/`SpanKind`/`DataLabel`/
@@ -119,6 +110,14 @@ pub use gamut_ifd::{
     Anomaly, ByteOrder, Conflict, DataLabel, DeconstructReport, Field, FieldType, Ifd, Segment,
     SegmentReport, Severity, SharedSpan, SpanKind, SubIfd, TiffFile, UnknownFieldType, UnknownTag,
     UnknownValue, Value, Variant, read, write,
+};
+// The C2PA exclusion set is gamut-ifd's — §A.3.6 and §18.5.5 are stated once, for this crate
+// and `gamut-dng` alike — but it is reachable from `TiffEncodeReport` and [`c2pa_exclusions`], so
+// it is re-exported here too and needs no direct gamut-ifd dependency. The non-validating report
+// [`c2pa_summary`] returns is gamut-ifd's too, re-exported whole for the same reason (issue #530).
+pub use gamut_ifd::{
+    C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary, C2paUnreadEntry,
+    C2paUnreadReason,
 };
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `TiffMetadata::metadata` / `TiffEncoder::with_metadata` without a direct dependency.

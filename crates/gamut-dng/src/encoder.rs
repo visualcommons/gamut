@@ -2,9 +2,11 @@
 
 use std::borrow::Cow;
 
+use gamut_core::c2pa::MIN_STORE_LEN;
 use gamut_core::{Error, Result};
-use gamut_ifd::c2pa::{self, C2paExclusions};
-use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
+use gamut_ifd::{
+    ByteOrder, C2paExclusions, Ifd, Value, Variant, append_c2pa_store, reserve_c2pa_entry,
+};
 
 use crate::gain_map::ProfileGainTableMap;
 use crate::metadata::DngMetadata;
@@ -207,7 +209,7 @@ impl DngEncoder {
     /// [`encode_with_report`](Self::encode_with_report) reports its two exclusion ranges
     /// (§18.5.5). A signer hashes the file around those ranges and overwrites the reservation in
     /// place; nothing else in the file moves. `len` must be at least
-    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header) — and, with
+    /// [`gamut_core::c2pa::MIN_STORE_LEN`] (a JUMBF box header) — and, with
     /// [`with_big_tiff`](Self::with_big_tiff), strictly more, since BigTIFF packs an 8-byte
     /// value inline — and at most what classic TIFF's 32-bit count describes (without BigTIFF)
     /// and what a buffer can hold; a reservation cannot be combined with a store supplied
@@ -225,7 +227,7 @@ impl DngEncoder {
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if both
     /// were requested, if the store is too short to be a
-    /// JUMBF box at all ([`c2pa::MIN_STORE_LEN`]), or if it would pack *inline* in this
+    /// JUMBF box at all ([`MIN_STORE_LEN`]), or if it would pack *inline* in this
     /// encoder's container variant — BigTIFF's inline threshold is those same 8 bytes, so a
     /// BigTIFF store must exceed them to be placeable at the end of the file; if classic TIFF's
     /// 32-bit `LONG` count cannot describe it; or if a reservation is longer than a buffer can
@@ -244,7 +246,7 @@ impl DngEncoder {
             (None, Some(len)) => len,
             (None, None) => return Ok(None),
         };
-        if len < c2pa::MIN_STORE_LEN {
+        if len < MIN_STORE_LEN {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "DNG: a C2PA manifest store is at least a JUMBF box header (8 bytes)",
@@ -260,7 +262,7 @@ impl DngEncoder {
             ));
         }
         // Classic TIFF counts an `UNDEFINED` value with a 32-bit `LONG`; BigTIFF's count is
-        // 64-bit. `c2pa::append_store` refuses such a store too, but only once the image has been
+        // 64-bit. `append_c2pa_store` refuses such a store too, but only once the image has been
         // compressed and the reservation zero-filled. Necessary, not sufficient: the store's
         // offset must also fit, and only `append_store` knows the size of the file before it.
         if uncountable_store_len(self.variant(), len) {
@@ -328,7 +330,7 @@ impl DngEncoder {
     /// As [`encode`](Self::encode); additionally an
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if both a store and a
     /// reservation were configured; if the store (or reservation) is shorter than
-    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`]; or if, with [`with_big_tiff`](Self::with_big_tiff),
+    /// [`gamut_core::c2pa::MIN_STORE_LEN`]; or if, with [`with_big_tiff`](Self::with_big_tiff),
     /// it is exactly `MIN_STORE_LEN` (8) bytes — BigTIFF packs a value that short inline in its
     /// entry, so it could not be the out-of-line run at the end of the file §A.3.6 wants; or if,
     /// without BigTIFF, it is longer than a 32-bit `LONG` count describes, or a reservation is
@@ -430,7 +432,7 @@ impl DngEncoder {
         // placeholder, so the directory layout is final while the store itself is placed after
         // the image data, last in the file (§A.3.6).
         if store.is_some() {
-            c2pa::reserve_entry(&mut ifd0);
+            reserve_c2pa_entry(&mut ifd0);
         }
         let raw_ifd = build_raw_ifd(self, raw)?;
 
@@ -461,7 +463,7 @@ impl DngEncoder {
             &raw_blocks,
         )?;
         let c2pa = match store {
-            Some(store) => Some(c2pa::append_store(&mut bytes, &store)?),
+            Some(store) => Some(append_c2pa_store(&mut bytes, &store)?),
             None => None,
         };
         out.extend_from_slice(&bytes);

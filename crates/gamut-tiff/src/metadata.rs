@@ -41,15 +41,16 @@
 //! One carrier has a placement rule of its own: C2PA 2.4 §A.3.6 puts the manifest store's entry
 //! in the **last IFD of the main chain** and its bytes at the **end of the file**, and §18.5.5
 //! makes an external signer exclude two disjoint ranges from its hard binding. All of that is
-//! [`gamut_ifd::c2pa`]'s — the one place the workspace states §A.3.6, shared with `gamut-dng`
+//! gamut-ifd's ([`gamut_ifd::append_c2pa_store`], [`gamut_ifd::c2pa_exclusions`]) — the one
+//! place the workspace states §A.3.6, shared with `gamut-dng`
 //! rather than re-derived here. This module only wires it to the encoder
 //! ([`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved)) and exposes the
 //! read-side locator as [`c2pa_exclusions`].
 
 use gamut_core::{Error, Result};
-use gamut_ifd::c2pa::{self, C2paExclusions, C2paSummary};
 use gamut_ifd::{
-    ByteOrder, Ifd, SubtreeScope, Value, read, read_header, read_ifd_at, resolve_subtree,
+    ByteOrder, C2paExclusions, C2paSummary, Ifd, SubtreeScope, Value, read, read_header,
+    read_ifd_at, resolve_subtree,
 };
 
 use crate::tags;
@@ -167,7 +168,7 @@ pub struct TiffMetadata {
     /// An ICC profile, stored in the `ICCProfile` tag (34675) as `UNDEFINED`, verbatim.
     pub icc: Option<Vec<u8>>,
     /// A C2PA manifest store, stored in the `C2PA` tag
-    /// ([`gamut_ifd::c2pa::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`), verbatim.
+    /// ([`gamut_ifd::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`), verbatim.
     ///
     /// **Opaque, and bound to one exact file.** A manifest store is signed over the bytes
     /// *around* it (C2PA 2.4 §18.5), so the only store valid here is one an external signer
@@ -342,7 +343,7 @@ impl TiffMetadata {
     ///
     /// The C2PA store is deliberately **not** written here: its bytes must land at the end of
     /// the file (C2PA 2.4 §A.3.6), after the image data, which only the encoder can arrange once
-    /// the rest of the file exists ([`gamut_ifd::c2pa::append_store`]).
+    /// the rest of the file exists ([`gamut_ifd::append_c2pa_store`]).
     pub(crate) fn apply(&self, ifd0: &mut Ifd) {
         if let Some(xmp) = &self.xmp {
             ifd0.set(tags::XMP, Value::Byte(xmp.clone()));
@@ -716,7 +717,7 @@ fn iptc_value(value: Option<&Value>, order: ByteOrder) -> Option<Vec<u8>> {
 /// sub-IFDs, plus the C2PA manifest
 /// store from the last IFD of the main chain (C2PA 2.4 §A.3.6).
 ///
-/// Whether a tag-52545 entry *is* a manifest store is [`gamut_ifd::c2pa::locate`]'s decision, not
+/// Whether a tag-52545 entry *is* a manifest store is [`gamut_ifd::c2pa_exclusions`]'s decision, not
 /// a second opinion held here: this asks the locator first and reports the store only when it
 /// agrees. That matters because `locate` reports absence for an entry a caller could not use —
 /// one of the wrong type, one too short to be a JUMBF box, a duplicated one — and reporting such
@@ -727,7 +728,7 @@ fn iptc_value(value: Option<&Value>, order: ByteOrder) -> Option<Vec<u8>> {
 /// Reader and locator agreeing is not the same as every readable store being writable, and this
 /// does not promise the latter — it cannot, because a reader does not know which container the
 /// caller will write. One case exists: `locate` accepts a store of exactly
-/// [`MIN_STORE_LEN`](gamut_ifd::c2pa::MIN_STORE_LEN) (8) bytes, while writing **BigTIFF** needs 9,
+/// [`MIN_STORE_LEN`](gamut_core::c2pa::MIN_STORE_LEN) (8) bytes, while writing **BigTIFF** needs 9,
 /// since 8 bytes would pack into the entry's own value word instead of being placed out of line
 /// at the end of the file. So an 8-byte store read from any file cannot be written back to a
 /// BigTIFF. The affected input is degenerate — 8 bytes is a JUMBF box header with no content, so
@@ -763,7 +764,7 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
     // two the same directory. The entry carries the store's bytes rather than an offset, so the
     // last IFD is reached without following a pointer, on a page whose pointers were never
     // resolved.
-    let located = c2pa::locate(data)?.is_some();
+    let located = gamut_ifd::c2pa_exclusions(data)?.is_some();
     let c2pa = match ifds
         .last()
         .and_then(|ifd| ifd.get(tags::C2PA_MANIFEST_STORE))
@@ -803,7 +804,7 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
 /// container is unreadable (bad header, looping or runaway IFD chain, no IFD) or the store's declared extent
 /// lies outside `file` or overlaps the entry's own count field.
 pub fn c2pa_exclusions(file: &[u8]) -> Result<Option<C2paExclusions>> {
-    c2pa::locate(file)
+    gamut_ifd::c2pa_exclusions(file)
 }
 
 /// A non-validating report of the C2PA manifest store `file` carries, for a host to print: the
@@ -811,9 +812,9 @@ pub fn c2pa_exclusions(file: &[u8]) -> Result<Option<C2paExclusions>> {
 /// none — misplaced in an earlier directory, mistyped, duplicated, too short, or pointing outside
 /// the file or over its own count field — with the reason, rather than reporting it as absence.
 ///
-/// [`C2paSummary::report_lines`](gamut_ifd::c2pa::C2paSummary::report_lines) renders it, with the
+/// [`C2paSummary::report_lines`](gamut_ifd::C2paSummary::report_lines) renders it, with the
 /// non-validation disclaimer inline; the store's bytes are never part of it. See
-/// [`gamut_ifd::c2pa::summarize`], which this delegates to, for the whole contract.
+/// [`gamut_ifd::c2pa_summary`], which this delegates to, for the whole contract.
 ///
 /// # Errors
 ///
@@ -821,7 +822,7 @@ pub fn c2pa_exclusions(file: &[u8]) -> Result<Option<C2paExclusions>> {
 /// container is unreadable (bad header, looping or runaway IFD chain, no IFD). An unreadable store is not an
 /// error here; it is listed.
 pub fn c2pa_summary(file: &[u8]) -> Result<C2paSummary> {
-    c2pa::summarize(file)
+    gamut_ifd::c2pa_summary(file)
 }
 
 #[cfg(test)]
@@ -1529,7 +1530,7 @@ mod tests {
         // (below `MIN_STORE_LEN`) — so a fix that only handled one of them still fails here.
         for value in [
             Value::Byte(vec![0x10; 12]),
-            Value::Undefined(vec![9; c2pa::MIN_STORE_LEN - 1]),
+            Value::Undefined(vec![9; gamut_core::c2pa::MIN_STORE_LEN - 1]),
         ] {
             let mut ifd0 = Ifd::new();
             ifd0.set(tags::C2PA_MANIFEST_STORE, value.clone());
@@ -1573,7 +1574,7 @@ mod tests {
         assert_eq!(summary.unread.len(), 1);
         assert_eq!(
             summary.unread[0].reason,
-            gamut_ifd::c2pa::C2paUnreadReason::NotUndefined
+            gamut_ifd::C2paUnreadReason::NotUndefined
         );
     }
 
