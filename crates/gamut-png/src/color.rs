@@ -1,31 +1,30 @@
 //! PNG colour types and their bit-depth matrix (PNG spec §11.2.2, Table 12).
 
 /// A PNG colour type, naming both the channel layout and its IHDR code.
+///
+/// `#[repr(u8)]` with the IHDR colour-type codes of §11.2.2 Table 12 as its discriminants, which
+/// are permanent: the value crosses the C ABI as that plain integer. Closed, because the table
+/// defines exactly these five.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ColorType {
     /// Greyscale: one channel. Valid bit depths 1, 2, 4, 8, 16.
-    Grayscale,
+    Grayscale = 0,
     /// Truecolour RGB: three channels. Valid bit depths 8, 16.
-    Truecolor,
+    Truecolor = 2,
     /// Indexed (palette): one channel of indices. Valid bit depths 1, 2, 4, 8.
-    Indexed,
+    Indexed = 3,
     /// Greyscale with alpha: two channels. Valid bit depths 8, 16.
-    GrayscaleAlpha,
+    GrayscaleAlpha = 4,
     /// Truecolour with alpha (RGBA): four channels. Valid bit depths 8, 16.
-    TruecolorAlpha,
+    TruecolorAlpha = 6,
 }
 
 impl ColorType {
-    /// The IHDR colour-type code (0, 2, 3, 4, or 6).
+    /// The IHDR colour-type code (0, 2, 3, 4, or 6): the discriminant.
     #[must_use]
-    pub fn code(self) -> u8 {
-        match self {
-            ColorType::Grayscale => 0,
-            ColorType::Truecolor => 2,
-            ColorType::Indexed => 3,
-            ColorType::GrayscaleAlpha => 4,
-            ColorType::TruecolorAlpha => 6,
-        }
+    pub const fn code(self) -> u8 {
+        self as u8
     }
 
     /// The colour type for an IHDR colour-type code, or `None` if the code is not defined.

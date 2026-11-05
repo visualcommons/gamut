@@ -42,26 +42,27 @@ use crate::encoder::MetadataNotice;
 use crate::{ColorType, chunk};
 
 /// The rendering intent for an `sRGB` chunk (PNG spec §11.3.2.5).
+///
+/// `#[repr(u8)]` with the chunk's intent codes (§11.3.2.5 Table 16) as its discriminants, which
+/// are permanent: the value crosses the C ABI as that plain integer. Closed, because the table
+/// defines exactly these four.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum SrgbIntent {
     /// Perceptual (intent code 0).
-    Perceptual,
+    Perceptual = 0,
     /// Relative colorimetric (intent code 1).
-    RelativeColorimetric,
+    RelativeColorimetric = 1,
     /// Saturation (intent code 2).
-    Saturation,
+    Saturation = 2,
     /// Absolute colorimetric (intent code 3).
-    AbsoluteColorimetric,
+    AbsoluteColorimetric = 3,
 }
 
 impl SrgbIntent {
-    fn code(self) -> u8 {
-        match self {
-            SrgbIntent::Perceptual => 0,
-            SrgbIntent::RelativeColorimetric => 1,
-            SrgbIntent::Saturation => 2,
-            SrgbIntent::AbsoluteColorimetric => 3,
-        }
+    /// The chunk's intent code: the discriminant.
+    const fn code(self) -> u8 {
+        self as u8
     }
 
     /// The intent for an sRGB chunk's code byte, or `None` if the code is not defined.
@@ -78,20 +79,23 @@ impl SrgbIntent {
 }
 
 /// The unit for a `pHYs` chunk's pixel dimensions.
+///
+/// `#[repr(u8)]` with the chunk's unit specifiers (§11.3.4.3 Table 24) as its discriminants,
+/// which are permanent: the value crosses the C ABI as that plain integer. Closed, because the
+/// table defines exactly these two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum PhysicalUnit {
     /// Unit is unknown; the values give only an aspect ratio (unit code 0).
-    Unknown,
+    Unknown = 0,
     /// Pixels per metre (unit code 1).
-    Meter,
+    Meter = 1,
 }
 
 impl PhysicalUnit {
-    fn code(self) -> u8 {
-        match self {
-            PhysicalUnit::Unknown => 0,
-            PhysicalUnit::Meter => 1,
-        }
+    /// The chunk's unit specifier: the discriminant.
+    const fn code(self) -> u8 {
+        self as u8
     }
 
     /// The unit for a `pHYs` unit specifier, or `None` for a value §11.3.4.3 Table 24 does not
