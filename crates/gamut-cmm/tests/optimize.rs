@@ -6,7 +6,7 @@
 //! `tests/oracle_conformance.rs` — this file only needs profiles it can build by hand.
 
 use gamut_cmm::{
-    ClutInterpolation, GamutCheck, IccTransform, Pipeline, PipelineOptimization, Stage, ToneCurve,
+    ClutInterpolation, GamutCheck, IccCurve, IccTransform, Pipeline, PipelineOptimization, Stage,
     Transform as _, TransformOptions, device_to_pcs, pcs_to_device,
 };
 use gamut_icc::{
@@ -37,12 +37,9 @@ fn rgb_shaper(g: u16, wtpt: Option<[f64; 3]>) -> IccProfile {
 }
 
 fn options(intent: RenderingIntent, optimization: PipelineOptimization) -> TransformOptions {
-    TransformOptions {
-        intent,
-        black_point_compensation: false,
-        optimization,
-        prefer_cicp_transfer: false,
-    }
+    TransformOptions::default()
+        .with_intent(intent)
+        .with_optimization(optimization)
 }
 
 /// A seeded device sweep over the RGB cube: the eight corners, a neutral ramp, and a
@@ -98,8 +95,8 @@ fn kinds(pipeline: &Pipeline) -> Vec<&'static str> {
         .collect()
 }
 
-fn gamma_curve(g: u16) -> ToneCurve {
-    ToneCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(g)))).unwrap()
+fn gamma_curve(g: u16) -> IccCurve {
+    IccCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(g)))).unwrap()
 }
 
 #[test]

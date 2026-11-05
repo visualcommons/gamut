@@ -28,7 +28,7 @@ that add behaviour (#325 onward).
 | Phase | Issue | Scope | Status |
 | ----- | ----- | ----- | ------ |
 | P1 | #324 | Scaffold + keystone: `Pipeline`/`Stage` model, `Transform` entry trait, `CmmError`, workspace wiring | ✅ |
-| P2 | #325 | Curve stages: `ToneCurve` (`curveType`/`parametricCurveType` evaluation, monotonicity detection, analytic + lcms2-shaped numeric inversion) + `Stage::Curves` | ✅ |
+| P2 | #325 | Curve stages: `IccCurve` (`curveType`/`parametricCurveType` evaluation, monotonicity detection, analytic + lcms2-shaped numeric inversion) + `Stage::Curves` | ✅ |
 | P3 | #326 | CLUT stage: multi-dimensional interpolation (lcms2-matching) — `ClutTable`/`ClutInterpolation` + `Stage::Clut` | ✅ |
 | P4 | #327 | Profile linking: matrix/TRC (shaper) profile pairs — `link::{device_to_pcs, pcs_to_device}` over RGB/gray v2+v4 shaper profiles, `Stage::MatrixN` | ✅ |
 | P5 | #328 | Profile linking: LUT (`lut8`/`lut16`/`mAB `/`mBA `) profile pairs — per-intent tag selection with lcms2's fallback, PCS encode/decode seams, `Stage::XyzToLab`/`LabToXyz` + the Lab-PCS RGB shaper lift | ✅ |
@@ -38,16 +38,16 @@ that add behaviour (#325 onward).
 | — | #555 | `TransformOptions::prefer_cicp_transfer`: closed-form evaluation of a shaper profile's `cicp`-signalled transfer, checked against its TRC; default off on the measured trade (below) | ✅ |
 | — | #423 | Precision tiers: `PipelineOptimization::PrecalculateF32`/`PrecalculateFixed16` (`NodePrecision`) — the resampled CLUT at `f32` or 16-bit fixed point, bit-exact against lcms2's interpolators, with integer `Transform::transform_u8`/`transform_u16` entry points under the image functions; each tier budgeted in the conformance gate. SIMD is separate (deferred table); the 8-bit matrix-shaper path is #992 (next row) | ✅ |
 | — | #992 | 8-bit matrix-shaper: lcms2's `OptimizeMatrixShaper` (256-entry Q1.14 input tables, Q1.14 matrix, 16 385-entry output tables) run by `transform_u8` of an `IccTransform` at `PrecalculateFixed16` whose link collapses to curves → matrix → curves; bit-exact against lcms2's `TYPE_RGB_8` transform over the whole 8-bit cube, budgeted in codes against the `f64` reference | ✅ |
-| — | #1042 | Format-crate decode helpers: in-place buffer application (`transform_in_place_u8`/`transform_in_place_u16`, byte-identical to `transform_interleaved_*` with one format on both sides, no second raster) and `IccTransform::embedded_to_srgb`, the embedded profile → built-in sRGB transform at the media-relative colorimetric intent (decision below); pinned byte-identical against lcms2's unoptimized 8-bit transform on a matrix-shaper and an `A2B0`-only LUT profile | ✅ |
+| — | #1042 | Format-crate decode helpers: in-place buffer application (`transform_in_place` over an `ImageBuf`, byte-identical to `transform_interleaved` with one format on both sides, no second raster) and `IccTransform::embedded_to_srgb`, the embedded profile → built-in sRGB transform at the media-relative colorimetric intent (decision below); pinned byte-identical against lcms2's unoptimized 8-bit transform on a matrix-shaper and an `A2B0`-only LUT profile | ✅ |
 
 ## Settled decisions (P2, tone curves)
 
-- **Endpoint semantics:** `ToneCurve::eval` clamps domain **and** range to `[0, 1]` in every
+- **Endpoint semantics:** `IccCurve::eval` clamps domain **and** range to `[0, 1]` in every
   representation, forward and inverse — the convention of `gamut_icc::Curve::eval`, extended to
   parametric curves whose raw closed forms can leave the range.
 - **Unknown parametric types:** `gamut_icc::ParametricCurve::eval` silently evaluates a
   `function_type > 4` as the identity (unreachable from parsed profiles, reachable from
-  hand-built values); `ToneCurve::new` guards the trap with the typed
+  hand-built values); `IccCurve::new` guards the trap with the typed
   `CmmError::UnsupportedParametricType`.
 - **Inversion:** analytic closed forms (lcms2's negated-type formulas, at full `f64` precision —
   a gamma inverse is *not* re-encoded through `u8Fixed8`) for identity, pure gamma, and
@@ -134,7 +134,7 @@ that add behaviour (#325 onward).
   `gamut_color::linalg::mat_inv_3x3`, whose exact-zero/non-finite-determinant `None` **is**
   the conditioning threshold (no epsilon — a nearly-collinear but invertible colorant set
   still inverts, as in lcms2); a non-finite inverse entry (overflowed cofactor over a
-  denormal determinant) is also `SingularMatrix`. TRC inversion reuses `ToneCurve::inverse`:
+  denormal determinant) is also `SingularMatrix`. TRC inversion reuses `IccCurve::inverse`:
   analytic for gamma and well-behaved parametric TRCs (as in lcms2's
   `cmsReverseToneCurveEx`), the lcms2-shaped 4096-entry numeric reversal for sampled tables.
 
@@ -249,7 +249,7 @@ that add behaviour (#325 onward).
   non-finite cascade is worse than skipping, and no real black point sits at the white
   anchor. Documented on `bpc::compensation`.
 - **Out-of-range comparison convention:** lcms2's `TYPE_*_DBL` formatters emit unclamped
-  device values for out-of-gamut PCS input, while this crate's `ToneCurve` clamps to
+  device values for out-of-gamut PCS input, while this crate's `IccCurve` clamps to
   `[0, 1]` (P2, matching lcms2's own integer formatters); the P6 differentials clamp the
   oracle's doubles before comparing.
 
@@ -283,7 +283,7 @@ that add behaviour (#325 onward).
   profiles; abstract profiles chain.
 - **Per-hop clamping divergence (documented):** mid-chain colorimetry that leaves the v4 Lab
   encodeable range — deep CMYK blacks pushed below zero by a BPC layer, chroma past
-  ±128 — clamps at each hop's tag curves (the P2 `[0, 1]` `ToneCurve` convention), where
+  ±128 — clamps at each hop's tag curves (the P2 `[0, 1]` `IccCurve` convention), where
   lcms2's unclamped *parametric* identity curves carry the overshoot to the final formatter.
   Measured on the conformance battery: ≤ 1.66e-1 device units, only at ≥ 300 % ink corners
   under relative+BPC through the Lab-identity abstract hop (≤ 4.6e-3 for the perceptual
@@ -307,8 +307,8 @@ that add behaviour (#325 onward).
   memory in the image size; planar buffers gather/scatter per chunk into the same
   interleaved core (identical numerics, one extra copy).
 - **Pipeline optimization is opt-in (P8, #372):** transforms still evaluate stage by stage
-  **by default** — `PipelineOptimization::None`, the value every `TransformOptions`/
-  `ProofingOptions` default carries, so v1's documented numerics are what an unconfigured
+  **by default** — `PipelineOptimization::None`, the value every default `TransformOptions`
+  (and so every `ProofingOptions` built on one) carries, so v1's documented numerics are what an unconfigured
   transform produces. The collapsed forms are a knob, not a policy, precisely because the
   conformance gate's LOOSE configuration already measures what they cost.
 
@@ -316,7 +316,8 @@ that add behaviour (#325 onward).
 
 - **One knob, on every constructor.** `PipelineOptimization` is a fieldless `#[repr(u32)]`
   enum with permanent append-only discriminants (the workspace C-portability convention, as
-  on `ClutInterpolation`), carried as a field of `TransformOptions` and `ProofingOptions`.
+  on `ClutInterpolation`), carried as a field of `TransformOptions`, which `ProofingOptions`
+  embeds.
   `IccTransform::device_link` and `GamutCheck::new` were widened from a bare
   `RenderingIntent` to the same `TransformOptions` so no constructor can silently miss the
   knob (a breaking signature change, taken while the crate was still unpublished; both
@@ -412,8 +413,8 @@ and 0.22 MB).
 - **Integer entry points on `Transform`.** `transform_u16`/`transform_u8` are *provided*
   methods (object safety kept): normalize by 65535/255, call `transform`, re-encode with
   `_cmsQuickSaturateWord` rounding — exactly the `image` module's old per-sample conversion,
-  so every existing transform keeps its numerics bit for bit. `transform_interleaved_*`/
-  `transform_planar_*` now route colour channels through them. A `Pipeline` that is one
+  so every existing transform keeps its numerics bit for bit. `transform_interleaved`/
+  `transform_planar` now route colour channels through them. A `Pipeline` that is one
   `Fixed16` CLUT overrides both and never touches a float: 8-bit codes widen with
   `FROM_8_TO_16` (`v·257`) and narrow with `FROM_16_TO_8` (`(c·65281 + 2²³) >> 24`), lcms2's
   8-bit formatter conversions — which agree with the `f64` route's round-half-up for every
@@ -492,7 +493,7 @@ tier, not the `f32` one, is the throughput tier.
   fast floor, which rounds to the nearest `2⁻¹⁶` first and so differs from `floor` within `2⁻¹⁷`
   of an integer — and narrowed with `FROM_16_TO_8`. The output tables keep that byte rather
   than lcms2's `FROM_8_TO_16` word (its formatter narrows it straight back): same result, half
-  the memory. A `ToneCurve` clamps its output to `[0, 1]`, so lcms2's `≥ 8.0` input-table arm and
+  the memory. An `IccCurve` clamps its output to `[0, 1]`, so lcms2's `≥ 8.0` input-table arm and
   its output-side clamp have nothing to act on and are not transcribed.
 - **One deliberate divergence: the offset's scale.** `MatShaperEval16` adds the Q1.14 offset to
   the Q2.28 matrix product before its `>> 14`, so lcms2 applies a matrix-shaper offset `2¹⁴` too
@@ -501,7 +502,7 @@ tier, not the `f32` one, is the throughput tier.
   zero; the unit test `mat_shaper_tracks_the_f64_chain_offset_included` holds a 0.0625 offset to
   the `f64` chain, where lcms2's scale would miss by ~15 codes.
 - **Sampled curves are not bit-exact.** lcms2 evaluates a `curveType` table through its 16-bit
-  table interpolation; `ToneCurve` interpolates it in `f64`. A profile with sampled TRCs runs the
+  table interpolation; `IccCurve` interpolates it in `f64`. A profile with sampled TRCs runs the
   same pass and lands within the budget below, but can differ from lcms2 by a code where the two
   round differently. The battery's RGB shapers are parametric and pure-gamma.
 
@@ -538,7 +539,7 @@ CLUT the #423 table measured.
 
 ## Settled decisions (#555, CICP-signalled transfer characteristics)
 
-`TransformOptions::prefer_cicp_transfer` (and its `ProofingOptions` twin; `GamutCheck::new`
+`TransformOptions::prefer_cicp_transfer` (also read from the `TransformOptions` a `ProofingOptions` embeds; `GamutCheck::new`
 honours it on all three legs) evaluates a matrix/TRC profile's tone curves in closed form from
 the ITU-T H.273 transfer its `cicp` tag (ICC.1:2022 §10.3) names. It is **shipped, default off**,
 on the measurements below; moxcms's equivalent (`allow_use_cicp_transfer`) defaults on, and that
@@ -592,7 +593,7 @@ paths are gated (`tests/oracle_conformance.rs`, `cicp_preferring_transforms_matc
 ## Settled decisions (#1042, format-crate decode helpers)
 
 - **In place, not a second raster.** A format crate that owns its decoded `ImageBuf` converts it
-  with `transform_in_place_*`: the same 256-pixel chunk scratch as `transform_interleaved_*`, the
+  with `transform_in_place`: the same 256-pixel chunk scratch as `transform_interleaved`, the
   chunk being both source and destination, so a decode's peak memory — the thing its limits
   bound — is not doubled. Only a transform with as many output as input colour channels can run
   in place; alpha stays where it is (the equal-formats copy rule).

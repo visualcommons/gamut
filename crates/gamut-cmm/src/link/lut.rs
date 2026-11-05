@@ -52,7 +52,7 @@ use gamut_icc::{
 };
 
 use crate::clut::{ClutInterpolation, ClutTable};
-use crate::curve::ToneCurve;
+use crate::curve::IccCurve;
 use crate::error::{CmmError, Result};
 use crate::pipeline::{Pipeline, Stage};
 
@@ -226,7 +226,7 @@ fn pcs_encoding(pcs: ColorSpace, legacy_lab: bool) -> Option<PcsEncoding> {
 /// # Errors
 ///
 /// [`CmmError::BadTagType`] if the tag holds a non-LUT element (or a `lut16Type` with a
-/// zero-entry table); [`ToneCurve::new`]/[`ClutTable`] construction errors for malformed
+/// zero-entry table); [`IccCurve::new`]/[`ClutTable`] construction errors for malformed
 /// curves or CLUT geometry; [`Pipeline::new`] channel-seam errors for a stage combination
 /// whose channel counts cannot chain.
 pub(super) fn build(sig: Signature, data: &TagData, mode: LinkMode) -> Result<Pipeline> {
@@ -313,7 +313,7 @@ fn mab_matrix_stage(matrix: &Matrix3x4) -> Stage {
 /// A curve set (`mAB `/`mBA ` A/M/B curves) as a [`Stage::Curves`].
 fn curves_stage(curves: &[CurveOrParametric]) -> Result<Stage> {
     Ok(Stage::Curves(
-        curves.iter().map(ToneCurve::new).collect::<Result<_>>()?,
+        curves.iter().map(IccCurve::new).collect::<Result<_>>()?,
     ))
 }
 
@@ -321,13 +321,13 @@ fn curves_stage(curves: &[CurveOrParametric]) -> Result<Stage> {
 /// to `u16` as `v · 257` — lcms2's `FROM_8_TO_16` (`255 → 65535`, preserving full scale) —
 /// and becomes a [`Curve::Sampled`] evaluated over `raw / 65535`.
 fn lut8_tables_stage(table: &[u8]) -> Result<Stage> {
-    let curves: Vec<ToneCurve> = table
+    let curves: Vec<IccCurve> = table
         .as_chunks::<256>()
         .0
         .iter()
         .map(|chunk| {
             let widened: Vec<u16> = chunk.iter().map(|&v| u16::from(v) * 257).collect();
-            ToneCurve::new(&CurveOrParametric::Curve(Curve::Sampled(widened)))
+            IccCurve::new(&CurveOrParametric::Curve(Curve::Sampled(widened)))
         })
         .collect::<Result<_>>()?;
     Ok(Stage::Curves(curves))
@@ -343,9 +343,9 @@ fn lut16_tables_stage(sig: Signature, table: &[u16], entries: u16) -> Result<Sta
     if entries == 0 {
         return Err(CmmError::BadTagType(sig));
     }
-    let curves: Vec<ToneCurve> = table
+    let curves: Vec<IccCurve> = table
         .chunks_exact(usize::from(entries))
-        .map(|chunk| ToneCurve::new(&CurveOrParametric::Curve(Curve::Sampled(chunk.to_vec()))))
+        .map(|chunk| IccCurve::new(&CurveOrParametric::Curve(Curve::Sampled(chunk.to_vec()))))
         .collect::<Result<_>>()?;
     Ok(Stage::Curves(curves))
 }

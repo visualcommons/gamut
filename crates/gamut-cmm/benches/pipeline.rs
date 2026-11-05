@@ -36,9 +36,9 @@ use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
 use gamut_cmm::{
     IccTransform, PipelineOptimization, TransformOptions, device_to_pcs, pcs_to_device,
-    transform_interleaved_u8,
+    transform_interleaved,
 };
-use gamut_core::PixelFormat;
+use gamut_core::{Dimensions, PixelFormat, RawImage};
 use gamut_icc::{BuiltinProfile, IccProfile, RenderingIntent};
 use lcms2_oracle::{
     FLAGS_NOOPTIMIZE, INTENT_RELATIVE_COLORIMETRIC, Profile, TYPE_CMYK_8, TYPE_RGB_8, Transform,
@@ -71,6 +71,13 @@ fn gradient(channels: usize) -> Vec<u8> {
         }
     }
     buf
+}
+
+/// `samples` as the `SIDE`×`SIDE` RGB image a pixel-buffer bar transforms.
+fn rgb_image(samples: &[u8]) -> RawImage<'_, u8> {
+    let side = u32::try_from(SIDE).expect("SIDE fits u32");
+    let dims = Dimensions::new(side, side).expect("SIDE is non-zero");
+    RawImage::new(samples, PixelFormat::Rgb8, dims).expect("a gradient(3) is SIDE×SIDE RGB")
 }
 
 /// Serializes an oracle-synthesized profile once and hands the same bytes to both sides — the
@@ -117,21 +124,17 @@ fn bench_gamut(bencher: Bencher, scenario: &Scenario, level: PipelineOptimizatio
     let transform = IccTransform::between(
         &src,
         &dst,
-        TransformOptions {
-            intent: RenderingIntent::MediaRelativeColorimetric,
-            black_point_compensation: false,
-            optimization: level,
-            prefer_cicp_transfer: false,
-        },
+        TransformOptions::default()
+            .with_intent(RenderingIntent::MediaRelativeColorimetric)
+            .with_optimization(level),
     )
     .expect("the benchmark profiles link");
     let input = gradient(src_channels);
     let mut output = vec![0u8; pixels() * dst_channels];
     bencher.counter(ItemsCount::new(pixels())).bench_local(|| {
-        transform_interleaved_u8(
+        transform_interleaved(
             &transform,
-            PixelFormat::Rgb8,
-            black_box(&input),
+            black_box(rgb_image(&input)),
             dst_format,
             &mut output,
         )
@@ -157,10 +160,9 @@ fn bench_pipeline(bencher: Bencher, scenario: &Scenario, level: PipelineOptimiza
     let input = gradient(src_channels);
     let mut output = vec![0u8; pixels() * dst_channels];
     bencher.counter(ItemsCount::new(pixels())).bench_local(|| {
-        transform_interleaved_u8(
+        transform_interleaved(
             &pipeline,
-            PixelFormat::Rgb8,
-            black_box(&input),
+            black_box(rgb_image(&input)),
             dst_format,
             &mut output,
         )
@@ -321,12 +323,9 @@ fn build_shaper_pair(bencher: Bencher, level: PipelineOptimization) {
         IccTransform::between(
             black_box(&src),
             &dst,
-            TransformOptions {
-                intent: RenderingIntent::MediaRelativeColorimetric,
-                black_point_compensation: false,
-                optimization: level,
-                prefer_cicp_transfer: false,
-            },
+            TransformOptions::default()
+                .with_intent(RenderingIntent::MediaRelativeColorimetric)
+                .with_optimization(level),
         )
         .expect("the benchmark profiles link")
     });
@@ -343,20 +342,17 @@ fn bench_cicp(bencher: Bencher, src: BuiltinProfile, dst: BuiltinProfile, prefer
     let transform = IccTransform::between(
         &src,
         &dst,
-        TransformOptions {
-            intent: RenderingIntent::MediaRelativeColorimetric,
-            prefer_cicp_transfer: prefer_cicp,
-            ..TransformOptions::default()
-        },
+        TransformOptions::default()
+            .with_intent(RenderingIntent::MediaRelativeColorimetric)
+            .with_prefer_cicp_transfer(prefer_cicp),
     )
     .expect("the built-ins link");
     let input = gradient(3);
     let mut output = vec![0u8; pixels() * 3];
     bencher.counter(ItemsCount::new(pixels())).bench_local(|| {
-        transform_interleaved_u8(
+        transform_interleaved(
             &transform,
-            PixelFormat::Rgb8,
-            black_box(&input),
+            black_box(rgb_image(&input)),
             PixelFormat::Rgb8,
             &mut output,
         )

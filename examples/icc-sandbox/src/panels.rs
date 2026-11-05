@@ -3,11 +3,11 @@
 //!
 //! | Panel | Function | Primitive |
 //! | --- | --- | --- |
-//! | TRC curve evaluator | [`trc_curves`] | [`ToneCurve::new`], [`ToneCurve::eval`], [`ToneCurve::inverse`], [`ToneCurve::is_monotonic`] |
+//! | TRC curve evaluator | [`trc_curves`] | [`IccCurve::new`], [`IccCurve::eval`], [`IccCurve::inverse`], [`IccCurve::is_monotonic`] |
 //! | Tag / matrix inspector | [`inspect`] | [`IccProfile::get`], [`IccProfile::validate`], the header fields |
 //! | Malformed-profile diagnostics | [`diagnose`] | [`IccProfile::parse`]'s [`gamut_icc::IccError`] |
 //! | CLUT interpolation viewer | [`clut_slice`] | [`ClutTable::with_interpolation`], [`Stage::Clut`], [`Pipeline::eval`] |
-//! | Full pipeline | [`to_display`], [`proof_to_display`], [`separate`], [`gamut_mask`] | [`IccTransform::between`], [`IccTransform::proofing`], [`GamutCheck`], [`transform_interleaved_u8`]/[`transform_interleaved_u16`] |
+//! | Full pipeline | [`to_display`], [`proof_to_display`], [`separate`], [`gamut_mask`] | [`IccTransform::between`], [`IccTransform::proofing`], [`GamutCheck`], [`transform_interleaved`] |
 //! | Camera comparison | [`camera_patch_errors`] | [`device_to_pcs`] |
 //! | Gamut hull | [`gamut_hull`] | [`device_to_pcs`] / [`pcs_to_device`] bulk PCS round trips |
 //!
@@ -15,14 +15,14 @@
 //! sRGB link over `gamut-icc`'s built-in sRGB profile.
 
 use gamut_cmm::{
-    ClutInterpolation, ClutTable, CmmError, GamutCheck, IccTransform, Pipeline,
-    PipelineOptimization, ProofingOptions, Stage, ToneCurve, Transform, TransformOptions,
-    device_to_pcs, pcs_to_device, transform_interleaved_u8, transform_interleaved_u16,
+    ClutInterpolation, ClutTable, CmmError, GamutCheck, IccCurve, IccTransform, Pipeline,
+    PipelineOptimization, ProofingOptions, Stage, Transform, TransformOptions, device_to_pcs,
+    pcs_to_device, transform_interleaved,
 };
 use gamut_color::lab::{D50_XYZ, delta_e_2000, lab_to_xyz, xyz_to_lab, xyz_to_xyy};
 use gamut_color::linalg::mat_mul3;
 use gamut_color::matrix::{D50, D65, bradford_adapt, rgb_to_xyz_matrix};
-use gamut_core::PixelFormat;
+use gamut_core::{Dimensions, PixelFormat, RawImage, Sample};
 use gamut_icc::{
     Clut, ColorSpace, Curve, CurveOrParametric, IccProfile, KnownTag, RenderingIntent, Tag, TagData,
 };
@@ -78,13 +78,27 @@ impl Settings {
     /// The options [`IccTransform::between`] takes.
     #[must_use]
     pub fn transform_options(self) -> TransformOptions {
-        TransformOptions {
-            intent: self.intent,
-            black_point_compensation: self.bpc,
-            optimization: self.optimization,
-            ..TransformOptions::default()
-        }
+        TransformOptions::default()
+            .with_intent(self.intent)
+            .with_black_point_compensation(self.bpc)
+            .with_optimization(self.optimization)
     }
+}
+
+/// `pixels` as one row of interleaved `format` pixels: every transform here is per pixel, so the
+/// row shape is all [`transform_interleaved`] needs.
+///
+/// # Errors
+///
+/// [`CmmError::BufferLength`] when `pixels` is empty or not a whole number of RGB pixels.
+fn rgb_row<S: Sample>(pixels: &[S], format: PixelFormat) -> Result<RawImage<'_, S>, CmmError> {
+    let bad = || CmmError::BufferLength {
+        channels: 3,
+        found: pixels.len(),
+    };
+    let width = u32::try_from(pixels.len() / 3).map_err(|_| bad())?;
+    let dims = Dimensions::new(width, 1).map_err(|_| bad())?;
+    RawImage::new(pixels, format, dims).map_err(|_| bad())
 }
 
 /// The four ICC.1 rendering intents, in header-code order, with display names.
@@ -168,7 +182,7 @@ pub struct TrcCurve {
     pub forward: Vec<[f64; 2]>,
     /// `(y, f⁻¹(y))`, when the curve inverts.
     pub inverse: Option<Vec<[f64; 2]>>,
-    /// [`ToneCurve::is_monotonic`].
+    /// [`IccCurve::is_monotonic`].
     pub monotonic: bool,
     /// `max |f⁻¹(f(x)) − x|` over the samples, when the curve inverts.
     pub round_trip_error: Option<f64>,
@@ -187,7 +201,7 @@ fn encoding(curve: &CurveOrParametric) -> String {
 }
 
 /// Every `curveType`/`parametricCurveType` tag in `profile`, evaluated through
-/// [`ToneCurve`] forward and inverse.
+/// [`IccCurve`] forward and inverse.
 ///
 /// # Errors
 ///
@@ -204,7 +218,7 @@ pub fn trc_curves(profile: &IccProfile) -> Result<Vec<TrcCurve>, CmmError> {
             TagData::ParametricCurve(p) => CurveOrParametric::Parametric(p.clone()),
             _ => continue,
         };
-        let tone = ToneCurve::new(&curve)?;
+        let tone = IccCurve::new(&curve)?;
         let last = (CURVE_SAMPLES - 1) as f64;
         let xs: Vec<f64> = (0..CURVE_SAMPLES).map(|i| i as f64 / last).collect();
         let forward = xs.iter().map(|&x| [x, tone.eval(x)]).collect();
@@ -586,8 +600,8 @@ pub fn slice_rgb8(
 ///
 /// # Errors
 ///
-/// [`CmmError`] when the profiles cannot be linked at the intent, or the buffer is not whole
-/// pixels.
+/// [`CmmError`] when the profiles cannot be linked at the intent, or the buffer is empty or not
+/// whole pixels.
 pub fn to_display(
     src: &IccProfile,
     display: &Display,
@@ -596,10 +610,9 @@ pub fn to_display(
 ) -> Result<Vec<u8>, CmmError> {
     let transform = IccTransform::between(src, &display.profile, settings.transform_options())?;
     let mut out = vec![0; pixels.len()];
-    transform_interleaved_u8(
+    transform_interleaved(
         &transform,
-        PixelFormat::Rgb8,
-        pixels,
+        rgb_row(pixels, PixelFormat::Rgb8)?,
         PixelFormat::Rgb8,
         &mut out,
     )?;
@@ -619,10 +632,9 @@ pub fn raw_to_display(
 ) -> Result<Vec<u8>, CmmError> {
     let transform = IccTransform::between(src, &display.profile, settings.transform_options())?;
     let mut out = vec![0; pixels.len()];
-    transform_interleaved_u16(
+    transform_interleaved(
         &transform,
-        PixelFormat::Rgb16,
-        pixels,
+        rgb_row(pixels, PixelFormat::Rgb16)?,
         PixelFormat::Rgb16,
         &mut out,
     )?;
@@ -644,19 +656,12 @@ pub fn proof_to_display(
     settings: Settings,
     proofing_intent: RenderingIntent,
 ) -> Result<Vec<u8>, CmmError> {
-    let options = ProofingOptions {
-        intent: settings.intent,
-        proofing_intent,
-        black_point_compensation: settings.bpc,
-        optimization: settings.optimization,
-        prefer_cicp_transfer: false,
-    };
+    let options = ProofingOptions::new(settings.transform_options(), proofing_intent);
     let transform = IccTransform::proofing(src, &display.profile, printer, options)?;
     let mut out = vec![0; pixels.len()];
-    transform_interleaved_u8(
+    transform_interleaved(
         &transform,
-        PixelFormat::Rgb8,
-        pixels,
+        rgb_row(pixels, PixelFormat::Rgb8)?,
         PixelFormat::Rgb8,
         &mut out,
     )?;

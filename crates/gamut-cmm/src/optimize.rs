@@ -97,7 +97,7 @@
 //! [`Precalculate`]: PipelineOptimization::Precalculate
 
 use crate::clut::{ClutInterpolation, ClutTable, NodePrecision};
-use crate::curve::ToneCurve;
+use crate::curve::IccCurve;
 use crate::error::Result;
 use crate::pipeline::{MAX_CHANNELS, Pipeline, Stage};
 use crate::transform::{check_buffers, narrow_u16};
@@ -110,8 +110,9 @@ use crate::transform::{check_buffers, narrow_u16};
 ///
 /// The discriminants are permanent and append-only, and the type is a fieldless `#[repr(u32)]`
 /// enum (the workspace C-portability convention, as on
-/// [`ClutInterpolation`]).
+/// [`ClutInterpolation`]). `#[non_exhaustive]`, so appending a level is not a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 #[repr(u32)]
 pub enum PipelineOptimization {
     /// No optimization: the pipeline is evaluated exactly as it was built, stage by stage.
@@ -141,7 +142,7 @@ pub enum PipelineOptimization {
     /// representation lcms2 runs under its 8- and 16-bit formatters, at a quarter of the node
     /// memory. On a pipeline that resamples, the 8- and 16-bit buffer entry points
     /// ([`crate::Transform::transform_u8`]/[`crate::Transform::transform_u16`], and so
-    /// [`crate::transform_interleaved_u8`] and its siblings) run integer arithmetic end to
+    /// [`crate::transform_interleaved`] and its siblings) run integer arithmetic end to
     /// end; the `f64` entry point quantizes to 16 bits on the way in (module docs, "Precision
     /// tiers").
     ///
@@ -364,7 +365,7 @@ fn collapse_once(stages: Vec<Stage>) -> (Vec<Stage>, bool) {
     (out, changed)
 }
 
-/// Tabulates every adjacent [`Stage::Curves`] pair as one curve set ([`ToneCurve::joined`]).
+/// Tabulates every adjacent [`Stage::Curves`] pair as one curve set ([`IccCurve::joined`]).
 /// Adjacent curve sets always carry the same channel count (the pipeline's validated seam),
 /// so the join is always shape-legal.
 ///
@@ -379,7 +380,7 @@ fn join_curves(pipeline: Pipeline) -> Result<Pipeline> {
             let joined = first
                 .iter()
                 .zip(second)
-                .map(|(a, b)| ToneCurve::joined(a, b))
+                .map(|(a, b)| IccCurve::joined(a, b))
                 .collect();
             out.pop();
             out.push(Stage::Curves(joined));
@@ -394,7 +395,7 @@ fn join_curves(pipeline: Pipeline) -> Result<Pipeline> {
 /// hypercube the pipeline's whole reachable input domain, and so makes a grid over that cube
 /// a faithful resampling.
 ///
-/// [`Stage::Curves`] clamps per channel ([`ToneCurve::eval`]), [`Stage::Clut`] clamps per axis
+/// [`Stage::Curves`] clamps per channel ([`IccCurve::eval`]), [`Stage::Clut`] clamps per axis
 /// (lcms2's `fclamp`), and [`Stage::Clamp`] is the clamp itself. Every other stage passes its
 /// input through unbounded — which is exactly how a PCS-entering pipeline starts (the link
 /// module prepends the PCS *encode* matrix that maps decoded colorimetry into `[0, 1]`), so
@@ -581,8 +582,8 @@ fn quick_saturate_word_unit(v: f64) -> u16 {
 /// lcms2's `FillFirstShaper`: code `i` through `curve` into Q1.14, evaluated at lcms2's
 /// widths — the code as the `f32` `i / 255`, the curve's result rounded to `f32`
 /// (`cmsEvalToneCurveFloat`). lcms2's `0x7fffffff` arm for a result `≥ 8.0` is absent: a
-/// [`ToneCurve`] clamps its output to `[0, 1]`, so every entry is in `0..=0x4000`.
-fn first_shaper(curve: &ToneCurve) -> [i32; SHAPER_IN_ENTRIES] {
+/// [`IccCurve`] clamps its output to `[0, 1]`, so every entry is in `0..=0x4000`.
+fn first_shaper(curve: &IccCurve) -> [i32; SHAPER_IN_ENTRIES] {
     let mut table = [0; SHAPER_IN_ENTRIES];
     for (code, entry) in (0_u8..=u8::MAX).zip(table.iter_mut()) {
         #[expect(
@@ -602,8 +603,8 @@ fn first_shaper(curve: &ToneCurve) -> [i32; SHAPER_IN_ENTRIES] {
 
 /// lcms2's 8-bit-output `FillSecondShaper`: Q1.14 value `i` (exact in `f32`) through `curve`,
 /// rounded to `f32`, to a 16-bit word, and narrowed with `FROM_16_TO_8`. lcms2's clamp of the
-/// curve's result to `[0, 1]` is absent because [`ToneCurve::eval`] already guarantees it.
-fn second_shaper(curve: &ToneCurve) -> Box<[u8; SHAPER_OUT_ENTRIES]> {
+/// curve's result to `[0, 1]` is absent because [`IccCurve::eval`] already guarantees it.
+fn second_shaper(curve: &IccCurve) -> Box<[u8; SHAPER_OUT_ENTRIES]> {
     let mut table = Box::new([0; SHAPER_OUT_ENTRIES]);
     for (step, entry) in (0_u16..).zip(table.iter_mut()) {
         #[expect(
@@ -653,7 +654,7 @@ fn is_near_identity(m: &[[f64; 3]; 3]) -> bool {
 ///
 /// Where lcms2 also selects this pass, the result is lcms2's to the bit for parametric and
 /// gamma curves; lcms2 evaluates a *sampled* curve through its 16-bit table interpolation,
-/// which [`ToneCurve`] does in `f64`, so a profile with `curveType` tables can land a code away
+/// which [`IccCurve`] does in `f64`, so a profile with `curveType` tables can land a code away
 /// at the entries where the two round differently. The selection differs from lcms2's in two
 /// directions, both because [`collapse`] is not lcms2's `PreOptimize`:
 ///
@@ -760,13 +761,13 @@ mod tests {
         }
     }
 
-    fn gamma(g: u16) -> ToneCurve {
-        ToneCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(g))))
+    fn gamma(g: u16) -> IccCurve {
+        IccCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(g))))
             .expect("a gamma curve is always constructible")
     }
 
-    fn identity_curve() -> ToneCurve {
-        ToneCurve::new(&CurveOrParametric::Curve(Curve::Identity))
+    fn identity_curve() -> IccCurve {
+        IccCurve::new(&CurveOrParametric::Curve(Curve::Identity))
             .expect("the identity curve is always constructible")
     }
 
@@ -986,11 +987,11 @@ mod tests {
         // pins the number the crate's precision budget quotes (measured 8.2e-3 at x ≈ 1.2e-4)
         // so a wider table — or a lost identity shortcut — shows up as a change here.
         let toe = gamma(0x0074); // u8Fixed8 0x0074 = 0.453125 ≈ 1/2.2
-        let joined = ToneCurve::joined(&toe, &identity_curve());
+        let joined = IccCurve::joined(&toe, &identity_curve());
         // The identity leg keeps it exact...
         assert_eq!(joined.eval(0.5), toe.eval(0.5));
         // ...but tabulating against a real second curve does not.
-        let tabulated = ToneCurve::joined(&toe, &gamma(0x0100));
+        let tabulated = IccCurve::joined(&toe, &gamma(0x0100));
         let mut worst = 0.0_f64;
         for i in 0..=40_000 {
             let x = f64::from(i) / 40_000.0;
@@ -1003,8 +1004,8 @@ mod tests {
     fn joining_with_an_identity_curve_is_exact() {
         let g = gamma(0x0233);
         for joined in [
-            ToneCurve::joined(&identity_curve(), &g),
-            ToneCurve::joined(&g, &identity_curve()),
+            IccCurve::joined(&identity_curve(), &g),
+            IccCurve::joined(&g, &identity_curve()),
         ] {
             for i in 0..=256 {
                 let x = f64::from(i) / 256.0;

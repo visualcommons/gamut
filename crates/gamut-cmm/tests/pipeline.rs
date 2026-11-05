@@ -1,7 +1,7 @@
 //! Integration tests for the pipeline/stage model: construction-time validation, evaluation,
 //! composition, and the `Transform` buffer contract.
 
-use gamut_cmm::{ClutTable, CmmError, MAX_CHANNELS, Pipeline, Stage, ToneCurve, Transform};
+use gamut_cmm::{ClutTable, CmmError, IccCurve, MAX_CHANNELS, Pipeline, Stage, Transform};
 use gamut_icc::{
     Clut, ClutPrecision, Curve, CurveOrParametric, ParametricCurve, S15Fixed16, U8Fixed8,
 };
@@ -304,17 +304,17 @@ fn error_messages_name_the_cmm_and_the_counts() {
     );
 }
 
-/// The identity as a [`ToneCurve`], for channel-count plumbing tests.
-fn identity_curve() -> ToneCurve {
-    ToneCurve::new(&CurveOrParametric::Curve(Curve::Identity)).unwrap()
+/// The identity as an [`IccCurve`], for channel-count plumbing tests.
+fn identity_curve() -> IccCurve {
+    IccCurve::new(&CurveOrParametric::Curve(Curve::Identity)).unwrap()
 }
 
 #[test]
 fn curves_stage_applies_a_distinct_curve_per_channel() {
     // Three distinct hand-checkable curves: x² (u8Fixed8 0x0200 is exactly 2.0), identity,
     // and x³ (parametric type 0, s15Fixed16 3.0 exact).
-    let square = ToneCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0200)))).unwrap();
-    let cube = ToneCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
+    let square = IccCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0200)))).unwrap();
+    let cube = IccCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
         function_type: 0,
         params: vec![S15Fixed16::from_f64(3.0)],
     }))
@@ -343,11 +343,11 @@ fn curves_stage_channel_counts_flow_through_validation() {
     let err = Pipeline::new(1, 1, vec![Stage::Curves(vec![])]).unwrap_err();
     assert!(matches!(err, CmmError::TooManyChannels(0)));
     // Seventeen curves: above the ICC bound.
-    let seventeen: Vec<ToneCurve> = (0..17).map(|_| identity_curve()).collect();
+    let seventeen: Vec<IccCurve> = (0..17).map(|_| identity_curve()).collect();
     let err = Pipeline::new(16, 16, vec![Stage::Curves(seventeen)]).unwrap_err();
     assert!(matches!(err, CmmError::TooManyChannels(17)));
     // Sixteen is the accepted boundary, and the count must match the declared ends.
-    let sixteen: Vec<ToneCurve> = (0..16).map(|_| identity_curve()).collect();
+    let sixteen: Vec<IccCurve> = (0..16).map(|_| identity_curve()).collect();
     let pipeline = Pipeline::new(16, 16, vec![Stage::Curves(sixteen)]).unwrap();
     assert_eq!(pipeline.input_channels(), 16);
     let err = Pipeline::new(3, 3, vec![Stage::Curves(vec![identity_curve()])]).unwrap_err();
@@ -367,7 +367,7 @@ fn curves_stage_reports_its_channel_count_saturating() {
     assert_eq!(two.input_channels(), 2);
     assert_eq!(two.output_channels(), 2);
     // Counts above 255 saturate for reporting and still fail validation.
-    let many: Vec<ToneCurve> = (0..300).map(|_| identity_curve()).collect();
+    let many: Vec<IccCurve> = (0..300).map(|_| identity_curve()).collect();
     let stage = Stage::Curves(many);
     assert_eq!(stage.input_channels(), u8::MAX);
     let err = Pipeline::new(16, 16, vec![stage]).unwrap_err();
@@ -456,7 +456,7 @@ fn clut_stage_channel_counts_flow_through_validation() {
 #[test]
 fn curves_clut_matrix_composition_evaluates_hand_checked_pixels() {
     // curves (x² on channel 0) → CLUT (3→3 axis swap [x, z, y]) → matrix: all dyadic, exact.
-    let square = ToneCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0200)))).unwrap();
+    let square = IccCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0200)))).unwrap();
     let pipeline = Pipeline::new(
         3,
         3,

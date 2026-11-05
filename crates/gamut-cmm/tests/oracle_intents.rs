@@ -24,7 +24,7 @@
 mod common;
 
 use common::Lcg;
-use gamut_cmm::{IccTransform, PipelineOptimization, Transform as _, TransformOptions, bpc};
+use gamut_cmm::{IccTransform, Transform as _, TransformOptions, bpc};
 use gamut_icc::{IccProfile, RenderingIntent};
 use lcms2_oracle::{
     FLAGS_BLACKPOINTCOMPENSATION, FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, INTENT_ABSOLUTE_COLORIMETRIC,
@@ -102,7 +102,7 @@ fn eval3(transform: &IccTransform, input: &[f64]) -> [f64; 3] {
 
 /// Clamps lcms2's device output into `[0, 1]` before comparing. lcms2's `TYPE_*_DBL`
 /// formatters write the pipeline's raw float result — out-of-gamut PCS values emerge as
-/// device samples below 0 or above 1 — while this crate's `ToneCurve` clamps both sides to
+/// device samples below 0 or above 1 — while this crate's `IccCurve` clamps both sides to
 /// `[0, 1]` by settled convention (P2; lcms2's own integer formatters saturate identically).
 /// Clamping the oracle aligns the two conventions without masking in-range disagreements.
 fn clamp01(v: Vec<f64>) -> Vec<f64> {
@@ -151,12 +151,7 @@ fn absolute_on_a_non_d50_white_matches_lcms2() {
     let ours = IccTransform::between(
         &src,
         &dst,
-        TransformOptions {
-            intent: RenderingIntent::IccAbsoluteColorimetric,
-            black_point_compensation: false,
-            optimization: PipelineOptimization::None,
-            prefer_cicp_transfer: false,
-        },
+        TransformOptions::default().with_intent(RenderingIntent::IccAbsoluteColorimetric),
     )
     .unwrap();
     let lcms = Transform::new(
@@ -189,12 +184,7 @@ fn absolute_on_a_non_d50_white_matches_lcms2() {
     let relative = IccTransform::between(
         &src,
         &dst,
-        TransformOptions {
-            intent: RenderingIntent::MediaRelativeColorimetric,
-            black_point_compensation: false,
-            optimization: PipelineOptimization::None,
-            prefer_cicp_transfer: false,
-        },
+        TransformOptions::default().with_intent(RenderingIntent::MediaRelativeColorimetric),
     )
     .unwrap();
     let abs_white = eval3(&ours, &[1.0; 3]);
@@ -223,23 +213,13 @@ fn absolute_between_d50_wtpt_profiles_is_exactly_relative() {
     let absolute = IccTransform::between(
         &src,
         &dst,
-        TransformOptions {
-            intent: RenderingIntent::IccAbsoluteColorimetric,
-            black_point_compensation: false,
-            optimization: PipelineOptimization::None,
-            prefer_cicp_transfer: false,
-        },
+        TransformOptions::default().with_intent(RenderingIntent::IccAbsoluteColorimetric),
     )
     .unwrap();
     let relative = IccTransform::between(
         &src,
         &dst,
-        TransformOptions {
-            intent: RenderingIntent::MediaRelativeColorimetric,
-            black_point_compensation: false,
-            optimization: PipelineOptimization::None,
-            prefer_cicp_transfer: false,
-        },
+        TransformOptions::default().with_intent(RenderingIntent::MediaRelativeColorimetric),
     )
     .unwrap();
     for point in rgb_sweep(67).into_iter().take(60) {
@@ -450,12 +430,9 @@ fn bpc_on_a_v2_pair_matches_lcms2_and_differs_from_no_bpc() {
         IccTransform::between(
             &src,
             &dst,
-            TransformOptions {
-                intent: RenderingIntent::MediaRelativeColorimetric,
-                black_point_compensation: bpc_on,
-                optimization: PipelineOptimization::None,
-                prefer_cicp_transfer: false,
-            },
+            TransformOptions::default()
+                .with_intent(RenderingIntent::MediaRelativeColorimetric)
+                .with_black_point_compensation(bpc_on),
         )
         .unwrap()
     };

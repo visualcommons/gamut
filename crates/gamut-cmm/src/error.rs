@@ -8,7 +8,8 @@
 /// pipeline from a parsed profile (missing/unusable tags, non-invertible data, profile forms a
 /// later phase covers). Exposing the crate's own type — rather than the shared
 /// `gamut_core::Error` — keeps the failing carrier identifiable when the CMM is embedded in a
-/// wider colour pipeline.
+/// wider colour pipeline, and `From<CmmError> for gamut_core::Error` funnels it into that shared
+/// type where one is wanted.
 ///
 /// Marked `#[non_exhaustive]`: the CMM phases (curves, CLUTs, profile linking, intents) add
 /// failure categories additively without a breaking change.
@@ -66,12 +67,12 @@ pub enum CmmError {
     /// A hand-built parametric curve carries a function type outside the five ICC.1:2022 §10.18
     /// defines (0–4). Unreachable from parsed profiles — `gamut-icc`'s parser rejects such
     /// types — but `gamut_icc::ParametricCurve::eval` silently treats them as the identity, so
-    /// [`ToneCurve::new`](crate::ToneCurve::new) refuses them with this typed error instead.
+    /// [`IccCurve::new`](crate::IccCurve::new) refuses them with this typed error instead.
     #[error("cmm: parametric curve function type {0} is not supported")]
     UnsupportedParametricType(u16),
 
     /// A tone curve is neither non-decreasing nor non-increasing (or is constant), so
-    /// [`ToneCurve::inverse`](crate::ToneCurve::inverse) has no functional inverse to build.
+    /// [`IccCurve::inverse`](crate::IccCurve::inverse) has no functional inverse to build.
     #[error("cmm: tone curve is not monotonic; no inverse exists")]
     NonMonotonicCurve,
 
@@ -144,7 +145,205 @@ pub enum CmmError {
     /// [`BufferLength`](CmmError::BufferLength) instead.
     #[error("cmm: image geometry mismatch ({0})")]
     ImageGeometry(&'static str),
+
+    /// An ICC profile failed to parse or serialize in `gamut-icc`. Never raised by this
+    /// crate's own constructors, which take profiles already parsed; it lets a caller that
+    /// parses a profile and then builds a transform from it carry both failures in one type
+    /// (`IccProfile::parse(bytes)?` converts through `From`). The [`IccError`] is the
+    /// [`source`](std::error::Error::source).
+    ///
+    /// [`IccError`]: gamut_icc::IccError
+    #[error("cmm: {0}")]
+    Icc(#[from] gamut_icc::IccError),
 }
 
 /// A [`Result`](core::result::Result) whose error is [`CmmError`].
 pub type Result<T> = core::result::Result<T, CmmError>;
+
+impl From<CmmError> for gamut_core::Error {
+    /// Funnels a [`CmmError`] into the workspace's unified [`gamut_core::Error`].
+    ///
+    /// [`CmmError::Icc`] is handed to `gamut-icc`'s own conversion, so its kind, origin and
+    /// byte offset survive. The `Unsupported*` variants — a parametric function type, a profile
+    /// form, or a pixel format outside what this crate builds or transforms — are
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported); every other variant is a
+    /// violated invariant of the profile or of the caller's buffers and stages, so
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput). Each carries a static
+    /// message naming its variant and the full CMM diagnostic as
+    /// [`detail`](gamut_core::Error::detail).
+    fn from(err: CmmError) -> Self {
+        let origin = env!("CARGO_PKG_NAME");
+        let core = match err {
+            CmmError::Icc(icc) => return icc.into(),
+            CmmError::UnsupportedParametricType(_) => gamut_core::Error::unsupported(
+                origin,
+                "cmm: parametric curve function type is not supported",
+            ),
+            CmmError::UnsupportedProfile(_) => {
+                gamut_core::Error::unsupported(origin, "cmm: unsupported profile")
+            }
+            CmmError::UnsupportedPixelFormat(_) => gamut_core::Error::unsupported(
+                origin,
+                "cmm: pixel format carries no continuous colour channels",
+            ),
+            CmmError::StageChannelMismatch { .. } => gamut_core::Error::invalid_input(
+                origin,
+                "cmm: adjacent pipeline stages disagree on channel count",
+            ),
+            CmmError::PipelineEndsMismatch { .. } => gamut_core::Error::invalid_input(
+                origin,
+                "cmm: pipeline end does not match its stage chain",
+            ),
+            CmmError::TooManyChannels(_) => {
+                gamut_core::Error::invalid_input(origin, "cmm: channel count outside 1..=16")
+            }
+            CmmError::BufferLength { .. } => gamut_core::Error::invalid_input(
+                origin,
+                "cmm: buffer length does not fit the channel count",
+            ),
+            CmmError::NonMonotonicCurve => gamut_core::Error::invalid_input(
+                origin,
+                "cmm: tone curve is not monotonic; no inverse exists",
+            ),
+            CmmError::ClutGeometry(_) => {
+                gamut_core::Error::invalid_input(origin, "cmm: CLUT geometry inconsistent")
+            }
+            CmmError::MissingTag(_) => {
+                gamut_core::Error::invalid_input(origin, "cmm: profile is missing a required tag")
+            }
+            CmmError::BadTagType(_) => {
+                gamut_core::Error::invalid_input(origin, "cmm: tag holds an unusable element type")
+            }
+            CmmError::SingularMatrix => {
+                gamut_core::Error::invalid_input(origin, "cmm: colorant matrix is singular")
+            }
+            CmmError::BadStage(_) => {
+                gamut_core::Error::invalid_input(origin, "cmm: malformed stage")
+            }
+            CmmError::ChainMismatch(_) => {
+                gamut_core::Error::invalid_input(origin, "cmm: profile chain mismatch")
+            }
+            CmmError::ImageGeometry(_) => {
+                gamut_core::Error::invalid_input(origin, "cmm: image geometry mismatch")
+            }
+        };
+        core.with_detail(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use gamut_core::ErrorKind;
+    use gamut_icc::{IccError, Signature};
+
+    use super::*;
+
+    /// Converts `err`, asserting the kind and static message, and that the detail is the
+    /// CMM diagnostic.
+    fn assert_core(err: CmmError, kind: ErrorKind, message: &str) {
+        let diagnostic = err.to_string();
+        let core = gamut_core::Error::from(err);
+        assert_eq!(core.kind(), kind, "{diagnostic}");
+        assert_eq!(core.static_message(), Some(message), "{diagnostic}");
+        assert_eq!(core.origin(), Some("gamut-cmm"), "{diagnostic}");
+        assert_eq!(core.detail(), Some(diagnostic.as_str()));
+    }
+
+    #[test]
+    fn unsupported_variants_convert_to_unsupported() {
+        use ErrorKind::Unsupported;
+        assert_core(
+            CmmError::UnsupportedParametricType(7),
+            Unsupported,
+            "cmm: parametric curve function type is not supported",
+        );
+        assert_core(
+            CmmError::UnsupportedProfile("x"),
+            Unsupported,
+            "cmm: unsupported profile",
+        );
+        assert_core(
+            CmmError::UnsupportedPixelFormat(gamut_core::PixelFormat::Bilevel),
+            Unsupported,
+            "cmm: pixel format carries no continuous colour channels",
+        );
+    }
+
+    #[test]
+    fn invariant_variants_convert_to_invalid_input() {
+        use ErrorKind::InvalidInput;
+        let tag = Signature(*b"rTRC");
+        let cases = [
+            (
+                CmmError::StageChannelMismatch {
+                    index: 1,
+                    expected: 3,
+                    found: 4,
+                },
+                "cmm: adjacent pipeline stages disagree on channel count",
+            ),
+            (
+                CmmError::PipelineEndsMismatch {
+                    end: "input",
+                    declared: 3,
+                    found: 4,
+                },
+                "cmm: pipeline end does not match its stage chain",
+            ),
+            (
+                CmmError::TooManyChannels(17),
+                "cmm: channel count outside 1..=16",
+            ),
+            (
+                CmmError::BufferLength {
+                    channels: 3,
+                    found: 4,
+                },
+                "cmm: buffer length does not fit the channel count",
+            ),
+            (
+                CmmError::NonMonotonicCurve,
+                "cmm: tone curve is not monotonic; no inverse exists",
+            ),
+            (
+                CmmError::ClutGeometry("x"),
+                "cmm: CLUT geometry inconsistent",
+            ),
+            (
+                CmmError::MissingTag(tag),
+                "cmm: profile is missing a required tag",
+            ),
+            (
+                CmmError::BadTagType(tag),
+                "cmm: tag holds an unusable element type",
+            ),
+            (CmmError::SingularMatrix, "cmm: colorant matrix is singular"),
+            (CmmError::BadStage("x"), "cmm: malformed stage"),
+            (CmmError::ChainMismatch("x"), "cmm: profile chain mismatch"),
+            (CmmError::ImageGeometry("x"), "cmm: image geometry mismatch"),
+        ];
+        for (err, message) in cases {
+            assert_core(err, InvalidInput, message);
+        }
+    }
+
+    #[test]
+    fn icc_errors_wrap_and_convert_through_gamut_icc() {
+        let icc = || IccError::Malformed("icc: duplicate tag signature");
+        let err = CmmError::from(icc());
+        assert_eq!(err.to_string(), "cmm: icc: duplicate tag signature");
+        assert_eq!(
+            err.source().map(ToString::to_string),
+            Some(icc().to_string())
+        );
+        // Converted exactly as `gamut-icc` converts it: its origin, not this crate's.
+        let core = gamut_core::Error::from(err);
+        let want = gamut_core::Error::from(icc());
+        assert_eq!(core.kind(), want.kind());
+        assert_eq!(core.origin(), Some("gamut-icc"));
+        assert_eq!(core.static_message(), want.static_message());
+        assert_eq!(core.detail(), want.detail());
+    }
+}

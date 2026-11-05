@@ -23,10 +23,10 @@ coverage gate never build egui.
 | Tab | Scenario or panel | Library entry points |
 | --- | --- | --- |
 | Formats | One chart tagged sRGB or Display P3, embedded in PNG (`iCCP`) and JPEG (APP2), decoded, extracted and rendered | `gamut_png`/`gamut_jpeg` encoders and `metadata`, `IccProfile::parse`, `IccTransform::between` |
-| Camera | One 16-bit raw capture read through two camera (`scnr`) profiles, with per-patch ΔE₀₀ to the scene | `transform_interleaved_u16`, `device_to_pcs` |
+| Camera | One 16-bit raw capture read through two camera (`scnr`) profiles, with per-patch ΔE₀₀ to the scene | `transform_interleaved`, `device_to_pcs` |
 | Print | A v4 CMYK printer: ink plates, a soft proof, and a gamut warning at all four intents, with BPC on or off | `IccTransform::proofing`, `GamutCheck` |
 | Tag inspector | The header, the tag table, the colorant/`wtpt`/`chad` matrices, and `validate()` findings | `IccProfile::get`, `IccProfile::validate` |
-| TRC curves | Every tone-curve tag plotted forward and inverse, with the round-trip error | `ToneCurve::{new, eval, inverse, is_monotonic}` |
+| TRC curves | Every tone-curve tag plotted forward and inverse, with the round-trip error | `IccCurve::{new, eval, inverse, is_monotonic}` |
 | CLUT viewer | A 2-D slice through any CLUT, tetrahedral or multilinear | `ClutTable::with_interpolation`, `Stage::Clut` |
 | Gamut hull | Device-surface samples in CIE xy, plus PCS → device → PCS round-trip ΔE₀₀ | `device_to_pcs`, `pcs_to_device` |
 | Malformed profile | A truncated profile: the parser's error, the declared size against the bytes present, and the untagged fallback | `IccProfile::parse` |

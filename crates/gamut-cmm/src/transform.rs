@@ -43,8 +43,8 @@ pub trait Transform {
 
     /// Transforms interleaved **16-bit** samples: each code `v` is a device value `v / 65535`.
     ///
-    /// The entry point [`crate::transform_interleaved_u16`] and its planar sibling run colour
-    /// channels through. The provided implementation is exactly that normalization, then
+    /// The entry point the pixel-buffer functions ([`crate::transform_interleaved`] and its
+    /// siblings) run 16-bit colour channels through. The provided implementation is exactly that normalization, then
     /// [`transform`](Transform::transform), then lcms2's `_cmsQuickSaturateWord` re-encoding
     /// (`floor(v · 65535 + 0.5)`, saturating, NaN → 0), so a transform that overrides nothing
     /// keeps its `f64` numerics. A transform with a native integer path overrides it — a
@@ -199,7 +199,22 @@ pub(crate) fn narrow_u16(v: u16) -> u8 {
 /// is fixed at lcms2's default `1.0` (observer fully adapted) — the only state this crate
 /// implements, which is also what makes the `chad` tag irrelevant to the absolute intent
 /// here.
+///
+/// The struct is `#[non_exhaustive]` so a further option can be added without a breaking
+/// change: build it from [`TransformOptions::default`] with the `with_*` methods.
+///
+/// ```
+/// use gamut_cmm::{PipelineOptimization, TransformOptions};
+/// use gamut_icc::RenderingIntent;
+///
+/// let options = TransformOptions::default()
+///     .with_intent(RenderingIntent::MediaRelativeColorimetric)
+///     .with_black_point_compensation(true)
+///     .with_optimization(PipelineOptimization::Collapse);
+/// assert!(!options.prefer_cicp_transfer);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TransformOptions {
     /// The rendering intent, selecting each profile's per-intent tables
     /// ([`crate::link`]'s tag dispatch) and the PCS-seam adjustment (ICC-absolute white
@@ -253,6 +268,43 @@ impl Default for TransformOptions {
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
             prefer_cicp_transfer: false,
+        }
+    }
+}
+
+impl TransformOptions {
+    /// These options with the rendering intent replaced ([`TransformOptions::intent`]).
+    #[must_use]
+    pub const fn with_intent(self, intent: RenderingIntent) -> Self {
+        Self { intent, ..self }
+    }
+
+    /// These options with black-point compensation switched
+    /// ([`TransformOptions::black_point_compensation`]).
+    #[must_use]
+    pub const fn with_black_point_compensation(self, black_point_compensation: bool) -> Self {
+        Self {
+            black_point_compensation,
+            ..self
+        }
+    }
+
+    /// These options with the optimization level replaced ([`TransformOptions::optimization`]).
+    #[must_use]
+    pub const fn with_optimization(self, optimization: PipelineOptimization) -> Self {
+        Self {
+            optimization,
+            ..self
+        }
+    }
+
+    /// These options with the `cicp` closed-form transfer switched
+    /// ([`TransformOptions::prefer_cicp_transfer`]).
+    #[must_use]
+    pub const fn with_prefer_cicp_transfer(self, prefer_cicp_transfer: bool) -> Self {
+        Self {
+            prefer_cicp_transfer,
+            ..self
         }
     }
 }
@@ -406,26 +458,24 @@ impl IccTransform {
     /// # Example
     ///
     /// ```
-    /// use gamut_cmm::{IccTransform, transform_in_place_u8};
-    /// use gamut_core::PixelFormat;
+    /// use gamut_cmm::{IccTransform, transform_in_place};
+    /// use gamut_core::{Dimensions, ImageBuf, Rgb8};
     /// use gamut_icc::{BuiltinProfile, IccProfile};
     ///
     /// // An sRGB image tagged sRGB comes through unchanged.
     /// let embedded = IccProfile::builtin(BuiltinProfile::Srgb).expect("sRGB is built in");
     /// let to_srgb = IccTransform::embedded_to_srgb(&embedded)?;
-    /// let mut pixels = [12u8, 128, 250];
-    /// transform_in_place_u8(&to_srgb, PixelFormat::Rgb8, &mut pixels)?;
-    /// assert_eq!(pixels, [12, 128, 250]);
-    /// # Ok::<(), gamut_cmm::CmmError>(())
+    /// let mut image = ImageBuf::<Rgb8>::new(vec![12, 128, 250], Dimensions::new(1, 1)?)?;
+    /// transform_in_place(&to_srgb, &mut image)?;
+    /// assert_eq!(image.as_samples(), [12, 128, 250]);
+    /// # Ok::<(), gamut_core::Error>(())
     /// ```
     pub fn embedded_to_srgb(embedded: &IccProfile) -> Result<Self> {
         let srgb = IccProfile::builtin(BuiltinProfile::Srgb).ok_or(
             CmmError::UnsupportedProfile("gamut-icc has no built-in sRGB profile"),
         )?;
-        let options = TransformOptions {
-            intent: RenderingIntent::MediaRelativeColorimetric,
-            ..TransformOptions::default()
-        };
+        let options =
+            TransformOptions::default().with_intent(RenderingIntent::MediaRelativeColorimetric);
         Self::between(embedded, &srgb, options)
     }
 
@@ -727,6 +777,39 @@ mod icc_transform_tests {
         assert_eq!(options.intent, RenderingIntent::Perceptual);
         assert!(!options.black_point_compensation);
         assert!(!options.prefer_cicp_transfer);
+    }
+
+    #[test]
+    fn each_option_setter_replaces_only_its_field() {
+        let base = TransformOptions::default();
+        assert_eq!(
+            base.with_intent(RenderingIntent::Saturation),
+            TransformOptions {
+                intent: RenderingIntent::Saturation,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_black_point_compensation(true),
+            TransformOptions {
+                black_point_compensation: true,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_optimization(PipelineOptimization::Collapse),
+            TransformOptions {
+                optimization: PipelineOptimization::Collapse,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_prefer_cicp_transfer(true),
+            TransformOptions {
+                prefer_cicp_transfer: true,
+                ..base
+            }
+        );
     }
 
     #[test]
