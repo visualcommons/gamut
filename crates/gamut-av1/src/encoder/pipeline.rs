@@ -537,11 +537,14 @@ fn crop<T: Copy>(plane: &[T], width: u32, src_stride: u32, height: u32) -> Vec<T
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "decode")]
     use gamut_color::RgbToYcbcr;
+    #[cfg(feature = "decode")]
     use gamut_core::{ImageRef, Rgb8};
 
     use super::*;
     use crate::encoder::tests::{dims, planes, texture};
+    #[cfg(feature = "decode")]
     use crate::encoder::{encode_still, encode_still16};
     use crate::headers::Tiling;
 
