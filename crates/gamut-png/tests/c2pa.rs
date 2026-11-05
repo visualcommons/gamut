@@ -659,3 +659,14 @@ fn gamut_frames_cabx_byte_for_byte_as_libpng_does() {
         .expect("gamut decodes libpng's file");
     assert_eq!(typed.as_samples(), pixels);
 }
+
+#[test]
+fn c2pa_not_validated_is_the_pinned_sentence() {
+    // The exact literal, never the constant interpolated: every headline test formats
+    // `C2PA_NOT_VALIDATED` into its expectation, so a reworded constant passes all of them.
+    assert_eq!(
+        gamut_png::C2PA_NOT_VALIDATED,
+        "gamut locates a C2PA manifest store and never validates it: it checks no signature, no \
+         hash binding and no trust list. Validate with c2pa-rs."
+    );
+}
