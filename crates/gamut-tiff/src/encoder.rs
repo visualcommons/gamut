@@ -98,7 +98,8 @@ impl TiffEncoder {
     /// Returns a copy of this encoder that applies `predictor` before compression.
     ///
     /// [`Predictor::HorizontalDifferencing`] requires 8- or 16-bit samples and pairs well with LZW
-    /// or Deflate. At 16 bits it differences sample *values* (TIFF 6.0 §14), not bytes.
+    /// or Deflate. At 16 bits it differences sample *values* (TIFF 6.0 §14), not bytes. The other
+    /// predictors gamut-ifd names (floating-point, and DNG's `X2`/`X4`) are refused at encode time.
     #[must_use]
     pub fn with_predictor(mut self, predictor: Predictor) -> Self {
         self.predictor = predictor;
@@ -353,6 +354,24 @@ impl TiffEncoder {
         })
     }
 
+    /// Whether the configured predictor differences samples — `false` for [`Predictor::None`].
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a predictor
+    /// this encoder does not write: [`Predictor`] is gamut-ifd's shared code set, which also names
+    /// the floating-point and DNG-only predictors.
+    fn predicting(&self) -> Result<bool> {
+        match self.predictor {
+            Predictor::None => Ok(false),
+            Predictor::HorizontalDifferencing => Ok(true),
+            _ => Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: unsupported predictor for encoding",
+            )),
+        }
+    }
+
     /// The container variant this encoder writes (BigTIFF when [`Self::with_big_tiff`] is set).
     fn variant(&self) -> Variant {
         if self.big_tiff {
@@ -516,7 +535,7 @@ impl TiffEncoder {
         // Apply the horizontal-differencing predictor before compression. §14 differences sample
         // values, so 16-bit samples are differenced as `u16` lanes in the file's byte order — the
         // order they are already packed in here.
-        let predicting = self.predictor == Predictor::HorizontalDifferencing;
+        let predicting = self.predicting()?;
         if predicting && !matches!(layout.bits_per_sample, 8 | 16) {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -708,7 +727,7 @@ impl TiffEncoder {
                 "TIFF: tiling requires 8- or 16-bit images",
             ));
         }
-        let predicting = self.predictor == Predictor::HorizontalDifferencing;
+        let predicting = self.predicting()?;
         if predicting && self.compression != Compression::Deflate {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -1216,6 +1235,26 @@ mod tests {
             );
         }
         assert!(out.is_empty(), "a refused encode writes nothing");
+    }
+
+    /// Only §14's two predictors are written; the floating-point and DNG-only codes the shared
+    /// `Predictor` also names are refused rather than silently encoded unpredicted.
+    #[test]
+    fn predicting_writes_only_none_and_horizontal_differencing() {
+        let with = |p| TiffEncoder::new().with_predictor(p).predicting();
+        assert!(!with(Predictor::None).unwrap());
+        assert!(with(Predictor::HorizontalDifferencing).unwrap());
+        for p in [
+            Predictor::FloatingPoint,
+            Predictor::HorizontalDifferencingX2,
+            Predictor::FloatingPointX4,
+        ] {
+            assert_eq!(
+                with(p).unwrap_err().kind(),
+                gamut_core::ErrorKind::Unsupported,
+                "{p:?}"
+            );
+        }
     }
 
     #[test]
