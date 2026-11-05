@@ -23,8 +23,10 @@
 //!   attached. It is built with [`Error::invalid_input`], [`Error::unsupported`] or
 //!   `From<std::io::Error>`, the last keeping transport failures distinguishable from malformed
 //!   input.
-//! - **Dimensions are never empty.** [`Dimensions`] has private fields and one constructor,
-//!   [`Dimensions::new`], which rejects a zero width or height; the buffers then enforce
+//! - **Dimensions are never empty.** [`Dimensions`] has private fields and two constructors:
+//!   [`Dimensions::new`], which rejects a zero width or height, and the infallible `const`
+//!   [`Dimensions::from_nonzero`], whose [`NonZeroU32`](core::num::NonZeroU32) arguments already
+//!   carry that invariant; the buffers then enforce
 //!   `len == width * height * channels` once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs
 //!   receive a known-good buffer.
 //! - **One vocabulary for what every format carries.** [`DecodeLimits`], [`Cicp`],
@@ -87,6 +89,8 @@ mod palette;
 mod pixel;
 pub mod segment;
 
+use core::num::NonZeroU32;
+
 pub use cicp::Cicp;
 pub use convert::RawImage;
 pub use error::{Error, ErrorKind, Result};
@@ -102,8 +106,8 @@ pub use pixel::{
 
 /// Width and height of an image, in pixels; neither is ever zero.
 ///
-/// The fields are private so [`Dimensions::new`] is the only way to build one, and the non-zero
-/// invariant holds for every value. `#[repr(C)]`: the layout — `width` then `height`, two `u32`s
+/// The fields are private so [`Dimensions::new`] and [`Dimensions::from_nonzero`] are the only
+/// ways to build one, and the non-zero invariant holds for every value. `#[repr(C)]`: the layout — `width` then `height`, two `u32`s
 /// — is a public guarantee so the value can cross the C ABI boundary as-is (issue #242).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
@@ -115,8 +119,9 @@ pub struct Dimensions {
 impl Dimensions {
     /// Creates dimensions, rejecting a zero width or height.
     ///
-    /// The only constructor, so an empty image is caught once, at the boundary, rather than
-    /// re-checked in every encoder.
+    /// The checked constructor for untrusted values, so an empty image is caught once, at the
+    /// boundary, rather than re-checked in every encoder. Values already known to be non-zero
+    /// take the infallible [`from_nonzero`](Self::from_nonzero) instead.
     ///
     /// # Errors
     ///
@@ -129,6 +134,28 @@ impl Dimensions {
             ));
         }
         Ok(Self { width, height })
+    }
+
+    /// Creates dimensions from a width and height whose types already rule out zero.
+    ///
+    /// The infallible twin of [`new`](Self::new), usable in `const` context, for values that are
+    /// non-zero by construction (literals, table entries) rather than read from input.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroU32;
+    /// use gamut_core::Dimensions;
+    ///
+    /// const UNIT: Dimensions = Dimensions::from_nonzero(NonZeroU32::MIN, NonZeroU32::MIN);
+    /// assert_eq!((UNIT.width(), UNIT.height()), (1, 1));
+    /// ```
+    #[must_use]
+    pub const fn from_nonzero(width: NonZeroU32, height: NonZeroU32) -> Self {
+        Self {
+            width: width.get(),
+            height: height.get(),
+        }
     }
 
     /// The image width, in pixels (never zero).
@@ -237,6 +264,15 @@ mod tests {
         }
         let d = Dimensions::new(4, 3).unwrap();
         assert_eq!((d.width(), d.height()), (4, 3));
+    }
+
+    #[test]
+    fn dimensions_from_nonzero_keeps_each_axis() {
+        // Distinct values per axis, so a swapped width/height cannot pass.
+        let (w, h) = (NonZeroU32::new(4).unwrap(), NonZeroU32::new(3).unwrap());
+        let d = Dimensions::from_nonzero(w, h);
+        assert_eq!((d.width(), d.height()), (4, 3));
+        assert_eq!(d, Dimensions::new(4, 3).unwrap());
     }
 
     #[test]
