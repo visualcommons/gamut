@@ -332,6 +332,18 @@ mod tests {
         assert_eq!(read_alph(&chunk, w, h).unwrap(), plane);
     }
 
+    /// A plane with either side zero has no `Dimensions` for the VP8L encode, so it takes the raw
+    /// payload; one zero side alone must suffice, or the compressed path would fail on it.
+    #[test]
+    fn zero_sided_planes_store_the_raw_payload() {
+        for (w, h) in [(0, 5), (5, 0)] {
+            assert_eq!(
+                write_alph_with_effort(&[], w, h, Effort::default()).unwrap(),
+                write_raw_alph(&[], w, h),
+            );
+        }
+    }
+
     /// The filter method lives in bits 2-3 of the `ALPH` header byte (RFC 9649 §2.7.1), beside the
     /// compression method in bits 0-1. Writing it into the wrong bits still produces a chunk the
     /// reader accepts — it just unfilters with the wrong method, so the plane comes back wrong.

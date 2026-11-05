@@ -714,6 +714,19 @@ mod tests {
     }
 
     #[test]
+    fn zero_sided_yuv420_rasters_have_no_dimensions() {
+        for (width, height) in [(0, 2), (2, 0)] {
+            let yuv = Yuv420::new(width, height, Vec::new(), Vec::new(), Vec::new()).unwrap();
+            for err in [
+                DecodedRaster::Yuv420(yuv.clone()).dimensions().unwrap_err(),
+                RasterRef::Yuv420(&yuv).dimensions().unwrap_err(),
+            ] {
+                assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+            }
+        }
+    }
+
+    #[test]
     fn encode_requests_default_to_effort_4_and_carry_an_override() {
         // `new` stays a 3-arg const fn, so effort arrives through the chainable setter; a request
         // that never mentions effort must report libwebp's default method rather than 0.
