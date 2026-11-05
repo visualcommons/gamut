@@ -97,18 +97,22 @@ profile = "mutants"
 # One entry per *claim*, not per generated mutant. An entry may match several mutants only when they
 # are the same statement (or the same operator class at one site) and one argument covers all of
 # them — `decode_image_data`'s three `i += 1` — and its
-# comment says so. It must never reach a mutant nobody argued for, which is what the anchor is for,
-# and the two anchors trade against each other:
+# comment says so. It must never reach a mutant nobody argued for, which is what the anchor is for.
+# Every entry is a single-quoted literal in one of two shapes (issue #1054):
 #
-#   * `file:line:column` pins one mutant exactly, so a killable sibling of the same shape in the
-#     same function stays in the survey. It silently stops matching the moment code above it moves,
-#     and a suppressed timeout then returns as a red gate at an unrelated commit. Use it when such a
-#     sibling exists — most operator mutations.
-#   * the function signature survives movement but covers every mutant the signature admits, so it
-#     can also cover one nobody argued for. Use it when the name is unique workspace-wide and the
-#     claim is about a whole-body replacement, where naming the return type is itself the anchor
-#     (`BitReader<'_>::read -> Option<u32>`), leaving every operator mutation inside the function
-#     in the survey.
+#   * SITE — '^crates/<crate>/src/<path>:LINE:COLUMN: <the mutant's description>$', the mutant's
+#     name exactly as `cargo mutants --list` prints it, regex-escaped and anchored at both ends. It
+#     pins one mutant (or the `(L:C|L:C)` sites of one statement), so a killable sibling of the same
+#     shape stays in the survey, and the crate-qualified path keeps a same-named function in another
+#     crate out of it. Operator mutations and whole-body replacements alike take this shape.
+#   * FUNCTION — '^crates/<crate>/src/<path>:\d+:\d+: .* in <fn>$', for the few free-choice claims
+#     that cover every mutant of one encoder heuristic (gamut-webp's mode and grouping searches).
+#
+# A SITE anchor stops matching the moment code above it moves, and an exclusion that matches nothing
+# fails nowhere — 29 of 44 line anchors had drifted off their operator before that was checked. So
+# `mise run check-mutants-anchors` (CI's Format & Metadata job) holds every entry to the source: the
+# file exists, the operator the description names starts at LINE:COLUMN, and the line sits in the
+# function the description names. Moving code means re-anchoring here in the same change.
 #
 # Keep this list short and justified; a gap is *not* an excuse for an entry.
 exclude_re = [
@@ -125,7 +129,7 @@ exclude_re = [
     # The *other* direction is NOT excluded: `with true` is a real defect and is killed by
     # `a_constructed_palette_is_never_empty`, which also asserts the constructor's refusal --
     # the invariant this argument rests on.
-    'replace PngPalette::is_empty -> bool with false',
+    '^crates/gamut-png/src/palette\.rs:148:9: replace PngPalette::is_empty -> bool with false$',
     # gamut-metadata capability::typed_wiring -- equivalent because every format is wired (#510).
     # The table's cell is `true` for each of the eight `Format` variants, and its `match` names
     # all eight with no wildcard, so the constant `true` agrees with the body on every value a
@@ -134,7 +138,7 @@ exclude_re = [
     #
     # The *other* direction is NOT excluded: `with false` is killed by
     # `typed_wiring_names_every_format`.
-    'replace typed_wiring -> bool with true',
+    '^crates/gamut-metadata/src/capability\.rs:263:5: replace typed_wiring -> bool with true$',
     # gamut-ifd track::subtract — disabling the merge guard is equivalent by construction: the
     # skip loop discards every claim with `end() <= pos`, and the covered arm advances `pos` to
     # `r.end().min(end)`, strictly greater than `pos`, so an unmerged sorted-but-overlapping list
@@ -149,7 +153,7 @@ exclude_re = [
     # *adjacent* ranges where one is correct: the byte set is unchanged, which is why every
     # set-equality test missed it, but the canonical form is not. `subtract_is_the_set_difference`
     # kills it and shrinks to `reads = [{2747, 103}], claims = [{2748, 0}]`.
-    'replace match guard r\.start <= last\.end\(\) with false in ReadLedger::subtract',
+    '^crates/gamut-ifd/src/track\.rs:105:31: replace match guard r\.start <= last\.end\(\) with false in ReadLedger::subtract$',
     # gamut-ifd `ReadLedger::subtract` — the `take_while` that bounds the run of claims touching a
     # span, `r.start < end`, relaxed to `<=`. `merged` is coalesced and its zero-length claims are
     # filtered out, so at most one claim can begin exactly at a span's end, and that claim
@@ -160,110 +164,112 @@ exclude_re = [
     # universe (1 048 576 pairs) the mutant's outputs fingerprint identically to the original's.
     # Line/column-anchored, not named: the `==` and `>` twins of this very comparison shorten the
     # run and ARE caught, as are every other comparison in the function.
-    'track\.rs:125:63: replace < with <= in ReadLedger::subtract$',
+    '^crates/gamut-ifd/src/track\.rs:125:63: replace < with <= in ReadLedger::subtract$',
     # gamut-dng rewrite::write — the pin-fallback match guard. With `pin == None` the guard is
     # the only difference between "return the error" and "retry the identical un-pinned write
     # and return its (identical) error": `write_with` is deterministic in its inputs, so forcing
     # the guard true merely repeats the failing call before propagating the same error.
     # Equivalent; the guard-false direction (pin errors must fall back, not propagate) is killed
     # by `unsatisfiable_pin_relocates_with_bytes_intact`.
-    'replace match guard pin\.is_some\(\) with true in DngRewrite::write',
-    # gamut-dng decode_image_data — `factor > 1` gates the deinterleave call; at `factor == 1`
-    # the field mapping is the identity (each field offset collapses to src == dst), so calling
-    # it anyway changes nothing observable: `>=` is equivalent. The *stricter* mutations
-    # (`==`/`<`, generated separately) skip a real factor-2 deinterleave and are killed by the
-    # single-axis interleave goldens.
-    'replace > with >= in decode_image_data',
+    '^crates/gamut-dng/src/rewrite\.rs:269:23: replace match guard pin\.is_some\(\) with true in DngRewrite::write$',
+    # gamut-dng decode_image_data — `row_factor > 1 || col_factor > 1` gates the deinterleave
+    # call; at a factor of 1 the field mapping is the identity on that axis (each field offset
+    # collapses to src == dst), so calling it anyway changes nothing observable: `>=` on either
+    # comparison is equivalent. The *stricter* mutations (`==`/`<`, generated separately) skip a
+    # real factor-2 deinterleave and are killed by the single-axis interleave goldens. (gamut-webp
+    # has a `decode_image_data` too; its comparisons are not this claim and stay in the survey.)
+    '^crates/gamut-dng/src/decoder\.rs:(1440:19|1440:37): replace > with >= in decode_image_data$',
     # gamut-dng version computation — `if v > *version { *version = v }` (and the analogous
     # `if backward_version > required` pick in encode): at equality both branches produce the
     # same version value, so `>=` cannot change the written tag: equivalent.
-    'replace > with >= in backward_version_for',
-    'replace > with >= in required_dng_version',
-    'replace > with >= in DngEncoder::encode',
+    '^crates/gamut-dng/src/encoder\.rs:613:14: replace > with >= in backward_version_for$',
+    '^crates/gamut-dng/src/encoder\.rs:643:14: replace > with >= in required_dng_version$',
+    '^crates/gamut-dng/src/encoder\.rs:402:33: replace > with >= in DngEncoder::encode_with_report$',
     # gamut-av1 quant::dequant — `sign = if dq < 0 { -1 } else { 1 }`. The sign multiplies
     # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
     # `<` and `<=` disagree. `±0 == 0`, so the reconstruction is identical: equivalent.
-    'replace < with <= in dequant',
+    '^crates/gamut-av1/src/quant\.rs:58:22: replace < with <= in dequant$',
     # gamut-av1 cdf::diagonal_count — `w + h - 1` is the anti-diagonal count; diagonals at index
     # `≥ w+h-1` are empty (`i_lo > i_hi`), so any bound that is larger or equal walks the same
     # non-empty diagonals and yields an identical scan. All three operator mutations only enlarge
     # (or keep) the bound, hence equivalent; a *smaller* bound (not generated here) would differ.
-    'replace \+ with \* in diagonal_count',
-    'replace - with \+ in diagonal_count',
-    'replace - with / in diagonal_count',
+    '^crates/gamut-av1/src/cdf\.rs:4755:7: replace \+ with \* in diagonal_count$',
+    '^crates/gamut-av1/src/cdf\.rs:4755:11: replace - with \+ in diagonal_count$',
+    '^crates/gamut-av1/src/cdf\.rs:4755:11: replace - with / in diagonal_count$',
     # gamut-av1 filter — equivalents in the in-loop filters (the dav1d oracle pins everything else).
     # constrain: `sign = if diff < 0`, but the magnitude is 0 at `diff == 0` (the only value `<`/`<=`
     # disagree on), so `±0` makes the result identical (same shape as quant::dequant).
-    'replace < with <= in constrain',
+    '^crates/gamut-av1/src/filter\.rs:453:24: replace < with <= in constrain$',
     # cdef_direction: `while i < 8` steps `i` by 2 from 1, so it only takes odd values and never
     # equals 8 — `<` and `<=` stop at the same place.
-    'replace < with <= in cdef_direction',
+    '^crates/gamut-av1/src/filter\.rs:578:13: replace < with <= in cdef_direction$',
     # cdef_partials: each directional `partial` enters the cost only as a square, so negating a whole
     # accumulator (any `+=`→`-=`) leaves every `cost += partial²` unchanged. (The `*=`, index math and
     # `- 128` centring mutants are *not* excluded — `cdef_direction_finds_dominant_direction` kills them.)
-    'replace \+= with -= in cdef_partials',
+    '^crates/gamut-av1/src/filter\.rs:(540:31|541:35|542:27|543:39|544:35|545:39|546:27|547:35): replace \+= with -= in cdef_partials$',
     # cdef_disabled: an all-zero-strength CDEF is the identity filter, so the early-return it guards is
     # a pure optimization — taking it or running the (identity) loop produces the same output, making
     # every mutation of the predicate, and the `-> false` body, unobservable. (`-> true` skips real
     # filtering and is caught by `cdef_leaves_flat_unchanged_but_filters_structure`.)
-    'replace == with != in cdef_disabled',
-    'replace && with \|\| in cdef_disabled',
-    'replace cdef_disabled -> bool with false',
+    '^crates/gamut-av1/src/filter\.rs:(681:11|681:25|681:40|681:55): replace == with != in cdef_disabled$',
+    '^crates/gamut-av1/src/filter\.rs:(681:16|681:30|681:45): replace && with \|\| in cdef_disabled$',
+    '^crates/gamut-av1/src/filter\.rs:681:5: replace cdef_disabled -> bool with false$',
     # sec_dir: the two secondary directions `±2` off the primary are summed symmetrically, so `dir+off`
     # vs `dir-off` selects the same pair. (`&`→`|`/`^` and the body mutants change the direction set and
     # are caught by the dav1d cdef oracle.)
-    'replace \+ with - in sec_dir',
+    '^crates/gamut-av1/src/filter\.rs:605:18: replace \+ with - in sec_dir$',
     # wide_tap_pos: the wide deblock filter is symmetric in `j` with symmetric taps, so reading row
     # `i+j` vs `i-j` sums identically. (`+`→`*` and the body are caught by the deblock oracle.)
-    'replace \+ with - in wide_tap_pos',
+    '^crates/gamut-av1/src/filter\.rs:219:8: replace \+ with - in wide_tap_pos$',
     # loop_restore_wiener_luma: `if width == 0 || height == 0` is a defensive guard, but the encoder
     # never calls it with a zero dimension and a zero-sized plane is a no-op anyway, so `||`→`&&` (both
     # branches false for the real `≥1` dimensions) cannot change the output.
-    'replace \|\| with && in loop_restore_wiener_luma',
+    '^crates/gamut-av1/src/filter\.rs:873:19: replace \|\| with && in loop_restore_wiener_luma$',
     # centred: the §7.15.2 direction search is invariant to a uniform sample offset (each direction
     # cost is a sum of squared partials; the chosen direction is an argmax and the variance a cost
     # *difference*), so flipping the centring `- 128` to `+ 128` cannot change the result. (Verified: the
     # cdef_direction test passes under the mutant for ramp/edge/sparse inputs. `- with /` is NOT masked
     # and is caught.)
-    'replace - with \+ in centred',
+    '^crates/gamut-av1/src/filter\.rs:525:38: replace - with \+ in centred$',
     # superres_err: see the doc comment — `err` reaches the offset only as `-err/2` and the `& 0x3fff`
     # discards the `2¹⁴`-multiple that `-`→`+` introduces. (The `*`/`<<`/`/` mutants are not masked.)
-    'replace - with \+ in superres_err',
+    '^crates/gamut-av1/src/filter\.rs:1093:18: replace - with \+ in superres_err$',
     # gamut-av1 tile — equivalents in the entropy/segment helpers (the snapshot + round-trip tests pin
     # everything observable). last_ref: `max - 1` is the largest valid segment ref; a ref is always
     # `< max`, so widening the threshold is never reached and the general neg_interleave path maps
     # `r == max-1` identically.
-    'replace - with \+ in last_ref',
-    'replace - with / in last_ref',
+    '^crates/gamut-av1/src/tile\.rs:377:9: replace - with \+ in last_ref$',
+    '^crates/gamut-av1/src/tile\.rs:377:9: replace - with / in last_ref$',
     # recenter: `if v > 2*ref` — at `v == 2*ref` the else branch yields `2*(v-ref) == 2*ref`, exactly the
     # value the `>=` mutant would return from the `v` branch, so the boundary is a continuity point.
-    'replace > with >= in recenter',
+    '^crates/gamut-av1/src/tile\.rs:4658:10: replace > with >= in recenter$',
     # gamut-bitstream `ec_partition`: its only `-` is the constant shift `7 - EC_PROB_SHIFT` (= 1,
     # since EC_PROB_SHIFT = 6). The `- → /` mutation yields `7 / EC_PROB_SHIFT` = 1 — the identical
     # value — so it is unkillable. (`- → +`/`*` give 13/42 and are caught by the round-trip tests.)
-    'replace - with / in ec_partition',
+    '^crates/gamut-bitstream/src/symbol\.rs:42:45: replace - with / in ec_partition$',
     # gamut-bitstream `SymbolEncoder::finish`: `s = 10 + cnt`, and the encoder holds `cnt` in
     # [-9, -1] (verified over 200k streams), so `s >= 1` always and the `if s > 0` flush guard is
     # always taken. `> → >=` is therefore unobservable. (`> → ==`/`<` skip the loop and are caught.)
-    'replace > with >= in SymbolEncoder::finish',
+    '^crates/gamut-bitstream/src/symbol\.rs:183:14: replace > with >= in SymbolEncoder::finish$',
     # gamut-bitstream `SymbolEncoder::finish`: with `s <= 9` the flush loop runs at most twice, and
     # the `n` it shifts is only consumed on an iteration that never executes, so `n >>= 8` is dead.
     # `>>= → <<=` is unobservable. (The loop-bound and `e`/`n` init mutants stay live and are caught.)
-    'replace >>= with <<= in SymbolEncoder::finish',
+    '^crates/gamut-bitstream/src/symbol\.rs:190:19: replace >>= with <<= in SymbolEncoder::finish$',
     # gamut-bitstream `BitReader::f`/`f64` accumulate a field by shifting then combining:
     # `x = (x << 1) | u32::from(bit)` and `x = (x << take) | u64::from(f(take)?)`. The shift vacates
     # exactly the bits the right operand occupies -- one bit, or `take` bits against a value `f(take)`
     # bounds below `2^take` -- so the operands are disjoint and `|` == `^` for every input. Provably
     # equivalent: the same shape as `BoolDecoder::get_literal` below.
-    # Path-anchored because a bare `::f` would also match gamut-jpeg's unrelated `BitReader::fetch`.
     # (`| -> &` in the same lines IS killed by `f_reads_back_what_the_writer_wrote`, which reads
     # fields with bits set, so only the `^` mutant is excluded.)
-    "bitreader\\.rs:.*: replace \\| with \\^ in BitReader<.a>::f(64)?$",
+    '^crates/gamut-bitstream/src/bitreader\.rs:105:26: replace \| with \^ in BitReader<.a>::f$',
+    '^crates/gamut-bitstream/src/bitreader\.rs:127:29: replace \| with \^ in BitReader<.a>::f64$',
     # gamut-bitstream `SymbolDecoder::read_f`/`read_literal` accumulate the same way --
     # `x = (x << 1) | u32::from(bit)` -- so the shift vacates exactly the bit the right operand
     # occupies and `|` == `^`. Provably equivalent, as above. (`read_golomb`'s own mutants are
     # killed by the golomb tests; only these two accumulator ORs are unkillable.)
-    "symbol\\.rs:.*: replace \\| with \\^ in SymbolDecoder<.a>::read_(f|literal)$",
+    '^crates/gamut-bitstream/src/symbol\.rs:309:26: replace \| with \^ in SymbolDecoder<.a>::read_f$',
+    '^crates/gamut-bitstream/src/symbol\.rs:388:26: replace \| with \^ in SymbolDecoder<.a>::read_literal$',
     # gamut-tiff `within_size_limit` is the shared *allocation* guard behind `stored_total`
     # (decode_page_samples) and `tile_size` (decode_tiles): relaxing `>` to `==`/`>=` only changes
     # whether a 64 MiB+ buffer is reserved before the (still inevitable) decode error — the malformed
@@ -273,109 +279,107 @@ exclude_re = [
     # than blanketing every `>` its callers may grow. Removing the guard entirely is a *separate*
     # mutant, killed by the two size-cap tests in tests/decoder_validation.rs, which assert the
     # distinct cap messages rather than a bare `is_err()`.
-    'replace > with == in within_size_limit',
-    'replace > with >= in within_size_limit',
+    '^crates/gamut-tiff/src/decoder\.rs:70:14: replace > with == in within_size_limit$',
+    '^crates/gamut-tiff/src/decoder\.rs:70:14: replace > with >= in within_size_limit$',
     # gamut-riff `Vp8xHeader::to_payload`: the feature-flag byte ORs five single bits each shifted to
     # a distinct position (`icc<<5 | alpha<<4 | ...`), so the operands are disjoint and `|` == `^`.
     # gamut-riff `Vp8xHeader::from_payload`: the `le24` closure ORs three bytes at offsets 0/8/16
     # (`b[0] | (b[1]<<8) | (b[2]<<16)`), again disjoint. Both functions' `| -> ^` are equivalent.
     # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    'replace \| with \^ in Vp8xHeader::to_payload',
-    'replace \| with \^ in Vp8xHeader::from_payload',
+    '^crates/gamut-riff/src/webp\.rs:(77:13|78:13|79:13|80:13): replace \| with \^ in Vp8xHeader::to_payload$',
+    '^crates/gamut-riff/src/webp\.rs:(136:47|136:72): replace \| with \^ in Vp8xHeader::from_payload$',
     # gamut-ifd `Value::decode`: the DOUBLE assembly OR's a 32-bit low half with a 32-bit high half
     # shifted up by 32 (`u64::from(a) | (u64::from(b) << 32)`). The operands occupy disjoint bits, so
     # `|` is identical to `^`; both `| -> ^` mutations are equivalent.
     # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    'replace \| with \^ in Value::decode',
+    '^crates/gamut-ifd/src/value\.rs:(601:65|602:62): replace \| with \^ in Value::decode$',
     # gamut-dsp `adst_output_permute`: the index is `(d << 3) | (c << 2) | (b << 1) | a`, where each
     # of a/b/c/d is a single bit (0 or 1) shifted to a distinct position, so the OR'd operands never
     # share bits and `|` is identical to `^`. The three `| -> ^` mutations are therefore equivalent.
     # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    'replace \| with \^ in adst_output_permute',
+    '^crates/gamut-dsp/src/av1/adst\.rs:(165:29|165:40|165:51): replace \| with \^ in adst_output_permute$',
     # gamut-color `vp8_clip8`: the `else if v < 0` branch is reached only when `v` is out of range
     # (`v == 0` takes the `v & !MASK2 == 0` fast path), so `v != 0` always holds there and `v < 0`
     # is equivalent to `v <= 0`. (`v < 0 → v == 0` *is* observable and is killed by a test.)
-    'replace < with <= in vp8_clip8',
+    '^crates/gamut-color/src/ycbcr\.rs:91:17: replace < with <= in vp8_clip8$',
     # gamut-color `prophoto_rgb_eotf_standard`: the ROMM toe `x/16` and the power curve `x^1.8` are
     # equal at the x = 1/32 breakpoint (both 2^-9), so the curve is continuous and `x < 1/32` vs
     # `x <= 1/32` choose between two identical values there — unobservable. (`1.0/32.0 → 1.0%32.0`
     # *is* observable and is killed by a test at x = 0.5.)
-    'replace < with <= in prophoto_rgb_eotf_standard',
+    '^crates/gamut-color/src/transfer\.rs:111:10: replace < with <= in prophoto_rgb_eotf_standard$',
     # gamut-iptc `IimBlock::parse`: every `|` assembles a big-endian length from disjoint octet
     # positions — `(hi << 8) | lo` (standard length), `(k_hi << 8) | k_lo` (extended descriptor
     # width), and `(len << 8) | byte` (extended length accumulator). In each the left operand's low
     # 8 bits are zero before the OR, so the operands never share a bit and `|` is identical to `^`.
     # All three `| -> ^` mutations are therefore equivalent. (The `<<`, `>`, and `==`/`>=` mutations
     # in this function are observable and killed by the extended-descriptor tests.)
-    'replace \| with \^ in IimBlock::parse',
+    '^crates/gamut-iptc/src/iim\.rs:(260:52|264:69|276:38): replace \| with \^ in IimBlock::parse$',
     # gamut-icc ProfileHeader::{is_embedded,is_transparency} test bit 0 of their field via
     # `flags & (1 << 0)`: a zero-distance shift is the identity in both directions
     # (`1 << 0` == `1 >> 0` == 1), so the mutation is provably equivalent. (The bit-1/2/3
     # accessors' shifts ARE killed by `decodes_flag_and_attribute_bits`.)
-    'replace << with >> in ProfileHeader::is_embedded',
-    'replace << with >> in ProfileHeader::is_transparency',
+    '^crates/gamut-icc/src/header\.rs:169:25: replace << with >> in ProfileHeader::is_embedded$',
+    '^crates/gamut-icc/src/header\.rs:183:30: replace << with >> in ProfileHeader::is_transparency$',
     # gamut-heic `HevcDecoder::supports` is a *defaulted trait method* whose body already is
     # `true` (the documented "I will attempt anything" default that keeps every pre-registry
     # implementation compiling, issue #273). The `-> true` replacement is therefore byte-identical
     # to the real body — provably equivalent and unkillable. The registry's *use* of the probe (push
     # order, skip-on-false, short-circuit) is fully covered by `tests/backend.rs`, and the overriding
     # implementations' `supports` mutants are not excluded.
-    'replace HevcDecoder::supports -> bool with true',
+    '^crates/gamut-heic/src/decode\.rs:105:9: replace HevcDecoder::supports -> bool with true$',
     # gamut-avif `AvifEncoder::lossless`: a named, intent-revealing alias for the default encoder
     # (the default mode is already lossless), so its body *is* `Self::default()` and the
     # `-> Default::default()` replacement is byte-identical — provably equivalent, unkillable. It
     # exists to pair with `lossy()` and make the call site explicit; `new()` (also `Self::default()`)
     # generates no such mutant. This is the only mutant the function produces.
-    'replace AvifEncoder::lossless -> Self with Default::default\(\)',
+    '^crates/gamut-avif/src/encoder\.rs:436:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
     # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
     # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
-    'replace WebpEncoder::lossless -> Self with Default::default\(\)',
+    '^crates/gamut-webp/src/encoder\.rs:125:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `alpha::write_compressed_alph`: `0xff00_0000 | (u32::from(a) << 8)` ORs the opaque
     # alpha byte (bits 24-31) with the green byte (bits 8-15); the operands are disjoint, so `|` == `^`.
-    'replace \| with \^ in write_compressed_alph',
+    # Its ALPH header byte `method.code() << 2 | 0x01` is the same shape: the shift clears the two
+    # low bits the `0x01` occupies.
+    '^crates/gamut-webp/src/alpha\.rs:(186:31|194:33): replace \| with \^ in write_compressed_alph$',
     # gamut-webp `transform::fwht4x4` negative-bias correction `x += i32::from(x < 0)`: the only value
     # where `<` and `<=` disagree is x == 0, where the extra +1 is absorbed by the subsequent
     # `(x + 3) >> 3` (both yield 0), so the four `< -> <=` mutations are unobservable. (The `+=`→`-=`,
     # `<`→`>` and `<`→`==` mutants ARE killed: the `[0, -1, 0, …]` golden vector drives the column
     # intermediates to ±4, where the correct and mutated roundings diverge.)
-    'replace < with <= in fwht4x4',
+    '^crates/gamut-webp/src/vp8/transform\.rs:(187:28|188:28|189:28|190:28): replace < with <= in fwht4x4$',
     # gamut-webp `BoolDecoder::get_literal`: `v = (v << 1) | u32::from(get_flag())` ORs a flag bit (0
     # or 1) into a freshly-vacated low bit, so the operands are disjoint and `|` is identical to `^`.
-    'replace \| with \^ in BoolDecoder<.a>::get_literal',
+    '^crates/gamut-webp/src/vp8/bool_coder\.rs:277:26: replace \| with \^ in BoolDecoder<.a>::get_literal$',
     # gamut-webp `loop_filter::s2u`: `(c(v) + 128) as u8`. `+ 128` and `- 128` differ by 256, which the
     # `as u8` truncation discards, so the result is identical — the `+ -> -` mutation is unobservable.
-    'replace \+ with - in s2u',
-    # gamut-webp `alpha::write_alph` returns the smaller of the raw and lossless encodings. At an exact
+    '^crates/gamut-webp/src/vp8/loop_filter\.rs:25:11: replace \+ with - in s2u$',
+    # gamut-webp `alpha::write_alph_with_effort` returns the smaller of the raw and lossless encodings. At an exact
     # size tie `<` keeps raw and `<=` would keep compressed, but both decode to identical alpha (the
     # transform is bijective) and real content never ties, so no non-contrived test can distinguish
     # them. (`< -> >` / `< -> ==` pick the *larger*/wrong encoding and are caught by the round-trip.)
-    'replace < with <= in write_alph',
+    '^crates/gamut-webp/src/alpha\.rs:238:28: replace < with <= in write_alph_with_effort$',
     # gamut-webp VP8 header — behaviourally-equivalent bit packing/branches.
     # write_uncompressed_chunk packs disjoint fields into the frame tag (`version<<1 | 1<<4 |
     # size<<5`, each within its width) and the dimension words (`width | hscale<<14`, width ≤ 0x3FFF);
     # read_uncompressed_chunk reassembles bytes at offsets 0/8/16. Disjoint operands ⇒ `|` == `^`.
-    'replace \| with \^ in write_uncompressed_chunk',
-    'replace \| with \^ in read_uncompressed_chunk',
+    '^crates/gamut-webp/src/vp8/header\.rs:(177:48|177:59|182:37|185:38): replace \| with \^ in write_uncompressed_chunk$',
+    '^crates/gamut-webp/src/vp8/header\.rs:(204:34|204:62|224:34|225:34): replace \| with \^ in read_uncompressed_chunk$',
     # write_delta / write_segment_feature emit the sign bit `value < 0` only inside the `value != 0`
     # branch, where `< 0` and `<= 0` agree. (The length/show-frame guards in read_uncompressed_chunk
     # and the segment `!=` terms ARE killed by the new boundary/round-trip tests.)
-    'replace < with <= in write_delta',
-    'replace < with <= in write_segment_feature',
+    '^crates/gamut-webp/src/vp8/header\.rs:245:28: replace < with <= in write_delta$',
+    '^crates/gamut-webp/src/vp8/header\.rs:319:28: replace < with <= in write_segment_feature$',
     # gamut-webp VP8 frame — behaviourally-equivalent.
     # (frame_header's LoopFilterParams literal is fully explicit — no `..Default::default()` — so a
     # `sharpness: 0` field deletion is a missing-field compile error: an *unviable* mutant rather than
     # an un-excludable equivalent survivor. cargo-mutants cannot match field deletions via exclude_re,
     # so the explicit literal is the clean way to retire that mutant.)
-    # split_token_partitions reassembles the 3-byte size from disjoint bytes (`s0 | s1<<8 | s2<<16`)
-    # ⇒ `|` == `^`. Its bits-16-23 byte (`s2<<16` read; `len>>16` write) is non-zero only for a single
-    # token partition > 64 KiB, which gamut never emits; for every reachable size that byte is 0, so
-    # `<<16`/`>>16` are identical (0). Col-anchored: the bits-8-15 shift on the same lines IS killed by
-    # `token_partitions_round_trip_bit_exact`, so it must stay tested.
-    'replace \| with \^ in split_token_partitions',
-    'frame\.rs:1172:79: replace << with >>',
-    'frame\.rs:1151:67: replace >> with <<',
+    # (The `split_token_partitions` size-prefix entries — `|` == `^` over disjoint bytes and the
+    # unreachable `<<16`/`>>16` byte — are gone: #110 reads and writes the prefix as one little-endian
+    # `u32` (`from_le_bytes` / `to_le_bytes`), which has no operator to mutate, and the anchors had
+    # drifted onto unrelated lines in the meantime.)
     # gamut-webp VP8 encoder — correctness-preserving free choices (NOT byte-identical). These mutate
     # cost/decision *heuristics*, never the bitstream contract: they change *which* valid encoding is
     # emitted, not its validity. The decoder reconstructs exactly what was written and the libwebp
@@ -383,31 +387,26 @@ exclude_re = [
     # specific choice would test an encoder heuristic (rate-distortion search is issue #32), not a spec
     # requirement. Each function below feeds only an encoder decision:
     #   mb_luma_mean — per-macroblock luma average, used only to choose a quantizer segment;
-    'in mb_luma_mean',
-    'replace mb_luma_mean -> u32 with',
+    '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in mb_luma_mean$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:132:5: replace mb_luma_mean -> u32 with .*$',
     #   block_sad — the prediction-cost proxy for mode selection;
-    'in block_sad',
+    '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in block_sad$',
     #   select_luma_mode / select_chroma_mode — lowest-SAD whole-block mode pickers (any mode is legal);
-    'in select_luma_mode',
-    'replace select_luma_mode -> usize with',
-    'in select_chroma_mode',
-    'replace select_chroma_mode -> usize with',
-    #   SEGMENT_QUANT_DELTAS (frame.rs:45) — the encoder's chosen per-segment quantizer spread; any
-    #   spread is valid and is faithfully signalled. Line-anchored: a bare const, no enclosing fn name.
-    'frame\.rs:45:40: delete -',
-    'frame\.rs:45:45: delete -',
+    '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in select_luma_mode$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:698:5: replace select_luma_mode -> usize with .*$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in select_chroma_mode$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:724:5: replace select_chroma_mode -> usize with .*$',
     #   encode_bpred_luma — the submode tie-break (`sad < best`) and the running prediction-cost
     #   accumulator (`total_sad +=`, used only for the B_PRED-vs-whole-block decision); both pick
     #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
-    'replace < with <= in encode_bpred_luma',
-    'replace \+= with \*= in encode_bpred_luma',
-    #   encode_frame_filtered decision heuristics (line-anchored so the structural mutants on other
-    #   operators of the same kind in this large function stay tested): the per-macroblock segment
-    #   assignment from luma mean (1029), the segment-map index it reads back (1049, self-consistent —
-    #   the same id is signalled), and the B_PRED-vs-whole-block SAD threshold (1070).
-    'frame\.rs:1029:53: replace / with',
-    'frame\.rs:1049:44: replace \* with /',
-    'frame\.rs:1070:59: replace < with <=',
+    '^crates/gamut-webp/src/vp8/frame\.rs:914:20: replace < with <= in encode_bpred_luma$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:920:19: replace \+= with \*= in encode_bpred_luma$',
+    #   (Line anchors on `SEGMENT_QUANT_DELTAS`' two signs and on `encode_frame_filtered`'s segment
+    #   assignment, segment-map index and B_PRED threshold had drifted off their lines and matched
+    #   nothing. #1054 re-surveyed those operators where they now stand — the deltas, the `/ 64`
+    #   segment pick, the `mb_y * mb_cols` index, and `bpred_beats_whole_block`, the threshold's own
+    #   function since — and the segmentation fixtures and the threshold test caught every one, so
+    #   no entry returns.)
     # gamut-webp VP8L encoder — correctness-preserving free choices. The lossless encode->decode
     # round-trip and the libwebp oracle BOTH run on these paths, so any mutant that produced an invalid
     # prefix code, an out-of-range backward reference, or a residual the inverse transform cannot undo
@@ -416,137 +415,107 @@ exclude_re = [
     # validity — so no correctness test can distinguish them:
     #   estimate_color_element / best_predictor_mode — least-squares colour coefficients and the
     #   minimum-residual spatial predictor; any element/mode is reversible and is signalled per block;
-    'in estimate_color_element',
-    'replace estimate_color_element ->',
-    'in best_predictor_mode',
-    'replace best_predictor_mode ->',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:\d+:\d+: .* in estimate_color_element$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:500:5: replace estimate_color_element -> \(i8, i8, i8\) with .*$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:\d+:\d+: .* in best_predictor_mode$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:380:5: replace best_predictor_mode -> u8 with .*$',
     #   residual_cost — a cheap entropy proxy used only to compare predictor modes;
-    'in residual_cost',
-    'replace residual_cost ->',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:\d+:\d+: .* in residual_cost$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:367:5: replace residual_cost -> u64 with .*$',
     #   pick_cache_bits / assign_groups — the colour-cache size and the meta-Huffman block grouping
     #   (both deferred-optimization knobs, issue #31; any choice is faithfully signalled);
-    'in pick_cache_bits',
-    'replace pick_cache_bits ->',
-    'in assign_groups',
-    'replace assign_groups ->',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:\d+:\d+: .* in pick_cache_bits$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:687:5: replace pick_cache_bits -> u32 with .*$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:\d+:\d+: .* in assign_groups$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:528:5: replace assign_groups -> GroupAssignment with Default::default\(\)$',
     #   huffman_pass — one length-limited Huffman construction pass; a suboptimal-but-valid tree only
-    #   costs bits (a malformed tree fails the round-trip and is caught);
-    'in huffman_pass',
+    #   costs bits (a malformed tree fails the round-trip and is caught). gamut-webp's only: the bare
+    #   name used to reach gamut-deflate's own `huffman_pass` as well, which nobody argued for here.
+    '^crates/gamut-webp/src/vp8l/prefix\.rs:\d+:\d+: .* in huffman_pass$',
     #   BackwardRefs::{hash,find,insert} — the LZ77 hash-chain matcher. Per its own contract
     #   (lz77.rs): "Correctness does not depend on the hash quality — matches are verified by
     #   comparison — only compression does." find() returns `1 <= distance <= pos` matches it verified.
-    'in BackwardRefs::hash',
-    'replace BackwardRefs::hash ->',
-    'in BackwardRefs::find',
-    'in BackwardRefs::insert',
+    '^crates/gamut-webp/src/vp8l/lz77\.rs:\d+:\d+: .* in BackwardRefs::hash$',
+    '^crates/gamut-webp/src/vp8l/lz77\.rs:311:9: replace BackwardRefs::hash -> usize with .*$',
+    '^crates/gamut-webp/src/vp8l/lz77\.rs:\d+:\d+: .* in BackwardRefs::find$',
+    '^crates/gamut-webp/src/vp8l/lz77\.rs:\d+:\d+: .* in BackwardRefs::insert$',
     #   forward_color / forward_predictor / forward_color_indexing replaced wholesale — these apply the
     #   *optional* §4 transforms; skipping a transform (the `-> vec![]`/`-> ()` body) emits a valid
     #   untransformed stream. (Their per-pixel apply math is asymmetric with the inverse and IS caught
     #   by the round-trip — only the whole-body "don't transform" replacement survives.)
-    'replace forward_color -> ',
-    'replace forward_predictor -> ',
-    'replace forward_color_indexing -> ',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:460:5: replace forward_color -> Vec<u32> with .*$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:339:5: replace forward_predictor -> \(Vec<u32>, Vec<u32>\) with .*$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:556:5: replace forward_color_indexing -> \(Vec<u32>, u32\) with .*$',
     # gamut-webp VP8L — behaviourally-equivalent.
     #   make_argb packs four channels into disjoint byte lanes (`a<<24 | r<<16 | g<<8 | b`), and
     #   reverse_bits ORs a single freshly-shifted bit into a vacated position — disjoint operands, so
     #   `|` == `^`.
-    'replace \| with \^ in make_argb',
-    'replace \| with \^ in reverse_bits',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:(117:24|117:45|117:65): replace \| with \^ in make_argb$',
+    #   (gamut-webp's `reverse_bits` only: the bare name used to reach gamut-deflate's as well.)
+    '^crates/gamut-webp/src/vp8l/prefix\.rs:58:22: replace \| with \^ in reverse_bits$',
     #   inverse_color's `if width == 0 || height == 0` is a defensive guard; for every real (≥1×1)
     #   image both operands are false, so `||`→`&&` cannot change the result (same shape as the av1
     #   loop_restore guard above).
-    'replace \|\| with && in inverse_color',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:415:19: replace \|\| with && in inverse_color$',
     # gamut-webp VP8L — more behaviourally-equivalent / free-choice survivors from the deep survey.
-    # value_to_prefix: the `offset` it subtracts only sets bits of `extra` at or above bit
-    # `num_extra_bits`; the sole caller emits exactly `num_extra_bits` low bits, so the offset's
-    # high-bit contribution is masked away and the bitstream is identical (verified: the
-    # lz77_value_prefix_round_trips test passes under each mutant). Line-anchored — the second `<<`/`+`
-    # in the function are killable.
-    'lz77\.rs:205:35: replace << with >>',
-    'lz77\.rs:205:50: replace \+ with \*',
-    'lz77\.rs:209:46: replace - with \+',
-    # distance_code_to_pixel_distance / pixel_distance_to_code clamp `if x < 1 { 1 }`: at x == 1 both
-    # `<` and `<=` yield 1, so `< -> <=` is unobservable. (`< -> ==` in pixel_distance_to_code IS
-    # caught by the width-1 clamp test.)
-    'replace < with <= in distance_code_to_pixel_distance',
-    'lz77\.rs:219:32: replace < with',
+    # (value_to_prefix's offset entries are gone: #110 masks the extra value instead of subtracting
+    # an offset, so the slack they argued about no longer exists. So is the pixel_distance_to_code
+    # clamp entry: that function is `#[cfg(test)]` now and generates no mutants.)
+    # distance_code_to_pixel_distance clamps `if x < 1 { 1 }`: at x == 1 both `<` and `<=` yield 1,
+    # so `< -> <=` is unobservable.
+    '^crates/gamut-webp/src/vp8l/lz77\.rs:184:13: replace < with <= in distance_code_to_pixel_distance$',
     # predict: arm `0 => 0xff00_0000` is identical to the wildcard `_ => 0xff00_0000`, so deleting it
-    # falls through to the same value. (Location-anchored: cargo-mutants matches match-arm deletions by
-    # location, like field deletions.)
-    'transform\.rs:228:9: delete match arm',
+    # falls through to the same value.
+    '^crates/gamut-webp/src/vp8l/transform\.rs:228:9: delete match arm 0 in predict$',
     # inverse_predictor's `if width == 0 || height == 0` is the same defensive zero-dimension guard as
     # inverse_color; both operands false for every real image, so `||`->`&&` is inert.
-    'replace \|\| with && in inverse_predictor',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:313:19: replace \|\| with && in inverse_predictor$',
     # BitWriter::write_bits `if n == 0 || n > 32`: real callers always pass n in 1..=32, where both
     # operands are false; n == 0 is itself a no-op (zero mask), so `||`->`&&` cannot change output.
-    'replace \|\| with && in BitWriter::write_bits',
+    # (gamut-webp's `BitWriter` only: the bare name used to reach gamut-deflate's as well.)
+    '^crates/gamut-webp/src/vp8l/bit_io\.rs:139:19: replace \|\| with && in BitWriter::write_bits$',
     # GroupAssignment::group_at `if num_groups <= 1 || width == 0`: for a single group the function
     # returns 0 anyway (the only group), so skipping the early return via `&&` yields the same 0.
-    'replace \|\| with && in GroupAssignment::group_at',
-    # write_normal_prefix_code `if (len as usize) < CODE_LENGTH_CODES`: literal code lengths are 0..=15,
-    # always < 19, so widening to `<=` is unreachable. (The `>`-trim at :497 IS caught.)
-    'prefix\.rs:487:27: replace < with <=',
-    # tokens::encode_block emits the sign bit `level < 0` only where `level != 0`, so `< 0` == `<= 0`.
-    'vp8/tokens\.rs:565:32: replace < with <=',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:487:33: replace \|\| with && in GroupAssignment::group_at$',
+    # (The write_normal_prefix_code `len < CODE_LENGTH_CODES` entry is gone with the comparison; the
+    # encode_block sign test and the encode_spatial `- 2` it duplicated are the walk_block and
+    # encode_spatial entries further down.)
     # forward_color_indexing reassembles disjoint bytes -> `|` == `^`.
-    'replace \| with \^ in forward_color_indexing',
-    # encode_spatial writes `TRANSFORM_SIZE_BITS - 2` (= 4 - 2 = 2); since the const is 4, `- 2` and
-    # `/ 2` are the identical value 2 (same shape as the av1 ec_partition justification).
-    'encoder\.rs:147:48: replace - with /',
-    'encoder\.rs:152:48: replace - with /',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:574:57: replace \| with \^ in forward_color_indexing$',
     # gamut-webp VP8L — more correctness-preserving free choices (issue #31 encoder heuristics).
     # Token::green_symbol is, per its doc, "a cheap per-block signature for grouping" — it feeds only
     # assign_groups, so any value just regroups blocks.
-    'in Token::green_symbol',
-    # tokenize :458 `if cache_bits > 0` chooses whether to use the optional colour cache; both
-    # branches emit a valid, self-consistently-signalled stream.
-    'encoder\.rs:458:35: replace > with',
-    # build_length_limited_lengths :348 `h > 0` counts used symbols; overcounting only yields a
-    # valid-but-suboptimal length-limited tree (a malformed tree fails the round-trip).
-    'prefix\.rs:348:48: replace > with >=',
-    # write_main_image meta-prefix signalling (:330 single-vs-multi group, :332 the block-size field):
-    # both paths round-trip self-consistently with the decoder; the grouping itself is free (issue #31).
-    'encoder\.rs:330:26: replace > with >=',
-    'encoder\.rs:332:41: replace - with /',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:\d+:\d+: .* in Token::green_symbol$',
+    # (Line anchors on the colour-cache `cache_bits > 0` choice, `build_length_limited_lengths`'
+    # `h > 0` count and `write_main_image`'s meta-prefix signalling had drifted off their lines and
+    # matched nothing. #1054 re-surveyed every comparison and subtraction at those sites where they
+    # now stand, in `write_main_image` and `build_length_limited_lengths`, and the effort byte-pins
+    # caught all of them, so no entry returns.)
     # forward_predictor / forward_color block geometry (`1 << size_bits`, the sub-image index): a
     # mutated block size or write index just makes the encoder choose predictor/colour elements the
     # decoder reads back identically (the per-pixel residual/colour math is asymmetric and IS caught).
-    'transform\.rs:341:49: replace << with >>',
-    'transform\.rs:342:51: replace << with >>',
-    'transform\.rs:348:26: replace \* with /',
-    'transform\.rs:462:49: replace << with >>',
-    'transform\.rs:463:51: replace << with >>',
-    'transform\.rs:464:29: replace << with >>',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:341:49: replace << with >> in forward_predictor$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:342:51: replace << with >> in forward_predictor$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:348:26: replace \* with / in forward_predictor$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:462:49: replace << with >> in forward_color$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:463:51: replace << with >> in forward_color$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:464:29: replace << with >> in forward_color$',
     # gamut-webp VP8L prefix/predictor — equivalents confirmed by deep analysis.
-    # from_code_lengths: `[0; MAX_CODE_LENGTH + 2]` only sizes a scratch array; `+ 2`->`* 2` makes it
-    # larger, and the extra entries are never indexed (offsets[len+1], len<=MAX), so output is identical.
-    'prefix\.rs:124:52: replace \+ with \*',
-    # canonical_codes: the `len > 0 && len <= MAX` filter counts/assigns only used symbols. Counting a
-    # length-0 symbol adds to bl_count[0], whose contribution lands at bit >= the code length and is
-    # masked off by reverse_bits(_, len); assigning a code to an unused symbol is never emitted. So the
-    # `>`->`>=` and `&&`->`||` mutants on both copies are unobservable (verified: the
-    # canonical_codes_and_decoder_agree round-trip passes under them).
-    'prefix\.rs:317:16: replace > with >=',
-    'prefix\.rs:317:20: replace && with \|\|',
-    'prefix\.rs:329:16: replace > with >=',
-    'prefix\.rs:329:20: replace && with \|\|',
+    # (from_code_lengths' `[0; MAX_CODE_LENGTH + 2]` entry is gone: the scratch array is no longer
+    # sized by hand, so the `+` it argued about does not exist. The two line-anchored copies of the
+    # canonical_codes guards it sat beside had drifted off their lines; the canonical_codes entries
+    # further down carry that claim. The write_normal_prefix_code `:497` trim is code_length_count's.)
     # predicted_value rightmost-column TR: at x == width-1, `img[idx - width + 1]` equals
     # `img[y*width]` (both index the current row's first pixel), so the `x + 1 < width` guard's two
     # branches return the same pixel there and differ nowhere else — the `+`/`<` mutants are inert.
-    'transform\.rs:288:23: replace \+ with',
-    'transform\.rs:288:27: replace < with <=',
-    # write_normal_prefix_code :497 trailing-zero trim of the code-length-code count (min 4 per spec):
-    # `>`->`<`/`==` skip trimming, emitting all 19 lengths — a valid, larger stream the decoder reads
-    # back by the written count (free choice). `>`->`>=` would over-trim only for a degenerate
-    # histogram with <=3 distinct code-length symbols, which the length-limited builder never produces
-    # for a real alphabet, so it is unreachable.
-    'prefix\.rs:497:28: replace > with',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:288:23: replace \+ with (\*|-) in predicted_value$',
+    '^crates/gamut-webp/src/vp8l/transform\.rs:288:27: replace < with <= in predicted_value$',
     # gamut-jxl (issue #243) — the crate wraps libjxl (encode) and jxl-rs (decode); these are the
     # only survivors, all in the unsafe `ffi.rs` glue and all unobservable through the public API.
     # `<impl Drop for Encoder>::drop`: its sole effect is `JxlEncoderDestroy`, freeing the libjxl
     # handle. Skipping it leaks the encoder but changes no produced byte and no Ok/Err outcome, so no
     # behavioural test can observe it (a leak checker is out of scope) — unobservable ⇒ unkillable.
-    'replace <impl Drop for Encoder>::drop with \(\)',
+    '^crates/gamut-jxl/src/ffi\.rs:29:9: replace <impl Drop for Encoder>::drop with \(\)$',
     # `Encoder::check` maps a libjxl setup status to a `Result`, returning `Ok(())` on SUCCESS. gamut
     # validates every parameter it forwards *before* the FFI — dimensions > 0 (`Dimensions`), distance
     # ∈ (0,25] (`Distance`), effort ∈ 1..=10 (`Effort`), modular ∈ {-1,0,1} (`ModularMode`, and the
@@ -563,7 +532,7 @@ exclude_re = [
     # is unit-tested directly in `error.rs`. Even under the mutant a real mid-sequence libjxl failure
     # still surfaces: the ProcessOutput ERROR arm reads `JxlEncoderGetError` directly, bypassing
     # `check`.
-    'replace Encoder::check -> Result<\(\)> with Ok\(\(\)\)',
+    '^crates/gamut-jxl/src/ffi\.rs:39:9: replace Encoder::check -> Result<\(\)> with Ok\(\(\)\)$',
     # (The former OUTPUT_CHUNK_INIT/MAX `64 * 1024` exclusions are retired: the drain-loop
     # reservation constants are plain literals now, so they generate no arithmetic mutants at all —
     # the values are encoder free choices, and the `* → /`-to-zero mutations used to be "caught"
@@ -572,7 +541,7 @@ exclude_re = [
     # mode is already lossless), so its body *is* `Self::default()` and the `-> Default::default()`
     # replacement is byte-identical — provably equivalent, unkillable. Same shape and justification
     # as the AvifEncoder::lossless / WebpEncoder::lossless entries above.
-    'replace JxlEncoder::lossless -> Self with Default::default\(\)',
+    '^crates/gamut-jxl/src/encoder\.rs:169:9: replace JxlEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `vp8l::prefix::canonical_codes` writes `len > 0 && (len as usize) <=
     # MAX_CODE_LENGTH` twice -- once counting into `bl_count`, once assigning from `next_code` --
     # and relaxing either to `||` is equivalent. Neither is obvious, and both were checked by
@@ -602,8 +571,11 @@ exclude_re = [
     # The neighbouring `== 0` and `< 0` mutations are NOT equivalent -- `== 0` inverts the guard
     # and is caught -- so they stay in the survey, which is why these entries name `>=` rather
     # than matching every comparison in the function.
-    'replace && with \|\| in canonical_codes',
-    'replace > with >= in canonical_codes',
+    #
+    # gamut-webp's `canonical_codes` only: the bare name used to reach gamut-deflate's own
+    # `canonical_codes` as well, which nobody argued for here.
+    '^crates/gamut-webp/src/vp8l/prefix\.rs:(353:20|365:20): replace && with \|\| in canonical_codes$',
+    '^crates/gamut-webp/src/vp8l/prefix\.rs:(353:16|365:16): replace > with >= in canonical_codes$',
     # gamut-webp `vp8l::prefix::code_length_count`: the trim's floor, `count > 4`, relaxed to
     # `>= 4`. Reaching 3 would underflow the caller's `- 4` on a `usize` and panic, but the loop
     # can never get there.
@@ -617,12 +589,12 @@ exclude_re = [
     # three `>` comparisons and the other two are *not* equivalent -- `symbol0 > 1` and the
     # `rposition(|&l| l > 0)` that trims `max_symbol` are both real gaps -- so an exclusion named
     # for `write_description` would have hidden them.
-    'replace > with >= in code_length_count',
+    '^crates/gamut-webp/src/vp8l/prefix\.rs:671:17: replace > with >= in code_length_count$',
     # gamut-jpeg quant::quality_scale — `if q < 50 { 5000 / q } else { 200 - 2 * q }` (the frozen
     # IJG quality mapping). The mapping is continuous at the branch point: at q == 50 — the only
     # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
     # the same scale and no input can distinguish the mutant: equivalent.
-    'replace < with <= in quality_scale',
+    '^crates/gamut-jpeg/src/quant\.rs:162:10: replace < with <= in quality_scale$',
     # gamut-dng predictor `undo`: `if channels == 0 || group_cols < 2 { return; }`, relaxed to
     # `&&`, is equivalent. `factor` reaches this line only through
     # `x_factor(predictor).filter(|&f| f > 0)`, so `channels = spp * factor` is zero only when
@@ -631,13 +603,15 @@ exclude_re = [
     # is an empty range whenever `group_cols < 2` (row_step <= channels) or `channels == 0`
     # (row_step == 0). The mutant therefore does strictly more work and writes exactly the same
     # bytes. An early return for speed, not for behaviour -- same shape as the `pt > 0` skip below.
-    'replace \|\| with && in undo',
+    '^crates/gamut-dng/src/predictor\.rs:105:22: replace \|\| with && in undo$',
     # gamut-dng lossless JPEG `decode`: `if pt > 0` guarding the point-transform upshift.
     # `pt` is a `u16`, so `pt >= 0` is unconditionally true and the loop it guards runs with a
     # shift of zero -- `*sample <<= 0` leaves every sample exactly as it was. The mutant does
     # strictly more work and produces byte-identical output, so no test can separate them: the
-    # guard is an optimisation, not a behaviour. Equivalent.
-    'replace > with >= in decode',
+    # guard is an optimisation, not a behaviour. Equivalent. (This one comparison only: the bare
+    # name used to reach every `>` in every function whose name begins `decode`, nineteen others
+    # across gamut-dng, gamut-icc, gamut-jpeg and gamut-webp that nobody argued for.)
+    '^crates/gamut-dng/src/lossless_jpeg\.rs:905:11: replace > with >= in decode$',
     # gamut-dng predictor `x_factor`: deleting the `Predictor::None => Some(0)` arm drops it to
     # `_ => None`, and neither caller can tell the two apart.
     #
@@ -652,14 +626,14 @@ exclude_re = [
     # `Predictor::None` really does difference against zero pixels to the left, and if the early
     # return above ever moved, `_ => None` would misreport it as a floating-point predictor. Same
     # shape and justification as the defensive clamps below.
-    'delete match arm Predictor::None in x_factor',
-    # gamut-jpeg decoder DecodedImage::sample — the upsampling clamps `.min(comp_w - 1)` /
-    # `.min(comp_h - 1)` are defence-in-depth that provably never engage: `px ≤ X−1` (the present
-    # loops) gives `cx = ⌊px·h/hmax⌋ ≤ ⌊(X·h−1)/hmax⌋ ≤ ⌈X·h/hmax⌉−1 = comp_w−1` (h ≥ 1, h ≤ hmax;
-    # likewise for cy), so both mutations only ENLARGE a bound the no-op clamp never reaches —
-    # equivalent. The clamp itself stays, per the never-panic-on-untrusted-input policy.
-    'replace - with \+ in DecodedImage::sample',
-    'replace - with / in DecodedImage::sample',
+    '^crates/gamut-dng/src/predictor\.rs:28:9: delete match arm Predictor::None in x_factor$',
+    # gamut-jpeg decoder DecodedImage::sample_row — the upsampling clamp `.min(comp_h - 1)` is
+    # defence-in-depth that provably never engages: `py ≤ Y−1` (the present rows) gives
+    # `cy = ⌊py·v/vmax⌋ ≤ ⌊(Y·v−1)/vmax⌋ ≤ ⌈Y·v/vmax⌉−1 = comp_h−1` (v ≥ 1, v ≤ vmax), so both
+    # mutations only ENLARGE a bound the no-op clamp never reaches — equivalent. The clamp itself
+    # stays, per the never-panic-on-untrusted-input policy.
+    '^crates/gamut-jpeg/src/decoder\.rs:628:77: replace - with \+ in DecodedImage::sample_row$',
+    '^crates/gamut-jpeg/src/decoder\.rs:628:77: replace - with / in DecodedImage::sample_row$',
     # (gamut-jpeg's `refine` and `ProgCoder::ac_refine` sign tests, `coeff > 0` on a coefficient
     # that is never zero, used to be excluded here as equivalent; #924 rewrote both as
     # `is_positive()`, which has no comparison to mutate. `ac_refine`'s `eob_pos` search, excluded
@@ -674,49 +648,34 @@ exclude_re = [
     # `(r + 16) << 4 ≡ r << 4 (mod 256)` — the added bit is exactly the one the shift discards,
     # so the emitted symbol is identical for every reachable run. Provably equivalent.
     # (`% -> /` collapses the run nibble to 0 and IS caught by the run-cost threshold tests.)
-    'rd\.rs:178:37: replace % with \+ in trellis_quantize',
+    '^crates/gamut-jpeg/src/rd\.rs:178:37: replace % with \+ in trellis_quantize$',
     # Backtrack sign restore `if coeff[k] < 0`: a backtracked node k always has a candidate
     # v >= 1, which requires v_hi[k] >= 1 and hence coeff[k] != 0 — the only value where `<` and
     # `<=` disagree is unreachable. Provably equivalent (same shape as the `refine` sign-test
     # entry above). (`< -> >` flips real signs and IS caught by the entropy-decode round-trip.)
-    'rd\.rs:271:36: replace < with <= in trellis_quantize',
+    '^crates/gamut-jpeg/src/rd\.rs:271:36: replace < with <= in trellis_quantize$',
     # gamut-heic (issue #238) — behaviourally-equivalent survivors.
     # `Reader::u48` (hvcc.rs) assembles a 48-bit big-endian value byte-by-byte via
     # `(acc << 8) | u64::from(byte)`: the running accumulator is shifted up 8 bits before each OR, so
     # its low 8 bits are always zero and never overlap the freshly-read byte (0..=255). Disjoint
     # operands ⇒ `|` is identical to `^`; the `| -> ^` mutant is provably equivalent (same shape as
     # the gamut-ifd `Value::decode` / gamut-iptc `IimBlock::parse` byte-assembly entries above).
-    'replace \| with \^ in Reader<.a>::u48',
+    '^crates/gamut-heic/src/hvcc\.rs:476:49: replace \| with \^ in Reader<.a>::u48$',
     # `NalHeader::parse` (nal.rs) packs `nuh_layer_id` from two disjoint bit fields:
     # `(u16::from(b0 & 0x01) << 5) | u16::from(b1 >> 3)`. The left operand contributes only bit 5
     # (0 or 32); the right only bits 0..=4 (`b1 >> 3` is 0..=31). The operands never share a bit, so
     # `| -> ^` is equivalent.
-    'replace \| with \^ in NalHeader::parse',
+    '^crates/gamut-heic/src/nal\.rs:151:52: replace \| with \^ in NalHeader::parse$',
     # `NalUnitIter::next` (nal.rs) accumulates a big-endian length prefix via
     # `(acc << 8) | usize::from(b)`: identical disjoint-byte shape as `Reader::u48`, so `| -> ^` is
     # equivalent.
-    'replace \| with \^ in <impl Iterator for NalUnitIter<.a>>::next',
-    # `walk_segments` (container.rs) is reached only from `HeifContainer::parse`, and only *after*
-    # `gamut_isobmff::read(data)?` has already succeeded — which requires both `ftyp` and `meta` to
-    # have been parsed. `walk_segments` replays the identical `BoxReader` walk, so by the time it
-    # reaches its malformed-box arm (the only place the `seen_ftyp && seen_meta` guard runs) both
-    # flags are necessarily true (had a malformed box preceded either, `read` itself would have
-    # errored and `parse` would never call `walk_segments`). With both operands always true at that
-    # point, `&&` and `||` are indistinguishable — the mutant is equivalent. Line-anchored (like the
-    # frame.rs entries above) because the *other* `&&` in the same function — the second-`ftyp`
-    # appended-stream detection at container.rs:253 — is observable and stays killed by the
-    # accounting tests. (The analogous tolerance guard in `read`, which *is* reachable with only one
-    # box seen, is killed by the exact-message tests in gamut-isobmff `tests/reader.rs`.)
-    'container\.rs:283:30: replace && with \|\|',
-    # gamut-png typed decoders (decoder.rs) — every `DecodeImage<P>` match arm pairs a colour-type
-    # pattern with a bit-depth guard, and the arm body begins by extracting exactly that depth's
-    # sample variant (`native8`/`native16`). Forcing a depth guard to *true* only admits files of
-    # the other depth, whose extraction fails with the very same `LOSSY` `Unsupported` error the
-    # default arm returns — no input distinguishes the mutant. Scoped to the guard-to-true shape
-    # only: the `with false` and comparison-operator variants of the same guards change which valid
-    # files decode and are killed by the typed-widening tests (sub-byte grey scaling, colour keys,
-    # GrayAlpha16→Rgba16).
-    'replace match guard native\.header\.bit_depth (==|<=) (8|16) with true in <impl DecodeImage<.+> for PngDecoder>::decode_image',
+    '^crates/gamut-heic/src/nal\.rs:195:48: replace \| with \^ in <impl Iterator for NalUnitIter<.a>>::next$',
+    # (The `seen_ftyp && seen_meta` trailer guard this list used to exclude as unreachable through
+    # `HeifContainer::parse` now lives in gamut-isobmff's public `walk_segments`, whose own tests
+    # call it directly; #1054's survey scored its `&&` → `||` caught there, so no entry returns.)
+    # (The gamut-png typed-decoder bit-depth match guards are gone: `DecodeImage<P>` delegates the
+    # layout change to gamut-core's `convert` module now, so the guards the entry argued about no
+    # longer exist and it matched nothing.)
     # gamut-color lab.rs — the CIELab companding branches are *tangent* at the junction: the
     # cube-root and linear forms both evaluate to 6/29 (L* = 8) at t = ε = 216/24389 exactly, by
     # construction of the exact rationals (that tangency is the reason ICC mandates them). `>` vs
@@ -724,8 +683,8 @@ exclude_re = [
     # exactly in f64, where the two branches agree to within one ulp of f64 `cbrt` — no test can
     # separate them without asserting a specific rounding of `cbrt`, which is exactly the
     # contrived-test shape this list exists to avoid.
-    'replace > with >= in lab_f',
-    'replace > with >= in lab_to_xyz',
+    '^crates/gamut-color/src/lab\.rs:60:10: replace > with >= in lab_f$',
+    '^crates/gamut-color/src/lab\.rs:(112:30|118:24|123:30): replace > with >= in lab_to_xyz$',
     # CIEDE2000 hue plumbing (Sharma et al. 2005). `wrap_hue_diff` folds Δh′ into (−180°, 180°]
     # and feeds only `sin(Δh′/2)` (Eq. (11)), which is 360°-periodic — so adding versus
     # subtracting 360° is provably unobservable (`- with +` / `+ with -`), and the strict-vs-
@@ -734,38 +693,38 @@ exclude_re = [
     # sign feeds is ~1e-22 (mean hue 90°/180° vs the 275° rotation centre) and the sign choice at
     # exactly 180° is the formula's own documented ambiguity, resolved differently across
     # implementations' last-ulp `atan2` scaling — unpinnable against any oracle.
-    'replace - with \+ in wrap_hue_diff',
-    'replace \+ with - in wrap_hue_diff',
-    'replace > with >= in wrap_hue_diff',
-    'replace < with <= in wrap_hue_diff',
+    '^crates/gamut-color/src/lab\.rs:451:11: replace - with \+ in wrap_hue_diff$',
+    '^crates/gamut-color/src/lab\.rs:453:11: replace \+ with - in wrap_hue_diff$',
+    '^crates/gamut-color/src/lab\.rs:450:10: replace > with >= in wrap_hue_diff$',
+    '^crates/gamut-color/src/lab\.rs:452:17: replace < with <= in wrap_hue_diff$',
     # `chroma_product_is_zero` gates the degenerate hue conventions of Eqs. (10)/(14). When either
     # chroma is zero every downstream hue term carries the factor √(C1′·C2′) = 0 (ΔH′ = 0, so the
     # hue and rotation terms vanish identically), making the branch choice unobservable; `*` vs
     # `+`/`/` on the product only changes *which* zero-chroma inputs take the degenerate branch.
     # The `== with !=` mutant of the same comparison flips behaviour for chromatic pairs and
     # stays killed by the Sharma golden set.
-    'replace \* with \+ in chroma_product_is_zero',
-    'replace \* with / in chroma_product_is_zero',
+    '^crates/gamut-color/src/lab\.rs:466:9: replace \* with \+ in chroma_product_is_zero$',
+    '^crates/gamut-color/src/lab\.rs:466:9: replace \* with / in chroma_product_is_zero$',
     # …and the whole-function `-> false` replacement is the same class: it only reroutes
     # zero-chroma pairs onto the general arms, whose hue terms the zero factor annihilates
     # anyway. (`-> true` reroutes chromatic pairs and stays killed by the Sharma set.)
-    'replace chroma_product_is_zero -> bool with false',
+    '^crates/gamut-color/src/lab\.rs:466:5: replace chroma_product_is_zero -> bool with false$',
     # Same vanishing-term argument for the Eq. (14) degenerate sum itself: `h1′ + h2′` is only
     # consumed when ΔH′ = 0 has already zeroed every term it feeds — so its operator mutants
     # *and* every whole-function value replacement are unobservable alike.
-    'replace \+ with (-|\*) in degenerate_hue_sum',
-    'replace degenerate_hue_sum -> f64 with',
+    '^crates/gamut-color/src/lab\.rs:476:9: replace \+ with (-|\*) in degenerate_hue_sum$',
+    '^crates/gamut-color/src/lab\.rs:476:5: replace degenerate_hue_sum -> f64 with .*$',
     # The Eq. (14) mean-hue `sum < 360` boundary: `<` vs `<=` differs only when h1′ + h2′ ==
     # 360.0 exactly with |h1′ − h2′| > 180°, which no exactly-representable hue pair satisfies
     # (the representable right angles give |Δh′| ≤ 180°) — and even then the two arms differ by
     # 360°, feeding the 360°-periodic Eq. (15) cosines and a Δθ rotation term at its ~1e-5 floor.
-    'replace < with <= in delta_e_2000_weighted',
+    '^crates/gamut-color/src/lab\.rs:531:23: replace < with <= in delta_e_2000_weighted$',
     # `ciede2000_hue_deg` normalizes atan2 into [0, 360): `h < 0` vs `<=` differs only at
     # h == 0, where the mutant returns 360 — the same angle. Every consumer is wrap-invariant:
     # Δh′ goes through the wrap fold and then `sin(Δh′/2)`, and the Eq. (14) mean re-folds a
     # ±360° shift of either hue to the identical h̄′ (that invariance is the point of its
     # adjustment arms). Provably equivalent.
-    'replace < with <= in ciede2000_hue_deg',
+    '^crates/gamut-color/src/lab\.rs:441:10: replace < with <= in ciede2000_hue_deg$',
     # gamut-cmm pipeline.rs Pipeline::fixed16 — the integer fast path's selection (#423), a
     # performance choice with no observable output. `None` sends `transform_u16`/`transform_u8`
     # through the provided `f64` conversion, which over a `NodePrecision::Fixed16` table computes
@@ -780,7 +739,7 @@ exclude_re = [
     # agree. Every other mutant on the fast path (the per-pixel loops, the widening and narrowing,
     # the buffer checks) stays in the survey; `ClutTable::fixed16` stays too, since the clut.rs
     # unit tests call it directly.
-    "replace Pipeline::fixed16 -> Option<Fixed16<'_>> with None",
+    '^crates/gamut-cmm/src/pipeline\.rs:448:9: replace Pipeline::fixed16 -> Option<Fixed16<._>> with None$',
     # gamut-cmm curve.rs — provably-equivalent mutants in tone-curve inversion/monotonicity.
     #   is_monotonic: deleting the tabulated arm falls through to the dense-probe path; both
     #   tabulated representations hold exactly MONOTONICITY_PROBES entries by construction
@@ -793,15 +752,15 @@ exclude_re = [
     #   Equivalent. (The analogous Icc(Sampled) arm deletion IS killable — tables of other
     #   lengths diverge — and is killed by
     #   `sampled_monotonicity_is_judged_on_entries_not_probes`.)
-    'delete match arm Repr::SampledInverse\{table\} \| Repr::Table\{table\} in ToneCurve::is_monotonic',
+    '^crates/gamut-cmm/src/curve\.rs:185:13: delete match arm Repr::SampledInverse\{table\} \| Repr::Table\{table\} in ToneCurve::is_monotonic$',
     #   reverse_table's no-interval arm (the only bare `<`/`>` in the function): reached only
     #   when the interval scan fails, and for the monotonic tables reverse_table receives, a
     #   target exactly equal to table[0] is always bracketed by segment 0 (`table[0] <= y &&
     #   y <= table[1]` holds at equality in both scan directions), so the boundary the mutation
     #   changes (y == table[0]) never reaches these comparisons. Equivalent both times; the
     #   strict sides ARE killed by `reverse_table_out_of_range_targets_clamp_to_domain_ends`.
-    'replace < with <= in reverse_table',
-    'replace > with >= in reverse_table',
+    '^crates/gamut-cmm/src/curve\.rs:532:26: replace < with <= in reverse_table$',
+    '^crates/gamut-cmm/src/curve\.rs:533:29: replace > with >= in reverse_table$',
     # gamut-cmm bpc.rs — float-boundary twins of transcribed lcms2 thresholds (#329). Each
     # threshold comparison is isolated in a tiny named helper precisely so these
     # boundary-equality mutants can be excluded without shadowing the killable mutants that
@@ -812,12 +771,12 @@ exclude_re = [
     #   is decided only at a difference of exactly 4.0 — inRamp is l·100/255 and outRamp an
     #   interpolated 16-bit-derived value, so exact equality is a measure-zero float
     #   coincidence no profile-derived ramp attains.
-    'replace < with <= in within_straightness_tolerance',
+    '^crates/gamut-cmm/src/bpc\.rs:210:26: replace < with <= in within_straightness_tolerance$',
     #   in_fit_window (`lo ≤ ff < hi`, cmssamp.c:568): the exclusive upper bound's twin is
     #   decided only at `ff == hi` exactly, with ff a quotient of interpolated ramp values;
     #   engineering exact equality would also make lcms2's own classification of that point
     #   fall on the boundary, breaking the differential's determinism rather than testing it.
-    'replace < with <= in in_fit_window',
+    '^crates/gamut-cmm/src/bpc\.rs:217:20: replace < with <= in in_fit_window$',
     #   below_tolerance (the MATRIX_DET_TOLERANCE = 1e-4, |a|/|b| < 1e-10, and D50-anchor
     #   1e-12 cutoffs): the twin is decided only at magnitude == tolerance exactly — a
     #   determinant of least-squares sums, a fitted coefficient, or a black-point-to-anchor
@@ -825,7 +784,7 @@ exclude_re = [
     #   (the thresholds are not representable on those values' result grids). The reachable
     #   disagreements of `<`→`==` ARE killed (fit_root_replicates_the_lcms2_determinant_cutoff,
     #   equal_black_points_and_d50_coincidence_skip_compensation).
-    'replace < with <= in below_tolerance',
+    '^crates/gamut-cmm/src/bpc\.rs:226:15: replace < with <= in below_tolerance$',
     #   clip_probe_l (the darker-colorant L* clip, cmssamp.c:129-134): `> 95` vs `>= 95` is
     #   decided only at L* == 95.0 exactly, which no 16-bit Lab encoding produces (v4 needs
     #   raw 62258.25, v2 the non-representable 62016/652.8 quotient); the `< 0` arm is dead
@@ -834,9 +793,9 @@ exclude_re = [
     #   fidelity, and at the one reachable disagreement point (L* == 0) both variants of both
     #   mutations still return 0. The `> `→`==`, `||`→`&&`, and body mutants ARE killed
     #   (high_l_probe_clips_to_zero_not_fifty and the pedestal probe pins).
-    'replace > with >= in clip_probe_l',
-    'replace < with <= in clip_probe_l',
-    'replace < with == in clip_probe_l',
+    '^crates/gamut-cmm/src/bpc\.rs:240:10: replace > with >= in clip_probe_l$',
+    '^crates/gamut-cmm/src/bpc\.rs:240:22: replace < with <= in clip_probe_l$',
+    '^crates/gamut-cmm/src/bpc\.rs:240:22: replace < with == in clip_probe_l$',
     # gamut-cmm gamut.rs — the one boundary twin of the transcribed GamutSampler decision
     # table (#330). ratio_excess isolates the table's ratio arm precisely so this can be
     # excluded without shadowing the killable threshold mutants in GamutCheck::excess (all
@@ -845,7 +804,7 @@ exclude_re = [
     # the untaken one returns 0.0 — bitwise the same output, so `>` vs `>=` cannot change
     # observable behaviour. Every other mutant in ratio_excess (the dE2 == 0 guard, the
     # division, the subtraction, the branch bodies) IS killed by the same test's exact pins.
-    'replace > with >= in ratio_excess',
+    '^crates/gamut-cmm/src/gamut\.rs:193:14: replace > with >= in ratio_excess$',
     # gamut-webp VP8 sign reconstruction (tokens.rs / quant.rs) — two `x < 0` sign tests whose
     # `<=` twin differs only at zero, which neither can reach. `walk_block`'s sign bit is written
     # inside `if token != DCT_0`, and `token_for_abs` returns `DCT_0` exactly when the level is
@@ -853,14 +812,17 @@ exclude_re = [
     # that is zero whenever `coeff` is zero (the bias term `bias * factor / (factor * 256)` floors
     # to 0 for both biases the encoder uses, 128 and 120, which are the only values its single
     # caller passes), and `-0 == 0` for integers. Both are equivalent mutants, not coverage gaps.
-    'tokens\.rs:.*: replace < with <= in walk_block',
-    'quant\.rs:.*: replace < with <= in quantize_biased',
+    # (`walk_block`'s other `<`, the `eob < 16` end-of-block test, is not a sign test and stays in
+    # the survey; the path-and-name anchor this replaced reached it too.)
+    '^crates/gamut-webp/src/vp8/tokens\.rs:610:39: replace < with <= in walk_block$',
+    '^crates/gamut-webp/src/vp8/quant\.rs:161:14: replace < with <= in quantize_biased$',
     # gamut-webp VP8L colour-transform block size (encoder.rs `encode_spatial`) — the transform
     # header stores `size_bits - 2` (RFC 9649 §4.4). Every plan in the ladder emits the colour
     # transform at `DEFAULT_TRANSFORM_BITS` (4), where `4 - 2` and `4 / 2` are both 2, so no input
     # separates the two. The *predictor* transform's identical expression is NOT excluded: plans
-    # emit it at 2, 3, 4, 5 and 6, and the effort byte-pins kill it there.
-    'encoder\.rs:.*: replace - with / in encode_spatial',
+    # emit it at 2, 3, 4, 5 and 6, and the effort byte-pins kill it there (the path-and-name anchor
+    # this replaced matched it as well).
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:242:37: replace - with / in encode_spatial$',
     # gamut-webp VP8L `single_group` (encoder.rs) — the degenerate assignment puts every
     # meta-block in one prefix-code group, and a `GroupAssignment` with `num_groups == 1` never has
     # its grid consulted: `group_of` returns 0 before touching `grid_width` or `block_group`
@@ -868,15 +830,16 @@ exclude_re = [
     # `block_group` only iterated, when `num_groups > 1`. The grid arithmetic these mutants corrupt
     # is therefore unobservable through any input. The same expressions in `assign_groups`, where
     # the grid *is* read, stay killed by the effort byte-pins.
-    'encoder\.rs:(508|509|510):\d+: replace (<< with >>|\* with [+/]) in single_group',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:(508:44|509:46): replace << with >> in single_group$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:510:44: replace \* with (\+|/) in single_group$',
     # gamut-webp VP8L zero-length-match guard (encoder.rs `nonempty_match`) — the comparison
     # defends the parse cursor against a length `BackwardRefs::find` never returns, so `>` and
     # `>=` admit exactly the same candidates on every input. That is what makes the mutant
     # equivalent, and also what makes the guard worth keeping: what it prevents is a
-    # non-terminating loop, which produces no output to check. Named rather than line-anchored so
-    # it cannot also cover the observable `>` in the deferral probe, which the lazy-parse tests
+    # non-terminating loop, which produces no output to check. Isolated in its own function so it
+    # cannot be confused with the observable `>` in the deferral probe, which the lazy-parse tests
     # kill.
-    'replace > with >= in nonempty_match',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:681:38: replace > with >= in nonempty_match$',
     # gamut-deflate `Matcher::walk` (lz77.rs) — the improvement test `len > best_len` relaxed to
     # `>=`. Equivalent, because the prune in front of it already rules out `len == best_len`: a
     # candidate is measured only when `data[c + best_len] == data[pos + best_len]`, and
@@ -888,7 +851,7 @@ exclude_re = [
     # walk runs up to 1024 candidates per position at `Level::Best`), and every other spelling of "strictly longer" has the same
     # twin. Line/column-anchored: the prune's own `==` and the `len >= max_len` break in the same
     # function are killable and stay in the survey.
-    'lz77\.rs:140:24: replace > with >= in Matcher::walk$',
+    '^crates/gamut-deflate/src/lz77\.rs:140:24: replace > with >= in Matcher::walk$',
     # -----------------------------------------------------------------------------------------
     # GROUP 2 — NON-TERMINATING: detected, but reportable only as a TIMEOUT.
     #
@@ -906,7 +869,7 @@ exclude_re = [
     # this hang and leaves the sibling `n > 64` guard mutants — which DO terminate and ARE caught
     # by `f_rejects_oversized_and_truncated_fields` — in the survey. Same shape as the
     # gamut-jpeg `Reader::u8` hang exclusion below.
-    "bitreader\\.rs:125:20: replace > with >= in BitReader<.a>::f64$",
+    '^crates/gamut-bitstream/src/bitreader\.rs:125:20: replace > with >= in BitReader<.a>::f64$',
     # gamut-bitstream `SymbolDecoder::read_golomb` — the other non-terminating mutant.
     # `length += 1` mutated to `*= 1` pins `length` at 0, so `length < max_bits` never stops the
     # unary-prefix loop; against a stream that never terminates the prefix (the all-zero buffer
@@ -915,7 +878,7 @@ exclude_re = [
     # — the suite does not pass — but only ever as a TIMEOUT, at 60s a scenario. Line- and
     # column-anchored: the `-=` sibling on the same line underflows `length` into a panic and IS
     # caught, as are every other mutant in this function now that the golomb tests exist.
-    "symbol\\.rs:430:20: replace \\+= with \\*= in SymbolDecoder<.a>::read_golomb$",
+    '^crates/gamut-bitstream/src/symbol\.rs:430:20: replace \+= with \*= in SymbolDecoder<.a>::read_golomb$',
     # gamut-webp `BoolDecoder::get_bool` renormalisation: `self.range *= 2` under
     # `while self.range < 128`. Reversed to `/= 2` the range shrinks toward zero, never reaches
     # 128, and the loop never returns -- reportable only as a TIMEOUT.
@@ -923,8 +886,8 @@ exclude_re = [
     # The statement is written `*= 2` rather than `<<= 1` precisely so this entry can name it. The
     # `self.value <<= 1` on the line above is the same operator applied to a different field, and
     # reversing *that* one is caught -- so a `<<=`-shaped exclusion would have hidden real
-    # coverage, and a line-anchored one stops matching as soon as anything above it moves.
-    'replace \*= with /= in BoolDecoder<.a>::get_bool',
+    # coverage.
+    '^crates/gamut-webp/src/vp8/bool_coder\.rs:257:24: replace \*= with /= in BoolDecoder<.a>::get_bool$',
     # gamut-webp hang-on-mutation timeouts: cursor advances and loop exits that stop making
     # progress. Each entry carries the paragraph directly above it.
     #
@@ -934,28 +897,28 @@ exclude_re = [
     # only ever report TIMEOUT. All three are the same statement in the same loop, which is why one
     # entry covers them. The `-=` siblings are deliberately NOT excluded: they underflow at `i == 0`
     # and panic, so they terminate and are caught.
-    'replace \+= with \*= in decode_image_data',
+    '^crates/gamut-webp/src/vp8l/decoder\.rs:(251:15|278:19|291:15): replace \+= with \*= in decode_image_data$',
     # `tokenize` is the encoder's mirror of that loop: three `i += 1` in one `while i < n`, pinned
     # the same way by `*= 1`. Its `-=` siblings terminate too -- they underflow and panic -- so they
     # stay in the survey, and one of them is what caught this reasoning being checked rather than
     # assumed.
-    'replace \+= with \*= in tokenize',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:(635:15|646:19|662:15): replace \+= with \*= in tokenize$',
     # `build_length_limited_lengths` raises the histogram's floor and rebuilds until the tree fits
     # `max_len`. `if max_depth <= max_len { return }` is the loop's only exit, so reversing it to
     # `>` means the loop returns exactly when it should keep going and spins when it should stop:
     # once the tree fits, `count_min` saturates and every further pass produces the same
     # already-flat tree. Non-terminating, reportable only as a TIMEOUT. It is the sole `<=` in the
     # function, so this names it unambiguously.
-    'replace <= with > in build_length_limited_lengths',
+    '^crates/gamut-webp/src/vp8l/prefix\.rs:404:22: replace <= with > in build_length_limited_lengths$',
     # `BoolDecoder::get_tree_start` descends a tree until it reaches a leaf, which `i <= 0` marks.
     # That test is the descent's only exit, so reversing it keeps the loop going at every leaf --
     # confirmed by applying it against a 120s cap, which the suite exceeds rather than failing. It
     # is the sole `<=` in the function.
-    "replace <= with > in BoolDecoder<.a>::get_tree_start",
+    '^crates/gamut-webp/src/vp8/bool_coder\.rs:303:18: replace <= with > in BoolDecoder<.a>::get_tree_start$',
     # `code_length_count` counts down with `count -= 1` under `while count > 4 && ...`. Mutated to
     # `/= 1` the count never changes and the loop spins. (`+=` grows it out of the array's range and
     # panics, so that one is caught and stays.)
-    'replace -= with /= in code_length_count',
+    '^crates/gamut-webp/src/vp8l/prefix\.rs:672:15: replace -= with /= in code_length_count$',
     # gamut-jpeg entropy-reader hang-on-mutation timeouts (unkillable by any finite test). Each
     # mutation turns an inherently-terminating advance loop into a non-terminating one: no test can
     # observe a decoded result because execution never returns, so cargo-mutants can only ever report
@@ -982,16 +945,18 @@ exclude_re = [
     # the cursor, so its `Ok(())` stub is that hang too. Its runaway Y=0 loop also grows the sample
     # plane, so whether it reaches the 6 GiB address-space cap before the 60 s test timeout depends
     # on the machine's load: #305's two surveys scored the same mutant `caught` and then `TIMEOUT`.
-    # All signature-anchored, so every operator mutant in these functions stays in the survey.
-    'replace decode_symbol -> Result<u8> with Ok\(0\)',
-    "replace Ctx<'_>::decode_block -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
-    'replace DecTable::walk -> \(u32, Result<u8>\) with \(0, Ok\(0\)\)',
-    "replace BitReader<'a>::consume -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
+    # All whole-body replacements, so every operator mutant in these functions stays in the survey.
+    # (gamut-jpeg's `decode_symbol` only: the bare signature used to reach gamut-dng's lossless-JPEG
+    # `decode_symbol` as well, which nobody argued for here.)
+    '^crates/gamut-jpeg/src/scan\.rs:389:5: replace decode_symbol -> Result<u8> with Ok\(0\)$',
+    '^crates/gamut-jpeg/src/scan\.rs:463:9: replace Ctx<._>::decode_block -> Result<\(\)> with Ok\(\(\)\)$',
+    '^crates/gamut-jpeg/src/huffman\.rs:278:9: replace DecTable::walk -> \(u32, Result<u8>\) with \(0, Ok\(0\)\)$',
+    '^crates/gamut-jpeg/src/scan\.rs:232:9: replace BitReader<.a>::consume -> Result<\(\)> with Ok\(\(\)\)$',
     # syntax::Reader::u8 — the segment cursor. `self.pos += 1` mutated to `*= 1` pins `pos`, so the
     # `while r.remaining() > 0` table loops in parse_dqt/parse_dht never make progress and never
     # terminate. (The `-=` sibling walks `pos` backwards into an out-of-range read that errors, and is
     # caught — only the non-terminating `*=` is excluded.)
-    "replace \\+= with \\*= in Reader<'a>::u8",
+    '^crates/gamut-jpeg/src/syntax\.rs:40:18: replace \+= with \*= in Reader<.a>::u8$',
     # gamut-jpeg `rd` (issue #333) — the module's non-terminating mutants, line/column anchored so
     # each matches EXACTLY its mutant and leaves every sibling in the survey. The same module's
     # provably-equivalent mutants make the other claim and sit in GROUP 1.
@@ -1002,13 +967,13 @@ exclude_re = [
     # TIMEOUT, never a catchable behavioural escape (the same shape as the `Reader::u8` cursor hang).
     # The seed arithmetic, the `<=` boundary, and `+= -> -=` (which walks r negative and returns
     # a wrong root) ARE caught by the exact isqrt cases incl. the 2^52 - 1 rounded-up-seed pin.
-    'rd\.rs:110:19: replace \* with / in isqrt',
-    'rd\.rs:111:11: replace \+= with \*= in isqrt',
+    '^crates/gamut-jpeg/src/rd\.rs:110:19: replace \* with / in isqrt$',
+    '^crates/gamut-jpeg/src/rd\.rs:111:11: replace \+= with \*= in isqrt$',
     # Backtrack terminator `node = (j > 0).then_some((j, jc))`: node j = 0 is the virtual start
     # whose parent is (0, 0), so `> -> >=` (and `> -> ==`, which chains INTO j = 0) re-visits the
     # same node forever — non-terminating, TIMEOUT-only. (`> -> <` truncates real chains and IS
     # caught by the trellis round-trip tests.)
-    'rd\.rs:273:19: replace > with (>=|==) in trellis_quantize',
+    '^crates/gamut-jpeg/src/rd\.rs:273:19: replace > with (>=|==) in trellis_quantize$',
     # gamut-tiff LZW `BitReader::read`, stubbed to a constant. It is a cursor-advance function
     # whose caller loops until the cursor passes a bound, so a constant return removes the only
     # thing that ends the loop -- non-terminating, and reportable only as a TIMEOUT (exit 3,
@@ -1020,10 +985,8 @@ exclude_re = [
     # #585 bounded G4 `encode_row` by the changing elements it walks, so a stalled `a0` now runs
     # out of steps and emits a wrong row that the round-trip tests reject.)
     #
-    # Anchored on the function signature rather than on line:col, unlike the jpeg entries above: a
-    # line-anchored regex silently stops matching when code above it moves, which turns a suppressed
-    # timeout back into a red gate at an unrelated moment. The name is unique workspace-wide, and
-    # the anchor names the return type, so only the whole-body replacements match -- every operator
-    # mutation inside the function stays in the survey.
-    "replace BitReader<'_>::read -> Option<u32> with Some\\((0|1)\\)",
+    # The anchor names the return type and the two constants, so only these whole-body replacements
+    # match -- `with None`, which ends the loop, and every operator mutation inside the function stay
+    # in the survey.
+    '^crates/gamut-tiff/src/compression/lzw\.rs:82:9: replace BitReader<._>::read -> Option<u32> with Some\((0|1)\)$',
 ]

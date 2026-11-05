@@ -158,8 +158,9 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
   moves is a choice the format leaves free. Exclusions live only in `.cargo/mutants.toml`, one
   regex per *claim* — several generated mutants only when they are one statement or one site's
   operator class and a single argument covers them all, and the comment says so — anchored so it
-  cannot also cover a killable sibling (`file:line:column` for an operator mutation, the function
-  signature for a whole-body one, and that file's header states which trades what), never as a
+  cannot also cover a killable sibling (the mutant's full crate-qualified name,
+  `crates/<crate>/src/<path>:line:column: …`, which `mise run check-mutants-anchors` holds to the
+  source, and that file's header states the shapes), never as a
   `#[mutants::skip]` attribute in source: one reviewable list beats a scatter, and a glob may
   exclude a path but never a live code path. Removing a mutant structurally is not free either:
   the rewrite takes the site's killable siblings with it, so the code is afterwards covered by
