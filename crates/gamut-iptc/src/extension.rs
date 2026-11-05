@@ -4,9 +4,11 @@
 //! IPTC's structured properties are ordinary XMP structure values ([`XmpValue::Structured`]),
 //! usually inside a `Bag`. This module is a typed *projection* over that graph — the same
 //! relationship [`gamut_exif::GpsInfo`](https://docs.rs/gamut-exif) has to its sub-IFD — not a
-//! parallel representation: the raw properties stay in [`PhotoMetadata::xmp`] and are what
-//! round-trips. Each type converts both ways with `from_xmp`/`to_xmp`, and
-//! [`PhotoMetadata`] exposes one accessor pair per property.
+//! parallel representation: the raw properties stay in
+//! [`PhotoMetadata::xmp`](crate::PhotoMetadata::xmp) and are what round-trips. Each type converts
+//! both ways with `from_xmp`/`to_xmp`, and [`PhotoMetadata`](crate::PhotoMetadata) exposes one
+//! accessor pair per property, in `photo_metadata`'s `structured` submodule; the field-level
+//! machinery both sides share lives in the private `fields` submodule.
 //!
 //! # Which structures are modelled
 //!
@@ -112,8 +114,8 @@
 //! Every type here keeps what its typed read did not consume in one public field,
 //! `other: Vec<XmpProperty>`, and that is the whole of its retention API. It is plain data like
 //! every field beside it: a caller reads it, edits it or builds it from [`Default`] and assigns it,
-//! exactly as it treats [`XmpMeta::properties`] one level up, and every structure added to this
-//! module carries the same field on the same terms.
+//! exactly as it treats [`XmpMeta::properties`](gamut_xmp::XmpMeta::properties) one level up,
+//! and every structure added to this module carries the same field on the same terms.
 //!
 //! `to_xmp` writes whatever the slot holds, in its order, after the modelled fields, and refuses
 //! nothing in it. The one field it leaves out is a namesake of a modelled field that was emitted,
@@ -123,8 +125,8 @@
 //! shape a graph read from a file can hold, and the slot exists to give such a shape back.
 //!
 //! Whether a field's namespace and name can be serialized at all is not decided here: it is the
-//! same question for a field in this slot as for a top-level property in [`XmpMeta::properties`],
-//! and it belongs to the XMP writer that answers it for both. That writer does not check a local
+//! same question for a field in this slot as for a top-level property in
+//! [`XmpMeta::properties`](gamut_xmp::XmpMeta::properties), and it belongs to the XMP writer that answers it for both. That writer does not check a local
 //! name yet (issue #732), so an empty or non-XML name in either place serializes as it stands.
 //!
 //! Accessors were declined. A borrowed `other()`/`other_mut()` pair adds nothing over the field
@@ -157,15 +159,15 @@
 //! - **Carrying qualifiers** would still leave the general case open, because a qualifier can hang
 //!   off any value, including an array item or a field of a nested structure.
 //!
-//! Each would turn plain data into a model of RDF, which the graph in [`PhotoMetadata::xmp`]
-//! already is. Every type here is `#[non_exhaustive]`, so a later widening can add a field beside
+//! Each would turn plain data into a model of RDF, which the graph in
+//! [`PhotoMetadata::xmp`](crate::PhotoMetadata::xmp) already is. Every type here is `#[non_exhaustive]`, so a later widening can add a field beside
 //! the plain one without breaking a caller.
 //!
 //! # A value the projection cannot express
 //!
 //! Emission is **infallible**, for the whole module: every `to_xmp` returns an [`XmpValue`], and
-//! every [`PhotoMetadata`] setter returns nothing. The one modelled value that has no form in the
-//! type its property declares is a non-finite coordinate — `NaN` or an infinity in a
+//! every [`PhotoMetadata`](crate::PhotoMetadata) setter returns nothing. The one modelled value
+//! that has no form in the type its property declares is a non-finite coordinate — `NaN` or an infinity in a
 //! [`RegionBoundary`] or [`RegionBoundaryPoint`] field — because those are not values of the XMP
 //! `Real` type (Part 1 §8.2.1); every other modelled field is text, a language alternative or a
 //! list of either, and has a form for every value a caller can hold. A non-finite coordinate is
@@ -187,9 +189,9 @@
 //!
 //! # The same rule at both levels
 //!
-//! [`PhotoMetadata`]'s accessor pairs for these properties apply that gate to the property
-//! itself, not only to the fields inside it. Inside a structure the retention list is the type's
-//! `other` field; at the top level it is the graph — a property the read does not consume is left
+//! [`PhotoMetadata`](crate::PhotoMetadata)'s accessor pairs for these properties apply that gate
+//! to the property itself, not only to the fields inside it. Inside a structure the retention list
+//! is the type's `other` field; at the top level it is the graph — a property the read does not consume is left
 //! exactly where it lies, and the setter beside it does not remove it. So a read that reports
 //! nothing is never a read that destroys something: a bare structure written where the standard
 //! puts an array of structures, an array member that is not a structure, an `rdf:li` or a property
@@ -215,448 +217,16 @@
 //! them — a caller that reads nothing and then deliberately writes a value has replaced the
 //! property, qualifiers and all, which is what a setter is for.
 
-use std::borrow::Borrow;
+pub(crate) mod fields;
+#[cfg(test)]
+pub(crate) mod test_support;
 
-use gamut_xmp::{WellKnownNs, XML_NAMESPACE, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
+use gamut_xmp::{WellKnownNs, XmpProperty, XmpValue};
 
-use crate::photo_metadata::PhotoMetadata;
-
-// --- Reading a structure's field list, keeping only what the writer can reproduce -------------
-
-/// The language tag of a language alternative's default entry (XMP Part 1 §8.2.2.4).
-const X_DEFAULT: &str = "x-default";
-
-/// A structure's field list under a typed read, remembering which fields the read consumed.
-///
-/// A field is consumed only when the property the writer will emit for the value read *reproduces*
-/// that field (see [`reproduces`]); every other field is left for the type's `other` list and
-/// re-emitted verbatim. Deciding it on the write side rather than on the read side is what makes
-/// the three ways a field can fall outside the model — unnamed, unreadable, unwritable — one rule
-/// (see the [module docs](self)).
-struct Reader<'a> {
-    /// The fields being read.
-    fields: &'a [XmpProperty],
-    /// Whether the read consumed the field at the same index.
-    used: Vec<bool>,
-}
-
-impl<'a> Reader<'a> {
-    /// A reader over `fields`, with nothing consumed yet.
-    fn new(fields: &'a [XmpProperty]) -> Self {
-        Self {
-            fields,
-            used: vec![false; fields.len()],
-        }
-    }
-
-    /// Reads the field named `ns:name` through `parse`, and keeps the value only when the property
-    /// `write` will emit for it reproduces the field that was read.
-    ///
-    /// Two fields of one name are never read: only one of them could be written back, so both are
-    /// left to be kept verbatim instead.
-    fn read<T>(
-        &mut self,
-        ns: &str,
-        name: &str,
-        parse: impl FnOnce(&'a XmpValue) -> Option<T>,
-        write: impl FnOnce(&T) -> Option<XmpValue>,
-    ) -> Option<T> {
-        let fields = self.fields;
-        let mut matches = fields
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.namespace == ns && p.name == name);
-        let (index, field) = matches.next()?;
-        if matches.next().is_some() {
-            return None;
-        }
-        let value = parse(&field.value)?;
-        let emitted = XmpProperty::new(ns, name, write(&value)?);
-        if !reproduces(field, &emitted) {
-            return None;
-        }
-        self.used[index] = true;
-        Some(value)
-    }
-
-    /// The simple text of the field named `ns:name`.
-    fn text(&mut self, ns: &str, name: &str) -> Option<String> {
-        self.read(ns, name, parse_text, |value| Some(text_value(value)))
-    }
-
-    /// The `x-default` entry of the language-alternative field named `ns:name`.
-    fn lang_alt(&mut self, ns: &str, name: &str) -> Option<String> {
-        self.read(ns, name, parse_lang_alt, |value| {
-            Some(lang_alt_value(value))
-        })
-    }
-
-    /// Every simple item of the array field named `ns:name` (empty when the field is absent or the
-    /// read did not consume it).
-    fn list(&mut self, ns: &str, name: &str, ordered: bool) -> Vec<String> {
-        self.read(ns, name, parse_list, |values| list_value(ordered, values))
-            .unwrap_or_default()
-    }
-
-    /// The field named `ns:name` parsed as an XMP `Real`.
-    fn number(&mut self, ns: &str, name: &str) -> Option<f64> {
-        self.read(ns, name, parse_number, |value| number_value(*value))
-    }
-
-    /// The single structured field named `ns:name`, read through `parse` and written through
-    /// `write`.
-    fn nested<T>(
-        &mut self,
-        ns: &str,
-        name: &str,
-        parse: impl FnOnce(&[XmpProperty]) -> T,
-        write: impl FnOnce(&T) -> XmpValue,
-    ) -> Option<T> {
-        self.read(
-            ns,
-            name,
-            |value| structure(value).map(parse),
-            |value| Some(write(value)),
-        )
-    }
-
-    /// Every structure of the array field named `ns:name`, read through `parse` and written through
-    /// `write` (empty when the field is absent or the read did not consume it).
-    fn nested_array<T>(
-        &mut self,
-        ns: &str,
-        name: &str,
-        ordered: bool,
-        parse: impl Fn(&[XmpProperty]) -> T,
-        write: impl Fn(&T) -> XmpValue,
-    ) -> Vec<T> {
-        self.read(
-            ns,
-            name,
-            |value| {
-                let parsed: Vec<T> = structures(value).into_iter().map(&parse).collect();
-                (!parsed.is_empty()).then_some(parsed)
-            },
-            |values| nested_array_value(ordered, values.iter().map(&write).collect()),
-        )
-        .unwrap_or_default()
-    }
-
-    /// Every field the read did not consume, cloned for verbatim retention.
-    fn other(self) -> Vec<XmpProperty> {
-        let Self { fields, used } = self;
-        fields
-            .iter()
-            .zip(used)
-            .filter(|&(_, used)| !used)
-            .map(|(property, _)| property.clone())
-            .collect()
-    }
-}
-
-/// The structure field lists an array value holds, skipping items that are not structures.
-///
-/// A bare structure written where the standard puts an array reads as that array's single element
-/// (see the [module docs](self)); everything that is neither reads as nothing at all.
-fn structures(value: &XmpValue) -> Vec<&[XmpProperty]> {
-    match value {
-        XmpValue::Array(array) => array
-            .items()
-            .iter()
-            .filter_map(|item| structure(&item.value))
-            .collect(),
-        single => structure(single).into_iter().collect(),
-    }
-}
-
-/// The structure fields of `value`, or `None` if it is not a structure.
-fn structure(value: &XmpValue) -> Option<&[XmpProperty]> {
-    match value {
-        XmpValue::Structured(fields) => Some(fields),
-        _ => None,
-    }
-}
-
-// --- Reproduction: whether writing back what was read gives the field back --------------------
-
-/// Whether `emitted` — the property the writer will produce for the value read from `read` —
-/// reproduces `read`.
-///
-/// Reproduction is equality of value and qualifiers, with the two lexical re-spellings the module
-/// documents allowed: a number may be written in another form for the same decimal value, and a
-/// language tag may be re-cased, because XMP Part 1 §8.2.2.4 matches tags case-insensitively. A
-/// structure's fields are an unordered set (Part 1 §6.3.3), so the model's field order is not a
-/// difference; an array's items are ordered, and its RDF container kind is part of its value
-/// (Part 1 §6.3.4).
-fn reproduces(read: &XmpProperty, emitted: &XmpProperty) -> bool {
-    read.namespace == emitted.namespace
-        && read.name == emitted.name
-        && same_value(&read.value, &emitted.value)
-        && same_qualifiers(&read.qualifiers, &emitted.qualifiers)
-}
-
-/// Whether two values carry the same information (see [`reproduces`]).
-fn same_value(read: &XmpValue, emitted: &XmpValue) -> bool {
-    match (read, emitted) {
-        (XmpValue::Simple(read), XmpValue::Simple(emitted)) => {
-            read == emitted || same_number(read, emitted)
-        }
-        (XmpValue::Uri(read), XmpValue::Uri(emitted)) => read == emitted,
-        (XmpValue::Structured(read), XmpValue::Structured(emitted)) => {
-            read.len() == emitted.len()
-                && read
-                    .iter()
-                    .all(|field| emitted.iter().any(|other| reproduces(field, other)))
-        }
-        (XmpValue::Array(read), XmpValue::Array(emitted)) => same_array(read, emitted),
-        _ => false,
-    }
-}
-
-/// Whether two arrays are the same RDF container kind holding the same items in the same order.
-fn same_array(read: &XmpArray, emitted: &XmpArray) -> bool {
-    let items = match (read, emitted) {
-        (XmpArray::Bag(read), XmpArray::Bag(emitted))
-        | (XmpArray::Seq(read), XmpArray::Seq(emitted))
-        | (XmpArray::Alt(read), XmpArray::Alt(emitted)) => (read, emitted),
-        _ => return false,
-    };
-    items.0.len() == items.1.len()
-        && items.0.iter().zip(items.1).all(|(read, emitted)| {
-            same_value(&read.value, &emitted.value)
-                && same_qualifiers(&read.qualifiers, &emitted.qualifiers)
-        })
-}
-
-/// Whether two qualifier lists hold the same qualifiers, matching an `xml:lang` tag
-/// case-insensitively (XMP Part 1 §8.2.2.4).
-fn same_qualifiers(read: &[XmpProperty], emitted: &[XmpProperty]) -> bool {
-    read.len() == emitted.len()
-        && read.iter().all(|qualifier| {
-            emitted
-                .iter()
-                .any(|other| match (lang(qualifier), lang(other)) {
-                    (Some(read), Some(emitted)) => read.eq_ignore_ascii_case(emitted),
-                    _ => reproduces(qualifier, other),
-                })
-        })
-}
-
-/// The tag `qualifier` carries if it is an `xml:lang` qualifier.
-fn lang(qualifier: &XmpProperty) -> Option<&str> {
-    (qualifier.namespace == XML_NAMESPACE && qualifier.name == "lang")
-        .then(|| qualifier.text())
-        .flatten()
-}
-
-/// Whether two texts are XMP `Real`s (Part 1 §8.2.1.4) spelling the same decimal value — the
-/// difference between ` 0.50 ` and `0.5`, which the writer's own formatting introduces.
-///
-/// The comparison is of decimal values, not of the doubles they parse to: a text a double cannot
-/// hold exactly — `0.1000000000000000000001`, a twenty-digit integer, a decimal that underflows
-/// to `0` — parses to a double whose shortest form is *another* decimal, so the writer would
-/// change the value, and the field is not reproduced.
-fn same_number(read: &str, emitted: &str) -> bool {
-    matches!((real(read), real(emitted)), (Some(read), Some(emitted)) if read == emitted)
-}
-
-/// The decimal value `text` spells as an XMP `Real` (Part 1 §8.2.1.4), reduced so that two
-/// spellings of one value reduce alike: its sign, its integer digits without leading zeros and its
-/// fraction digits without trailing zeros. `None` for text that is not a `Real`.
-///
-/// A `Real` is an optional sign, then an integer part, a fraction part, or both; it has no
-/// exponent, so `1e-400`, `NaN` and `inf` are not `Real`s. Surrounding whitespace is not part of the value.
-/// A zero keeps its sign: the writer formats a double, which keeps it too, so a read zero and the
-/// zero written for it always agree on it.
-fn real(text: &str) -> Option<(bool, &str, &str)> {
-    let text = text.trim();
-    let (negative, unsigned) = match text.strip_prefix('-') {
-        Some(unsigned) => (true, unsigned),
-        None => (false, text.strip_prefix('+').unwrap_or(text)),
-    };
-    let (integer, fraction) = match unsigned.split_once('.') {
-        Some((integer, fraction)) if !fraction.is_empty() => (integer, fraction),
-        Some(_) => return None,
-        None if !unsigned.is_empty() => (unsigned, ""),
-        None => return None,
-    };
-    integer
-        .bytes()
-        .chain(fraction.bytes())
-        .all(|byte| byte.is_ascii_digit())
-        .then(|| {
-            (
-                negative,
-                integer.trim_start_matches('0'),
-                fraction.trim_end_matches('0'),
-            )
-        })
-}
-
-// --- The value each modelled field is read from and written back as ---------------------------
-//
-// Every field is read by a `parse_*` and written by the `*_value` beside it, so what the reader
-// compares against is the very value the writer will emit and the two cannot drift apart.
-
-/// The simple text of a value.
-fn parse_text(value: &XmpValue) -> Option<String> {
-    value.text().map(str::to_owned)
-}
-
-/// A simple text value.
-fn text_value(value: &str) -> XmpValue {
-    XmpValue::Simple(value.to_owned())
-}
-
-/// The `x-default` entry of a language alternative, tolerating a plain simple value.
-///
-/// The entry is found by its `xml:lang` qualifier, compared case-insensitively as XMP Part 1
-/// §8.2.2.4 requires — the same match [`XmpMeta::get_lang_alt`] makes on a top-level property. An
-/// alternative list with no default entry reads as absent, rather than having another language
-/// relabelled as the default; one holding a language *beside* the default reads its default and is
-/// then refused by [`reproduces`], because [`lang_alt_value`] would write the other language away.
-fn parse_lang_alt(value: &XmpValue) -> Option<String> {
-    match value {
-        XmpValue::Array(XmpArray::Alt(items)) => items
-            .iter()
-            .find(|item| {
-                item.lang()
-                    .is_some_and(|lang| lang.eq_ignore_ascii_case(X_DEFAULT))
-            })
-            .and_then(XmpItem::text),
-        simple => simple.text(),
-    }
-    .map(str::to_owned)
-}
-
-/// A language alternative holding one `x-default` entry.
-fn lang_alt_value(value: &str) -> XmpValue {
-    XmpValue::Array(XmpArray::Alt(vec![XmpItem::lang_text(
-        X_DEFAULT,
-        value.to_owned(),
-    )]))
-}
-
-/// Every simple item of an array value, or `None` when the value is not an array or holds no
-/// simple item.
-fn parse_list(value: &XmpValue) -> Option<Vec<String>> {
-    match value {
-        XmpValue::Array(array) => {
-            let texts: Vec<String> = array.texts().map(str::to_owned).collect();
-            (!texts.is_empty()).then_some(texts)
-        }
-        _ => None,
-    }
-}
-
-/// An array of simple text, or `None` when there is nothing to write.
-fn list_value(ordered: bool, values: &[String]) -> Option<XmpValue> {
-    array_value(ordered, values.iter().map(XmpItem::simple).collect())
-}
-
-/// A value parsed as an XMP `Real`; text that does not parse reads as absent.
-fn parse_number(value: &XmpValue) -> Option<f64> {
-    value.text()?.trim().parse().ok()
-}
-
-/// An XMP `Real`, or `None` for a value the type has no form for.
-///
-/// `NaN` and the infinities are not values of the XMP `Real` type (Part 1 §8.2.1), so they are
-/// never written — and a coordinate stating one in the graph is therefore never consumed, and is
-/// kept verbatim (see the [module docs](self)). A finite value is written in its shortest decimal
-/// form, which is why a coordinate whose decimal value a double does not hold exactly is not
-/// consumed either (see [`same_number`]).
-fn number_value(value: f64) -> Option<XmpValue> {
-    value
-        .is_finite()
-        .then(|| XmpValue::Simple(value.to_string()))
-}
-
-/// An array of structure values, or `None` when there is nothing to write.
-fn nested_array_value(ordered: bool, values: Vec<XmpValue>) -> Option<XmpValue> {
-    array_value(ordered, values.into_iter().map(XmpItem::new).collect())
-}
-
-/// An `rdf:Seq` when `ordered` and an `rdf:Bag` otherwise, or `None` when there are no items: an
-/// empty array says nothing a missing property does not.
-fn array_value(ordered: bool, items: Vec<XmpItem>) -> Option<XmpValue> {
-    if items.is_empty() {
-        return None;
-    }
-    Some(XmpValue::Array(if ordered {
-        XmpArray::Seq(items)
-    } else {
-        XmpArray::Bag(items)
-    }))
-}
-
-// --- Writing helpers -------------------------------------------------------------------------
-
-/// Appends `ns:name`, unless there is no value to write.
-fn put(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<XmpValue>) {
-    if let Some(value) = value {
-        out.push(XmpProperty::new(ns, name, value));
-    }
-}
-
-/// Appends `ns:name` as simple text, unless the value is absent.
-fn put_text(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<&String>) {
-    put(out, ns, name, value.map(String::as_str).map(text_value));
-}
-
-/// Appends `ns:name` as a language alternative holding one `x-default` item, unless absent.
-fn put_lang_alt(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<&String>) {
-    put(out, ns, name, value.map(String::as_str).map(lang_alt_value));
-}
-
-/// Appends `ns:name` as an array of simple text, unless the list is empty.
-fn put_list(out: &mut Vec<XmpProperty>, ns: &str, name: &str, ordered: bool, values: &[String]) {
-    put(out, ns, name, list_value(ordered, values));
-}
-
-/// Appends `ns:name` as an XMP `Real`, unless the value is absent or has no `Real` form.
-fn put_number(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<f64>) {
-    put(out, ns, name, value.and_then(number_value));
-}
-
-/// Appends `ns:name` as a single structure value, unless absent.
-fn put_nested(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<XmpValue>) {
-    put(out, ns, name, value);
-}
-
-/// Appends `ns:name` as an array of structure values, unless the list is empty.
-fn put_nested_array(
-    out: &mut Vec<XmpProperty>,
-    ns: &str,
-    name: &str,
-    ordered: bool,
-    values: Vec<XmpValue>,
-) {
-    put(out, ns, name, nested_array_value(ordered, values));
-}
-
-// --- Verbatim retention of the fields a typed read did not consume ---------------------------
-
-/// Appends the retained fields, skipping one whose `(namespace, name)` a *modelled* field already
-/// emitted carries.
-///
-/// The retention list is public, so a caller can put a name the model also carries in it. Emitting
-/// both would produce a structure with two fields of one name, which is ill-formed and does not
-/// read back — so a namesake of a modelled field is dropped, but only when that field was actually
-/// emitted. When it was not, the retained field is the only copy of that name and is written; and
-/// two retained fields of one name are both written, because dropping either would lose a field
-/// the graph carries.
-fn put_other(out: &mut Vec<XmpProperty>, other: &[XmpProperty]) {
-    let modelled = out.len();
-    for property in other {
-        if !out[..modelled]
-            .iter()
-            .any(|p| p.namespace == property.namespace && p.name == property.name)
-        {
-            out.push(property.clone());
-        }
-    }
-}
+use self::fields::{
+    Reader, put_lang_alt, put_list, put_nested, put_nested_array, put_number, put_other, put_text,
+    structure,
+};
 
 // --- Creator's contact info -------------------------------------------------------------------
 
@@ -702,7 +272,7 @@ impl CreatorContactInfo {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             address: r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiAdrExtadr"),
@@ -836,7 +406,7 @@ impl ArtworkOrObject {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             title: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "AOTitle"),
@@ -1042,7 +612,7 @@ impl Licensor {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             identifier: r.text(WellKnownNs::Plus.uri(), "LicensorID"),
@@ -1186,7 +756,7 @@ impl Entity {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             identifiers: r.list(WellKnownNs::Xmp.uri(), "Identifier", false),
@@ -1241,7 +811,7 @@ impl RegionBoundaryPoint {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             x: r.number(WellKnownNs::Iptc4XmpExt.uri(), "rbX"),
@@ -1304,7 +874,7 @@ impl RegionBoundary {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             shape: r.text(WellKnownNs::Iptc4XmpExt.uri(), "rbShape"),
@@ -1403,7 +973,7 @@ impl ImageRegion {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             boundary: r.nested(
@@ -1481,8 +1051,8 @@ impl ImageRegion {
 ///
 /// This is the structured successor of the Core's flat `photoshop:City`/`photoshop:State`/
 /// `photoshop:Country` and `Iptc4xmpCore:Location`/`Iptc4xmpCore:CountryCode` scalars
-/// ([`PhotoMetadata::city`] and its siblings). The two surfaces are independent properties: gamut
-/// does not copy one into the other, and neither participates in the other's reconciliation.
+/// ([`PhotoMetadata::city`](crate::PhotoMetadata::city) and its siblings). The two surfaces are
+/// independent properties: gamut does not copy one into the other, and neither participates in the other's reconciliation.
 ///
 /// The four GPS fields are the EXIF-in-XMP properties `exif:GPSLatitude`, `exif:GPSLongitude`,
 /// `exif:GPSAltitude` and `exif:GPSAltitudeRef`. Their XMP types are the EXIF `GPSCoordinate`
@@ -1532,7 +1102,7 @@ impl Location {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             identifiers: r.list(WellKnownNs::Iptc4XmpExt.uri(), "LocationId", false),
@@ -1667,7 +1237,7 @@ impl CvTerm {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             vocabulary_identifier: r.text(WellKnownNs::Iptc4XmpExt.uri(), "CvId"),
@@ -1745,7 +1315,7 @@ impl Person {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             identifiers: r.list(WellKnownNs::Iptc4XmpExt.uri(), "PersonId", false),
@@ -1831,7 +1401,7 @@ impl EntityWithRole {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             identifiers: r.list(WellKnownNs::Xmp.uri(), "Identifier", false),
@@ -1903,7 +1473,7 @@ impl Product {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             identifiers: r.list(WellKnownNs::Iptc4XmpExt.uri(), "ProductId", false),
@@ -1979,7 +1549,7 @@ impl RegistryEntry {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             item_identifier: r.text(WellKnownNs::Iptc4XmpExt.uri(), "RegItemId"),
@@ -2047,7 +1617,7 @@ impl EmbeddedRightsExpression {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             expression: r.text(WellKnownNs::Iptc4XmpExt.uri(), "EncRightsExpr"),
@@ -2115,7 +1685,7 @@ impl LinkedRightsExpression {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             url: r.text(WellKnownNs::Iptc4XmpExt.uri(), "LinkedRightsExpr"),
@@ -2160,7 +1730,8 @@ impl LinkedRightsExpression {
 ///
 /// The standard caps the property at three copyright owners; gamut does not enforce that on read
 /// or write — an over-long array reads as the owners it holds, and
-/// [`set_copyright_owners`](PhotoMetadata::set_copyright_owners) writes every owner it is given.
+/// [`set_copyright_owners`](crate::PhotoMetadata::set_copyright_owners) writes every owner it is
+/// given.
 ///
 /// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
 /// [module docs](self)).
@@ -2185,7 +1756,7 @@ impl CopyrightOwner {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             identifier: r.text(WellKnownNs::Plus.uri(), "CopyrightOwnerID"),
@@ -2221,7 +1792,8 @@ impl CopyrightOwner {
 ///
 /// The standard caps the property at three image creators; gamut does not enforce that on read or
 /// write — an over-long array reads as the creators it holds, and
-/// [`set_image_creators`](PhotoMetadata::set_image_creators) writes every creator it is given.
+/// [`set_image_creators`](crate::PhotoMetadata::set_image_creators) writes every creator it is
+/// given.
 ///
 /// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
 /// [module docs](self)).
@@ -2246,7 +1818,7 @@ impl ImageCreator {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             identifier: r.text(WellKnownNs::Plus.uri(), "ImageCreatorID"),
@@ -2282,7 +1854,8 @@ impl ImageCreator {
 ///
 /// The standard caps the property at one image supplier while its XMP form is a `Seq`; gamut does
 /// not enforce that on read or write — an over-long array reads as the suppliers it holds, and
-/// [`set_image_suppliers`](PhotoMetadata::set_image_suppliers) writes every supplier it is given.
+/// [`set_image_suppliers`](crate::PhotoMetadata::set_image_suppliers) writes every supplier it is
+/// given.
 ///
 /// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
 /// [module docs](self)).
@@ -2307,7 +1880,7 @@ impl ImageSupplier {
     }
 
     /// Reads the structure from an already-unwrapped field list.
-    fn from_fields(f: &[XmpProperty]) -> Self {
+    pub(crate) fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
             identifier: r.text(WellKnownNs::Plus.uri(), "ImageSupplierID"),
@@ -2338,556 +1911,19 @@ impl ImageSupplier {
     }
 }
 
-// --- The accessors on the unified view ---------------------------------------------------------
-
-/// The RDF container an array setter puts its items in (XMP Part 1 §6.3.4).
-type Container = fn(Vec<XmpItem>) -> XmpArray;
-
-/// The container kind a property's value is already held in — what an array setter keeps, so that
-/// one legal container kind is never rewritten to another. A property that is not an array, or no
-/// property at all, gives `standard`: the kind the standard specifies for that property — an
-/// `rdf:Seq` for the three ordered PLUS party lists, an `rdf:Bag` for every other one.
-fn container_of(value: Option<&XmpValue>, standard: Container) -> Container {
-    match value {
-        Some(XmpValue::Array(XmpArray::Bag(_))) => XmpArray::Bag,
-        Some(XmpValue::Array(XmpArray::Seq(_))) => XmpArray::Seq,
-        Some(XmpValue::Array(XmpArray::Alt(_))) => XmpArray::Alt,
-        _ => standard,
-    }
-}
-
-/// One top-level property the typed view projects, and the rule that keeps that projection
-/// lossless.
-///
-/// This is [`Reader`] one level up. Inside a structure the retention list is the type's `other`
-/// field; at the top level it is the graph itself, so *retained* here means the accessor pair
-/// leaves the property exactly where it found it. The gate is the same one: the read reports a
-/// value only when the property the setter will emit for it [reproduces](reproduces) the property
-/// that was read.
-///
-/// `R` is what the read yields and `W` what the setter takes — `Vec<T>` and `[T]` for a property
-/// holding an array of structures, one type for a property holding a single structure.
-struct Projection<R, W: ?Sized> {
-    /// The property's namespace URI.
-    ns: &'static str,
-    /// The property's local name.
-    name: &'static str,
-    /// Reads the typed value out of the property's value, or `None` when there is none to read.
-    parse: fn(&XmpValue) -> Option<R>,
-    /// The value the setter emits for a typed value, in the container kind the property already
-    /// carries, or `None` when there is nothing to write.
-    emit: fn(&W, Container) -> Option<XmpValue>,
-    /// The container kind the standard specifies for the property (IPTC Photo Metadata 2025.1, its
-    /// *XMP Specs* row), written when the property it replaces carries none.
-    standard: Container,
-}
-
-impl<R: Borrow<W>, W: ?Sized> Projection<R, W> {
-    /// The typed value of the property, or `None` when it is absent, holds nothing the model
-    /// reads, or could not be written back as it stands.
-    ///
-    /// Two top-level properties of one name are never read: only one of them could be written
-    /// back, which is why [`Reader::read`] refuses the same shape inside a structure.
-    fn read(&self, xmp: &XmpMeta) -> Option<R> {
-        let mut matches = xmp
-            .properties
-            .iter()
-            .filter(|property| self.names(property));
-        let property = matches.next()?;
-        if matches.next().is_some() {
-            return None;
-        }
-        let value = (self.parse)(&property.value)?;
-        let emitted = XmpProperty::new(
-            self.ns,
-            self.name,
-            (self.emit)(
-                value.borrow(),
-                container_of(Some(&property.value), self.standard),
-            )?,
-        );
-        reproduces(property, &emitted).then_some(value)
-    }
-
-    /// Replaces the property with `value`, keeping the RDF container kind it already carries.
-    ///
-    /// Replacing is total: where the graph holds two or more properties of this name, the value
-    /// takes the first one's place and the others are removed, so that what was set is what
-    /// [`read`](Self::read) reports next. [`XmpMeta::set`] replaces only the first, which would
-    /// leave the graph holding two of one name — a shape the read refuses — and the value just set
-    /// unreadable. The container kind kept is the first one's.
-    ///
-    /// Writing nothing removes the property — but only when [`read`](Self::read) reported one. A
-    /// property the typed view does not report is one the caller was never shown, so the pair does
-    /// not destroy it.
-    fn write(&self, xmp: &mut XmpMeta, value: &W) {
-        let container = container_of(
-            xmp.get(self.ns, self.name).map(|property| &property.value),
-            self.standard,
-        );
-        match (self.emit)(value, container) {
-            Some(value) => self.replace(xmp, XmpProperty::new(self.ns, self.name, value)),
-            None if self.read(xmp).is_some() => drop(xmp.remove(self.ns, self.name)),
-            None => {}
-        }
-    }
-
-    /// Puts `property` in place of the first property of this name, removing every later one, or
-    /// appends it where there is none.
-    fn replace(&self, xmp: &mut XmpMeta, property: XmpProperty) {
-        let Some(first) = xmp.properties.iter().position(|p| self.names(p)) else {
-            xmp.properties.push(property);
-            return;
-        };
-        let later = xmp.properties.split_off(first + 1);
-        xmp.properties[first] = property;
-        xmp.properties
-            .extend(later.into_iter().filter(|p| !self.names(p)));
-    }
-
-    /// Whether `property` is this projection's property.
-    fn names(&self, property: &XmpProperty) -> bool {
-        property.namespace == self.ns && property.name == self.name
-    }
-}
-
-/// Every structure an array property holds, which is none at all for a value holding none.
-///
-/// Never `None`: whether there is anything here to write is [`emit_structures`]'s decision, taken
-/// once. A read that finds no structure emits nothing, and a read that emits nothing reports
-/// nothing (see [`Projection::read`]).
-fn parse_structures<T>(value: &XmpValue, parse: fn(&[XmpProperty]) -> T) -> Option<Vec<T>> {
-    Some(structures(value).into_iter().map(parse).collect())
-}
-
-/// The array value an array setter emits for `values`, or `None` when there is nothing to write:
-/// an empty array says nothing a missing property does not.
-fn emit_structures<T>(
-    values: &[T],
-    container: Container,
-    to_xmp: fn(&T) -> XmpValue,
-) -> Option<XmpValue> {
-    (!values.is_empty()).then(|| {
-        XmpValue::Array(container(
-            values
-                .iter()
-                .map(|value| XmpItem::new(to_xmp(value)))
-                .collect(),
-        ))
-    })
-}
-
-/// The `Iptc4xmpCore:CreatorContactInfo` projection: a single structure, so no container applies.
-const CONTACT_INFO: Projection<CreatorContactInfo, CreatorContactInfo> = Projection {
-    ns: WellKnownNs::Iptc4XmpCore.uri(),
-    name: "CreatorContactInfo",
-    parse: |value| structure(value).map(CreatorContactInfo::from_fields),
-    emit: |info, _| {
-        let value = info.to_xmp();
-        (!structure(&value).is_some_and(<[XmpProperty]>::is_empty)).then_some(value)
-    },
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:ImageRegion` projection.
-const IMAGE_REGIONS: Projection<Vec<ImageRegion>, [ImageRegion]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "ImageRegion",
-    parse: |value| parse_structures(value, ImageRegion::from_fields),
-    emit: |values, container| emit_structures(values, container, ImageRegion::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:ArtworkOrObject` projection.
-const ARTWORK_OR_OBJECTS: Projection<Vec<ArtworkOrObject>, [ArtworkOrObject]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "ArtworkOrObject",
-    parse: |value| parse_structures(value, ArtworkOrObject::from_fields),
-    emit: |values, container| emit_structures(values, container, ArtworkOrObject::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `plus:Licensor` projection.
-const LICENSORS: Projection<Vec<Licensor>, [Licensor]> = Projection {
-    ns: WellKnownNs::Plus.uri(),
-    name: "Licensor",
-    parse: |value| parse_structures(value, Licensor::from_fields),
-    emit: |values, container| emit_structures(values, container, Licensor::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:LocationCreated` projection.
-const LOCATIONS_CREATED: Projection<Vec<Location>, [Location]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "LocationCreated",
-    parse: |value| parse_structures(value, Location::from_fields),
-    emit: |values, container| emit_structures(values, container, Location::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:LocationShown` projection.
-const LOCATIONS_SHOWN: Projection<Vec<Location>, [Location]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "LocationShown",
-    parse: |value| parse_structures(value, Location::from_fields),
-    emit: |values, container| emit_structures(values, container, Location::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:PersonInImageWDetails` projection.
-const PERSONS_SHOWN: Projection<Vec<Person>, [Person]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "PersonInImageWDetails",
-    parse: |value| parse_structures(value, Person::from_fields),
-    emit: |values, container| emit_structures(values, container, Person::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:AboutCvTerm` projection.
-const ABOUT_CV_TERMS: Projection<Vec<CvTerm>, [CvTerm]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "AboutCvTerm",
-    parse: |value| parse_structures(value, CvTerm::from_fields),
-    emit: |values, container| emit_structures(values, container, CvTerm::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:Genre` projection.
-const GENRES: Projection<Vec<CvTerm>, [CvTerm]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "Genre",
-    parse: |value| parse_structures(value, CvTerm::from_fields),
-    emit: |values, container| emit_structures(values, container, CvTerm::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:Contributor` projection.
-const CONTRIBUTORS: Projection<Vec<EntityWithRole>, [EntityWithRole]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "Contributor",
-    parse: |value| parse_structures(value, EntityWithRole::from_fields),
-    emit: |values, container| emit_structures(values, container, EntityWithRole::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:ProductInImage` projection.
-const PRODUCTS_SHOWN: Projection<Vec<Product>, [Product]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "ProductInImage",
-    parse: |value| parse_structures(value, Product::from_fields),
-    emit: |values, container| emit_structures(values, container, Product::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:RegistryId` projection.
-const REGISTRY_ENTRIES: Projection<Vec<RegistryEntry>, [RegistryEntry]> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "RegistryId",
-    parse: |value| parse_structures(value, RegistryEntry::from_fields),
-    emit: |values, container| emit_structures(values, container, RegistryEntry::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:EmbdEncRightsExpr` projection.
-const EMBEDDED_RIGHTS_EXPRESSIONS: Projection<
-    Vec<EmbeddedRightsExpression>,
-    [EmbeddedRightsExpression],
-> = Projection {
-    ns: WellKnownNs::Iptc4XmpExt.uri(),
-    name: "EmbdEncRightsExpr",
-    parse: |value| parse_structures(value, EmbeddedRightsExpression::from_fields),
-    emit: |values, container| emit_structures(values, container, EmbeddedRightsExpression::to_xmp),
-    standard: XmpArray::Bag,
-};
-
-/// The `Iptc4xmpExt:LinkedEncRightsExpr` projection.
-const LINKED_RIGHTS_EXPRESSIONS: Projection<Vec<LinkedRightsExpression>, [LinkedRightsExpression]> =
-    Projection {
-        ns: WellKnownNs::Iptc4XmpExt.uri(),
-        name: "LinkedEncRightsExpr",
-        parse: |value| parse_structures(value, LinkedRightsExpression::from_fields),
-        emit: |values, container| {
-            emit_structures(values, container, LinkedRightsExpression::to_xmp)
-        },
-        standard: XmpArray::Bag,
-    };
-
-/// The `plus:CopyrightOwner` projection: an ordered `rdf:Seq`.
-const COPYRIGHT_OWNERS: Projection<Vec<CopyrightOwner>, [CopyrightOwner]> = Projection {
-    ns: WellKnownNs::Plus.uri(),
-    name: "CopyrightOwner",
-    parse: |value| parse_structures(value, CopyrightOwner::from_fields),
-    emit: |values, container| emit_structures(values, container, CopyrightOwner::to_xmp),
-    standard: XmpArray::Seq,
-};
-
-/// The `plus:ImageCreator` projection: an ordered `rdf:Seq`.
-const IMAGE_CREATORS: Projection<Vec<ImageCreator>, [ImageCreator]> = Projection {
-    ns: WellKnownNs::Plus.uri(),
-    name: "ImageCreator",
-    parse: |value| parse_structures(value, ImageCreator::from_fields),
-    emit: |values, container| emit_structures(values, container, ImageCreator::to_xmp),
-    standard: XmpArray::Seq,
-};
-
-/// The `plus:ImageSupplier` projection: an ordered `rdf:Seq`.
-const IMAGE_SUPPLIERS: Projection<Vec<ImageSupplier>, [ImageSupplier]> = Projection {
-    ns: WellKnownNs::Plus.uri(),
-    name: "ImageSupplier",
-    parse: |value| parse_structures(value, ImageSupplier::from_fields),
-    emit: |values, container| emit_structures(values, container, ImageSupplier::to_xmp),
-    standard: XmpArray::Seq,
-};
-
-impl PhotoMetadata {
-    /// The creator's contact details (`Iptc4xmpCore:CreatorContactInfo`), or `None` when the
-    /// property is absent, holds no structure, or could not be written back as it stands (see the
-    /// [module docs](self)).
-    #[must_use]
-    pub fn creator_contact_info(&self) -> Option<CreatorContactInfo> {
-        CONTACT_INFO.read(&self.xmp)
-    }
-
-    /// Sets the creator's contact details (`Iptc4xmpCore:CreatorContactInfo`); a block with no
-    /// fields at all removes the property, as an empty slice does for the array accessors — but
-    /// only a property this pair reported.
-    pub fn set_creator_contact_info(&mut self, info: &CreatorContactInfo) {
-        CONTACT_INFO.write(&mut self.xmp, info);
-    }
-
-    /// The image regions (`Iptc4xmpExt:ImageRegion`), in the order the graph holds them, or an
-    /// empty list when the property is absent, holds no structure, or could not be written back as
-    /// it stands (see the [module docs](self)).
-    #[must_use]
-    pub fn image_regions(&self) -> Vec<ImageRegion> {
-        IMAGE_REGIONS.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the image regions (`Iptc4xmpExt:ImageRegion`); an existing array keeps its container
-    /// kind, and an empty slice removes a property this pair reported.
-    pub fn set_image_regions(&mut self, regions: &[ImageRegion]) {
-        IMAGE_REGIONS.write(&mut self.xmp, regions);
-    }
-
-    /// The artworks or objects shown in the image (`Iptc4xmpExt:ArtworkOrObject`), on the same
-    /// terms as [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn artwork_or_objects(&self) -> Vec<ArtworkOrObject> {
-        ARTWORK_OR_OBJECTS.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the artworks or objects shown in the image (`Iptc4xmpExt:ArtworkOrObject`); an existing
-    /// array keeps its container kind, and an empty slice removes a property this pair reported.
-    pub fn set_artwork_or_objects(&mut self, artworks: &[ArtworkOrObject]) {
-        ARTWORK_OR_OBJECTS.write(&mut self.xmp, artworks);
-    }
-
-    /// The licensors of the image (`plus:Licensor`), on the same terms as
-    /// [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn licensors(&self) -> Vec<Licensor> {
-        LICENSORS.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the licensors of the image (`plus:Licensor`); an existing array keeps its container
-    /// kind, and an empty slice removes a property this pair reported.
-    pub fn set_licensors(&mut self, licensors: &[Licensor]) {
-        LICENSORS.write(&mut self.xmp, licensors);
-    }
-
-    /// The locations the image was created at (`Iptc4xmpExt:LocationCreated`), on the same terms
-    /// as [`image_regions`](Self::image_regions).
-    ///
-    /// The standard caps the property at one location while its XMP form is a `Bag`; gamut reads
-    /// every location the array holds.
-    #[must_use]
-    pub fn locations_created(&self) -> Vec<Location> {
-        LOCATIONS_CREATED.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the locations the image was created at (`Iptc4xmpExt:LocationCreated`); an existing
-    /// array keeps its container kind, and an empty slice removes a property this pair reported.
-    pub fn set_locations_created(&mut self, locations: &[Location]) {
-        LOCATIONS_CREATED.write(&mut self.xmp, locations);
-    }
-
-    /// The locations shown in the image (`Iptc4xmpExt:LocationShown`), on the same terms as
-    /// [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn locations_shown(&self) -> Vec<Location> {
-        LOCATIONS_SHOWN.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the locations shown in the image (`Iptc4xmpExt:LocationShown`); an existing array
-    /// keeps its container kind, and an empty slice removes a property this pair reported.
-    pub fn set_locations_shown(&mut self, locations: &[Location]) {
-        LOCATIONS_SHOWN.write(&mut self.xmp, locations);
-    }
-
-    /// The persons shown in the image, with details (`Iptc4xmpExt:PersonInImageWDetails`), on the
-    /// same terms as [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn persons_shown(&self) -> Vec<Person> {
-        PERSONS_SHOWN.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the persons shown in the image (`Iptc4xmpExt:PersonInImageWDetails`); an existing
-    /// array keeps its container kind, and an empty slice removes a property this pair reported.
-    pub fn set_persons_shown(&mut self, persons: &[Person]) {
-        PERSONS_SHOWN.write(&mut self.xmp, persons);
-    }
-
-    /// The controlled-vocabulary terms the image is about (`Iptc4xmpExt:AboutCvTerm`), on the same
-    /// terms as [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn about_cv_terms(&self) -> Vec<CvTerm> {
-        ABOUT_CV_TERMS.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the controlled-vocabulary terms the image is about (`Iptc4xmpExt:AboutCvTerm`); an
-    /// existing array keeps its container kind, and an empty slice removes a property this pair
-    /// reported.
-    pub fn set_about_cv_terms(&mut self, terms: &[CvTerm]) {
-        ABOUT_CV_TERMS.write(&mut self.xmp, terms);
-    }
-
-    /// The genres of the image, as controlled-vocabulary terms (`Iptc4xmpExt:Genre`), on the same
-    /// terms as [`image_regions`](Self::image_regions).
-    ///
-    /// Distinct from the Core's flat [`intellectual_genre`](Self::intellectual_genre)
-    /// (`Iptc4xmpCore:IntellectualGenre`); gamut does not copy one into the other.
-    #[must_use]
-    pub fn genres(&self) -> Vec<CvTerm> {
-        GENRES.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the genres of the image (`Iptc4xmpExt:Genre`); an existing array keeps its container
-    /// kind, and an empty slice removes a property this pair reported.
-    pub fn set_genres(&mut self, genres: &[CvTerm]) {
-        GENRES.write(&mut self.xmp, genres);
-    }
-
-    /// The contributors to the image, with their roles (`Iptc4xmpExt:Contributor`), on the same
-    /// terms as [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn contributors(&self) -> Vec<EntityWithRole> {
-        CONTRIBUTORS.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the contributors to the image (`Iptc4xmpExt:Contributor`); an existing array keeps its
-    /// container kind, and an empty slice removes a property this pair reported.
-    pub fn set_contributors(&mut self, contributors: &[EntityWithRole]) {
-        CONTRIBUTORS.write(&mut self.xmp, contributors);
-    }
-
-    /// The products shown in the image (`Iptc4xmpExt:ProductInImage`), on the same terms as
-    /// [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn products_shown(&self) -> Vec<Product> {
-        PRODUCTS_SHOWN.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the products shown in the image (`Iptc4xmpExt:ProductInImage`); an existing array
-    /// keeps its container kind, and an empty slice removes a property this pair reported.
-    pub fn set_products_shown(&mut self, products: &[Product]) {
-        PRODUCTS_SHOWN.write(&mut self.xmp, products);
-    }
-
-    /// The image's registry entries (`Iptc4xmpExt:RegistryId`), on the same terms as
-    /// [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn registry_entries(&self) -> Vec<RegistryEntry> {
-        REGISTRY_ENTRIES.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the image's registry entries (`Iptc4xmpExt:RegistryId`); an existing array keeps its
-    /// container kind, and an empty slice removes a property this pair reported.
-    pub fn set_registry_entries(&mut self, entries: &[RegistryEntry]) {
-        REGISTRY_ENTRIES.write(&mut self.xmp, entries);
-    }
-
-    /// The rights expressions embedded in the metadata (`Iptc4xmpExt:EmbdEncRightsExpr`), on the
-    /// same terms as [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn embedded_rights_expressions(&self) -> Vec<EmbeddedRightsExpression> {
-        EMBEDDED_RIGHTS_EXPRESSIONS
-            .read(&self.xmp)
-            .unwrap_or_default()
-    }
-
-    /// Sets the rights expressions embedded in the metadata (`Iptc4xmpExt:EmbdEncRightsExpr`); an
-    /// existing array keeps its container kind, and an empty slice removes a property this pair
-    /// reported.
-    pub fn set_embedded_rights_expressions(&mut self, expressions: &[EmbeddedRightsExpression]) {
-        EMBEDDED_RIGHTS_EXPRESSIONS.write(&mut self.xmp, expressions);
-    }
-
-    /// The rights expressions the metadata links to (`Iptc4xmpExt:LinkedEncRightsExpr`), on the
-    /// same terms as [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn linked_rights_expressions(&self) -> Vec<LinkedRightsExpression> {
-        LINKED_RIGHTS_EXPRESSIONS
-            .read(&self.xmp)
-            .unwrap_or_default()
-    }
-
-    /// Sets the rights expressions the metadata links to (`Iptc4xmpExt:LinkedEncRightsExpr`); an
-    /// existing array keeps its container kind, and an empty slice removes a property this pair
-    /// reported.
-    pub fn set_linked_rights_expressions(&mut self, expressions: &[LinkedRightsExpression]) {
-        LINKED_RIGHTS_EXPRESSIONS.write(&mut self.xmp, expressions);
-    }
-
-    /// The copyright owners of the image (`plus:CopyrightOwner`), in order, on the same terms as
-    /// [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn copyright_owners(&self) -> Vec<CopyrightOwner> {
-        COPYRIGHT_OWNERS.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the copyright owners of the image (`plus:CopyrightOwner`); an existing array keeps its
-    /// container kind, a new one is the `rdf:Seq` the standard specifies, and an empty slice
-    /// removes a property this pair reported.
-    pub fn set_copyright_owners(&mut self, owners: &[CopyrightOwner]) {
-        COPYRIGHT_OWNERS.write(&mut self.xmp, owners);
-    }
-
-    /// The creators of the image (`plus:ImageCreator`), in order, on the same terms as
-    /// [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn image_creators(&self) -> Vec<ImageCreator> {
-        IMAGE_CREATORS.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the creators of the image (`plus:ImageCreator`); an existing array keeps its container
-    /// kind, a new one is the `rdf:Seq` the standard specifies, and an empty slice removes a
-    /// property this pair reported.
-    pub fn set_image_creators(&mut self, creators: &[ImageCreator]) {
-        IMAGE_CREATORS.write(&mut self.xmp, creators);
-    }
-
-    /// The suppliers of the image (`plus:ImageSupplier`), in order, on the same terms as
-    /// [`image_regions`](Self::image_regions).
-    #[must_use]
-    pub fn image_suppliers(&self) -> Vec<ImageSupplier> {
-        IMAGE_SUPPLIERS.read(&self.xmp).unwrap_or_default()
-    }
-
-    /// Sets the suppliers of the image (`plus:ImageSupplier`); an existing array keeps its
-    /// container kind, a new one is the `rdf:Seq` the standard specifies, and an empty slice
-    /// removes a property this pair reported.
-    pub fn set_image_suppliers(&mut self, suppliers: &[ImageSupplier]) {
-        IMAGE_SUPPLIERS.write(&mut self.xmp, suppliers);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use gamut_xmp::{XmpArray, XmpItem};
 
-    fn text_value(s: &str) -> XmpValue {
-        XmpValue::Simple(s.to_owned())
-    }
+    use super::fields::{
+        X_DEFAULT, lang_alt_value, parse_lang_alt, parse_list, parse_number, parse_text, structures,
+    };
+    use super::test_support::{
+        contact, contributor, copyright_owner, cv_term, embedded_rights, image_creator,
+        image_supplier, linked_rights, location, person, product, qualified, registry_entry,
+        structured, text_value,
+    };
+    use super::*;
 
     /// A structure's `from_xmp` → `to_xmp` round trip, named for the type it converts.
     type Trip = (&'static str, XmpValue, fn(&XmpValue) -> Option<XmpValue>);
@@ -2895,22 +1931,6 @@ mod tests {
     /// The field of `fields` named `ns:name`, for assertions about a field's container kind.
     fn field<'a>(fields: &'a [XmpProperty], ns: &str, name: &str) -> Option<&'a XmpProperty> {
         fields.iter().find(|p| p.namespace == ns && p.name == name)
-    }
-
-    /// A contact block whose eight values are all distinct, so a field read from the wrong
-    /// property is visible.
-    fn contact() -> CreatorContactInfo {
-        CreatorContactInfo {
-            address: Some("1 Rue Test".to_owned()),
-            city: Some("Lyon".to_owned()),
-            country: Some("France".to_owned()),
-            postal_code: Some("69000".to_owned()),
-            region: Some("Rhône".to_owned()),
-            email: Some("a@example.org".to_owned()),
-            phone: Some("+33 1 23".to_owned()),
-            web_url: Some("https://example.org/".to_owned()),
-            other: Vec::new(),
-        }
     }
 
     #[test]
@@ -2958,129 +1978,6 @@ mod tests {
         assert_eq!(CopyrightOwner::from_xmp(&text), None);
         assert_eq!(ImageCreator::from_xmp(&text), None);
         assert_eq!(ImageSupplier::from_xmp(&text), None);
-    }
-
-    /// A [`Location`] whose twelve values are all distinct, so a field read from the wrong property
-    /// is visible.
-    fn location() -> Location {
-        Location {
-            identifiers: vec!["https://example.org/loc/1".to_owned(), "urn:loc".to_owned()],
-            name: Some("Place Bellecour".to_owned()),
-            sublocation: Some("Presqu'île".to_owned()),
-            city: Some("Lyon".to_owned()),
-            province_state: Some("Rhône".to_owned()),
-            country_name: Some("France".to_owned()),
-            country_code: Some("FRA".to_owned()),
-            world_region: Some("Europe".to_owned()),
-            gps_latitude: Some("45,45.47N".to_owned()),
-            gps_longitude: Some("4,49.92E".to_owned()),
-            gps_altitude: Some("170/1".to_owned()),
-            gps_altitude_ref: Some("0".to_owned()),
-            other: Vec::new(),
-        }
-    }
-
-    /// A [`CvTerm`] with every field set to a distinct value.
-    fn cv_term(name: &str) -> CvTerm {
-        CvTerm {
-            vocabulary_identifier: Some("http://cv.iptc.org/newscodes/scene/".to_owned()),
-            identifier: Some("http://cv.iptc.org/newscodes/scene/011900".to_owned()),
-            name: Some(name.to_owned()),
-            refined_about: Some("http://cv.iptc.org/newscodes/rbac/visual".to_owned()),
-            other: Vec::new(),
-        }
-    }
-
-    /// A [`Person`] with every field set, including two characteristics.
-    fn person() -> Person {
-        Person {
-            identifiers: vec!["urn:person".to_owned()],
-            name: Some("Ada Lovelace".to_owned()),
-            characteristics: vec![cv_term("adult"), cv_term("smiling")],
-            description: Some("Seated, left of frame".to_owned()),
-            other: Vec::new(),
-        }
-    }
-
-    /// An [`EntityWithRole`] with every field set.
-    fn contributor() -> EntityWithRole {
-        EntityWithRole {
-            identifiers: vec!["urn:contributor".to_owned()],
-            name: Some("Studio gamut".to_owned()),
-            roles: vec![
-                "http://cv.iptc.org/newscodes/contrrole/retoucher".to_owned(),
-                "http://cv.iptc.org/newscodes/contrrole/editor".to_owned(),
-            ],
-            other: Vec::new(),
-        }
-    }
-
-    /// A [`Product`] with every field set.
-    fn product() -> Product {
-        Product {
-            identifiers: vec!["urn:product".to_owned()],
-            name: Some("Teapot".to_owned()),
-            gtin: Some("4006381333931".to_owned()),
-            description: Some("White porcelain".to_owned()),
-            other: Vec::new(),
-        }
-    }
-
-    /// A [`RegistryEntry`] with every field set.
-    fn registry_entry() -> RegistryEntry {
-        RegistryEntry {
-            item_identifier: Some("item-42".to_owned()),
-            organisation_identifier: Some("https://registry.example.org/".to_owned()),
-            role: Some("http://cv.iptc.org/newscodes/imageregistryrole/canonicalLink".to_owned()),
-            other: Vec::new(),
-        }
-    }
-
-    /// An [`EmbeddedRightsExpression`] with every field set.
-    fn embedded_rights() -> EmbeddedRightsExpression {
-        EmbeddedRightsExpression {
-            expression: Some("<o:Policy/>".to_owned()),
-            encoding_type: Some("application/xml".to_owned()),
-            language_identifier: Some("http://www.w3.org/ns/odrl/2/".to_owned()),
-            other: Vec::new(),
-        }
-    }
-
-    /// A [`LinkedRightsExpression`] with every field set.
-    fn linked_rights() -> LinkedRightsExpression {
-        LinkedRightsExpression {
-            url: Some("https://example.org/policy.xml".to_owned()),
-            encoding_type: Some("application/xml".to_owned()),
-            language_identifier: Some("http://www.w3.org/ns/odrl/2/".to_owned()),
-            other: Vec::new(),
-        }
-    }
-
-    /// A [`CopyrightOwner`] with both fields set.
-    fn copyright_owner(name: &str) -> CopyrightOwner {
-        CopyrightOwner {
-            identifier: Some(format!("urn:owner:{name}")),
-            name: Some(name.to_owned()),
-            other: Vec::new(),
-        }
-    }
-
-    /// An [`ImageCreator`] with both fields set.
-    fn image_creator(name: &str) -> ImageCreator {
-        ImageCreator {
-            identifier: Some(format!("urn:creator:{name}")),
-            name: Some(name.to_owned()),
-            other: Vec::new(),
-        }
-    }
-
-    /// An [`ImageSupplier`] with both fields set.
-    fn image_supplier(name: &str) -> ImageSupplier {
-        ImageSupplier {
-            identifier: Some(format!("urn:supplier:{name}")),
-            name: Some(name.to_owned()),
-            other: Vec::new(),
-        }
     }
 
     /// Each of the eleven structures added for issue #538 with every field set, its `to_xmp` →
@@ -3513,66 +2410,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn accessors_round_trip_through_the_unified_view() {
-        let mut pm = PhotoMetadata::new();
-        assert_eq!(pm.creator_contact_info(), None);
-        assert!(pm.image_regions().is_empty());
-        assert!(pm.artwork_or_objects().is_empty());
-        assert!(pm.licensors().is_empty());
-
-        let info = contact();
-        let region = ImageRegion {
-            identifier: Some("r1".to_owned()),
-            ..ImageRegion::default()
-        };
-        let art = ArtworkOrObject {
-            title: Some("Sunflowers".to_owned()),
-            ..ArtworkOrObject::default()
-        };
-        let licensor = Licensor {
-            name: Some("Agence gamut".to_owned()),
-            ..Licensor::default()
-        };
-        pm.set_creator_contact_info(&info);
-        pm.set_image_regions(std::slice::from_ref(&region));
-        pm.set_artwork_or_objects(std::slice::from_ref(&art));
-        pm.set_licensors(std::slice::from_ref(&licensor));
-
-        assert_eq!(pm.creator_contact_info(), Some(info));
-        assert_eq!(pm.image_regions(), vec![region]);
-        assert_eq!(pm.artwork_or_objects(), vec![art]);
-        assert_eq!(pm.licensors(), vec![licensor]);
-        assert_eq!(pm.xmp.properties.len(), 4);
-
-        // Setting an empty slice removes the property rather than leaving an empty array.
-        pm.set_image_regions(&[]);
-        pm.set_artwork_or_objects(&[]);
-        pm.set_licensors(&[]);
-        assert!(pm.image_regions().is_empty());
-        assert_eq!(pm.xmp.properties.len(), 1);
-    }
-
-    #[test]
-    fn plus_licensors_survive_extraction_from_a_full_xmp_graph() {
-        // plus: is in IPTC_NAMESPACES, so PhotoMetadata::from_xmp must keep plus:Licensor while
-        // still dropping a non-IPTC property.
-        let mut pm = PhotoMetadata::new();
-        pm.set_licensors(&[Licensor {
-            name: Some("Agence gamut".to_owned()),
-            ..Licensor::default()
-        }]);
-        let mut graph = pm.to_xmp();
-        graph.set(XmpProperty::new(
-            WellKnownNs::Xmp.uri(),
-            "CreatorTool",
-            text_value("something else"),
-        ));
-        let extracted = PhotoMetadata::from_xmp(&graph);
-        assert_eq!(extracted.licensors().len(), 1);
-        assert_eq!(extracted.xmp.properties.len(), 1);
-    }
-
     /// `value` (a structure) with one vendor-namespace field appended.
     fn with_vendor_field(value: &XmpValue) -> XmpValue {
         let mut fields = structure(value).expect("a structure value").to_vec();
@@ -3711,177 +2548,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reproduction_is_equality_apart_from_the_two_re_spellings() {
-        // The relation the retention rule is built on, stated on its own: the same value spelled
-        // another way reproduces a field, and nothing else does.
-        let coordinate =
-            |text: &str| XmpProperty::new(WellKnownNs::Iptc4XmpExt.uri(), "rbX", text_value(text));
-        assert!(reproduces(&coordinate(" 0.50 "), &coordinate("0.5")));
-        assert!(!reproduces(&coordinate("0.5"), &coordinate("0.25")));
-        // A double that formats to another decimal is another value, not another spelling.
-        assert!(!reproduces(
-            &coordinate("12345678901234567891"),
-            &coordinate("12345678901234567000")
-        ));
-        assert!(!reproduces(&coordinate("left"), &coordinate("right")));
-        // A value of another kind is another value, and a field of another name is another field.
-        assert!(!reproduces(
-            &coordinate("0.5"),
-            &XmpProperty::new(
-                WellKnownNs::Iptc4XmpExt.uri(),
-                "rbX",
-                XmpValue::Uri("0.5".to_owned())
-            )
-        ));
-        assert!(!reproduces(
-            &coordinate("0.5"),
-            &XmpProperty::new(WellKnownNs::Iptc4XmpExt.uri(), "rbY", text_value("0.5"))
-        ));
-        assert!(!reproduces(
-            &coordinate("0.5"),
-            &XmpProperty::new(WellKnownNs::Xmp.uri(), "rbX", text_value("0.5"))
-        ));
-    }
-
-    #[test]
-    fn a_number_reproduces_only_an_xmp_real_of_the_same_decimal_value() {
-        // `same_number` compares decimal values under XMP Part 1 §8.2.1.4's grammar.
-        // Re-spellings of one value: zeros that carry no digit, a `+` sign, an omitted part.
-        for (read, emitted) in [
-            ("0.50", "0.5"),
-            ("05", "5"),
-            ("+0.5", "0.5"),
-            (".5", "0.5"),
-            ("-0.50", "-0.5"),
-            ("100.0", "100"),
-        ] {
-            assert!(same_number(read, emitted), "{read} is {emitted}");
-        }
-        for (read, emitted) in [
-            // Another value: the sign, the integer digits and the fraction digits each count.
-            ("-0.5", "0.5"),
-            ("1.5", "10.5"),
-            ("0.5", "0.05"),
-            // A double that formats to another decimal: more digits than it keeps, an underflow.
-            ("12345678901234567891", "12345678901234567000"),
-            ("0.1000000000000000000001", "0.1"),
-            // Not an XMP Real at all: an exponent, a bare point, a point with no fraction, a
-            // sign or nothing on its own, a sign after a sign.
-            ("1e-400", "0"),
-            ("5e0", "5"),
-            (".", "0"),
-            ("5.", "5"),
-            ("", "0"),
-            ("-", "-0"),
-            ("+-5", "-5"),
-            ("NaN", "NaN"),
-        ] {
-            assert!(!same_number(read, emitted), "{read} is not {emitted}");
-        }
-    }
-
-    #[test]
-    fn a_uri_reproduces_only_a_uri_of_the_same_target() {
-        // `rdf:resource` is a value kind of its own (XMP Part 1 §6.3.2), so a URL field is
-        // reproduced only by emitting the same URI again — the clause that makes a `Uri` field
-        // consumable at all rather than retained.
-        let url = |target: &str| {
-            XmpProperty::new(
-                WellKnownNs::Iptc4XmpExt.uri(),
-                "AOSourceInvURL",
-                XmpValue::Uri(target.to_owned()),
-            )
-        };
-        assert!(reproduces(
-            &url("https://example.test/a"),
-            &url("https://example.test/a")
-        ));
-        assert!(!reproduces(
-            &url("https://example.test/a"),
-            &url("https://example.test/b")
-        ));
-    }
-
-    #[test]
-    fn a_structure_reproduces_only_when_every_field_does() {
-        // A structure's fields are an unordered set (Part 1 §6.3.3), so each one has to be found
-        // in the other structure; counting them is not enough.
-        let creator = |name: &str| {
-            XmpProperty::new(
-                WellKnownNs::Iptc4XmpExt.uri(),
-                "AOCreator",
-                structured(vec![XmpProperty::new(
-                    WellKnownNs::Iptc4XmpExt.uri(),
-                    "Name",
-                    text_value(name),
-                )]),
-            )
-        };
-        assert!(reproduces(&creator("Human"), &creator("Human")));
-        assert!(!reproduces(&creator("Human"), &creator("Another")));
-    }
-
-    #[test]
-    fn a_qualifier_the_writer_does_not_emit_is_a_difference() {
-        // The writer builds its properties with no qualifiers at all, so a qualified field is
-        // reproduced only by a field carrying the same qualifier — matching them pairwise, not
-        // by count.
-        let city = || {
-            XmpProperty::new(
-                WellKnownNs::Iptc4XmpExt.uri(),
-                "CiAdrCity",
-                text_value("Paris"),
-            )
-        };
-        assert!(reproduces(
-            &qualified(city(), "fr"),
-            &qualified(city(), "fr")
-        ));
-        assert!(!reproduces(&qualified(city(), "fr"), &city()));
-        assert!(!reproduces(
-            &qualified(city(), "fr"),
-            &qualified(city(), "en")
-        ));
-    }
-
-    #[test]
-    fn only_an_xml_lang_qualifier_is_matched_case_insensitively() {
-        // XMP Part 1 §8.2.2.4 matches language tags case-insensitively. No other qualifier is
-        // matched that way: neither the `xml:` namespace on its own nor the name `lang` on its
-        // own makes one, and an ordinary qualifier is compared by value.
-        let city = || {
-            XmpProperty::new(
-                WellKnownNs::Iptc4XmpExt.uri(),
-                "CiAdrCity",
-                text_value("Paris"),
-            )
-        };
-        let with = |namespace: &str, name: &str, text: &str| {
-            let mut property = city();
-            property
-                .qualifiers
-                .push(XmpProperty::new(namespace, name, text_value(text)));
-            property
-        };
-        assert!(reproduces(
-            &qualified(city(), "x-default"),
-            &qualified(city(), "X-Default")
-        ));
-        assert!(!reproduces(
-            &with(XML_NAMESPACE, "space", "preserve"),
-            &with(XML_NAMESPACE, "space", "PRESERVE")
-        ));
-        assert!(!reproduces(
-            &with(WellKnownNs::Iptc4XmpExt.uri(), "lang", "fr"),
-            &with(WellKnownNs::Iptc4XmpExt.uri(), "lang", "FR")
-        ));
-        assert!(!reproduces(
-            &with(WellKnownNs::Iptc4XmpExt.uri(), "role", "editor"),
-            &with(WellKnownNs::Iptc4XmpExt.uri(), "role", "author")
-        ));
-    }
-
     /// One shape a modelled field can arrive in, with both rules' machinery attached to it.
     struct Shape {
         /// What the shape is — the label the enumeration is published under.
@@ -3896,17 +2562,6 @@ mod tests {
         parses: fn(&XmpValue) -> bool,
         /// The owning type's `from_xmp` -> `to_xmp`.
         trip: fn(&XmpValue) -> Option<XmpValue>,
-    }
-
-    fn structured(fields: Vec<XmpProperty>) -> XmpValue {
-        XmpValue::Structured(fields)
-    }
-
-    fn qualified(mut property: XmpProperty, lang: &str) -> XmpProperty {
-        property
-            .qualifiers
-            .push(XmpProperty::new(XML_NAMESPACE, "lang", text_value(lang)));
-        property
     }
 
     fn entity() -> XmpValue {
@@ -4458,684 +3113,5 @@ mod tests {
             Reader::new(fields).text(WellKnownNs::Iptc4XmpExt.uri(), "rId"),
             Some("r2".to_owned())
         );
-    }
-
-    #[test]
-    fn setting_an_array_keeps_the_container_kind_the_property_already_has() {
-        // Rewriting one legal container kind to another throws away what that kind states — a
-        // `Seq`'s order, an `Alt`'s "these are alternatives" — and the setter has the existing
-        // property in front of it. A property that is not an array becomes the standard Bag.
-        let region = ImageRegion {
-            identifier: Some("r1".to_owned()),
-            ..ImageRegion::default()
-        };
-        let kinds: [fn(Vec<XmpItem>) -> XmpArray; 3] =
-            [XmpArray::Bag, XmpArray::Seq, XmpArray::Alt];
-        for kind in kinds {
-            let mut pm = PhotoMetadata::new();
-            pm.xmp.set(XmpProperty::new(
-                WellKnownNs::Iptc4XmpExt.uri(),
-                "ImageRegion",
-                XmpValue::Array(kind(vec![XmpItem::new(region.to_xmp())])),
-            ));
-            pm.set_image_regions(std::slice::from_ref(&region));
-            assert_eq!(
-                pm.xmp
-                    .get(WellKnownNs::Iptc4XmpExt.uri(), "ImageRegion")
-                    .expect("the property")
-                    .value,
-                XmpValue::Array(kind(vec![XmpItem::new(region.to_xmp())]))
-            );
-        }
-        // Nothing to keep: the standard Bag.
-        let mut pm = PhotoMetadata::new();
-        pm.set_image_regions(std::slice::from_ref(&region));
-        assert!(matches!(
-            pm.xmp
-                .get(WellKnownNs::Iptc4XmpExt.uri(), "ImageRegion")
-                .expect("the property")
-                .value,
-            XmpValue::Array(XmpArray::Bag(_))
-        ));
-    }
-
-    #[test]
-    fn reading_an_array_and_setting_it_back_keeps_every_member() {
-        // A member carrying no field at all is still a member: dropping it would shift every
-        // later member's index, so `image_regions()` -> `set_image_regions()` would not be the
-        // identity. `rbVertices` never dropped one, and the top-level setters now agree with it.
-        let mut pm = PhotoMetadata::new();
-        let region = ImageRegion {
-            identifier: Some("r1".to_owned()),
-            ..ImageRegion::default()
-        };
-        let regions = vec![ImageRegion::default(), region];
-        pm.set_image_regions(&regions);
-        assert_eq!(pm.image_regions(), regions);
-        pm.set_image_regions(&pm.image_regions());
-        assert_eq!(pm.image_regions(), regions);
-    }
-
-    #[test]
-    fn an_empty_contact_block_removes_the_property() {
-        // Every setter agrees: nothing to say removes the property, rather than leaving behind
-        // an empty structure a reader would report as "present but blank".
-        let mut pm = PhotoMetadata::new();
-        pm.set_creator_contact_info(&contact());
-        pm.set_creator_contact_info(&CreatorContactInfo::default());
-        assert_eq!(pm.creator_contact_info(), None);
-        assert!(pm.xmp.properties.is_empty());
-    }
-
-    #[test]
-    fn a_bare_structure_where_an_array_belongs_reads_as_absent_at_both_levels() {
-        // Seen in the wild: a single structure written where the standard puts a Bag. Writing it
-        // back would normalise it into a Bag, so it is not read — one rule, at both levels, and
-        // the property is left where it lies either way.
-        let licensor = Licensor {
-            name: Some("Agence gamut".to_owned()),
-            ..Licensor::default()
-        };
-        let mut pm = PhotoMetadata::new();
-        pm.xmp.set(XmpProperty::new(
-            WellKnownNs::Plus.uri(),
-            "Licensor",
-            licensor.to_xmp(),
-        ));
-        assert_eq!(pm.licensors(), Vec::new());
-
-        // Inside a structure the same shape reads the same way: `rCtype` reads as nothing.
-        let region = XmpValue::Structured(vec![XmpProperty::new(
-            WellKnownNs::Iptc4XmpExt.uri(),
-            "rCtype",
-            Entity {
-                name: Some("Human".to_owned()),
-                ..Entity::default()
-            }
-            .to_xmp(),
-        )]);
-        let read = ImageRegion::from_xmp(&region).expect("a structure value");
-        assert_eq!(read.content_types, Vec::new());
-    }
-
-    #[test]
-    fn an_array_member_the_model_cannot_write_back_makes_the_property_read_as_absent() {
-        // Hostile/odd input: a Bag holding plain text where a structure is expected. Reporting the
-        // one region the model does read would invite a setter call that drops the other member,
-        // so the property reads as absent instead — and it is not fatal.
-        let mut pm = PhotoMetadata::new();
-        pm.xmp.set(XmpProperty::new(
-            WellKnownNs::Iptc4XmpExt.uri(),
-            "ImageRegion",
-            XmpValue::Array(XmpArray::Bag(vec![
-                XmpItem::simple("not a region"),
-                XmpItem::new(
-                    ImageRegion {
-                        identifier: Some("r1".to_owned()),
-                        ..ImageRegion::default()
-                    }
-                    .to_xmp(),
-                ),
-            ])),
-        ));
-        assert_eq!(pm.image_regions(), Vec::new());
-        // A non-array property yields nothing at all rather than a bogus entry.
-        pm.xmp.set(XmpProperty::new(
-            WellKnownNs::Plus.uri(),
-            "Licensor",
-            text_value("not an array"),
-        ));
-        assert!(pm.licensors().is_empty());
-    }
-
-    #[test]
-    fn two_top_level_properties_of_one_name_are_neither_read_nor_lost() {
-        // Only one of the two could be written back, so neither is read — the rule `Reader::read`
-        // already takes inside a structure — and the setter therefore has nothing to remove.
-        let named = |name: &str| {
-            XmpProperty::new(
-                WellKnownNs::Plus.uri(),
-                "Licensor",
-                XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(
-                    Licensor {
-                        name: Some(name.to_owned()),
-                        ..Licensor::default()
-                    }
-                    .to_xmp(),
-                )])),
-            )
-        };
-        let mut pm = PhotoMetadata::new();
-        pm.xmp.properties.push(named("Agence gamut"));
-        pm.xmp.properties.push(named("Another agency"));
-        let before = pm.xmp.clone();
-        assert_eq!(pm.licensors(), Vec::new());
-        pm.set_licensors(&pm.licensors());
-        assert_eq!(pm.xmp, before);
-    }
-
-    #[test]
-    fn a_setter_handed_values_replaces_every_top_level_property_of_its_name() {
-        // `Projection::replace`: the value takes the first copy's place and the later copies go,
-        // so the value set is the value read back; neighbours on either side are untouched.
-        let licensor = |name: &str| Licensor {
-            name: Some(name.to_owned()),
-            ..Licensor::default()
-        };
-        let named = |name: &str| {
-            XmpProperty::new(
-                WellKnownNs::Plus.uri(),
-                "Licensor",
-                XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(licensor(name).to_xmp())])),
-            )
-        };
-        let neighbour =
-            |name: &str| XmpProperty::new(WellKnownNs::Xmp.uri(), name, text_value(name));
-        let mut pm = PhotoMetadata::new();
-        pm.xmp.properties = vec![
-            neighbour("Before"),
-            named("Agence gamut"),
-            neighbour("Between"),
-            named("Another agency"),
-            neighbour("After"),
-        ];
-        pm.set_licensors(&[licensor("New agency")]);
-        assert_eq!(
-            pm.xmp.properties,
-            [
-                neighbour("Before"),
-                named("New agency"),
-                neighbour("Between"),
-                neighbour("After"),
-            ]
-        );
-        assert_eq!(pm.licensors(), [licensor("New agency")]);
-    }
-
-    /// One top-level property the typed view projects, for the sweep below.
-    struct TopProperty {
-        /// The accessor pair under test, for the failure message.
-        label: &'static str,
-        /// The property's namespace URI.
-        ns: &'static str,
-        /// The property's local name.
-        name: &'static str,
-        /// A structure value whose every field the property's own type reads.
-        member: fn() -> XmpValue,
-        /// Reads the property through its accessor and writes what it read straight back.
-        trip: fn(&mut PhotoMetadata),
-    }
-
-    /// Every accessor pair [`PhotoMetadata`] exposes for a structured IPTC property.
-    fn top_properties() -> Vec<TopProperty> {
-        vec![
-            TopProperty {
-                label: "creator_contact_info",
-                ns: WellKnownNs::Iptc4XmpCore.uri(),
-                name: "CreatorContactInfo",
-                member: || contact().to_xmp(),
-                trip: |pm| {
-                    let info = pm.creator_contact_info().unwrap_or_default();
-                    pm.set_creator_contact_info(&info);
-                },
-            },
-            TopProperty {
-                label: "image_regions",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "ImageRegion",
-                member: || {
-                    ImageRegion {
-                        identifier: Some("r1".to_owned()),
-                        ..ImageRegion::default()
-                    }
-                    .to_xmp()
-                },
-                trip: |pm| pm.set_image_regions(&pm.image_regions()),
-            },
-            TopProperty {
-                label: "artwork_or_objects",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "ArtworkOrObject",
-                member: || {
-                    ArtworkOrObject {
-                        title: Some("Sunflowers".to_owned()),
-                        ..ArtworkOrObject::default()
-                    }
-                    .to_xmp()
-                },
-                trip: |pm| pm.set_artwork_or_objects(&pm.artwork_or_objects()),
-            },
-            TopProperty {
-                label: "licensors",
-                ns: WellKnownNs::Plus.uri(),
-                name: "Licensor",
-                member: || {
-                    Licensor {
-                        name: Some("Agence gamut".to_owned()),
-                        ..Licensor::default()
-                    }
-                    .to_xmp()
-                },
-                trip: |pm| pm.set_licensors(&pm.licensors()),
-            },
-            TopProperty {
-                label: "locations_created",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "LocationCreated",
-                member: || location().to_xmp(),
-                trip: |pm| pm.set_locations_created(&pm.locations_created()),
-            },
-            TopProperty {
-                label: "locations_shown",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "LocationShown",
-                member: || location().to_xmp(),
-                trip: |pm| pm.set_locations_shown(&pm.locations_shown()),
-            },
-            TopProperty {
-                label: "persons_shown",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "PersonInImageWDetails",
-                member: || person().to_xmp(),
-                trip: |pm| pm.set_persons_shown(&pm.persons_shown()),
-            },
-            TopProperty {
-                label: "about_cv_terms",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "AboutCvTerm",
-                member: || cv_term("outdoors").to_xmp(),
-                trip: |pm| pm.set_about_cv_terms(&pm.about_cv_terms()),
-            },
-            TopProperty {
-                label: "genres",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "Genre",
-                member: || cv_term("portrait").to_xmp(),
-                trip: |pm| pm.set_genres(&pm.genres()),
-            },
-            TopProperty {
-                label: "contributors",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "Contributor",
-                member: || contributor().to_xmp(),
-                trip: |pm| pm.set_contributors(&pm.contributors()),
-            },
-            TopProperty {
-                label: "products_shown",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "ProductInImage",
-                member: || product().to_xmp(),
-                trip: |pm| pm.set_products_shown(&pm.products_shown()),
-            },
-            TopProperty {
-                label: "registry_entries",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "RegistryId",
-                member: || registry_entry().to_xmp(),
-                trip: |pm| pm.set_registry_entries(&pm.registry_entries()),
-            },
-            TopProperty {
-                label: "embedded_rights_expressions",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "EmbdEncRightsExpr",
-                member: || embedded_rights().to_xmp(),
-                trip: |pm| pm.set_embedded_rights_expressions(&pm.embedded_rights_expressions()),
-            },
-            TopProperty {
-                label: "linked_rights_expressions",
-                ns: WellKnownNs::Iptc4XmpExt.uri(),
-                name: "LinkedEncRightsExpr",
-                member: || linked_rights().to_xmp(),
-                trip: |pm| pm.set_linked_rights_expressions(&pm.linked_rights_expressions()),
-            },
-            TopProperty {
-                label: "copyright_owners",
-                ns: WellKnownNs::Plus.uri(),
-                name: "CopyrightOwner",
-                member: || copyright_owner("Owner").to_xmp(),
-                trip: |pm| pm.set_copyright_owners(&pm.copyright_owners()),
-            },
-            TopProperty {
-                label: "image_creators",
-                ns: WellKnownNs::Plus.uri(),
-                name: "ImageCreator",
-                member: || image_creator("Creator").to_xmp(),
-                trip: |pm| pm.set_image_creators(&pm.image_creators()),
-            },
-            TopProperty {
-                label: "image_suppliers",
-                ns: WellKnownNs::Plus.uri(),
-                name: "ImageSupplier",
-                member: || image_supplier("Supplier").to_xmp(),
-                trip: |pm| pm.set_image_suppliers(&pm.image_suppliers()),
-            },
-        ]
-    }
-
-    #[test]
-    fn every_added_setter_writes_what_its_accessor_reads_back() {
-        // The read-modify-write sweep below starts from a graph that already holds the property,
-        // so a setter that wrote nothing would pass it. Each pair is checked here from an empty
-        // graph instead: one value in, the same value read back, under the one property named.
-        fn pair<T: Clone + PartialEq + std::fmt::Debug>(
-            label: &str,
-            values: &[T],
-            set: fn(&mut PhotoMetadata, &[T]),
-            get: fn(&PhotoMetadata) -> Vec<T>,
-            ns: &str,
-            name: &str,
-        ) {
-            let mut pm = PhotoMetadata::new();
-            set(&mut pm, values);
-            assert_eq!(get(&pm), values, "{label}");
-            assert_eq!(pm.xmp.properties.len(), 1, "{label}");
-            assert!(pm.xmp.get(ns, name).is_some(), "{label}: {name}");
-        }
-        let ext = WellKnownNs::Iptc4XmpExt.uri();
-        let locations = [location(), Location::default()];
-        pair(
-            "locations_created",
-            &locations,
-            PhotoMetadata::set_locations_created,
-            PhotoMetadata::locations_created,
-            ext,
-            "LocationCreated",
-        );
-        pair(
-            "locations_shown",
-            &locations,
-            PhotoMetadata::set_locations_shown,
-            PhotoMetadata::locations_shown,
-            ext,
-            "LocationShown",
-        );
-        pair(
-            "persons_shown",
-            &[person()],
-            PhotoMetadata::set_persons_shown,
-            PhotoMetadata::persons_shown,
-            ext,
-            "PersonInImageWDetails",
-        );
-        pair(
-            "about_cv_terms",
-            &[cv_term("outdoors")],
-            PhotoMetadata::set_about_cv_terms,
-            PhotoMetadata::about_cv_terms,
-            ext,
-            "AboutCvTerm",
-        );
-        pair(
-            "genres",
-            &[cv_term("portrait")],
-            PhotoMetadata::set_genres,
-            PhotoMetadata::genres,
-            ext,
-            "Genre",
-        );
-        pair(
-            "contributors",
-            &[contributor()],
-            PhotoMetadata::set_contributors,
-            PhotoMetadata::contributors,
-            ext,
-            "Contributor",
-        );
-        pair(
-            "products_shown",
-            &[product()],
-            PhotoMetadata::set_products_shown,
-            PhotoMetadata::products_shown,
-            ext,
-            "ProductInImage",
-        );
-        pair(
-            "registry_entries",
-            &[registry_entry()],
-            PhotoMetadata::set_registry_entries,
-            PhotoMetadata::registry_entries,
-            ext,
-            "RegistryId",
-        );
-        pair(
-            "embedded_rights_expressions",
-            &[embedded_rights()],
-            PhotoMetadata::set_embedded_rights_expressions,
-            PhotoMetadata::embedded_rights_expressions,
-            ext,
-            "EmbdEncRightsExpr",
-        );
-        pair(
-            "linked_rights_expressions",
-            &[linked_rights()],
-            PhotoMetadata::set_linked_rights_expressions,
-            PhotoMetadata::linked_rights_expressions,
-            ext,
-            "LinkedEncRightsExpr",
-        );
-        pair(
-            "copyright_owners",
-            &[copyright_owner("First"), copyright_owner("Second")],
-            PhotoMetadata::set_copyright_owners,
-            PhotoMetadata::copyright_owners,
-            WellKnownNs::Plus.uri(),
-            "CopyrightOwner",
-        );
-        pair(
-            "image_creators",
-            &[image_creator("First"), image_creator("Second")],
-            PhotoMetadata::set_image_creators,
-            PhotoMetadata::image_creators,
-            WellKnownNs::Plus.uri(),
-            "ImageCreator",
-        );
-        pair(
-            "image_suppliers",
-            &[image_supplier("First"), image_supplier("Second")],
-            PhotoMetadata::set_image_suppliers,
-            PhotoMetadata::image_suppliers,
-            WellKnownNs::Plus.uri(),
-            "ImageSupplier",
-        );
-    }
-
-    #[test]
-    fn a_new_plus_party_list_is_the_seq_the_standard_specifies() {
-        // `plus:CopyrightOwner`, `plus:ImageCreator` and `plus:ImageSupplier` are ordered lists in
-        // the standard's XMP Specs rows; every other structured array is a Bag. A property that
-        // already exists keeps its own kind — including a Bag under a Seq-standard property, which
-        // is what makes `container_of`'s Bag arm distinct from its default.
-        let mut pm = PhotoMetadata::new();
-        pm.set_copyright_owners(&[copyright_owner("Owner")]);
-        pm.set_image_creators(&[image_creator("Creator")]);
-        pm.set_image_suppliers(&[image_supplier("Supplier")]);
-        pm.set_locations_created(&[location()]);
-        let kind = container_kind;
-        assert_eq!(kind(&pm, WellKnownNs::Plus.uri(), "CopyrightOwner"), "Seq");
-        assert_eq!(kind(&pm, WellKnownNs::Plus.uri(), "ImageCreator"), "Seq");
-        assert_eq!(kind(&pm, WellKnownNs::Plus.uri(), "ImageSupplier"), "Seq");
-        assert_eq!(
-            kind(&pm, WellKnownNs::Iptc4XmpExt.uri(), "LocationCreated"),
-            "Bag"
-        );
-
-        let mut pm = PhotoMetadata::new();
-        pm.xmp.set(XmpProperty::new(
-            WellKnownNs::Plus.uri(),
-            "CopyrightOwner",
-            XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(
-                copyright_owner("Owner").to_xmp(),
-            )])),
-        ));
-        pm.set_copyright_owners(&[copyright_owner("Another")]);
-        assert_eq!(kind(&pm, WellKnownNs::Plus.uri(), "CopyrightOwner"), "Bag");
-    }
-
-    /// The container kind of the top-level property `ns`/`name`: `"Seq"`, `"Bag"` or `"other"`.
-    fn container_kind(pm: &PhotoMetadata, ns: &str, name: &str) -> &'static str {
-        match &pm.xmp.get(ns, name).unwrap().value {
-            XmpValue::Array(XmpArray::Seq(_)) => "Seq",
-            XmpValue::Array(XmpArray::Bag(_)) => "Bag",
-            _ => "other",
-        }
-    }
-
-    #[test]
-    fn a_new_extension_list_is_the_bag_the_standard_specifies() {
-        // Every structured `Iptc4xmpExt` list this module added is a Bag in the standard's XMP
-        // Specs rows. The `standard` field of each projection is a literal the mutation gate
-        // cannot alter, so each one is asserted here, written fresh into an empty graph.
-        let ext = WellKnownNs::Iptc4XmpExt.uri();
-        let fresh = |set: &dyn Fn(&mut PhotoMetadata), name: &str| {
-            let mut pm = PhotoMetadata::new();
-            set(&mut pm);
-            assert_eq!(container_kind(&pm, ext, name), "Bag", "{name}");
-        };
-        fresh(&|pm| pm.set_locations_shown(&[location()]), "LocationShown");
-        fresh(
-            &|pm| pm.set_persons_shown(&[person()]),
-            "PersonInImageWDetails",
-        );
-        fresh(
-            &|pm| pm.set_about_cv_terms(&[cv_term("outdoors")]),
-            "AboutCvTerm",
-        );
-        fresh(&|pm| pm.set_genres(&[cv_term("portrait")]), "Genre");
-        fresh(&|pm| pm.set_contributors(&[contributor()]), "Contributor");
-        fresh(&|pm| pm.set_products_shown(&[product()]), "ProductInImage");
-        fresh(
-            &|pm| pm.set_registry_entries(&[registry_entry()]),
-            "RegistryId",
-        );
-        fresh(
-            &|pm| pm.set_embedded_rights_expressions(&[embedded_rights()]),
-            "EmbdEncRightsExpr",
-        );
-        fresh(
-            &|pm| pm.set_linked_rights_expressions(&[linked_rights()]),
-            "LinkedEncRightsExpr",
-        );
-    }
-
-    /// Every shape a top-level property's *value* can arrive in: the canonical form the model
-    /// writes, and every departure from it a graph can carry — a container kind it does not write,
-    /// a member it cannot read or cannot write back, and a value that is not an array at all.
-    fn top_level_values(member: &XmpValue) -> Vec<(&'static str, XmpValue)> {
-        let bag = |items: Vec<XmpItem>| XmpValue::Array(XmpArray::Bag(items));
-        let one = || XmpItem::new(member.clone());
-        let vendor = XmpValue::Structured(vec![XmpProperty::new(
-            "http://example.org/vendor/",
-            "Tint",
-            text_value("warm"),
-        )]);
-        vec![
-            ("a bag of one structure", bag(vec![one()])),
-            (
-                "a seq of one structure",
-                XmpValue::Array(XmpArray::Seq(vec![one()])),
-            ),
-            (
-                "an alt of one structure",
-                XmpValue::Array(XmpArray::Alt(vec![one()])),
-            ),
-            ("a bag of two structures", bag(vec![one(), one()])),
-            (
-                "a bag of a structure the model does not name",
-                bag(vec![XmpItem::new(vendor)]),
-            ),
-            (
-                "a bag of a structure with no field at all",
-                bag(vec![XmpItem::new(XmpValue::Structured(Vec::new()))]),
-            ),
-            (
-                "a bag holding a member that is not a structure",
-                bag(vec![one(), XmpItem::simple("not a structure")]),
-            ),
-            (
-                "a bag holding a member held as rdf:resource",
-                bag(vec![XmpItem::new(XmpValue::Uri(
-                    "https://example.org/".to_owned(),
-                ))]),
-            ),
-            (
-                "a bag holding a member that carries a qualifier",
-                bag(vec![XmpItem {
-                    value: member.clone(),
-                    qualifiers: vec![XmpProperty::new(XML_NAMESPACE, "lang", text_value("fr"))],
-                }]),
-            ),
-            ("an empty bag", bag(Vec::new())),
-            ("a bare structure", member.clone()),
-            (
-                "a structure with no field at all",
-                XmpValue::Structured(Vec::new()),
-            ),
-            ("simple text", text_value("not a structure")),
-            (
-                "a value held as rdf:resource",
-                XmpValue::Uri("https://example.org/".to_owned()),
-            ),
-            (
-                "a language alternative of text",
-                XmpValue::Array(XmpArray::Alt(vec![
-                    XmpItem::lang_text(X_DEFAULT, "Sunflowers"),
-                    XmpItem::lang_text("fr", "Tournesols"),
-                ])),
-            ),
-        ]
-    }
-
-    /// Every qualifier list a top-level property can carry.
-    fn top_level_qualifiers() -> Vec<(&'static str, Vec<XmpProperty>)> {
-        let lang = || XmpProperty::new(XML_NAMESPACE, "lang", text_value("fr"));
-        let vendor = || XmpProperty::new("http://example.org/vendor/", "Note", text_value("n"));
-        vec![
-            ("no qualifier", Vec::new()),
-            ("an xml:lang qualifier", vec![lang()]),
-            ("a vendor qualifier", vec![vendor()]),
-            ("two qualifiers", vec![lang(), vendor()]),
-        ]
-    }
-
-    #[test]
-    fn every_top_level_shape_survives_a_read_modify_write_unchanged() {
-        // The same law as `every_shape_survives_a_read_modify_write_unchanged`, one level up, and
-        // generated rather than listed: every accessor pair crossed with every value shape and
-        // every qualifier list. A shape the setter reproduces goes back out as the model's own
-        // output; one it cannot is left where it lies. Either way the graph that comes out — the
-        // property under test and the unrelated one beside it — is the graph that went in.
-        let neighbour = XmpProperty::new(
-            WellKnownNs::Photoshop.uri(),
-            "Headline",
-            text_value("Breaking"),
-        );
-        let mut crossed = 0_usize;
-        for property in top_properties() {
-            let member = (property.member)();
-            for (value_label, value) in top_level_values(&member) {
-                for (qualifier_label, qualifiers) in top_level_qualifiers() {
-                    let mut pm = PhotoMetadata::new();
-                    pm.xmp.properties.push(XmpProperty {
-                        namespace: property.ns.to_owned(),
-                        name: property.name.to_owned(),
-                        value: value.clone(),
-                        qualifiers,
-                    });
-                    pm.xmp.properties.push(neighbour.clone());
-                    let before = pm.xmp.clone();
-                    (property.trip)(&mut pm);
-                    assert_eq!(
-                        pm.xmp, before,
-                        "{}: {value_label}, {qualifier_label}: a read-modify-write did not give \
-                         the graph back",
-                        property.label
-                    );
-                    crossed += 1;
-                }
-            }
-        }
-        // The cross is what makes this a sweep rather than a spot check: 17 pairs x 15 value
-        // shapes x 4 qualifier lists.
-        assert_eq!(crossed, 1020);
     }
 }

@@ -4,12 +4,14 @@ use gamut_xmp::{WellKnownNs, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
 use crate::schema::{IPTC_NAMESPACES, XmpField, XmpShape};
 
+mod structured;
+
 /// IPTC Photo Metadata (Core + Extension), the modern standard.
 ///
 /// These properties are defined *as* XMP (in the `dc:`/`photoshop:`/`Iptc4xmpCore:` namespaces), so
 /// the model is carried as [`gamut_xmp`] properties rather than a parallel type hierarchy. Typed
 /// accessors cover every scalar/list Core field, and the structured `Iptc4xmpCore:CreatorContactInfo`
-/// and every IPTC Extension structure have typed accessor pairs defined in
+/// and every IPTC Extension structure have typed accessor pairs over the models in
 /// [`crate::extension`] (such as [`PhotoMetadata::locations_created`]). Everything stays
 /// accessible (and round-trips losslessly) through [`PhotoMetadata::xmp`], and every IIM-mapped
 /// field also through
