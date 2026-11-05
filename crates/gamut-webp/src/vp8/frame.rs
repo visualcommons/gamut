@@ -15,8 +15,9 @@
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
 #![allow(clippy::needless_range_loop)]
 
-use gamut_color::{Yuv420, clip_pixel8};
-use gamut_core::{Error, Result};
+use gamut_color::{ChromaSubsampling, Planar8};
+use gamut_core::{Dimensions, Error, Result};
+use gamut_dsp::math::clip_pixel8;
 
 use super::bool_coder::{BoolDecoder, BoolEncoder};
 use super::cost::bit_cost;
@@ -311,14 +312,12 @@ impl FrameBuffers {
         self.mb_cols * 8
     }
 
-    /// Crops the reconstruction to a visible-resolution [`Yuv420`].
+    /// Crops the reconstruction to visible-resolution 4:2:0 [`Planar8`] planes.
     #[must_use]
-    pub fn to_yuv420(&self) -> Yuv420 {
+    pub fn to_yuv420(&self) -> Planar8 {
         let (w, h) = (self.width as usize, self.height as usize);
-        let (cw, ch) = (
-            Yuv420::chroma_width(self.width) as usize,
-            Yuv420::chroma_height(self.height) as usize,
-        );
+        let (cw, ch) = ChromaSubsampling::Cs420.chroma_dimensions(self.width, self.height);
+        let (cw, ch) = (cw as usize, ch as usize);
         let crop = |plane: &[u8], stride: usize, pw: usize, ph: usize| {
             let mut out = vec![0u8; pw * ph];
             for row in 0..ph {
@@ -330,7 +329,11 @@ impl FrameBuffers {
         let y = crop(&self.y, self.y_stride(), w, h);
         let u = crop(&self.u, self.c_stride(), cw, ch);
         let v = crop(&self.v, self.c_stride(), cw, ch);
-        Yuv420::new(self.width, self.height, y, u, v).expect("cropped planes match dimensions")
+        Dimensions::new(self.width, self.height)
+            .and_then(|dims| {
+                Planar8::from_planes_subsampled(dims, ChromaSubsampling::Cs420, [y, u, v])
+            })
+            .expect("a VP8 frame is non-empty and its cropped planes match its dimensions")
     }
 }
 
@@ -1181,14 +1184,14 @@ fn decode_mb_tokens(
     levels
 }
 
-/// Encodes a [`Yuv420`] image as a VP8 key-frame bitstream (the `VP8 ` chunk payload), returning the
+/// Encodes 4:2:0 [`Planar8`] planes as a VP8 key-frame bitstream (the `VP8 ` chunk payload), returning the
 /// bitstream and the encoder's reconstruction (the tier-2 oracle: it must equal any decoder's output).
 /// Uses the normal loop filter.
 ///
 /// # Errors
 ///
 /// As [`encode_frame_filtered`].
-pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> Result<(Vec<u8>, FrameBuffers)> {
+pub fn encode_frame(yuv: &Planar8, quant_index: u8) -> Result<(Vec<u8>, FrameBuffers)> {
     encode_frame_filtered(yuv, quant_index, EncodeOptions::default())
 }
 
@@ -1209,11 +1212,20 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> Result<(Vec<u8>, FrameBuff
 /// caller's back, and neither does this. The lever is [`EncodeOptions::effort`]: `B_PRED` is what
 /// fills partition 0, so [`Effort::Fastest`] (which never emits it) encodes the whole WebP canvas
 /// range, up to 16383x16383, at any detail level.
+///
+/// Also returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when
+/// `yuv` is not laid out [`ChromaSubsampling::Cs420`], the only layout VP8 codes (RFC 6386 §9.2).
 pub fn encode_frame_filtered(
-    yuv: &Yuv420,
+    yuv: &Planar8,
     quant_index: u8,
     opts: EncodeOptions,
 ) -> Result<(Vec<u8>, FrameBuffers)> {
+    if yuv.subsampling() != ChromaSubsampling::Cs420 {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: only 4:2:0 planes are coded",
+        ));
+    }
     let mut header = frame_header(yuv.width(), yuv.height(), quant_index, opts.simple_filter);
     if opts.segmented {
         header.segmentation = Segmentation {
@@ -1234,11 +1246,12 @@ pub fn encode_frame_filtered(
 
     let (yw, yh) = (recon.y_stride(), recon.mb_rows * 16);
     let (cw, ch) = (recon.c_stride(), recon.mb_rows * 8);
-    let src_y = pad_plane(yuv.y(), yuv.width() as usize, yuv.height() as usize, yw, yh);
-    let vcw = Yuv420::chroma_width(yuv.width()) as usize;
-    let vch = Yuv420::chroma_height(yuv.height()) as usize;
-    let src_u = pad_plane(yuv.u(), vcw, vch, cw, ch);
-    let src_v = pad_plane(yuv.v(), vcw, vch, cw, ch);
+    let [y_plane, u_plane, v_plane] = yuv.planes();
+    let src_y = pad_plane(y_plane, yuv.width() as usize, yuv.height() as usize, yw, yh);
+    let (vcw, vch) = ChromaSubsampling::Cs420.chroma_dimensions(yuv.width(), yuv.height());
+    let (vcw, vch) = (vcw as usize, vch as usize);
+    let src_u = pad_plane(u_plane, vcw, vch, cw, ch);
+    let src_v = pad_plane(v_plane, vcw, vch, cw, ch);
 
     let segment_map: Vec<usize> = (0..recon.mb_rows * recon.mb_cols)
         .map(|i| {
@@ -1645,13 +1658,64 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
 mod tests {
     use super::*;
 
-    /// Builds a `Yuv420` from a deterministic synthetic pattern.
-    fn pattern(width: u32, height: u32) -> Yuv420 {
-        let (w, h) = (width as usize, height as usize);
-        let (cw, ch) = (
-            Yuv420::chroma_width(width) as usize,
-            Yuv420::chroma_height(height) as usize,
+    /// 4:2:0 chroma plane dimensions for a `width`×`height` luma plane, as `usize`.
+    fn chroma_dims(width: u32, height: u32) -> (usize, usize) {
+        let (cw, ch) = ChromaSubsampling::Cs420.chroma_dimensions(width, height);
+        (cw as usize, ch as usize)
+    }
+
+    /// Assembles a 4:2:0 `Planar8` from its three planes.
+    fn yuv420(width: u32, height: u32, y: Vec<u8>, u: Vec<u8>, v: Vec<u8>) -> Planar8 {
+        Planar8::from_planes_subsampled(
+            Dimensions::new(width, height).unwrap(),
+            ChromaSubsampling::Cs420,
+            [y, u, v],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn encode_refuses_planes_that_are_not_four_two_zero() {
+        // VP8 codes 4:2:0 only (RFC 6386 §9.2); a `Planar8` can carry any layout, so the encoder
+        // checks it rather than reading the chroma planes at the wrong geometry.
+        let dims = Dimensions::new(16, 16).unwrap();
+        for subsampling in [
+            ChromaSubsampling::Cs444,
+            ChromaSubsampling::Cs422,
+            ChromaSubsampling::Cs440,
+            ChromaSubsampling::Cs400,
+        ] {
+            let (cw, ch) = subsampling.chroma_dimensions(16, 16);
+            let chroma = vec![128; (cw * ch) as usize];
+            let planes = Planar8::from_planes_subsampled(
+                dims,
+                subsampling,
+                [vec![0; 256], chroma.clone(), chroma],
+            )
+            .unwrap();
+            let Err(err) = encode_frame(&planes, 40) else {
+                panic!("VP8 is 4:2:0 only, but {subsampling:?} encoded");
+            };
+            assert_eq!(
+                err.kind(),
+                gamut_core::ErrorKind::InvalidInput,
+                "{subsampling:?}"
+            );
+        }
+        // The same image at 4:2:0 encodes, so the refusal is the layout and nothing else.
+        assert!(
+            encode_frame(
+                &yuv420(16, 16, vec![0; 256], vec![128; 64], vec![128; 64]),
+                40
+            )
+            .is_ok()
         );
+    }
+
+    /// Builds a 4:2:0 `Planar8` from a deterministic synthetic pattern.
+    fn pattern(width: u32, height: u32) -> Planar8 {
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = chroma_dims(width, height);
         let y = (0..w * h)
             .map(|i| ((i * 7 + i / w * 13) & 0xff) as u8)
             .collect();
@@ -1659,7 +1723,7 @@ mod tests {
         let v = (0..cw * ch)
             .map(|i| ((i * 11 + 128) & 0xff) as u8)
             .collect();
-        Yuv420::new(width, height, y, u, v).unwrap()
+        yuv420(width, height, y, u, v)
     }
 
     /// Four horizontal bands, one per quantizer segment, each lightly textured.
@@ -1677,12 +1741,9 @@ mod tests {
     /// flat enough to skip entirely.
     ///
     /// `height` should cover four macroblock rows (64) so every band gets one.
-    fn banded(width: u32, height: u32) -> Yuv420 {
+    fn banded(width: u32, height: u32) -> Planar8 {
         let (w, h) = (width as usize, height as usize);
-        let (cw, ch) = (
-            Yuv420::chroma_width(width) as usize,
-            Yuv420::chroma_height(height) as usize,
-        );
+        let (cw, ch) = chroma_dims(width, height);
         let y = (0..w * h)
             .map(|i| {
                 let band = (i / w) * 4 / h.max(1);
@@ -1694,7 +1755,7 @@ mod tests {
         let v = (0..cw * ch)
             .map(|i| ((i * 11 + 128) & 0xff) as u8)
             .collect();
-        Yuv420::new(width, height, y, u, v).unwrap()
+        yuv420(width, height, y, u, v)
     }
 
     /// A coarse stepped gradient: structure enough for B_PRED, shallow enough to quantize away.
@@ -1704,29 +1765,23 @@ mod tests {
     /// a coarse quantizer. `detailed` is too contrasty (its residual survives even at q=127) and
     /// flat content is too plain (a whole-block mode wins, so B_PRED is never chosen). Stepping
     /// the value every four pixels sits between the two.
-    fn stepped(width: u32, height: u32) -> Yuv420 {
+    fn stepped(width: u32, height: u32) -> Planar8 {
         let (w, h) = (width as usize, height as usize);
-        let (cw, ch) = (
-            Yuv420::chroma_width(width) as usize,
-            Yuv420::chroma_height(height) as usize,
-        );
+        let (cw, ch) = chroma_dims(width, height);
         let y = (0..w * h)
             .map(|i| {
                 let (x, yy) = (i % w, i / w);
                 (100 + (x / 4 + yy / 4) % 8 * 2) as u8
             })
             .collect();
-        Yuv420::new(width, height, y, vec![128; cw * ch], vec![128; cw * ch]).unwrap()
+        yuv420(width, height, y, vec![128; cw * ch], vec![128; cw * ch])
     }
 
     /// Builds B_PRED-favorable content: each 4×4 region carries a different gradient direction, so a
     /// single whole-block mode predicts the macroblock poorly but per-subblock modes do not.
-    fn detailed(width: u32, height: u32) -> Yuv420 {
+    fn detailed(width: u32, height: u32) -> Planar8 {
         let (w, h) = (width as usize, height as usize);
-        let (cw, ch) = (
-            Yuv420::chroma_width(width) as usize,
-            Yuv420::chroma_height(height) as usize,
-        );
+        let (cw, ch) = chroma_dims(width, height);
         let y = (0..w * h)
             .map(|i| {
                 let (x, yy) = (i % w, i / w);
@@ -1741,7 +1796,7 @@ mod tests {
             .collect();
         let u = (0..cw * ch).map(|i| ((i * 3) & 0xff) as u8).collect();
         let v = (0..cw * ch).map(|i| ((i * 9 + 70) & 0xff) as u8).collect();
-        Yuv420::new(width, height, y, u, v).unwrap()
+        yuv420(width, height, y, u, v)
     }
 
     /// Counts macroblocks coded as `B_PRED` by re-reading partition 0, to confirm the path is
@@ -1822,9 +1877,13 @@ mod tests {
 
         let decoded = decode_frame(&bits).expect("decode");
         let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
-        assert_eq!(enc.y(), dec.y(), "luma mismatch on a skipped B_PRED frame");
-        assert_eq!(enc.u(), dec.u(), "u mismatch");
-        assert_eq!(enc.v(), dec.v(), "v mismatch");
+        assert_eq!(
+            enc.planes()[0],
+            dec.planes()[0],
+            "luma mismatch on a skipped B_PRED frame"
+        );
+        assert_eq!(enc.planes()[1], dec.planes()[1], "u mismatch");
+        assert_eq!(enc.planes()[2], dec.planes()[2], "v mismatch");
     }
 
     #[test]
@@ -1838,9 +1897,9 @@ mod tests {
         );
         let decoded = decode_frame(&bitstream).expect("decode");
         let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
-        assert_eq!(enc.y(), dec.y(), "B_PRED luma mismatch");
-        assert_eq!(enc.u(), dec.u(), "B_PRED u mismatch");
-        assert_eq!(enc.v(), dec.v(), "B_PRED v mismatch");
+        assert_eq!(enc.planes()[0], dec.planes()[0], "B_PRED luma mismatch");
+        assert_eq!(enc.planes()[1], dec.planes()[1], "B_PRED u mismatch");
+        assert_eq!(enc.planes()[2], dec.planes()[2], "B_PRED v mismatch");
     }
 
     #[test]
@@ -1848,27 +1907,23 @@ mod tests {
         // A flat image predicts to 128 with a zero residual, so every macroblock is skipped; the
         // decode must reproduce it from the skip flags alone.
         let (w, h) = (48u32, 48u32);
-        let (cw, ch) = (
-            Yuv420::chroma_width(w) as usize,
-            Yuv420::chroma_height(h) as usize,
-        );
-        let yuv = Yuv420::new(
+        let (cw, ch) = chroma_dims(w, h);
+        let yuv = yuv420(
             w,
             h,
             vec![128u8; (w * h) as usize],
             vec![128u8; cw * ch],
             vec![128u8; cw * ch],
-        )
-        .unwrap();
+        );
         let (bits, recon) = encode_frame(&yuv, 60).expect("fixture fits the partition-size fields");
         assert!(
             mode_stats(&bits).skipped > 0,
             "flat content should skip macroblocks"
         );
         let dec = decode_frame(&bits).expect("decode");
-        assert_eq!(recon.to_yuv420().y(), dec.to_yuv420().y());
-        assert_eq!(recon.to_yuv420().u(), dec.to_yuv420().u());
-        assert_eq!(recon.to_yuv420().v(), dec.to_yuv420().v());
+        assert_eq!(recon.to_yuv420().planes()[0], dec.to_yuv420().planes()[0]);
+        assert_eq!(recon.to_yuv420().planes()[1], dec.to_yuv420().planes()[1]);
+        assert_eq!(recon.to_yuv420().planes()[2], dec.to_yuv420().planes()[2]);
     }
 
     /// Tier-2: the encoder's reconstruction must equal the native decoder's output, bit-for-bit.
@@ -1879,9 +1934,21 @@ mod tests {
         let decoded = decode_frame(&bitstream).expect("decode");
         let enc = recon.to_yuv420();
         let dec = decoded.to_yuv420();
-        assert_eq!(enc.y(), dec.y(), "luma mismatch at {width}x{height} q{q}");
-        assert_eq!(enc.u(), dec.u(), "u mismatch at {width}x{height} q{q}");
-        assert_eq!(enc.v(), dec.v(), "v mismatch at {width}x{height} q{q}");
+        assert_eq!(
+            enc.planes()[0],
+            dec.planes()[0],
+            "luma mismatch at {width}x{height} q{q}"
+        );
+        assert_eq!(
+            enc.planes()[1],
+            dec.planes()[1],
+            "u mismatch at {width}x{height} q{q}"
+        );
+        assert_eq!(
+            enc.planes()[2],
+            dec.planes()[2],
+            "v mismatch at {width}x{height} q{q}"
+        );
     }
 
     #[test]
@@ -1923,9 +1990,21 @@ mod tests {
                     encode_frame_filtered(&yuv, q, opts).expect("fixture fits the size fields");
                 let decoded = decode_frame(&bits).expect("decode");
                 let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
-                assert_eq!(enc.y(), dec.y(), "luma mismatch at {w}x{h} q{q} segmented");
-                assert_eq!(enc.u(), dec.u(), "u mismatch at {w}x{h} q{q} segmented");
-                assert_eq!(enc.v(), dec.v(), "v mismatch at {w}x{h} q{q} segmented");
+                assert_eq!(
+                    enc.planes()[0],
+                    dec.planes()[0],
+                    "luma mismatch at {w}x{h} q{q} segmented"
+                );
+                assert_eq!(
+                    enc.planes()[1],
+                    dec.planes()[1],
+                    "u mismatch at {w}x{h} q{q} segmented"
+                );
+                assert_eq!(
+                    enc.planes()[2],
+                    dec.planes()[2],
+                    "v mismatch at {w}x{h} q{q} segmented"
+                );
             }
         }
     }
@@ -1988,9 +2067,13 @@ mod tests {
                     .expect("fixture fits the partition-size fields");
                 let dec = decode_frame(&bits).expect("decode");
                 let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
-                assert_eq!(enc.y(), dec.y(), "luma simple={simple} q{q}");
-                assert_eq!(enc.u(), dec.u(), "u simple={simple} q{q}");
-                assert_eq!(enc.v(), dec.v(), "v simple={simple} q{q}");
+                assert_eq!(
+                    enc.planes()[0],
+                    dec.planes()[0],
+                    "luma simple={simple} q{q}"
+                );
+                assert_eq!(enc.planes()[1], dec.planes()[1], "u simple={simple} q{q}");
+                assert_eq!(enc.planes()[2], dec.planes()[2], "v simple={simple} q{q}");
             }
         }
     }
@@ -2011,9 +2094,9 @@ mod tests {
                 .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
             let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
-            assert_eq!(enc.y(), dec.y(), "luma q{q}");
-            assert_eq!(enc.u(), dec.u(), "u q{q}");
-            assert_eq!(enc.v(), dec.v(), "v q{q}");
+            assert_eq!(enc.planes()[0], dec.planes()[0], "luma q{q}");
+            assert_eq!(enc.planes()[1], dec.planes()[1], "u q{q}");
+            assert_eq!(enc.planes()[2], dec.planes()[2], "v q{q}");
         }
     }
 
@@ -2033,9 +2116,9 @@ mod tests {
                 .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
             let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
-            assert_eq!(enc.y(), dec.y(), "luma p{partitions}");
-            assert_eq!(enc.u(), dec.u(), "u p{partitions}");
-            assert_eq!(enc.v(), dec.v(), "v p{partitions}");
+            assert_eq!(enc.planes()[0], dec.planes()[0], "luma p{partitions}");
+            assert_eq!(enc.planes()[1], dec.planes()[1], "u p{partitions}");
+            assert_eq!(enc.planes()[2], dec.planes()[2], "v p{partitions}");
         }
     }
 
@@ -2061,9 +2144,21 @@ mod tests {
                         .expect("fixture fits the partition-size fields");
                     let dec = decode_frame(&bits).expect("decode");
                     let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
-                    assert_eq!(enc.y(), dec.y(), "luma ref={ref_d} mode={mode_d} q{q}");
-                    assert_eq!(enc.u(), dec.u(), "u ref={ref_d} mode={mode_d} q{q}");
-                    assert_eq!(enc.v(), dec.v(), "v ref={ref_d} mode={mode_d} q{q}");
+                    assert_eq!(
+                        enc.planes()[0],
+                        dec.planes()[0],
+                        "luma ref={ref_d} mode={mode_d} q{q}"
+                    );
+                    assert_eq!(
+                        enc.planes()[1],
+                        dec.planes()[1],
+                        "u ref={ref_d} mode={mode_d} q{q}"
+                    );
+                    assert_eq!(
+                        enc.planes()[2],
+                        dec.planes()[2],
+                        "v ref={ref_d} mode={mode_d} q{q}"
+                    );
                 }
             }
         }
@@ -2273,15 +2368,12 @@ mod tests {
                 (128 + (x * x + yy * yy) / 64) as u8
             })
             .collect();
-        let (cw, ch) = (
-            Yuv420::chroma_width(w) as usize,
-            Yuv420::chroma_height(h) as usize,
-        );
-        let yuv = Yuv420::new(w, h, y, vec![128; cw * ch], vec![128; cw * ch]).unwrap();
+        let (cw, ch) = chroma_dims(w, h);
+        let yuv = yuv420(w, h, y, vec![128; cw * ch], vec![128; cw * ch]);
         let (bits, recon) = encode_frame_filtered(&yuv, 40, EncodeOptions::default())
             .expect("fixture fits the partition-size fields");
         let dec = decode_frame(&bits).expect("decode");
-        assert_eq!(recon.to_yuv420().y(), dec.to_yuv420().y());
+        assert_eq!(recon.to_yuv420().planes()[0], dec.to_yuv420().planes()[0]);
     }
 
     #[test]
@@ -2291,18 +2383,14 @@ mod tests {
         // token-partition bytes — part0_end == data.len(). The `part0_end > data.len()` guard must
         // accept this exact fit; `>=` would reject the valid (if minimal) stream.
         let (w, h) = (16u32, 16u32);
-        let (cw, ch) = (
-            Yuv420::chroma_width(w) as usize,
-            Yuv420::chroma_height(h) as usize,
-        );
-        let yuv = Yuv420::new(
+        let (cw, ch) = chroma_dims(w, h);
+        let yuv = yuv420(
             w,
             h,
             vec![128; (w * h) as usize],
             vec![128; cw * ch],
             vec![128; cw * ch],
-        )
-        .unwrap();
+        );
         let (bits, _) = encode_frame(&yuv, 127).expect("fixture fits the partition-size fields"); // coarsest quantizer → every macroblock skips
         let chunk = header::read_uncompressed_chunk(&bits).expect("chunk");
         let end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;

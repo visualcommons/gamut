@@ -13,7 +13,7 @@
 //! fetch-av1-oracles`).
 
 use gamut_avif::{AlphaMode, AvifContainer, AvifEncoder, AvifItem, ChromaFormat};
-use gamut_color::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::{ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgb16, Rgba8, Rgba16};
 
 const W: u32 = 34;
@@ -431,12 +431,12 @@ fn a_monochrome_item_still_carries_the_primaries_and_transfer_tags() {
     // signals `Unspecified` however `with_matrix` was set.
     let avif = encode_gray(
         &AvifEncoder::new()
-            .with_primaries(ColourPrimaries::Bt2020)
+            .with_primaries(ColorPrimaries::Bt2020)
             .with_transfer(TransferCharacteristics::Pq)
             .with_matrix(MatrixCoefficients::Bt709),
     );
     let oracle = libavif_oracle::introspect(&avif).expect("libavif parses");
-    assert_eq!(oracle.color_primaries, ColourPrimaries::Bt2020.code_point());
+    assert_eq!(oracle.color_primaries, ColorPrimaries::Bt2020.code_point());
     assert_eq!(
         oracle.transfer_characteristics,
         TransferCharacteristics::Pq.code_point()

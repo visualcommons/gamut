@@ -17,10 +17,10 @@ use gamut_avif::{
     AlphaMode, Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, DecodedFrame, RawPlanes,
 };
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
-    Planar16, TransferCharacteristics,
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients, Planar8, Planar16,
+    TransferCharacteristics,
 };
-use gamut_core::{Error, ErrorKind, Result};
+use gamut_core::{Dimensions, Error, ErrorKind, Result};
 
 const W: u32 = 23;
 const H: u32 = 13;
@@ -54,36 +54,43 @@ fn source(subsampling: ChromaSubsampling, max: u32) -> [Vec<u16>; 3] {
     ]
 }
 
+/// The `W`×`H` image size.
+fn dims() -> Dimensions {
+    Dimensions::new(W, H).unwrap()
+}
+
 fn planar8(subsampling: ChromaSubsampling) -> Planar8 {
     let narrow = |p: Vec<u16>| p.into_iter().map(|s| s as u8).collect();
     let [y, u, v] = source(subsampling, 255);
-    Planar8::from_planes_subsampled(W, H, subsampling, [narrow(y), narrow(u), narrow(v)])
+    Planar8::from_planes_subsampled(dims(), subsampling, [narrow(y), narrow(u), narrow(v)])
         .expect("8-bit planes")
 }
 
 fn planar16(subsampling: ChromaSubsampling, depth: BitDepth) -> Planar16 {
     let [y, u, v] = source(subsampling, u32::from(depth.max_value()));
-    Planar16::from_planes_subsampled(W, H, subsampling, depth, [y, u, v]).expect("planes")
+    Planar16::from_planes_subsampled(dims(), subsampling, depth, [y, u, v]).expect("planes")
 }
 
 fn alpha8() -> Planar8 {
     let a = plane(W, H, 3, 255).into_iter().map(|s| s as u8).collect();
-    Planar8::from_planes_subsampled(W, H, ChromaSubsampling::Cs400, [a, vec![], vec![]])
+    Planar8::from_planes_subsampled(dims(), ChromaSubsampling::Cs400, [a, vec![], vec![]])
         .expect("alpha plane")
 }
 
 fn alpha16(depth: BitDepth) -> Planar16 {
     let a = plane(W, H, 3, u32::from(depth.max_value()));
-    Planar16::from_planes_subsampled(W, H, ChromaSubsampling::Cs400, depth, [a, vec![], vec![]])
+    Planar16::from_planes_subsampled(dims(), ChromaSubsampling::Cs400, depth, [a, vec![], vec![]])
         .expect("alpha plane")
 }
 
 fn widened(planes: &Planar8) -> [Vec<u16>; 3] {
-    [0, 1, 2].map(|i| planes.plane(i).iter().map(|&s| u16::from(s)).collect())
+    planes
+        .planes()
+        .map(|p| p.iter().map(|&s| u16::from(s)).collect())
 }
 
 fn owned(planes: &Planar16) -> [Vec<u16>; 3] {
-    [0, 1, 2].map(|i| planes.plane(i).to_vec())
+    planes.planes().map(<[u16]>::to_vec)
 }
 
 /// [`Av1StillDecoder`] over the real dav1d decoder, as `conformance.rs` bridges it.
@@ -237,7 +244,7 @@ fn colr_nclx_states_the_planes_declaration_not_the_encoders_knobs() {
         .with_matrix(MatrixCoefficients::Bt709)
         .with_color_range(ColorRange::Full)
         .with_chroma(ChromaSubsampling::Cs444)
-        .with_primaries(ColourPrimaries::Bt2020)
+        .with_primaries(ColorPrimaries::Bt2020)
         .with_transfer(TransferCharacteristics::Pq);
     for (matrix, range, full_range) in [
         (MatrixCoefficients::Bt601, ColorRange::Limited, false),
@@ -253,7 +260,7 @@ fn colr_nclx_states_the_planes_declaration_not_the_encoders_knobs() {
         assert_eq!(
             (s.color_primaries, s.transfer_characteristics),
             (
-                ColourPrimaries::Bt2020 as u16,
+                ColorPrimaries::Bt2020 as u16,
                 TransferCharacteristics::Pq as u16
             )
         );
@@ -284,7 +291,7 @@ fn an_alpha_plane_decodes_bit_exact_as_the_auxiliary_at_the_colour_depth() {
     let avif = AvifEncoder::lossless()
         .encode_raw_planes_to_vec(raw)
         .unwrap();
-    assert_eq!(decoded_alpha(&avif), a16.plane(0));
+    assert_eq!(decoded_alpha(&avif), a16.planes()[0]);
 }
 
 #[test]

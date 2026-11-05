@@ -6,7 +6,7 @@
 //! solid colour. The transformative-property and grid tests compare against independently-written
 //! reference transforms.
 
-use gamut_color::{ColorRange, ycbcr_to_rgb};
+use gamut_color::{ColorRange, bt601_ycbcr_to_rgb};
 use gamut_core::{Error, ErrorKind, Result};
 use gamut_heic::{
     ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder, iter_nal_units,
@@ -908,7 +908,7 @@ fn bt601_limited_and_full_range_are_golden() {
                 let yv = ey(15, x, y, 8) as u8;
                 let cb = ecb(15, cx, cy, 8) as u8;
                 let cr = ecr(15, cx, cy, 8) as u8;
-                let (r, g, b) = ycbcr_to_rgb(yv, cb, cr, range);
+                let (r, g, b) = bt601_ycbcr_to_rgb(yv, cb, cr, range);
                 let o = ((y * 4 + x) * 4) as usize;
                 assert_eq!(
                     &rgba.as_samples()[o..o + 4],
@@ -1283,7 +1283,7 @@ fn bt601_at_eight_bit_still_uses_the_libwebp_inverse() {
         for y in 0..4u32 {
             for x in 0..4u32 {
                 let (cx, cy) = (x / 2, y / 2);
-                let (r, g, b) = ycbcr_to_rgb(
+                let (r, g, b) = bt601_ycbcr_to_rgb(
                     ey(15, x, y, 8) as u8,
                     ecb(15, cx, cy, 8) as u8,
                     ecr(15, cx, cy, 8) as u8,
@@ -2052,7 +2052,7 @@ fn bt601_444_uses_full_chroma_resolution() {
             let yv = ey(15, x, y, 8) as u8;
             let cb = ecb(15, x, y, 8) as u8; // 4:4:4: chroma index == luma index
             let cr = ecr(15, x, y, 8) as u8;
-            let (r, g, b) = ycbcr_to_rgb(yv, cb, cr, ColorRange::Limited);
+            let (r, g, b) = bt601_ycbcr_to_rgb(yv, cb, cr, ColorRange::Limited);
             let o = ((y * 3 + x) * 4) as usize;
             assert_eq!(&rgba.as_samples()[o..o + 4], &[r, g, b, 255], "({x},{y})");
         }

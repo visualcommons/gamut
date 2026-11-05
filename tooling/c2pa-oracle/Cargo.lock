@@ -969,6 +969,7 @@ dependencies = [
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
+ "gamut-dsp",
  "gamut-isobmff",
 ]
 
@@ -988,6 +989,7 @@ name = "gamut-color"
 version = "3.0.0"
 dependencies = [
  "gamut-core",
+ "gamut-dsp",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@
 //! Serde contract tests for the feature-gated colour enums.
 
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients,
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
     TransferCharacteristics,
 };
 
@@ -29,12 +29,12 @@ fn public_enums_round_trip_by_variant_name() {
         MatrixCoefficients::Bt2020Ncl,
     ]);
     round_trip(&[
-        ColourPrimaries::Bt709,
-        ColourPrimaries::Unspecified,
-        ColourPrimaries::Bt601Pal,
-        ColourPrimaries::Smpte170m,
-        ColourPrimaries::Bt2020,
-        ColourPrimaries::DisplayP3,
+        ColorPrimaries::Bt709,
+        ColorPrimaries::Unspecified,
+        ColorPrimaries::Bt601Pal,
+        ColorPrimaries::Smpte170m,
+        ColorPrimaries::Bt2020,
+        ColorPrimaries::DisplayP3,
     ]);
     round_trip(&[
         TransferCharacteristics::Bt709,
@@ -59,6 +59,7 @@ fn public_enums_round_trip_by_variant_name() {
         ChromaSubsampling::Cs422,
         ChromaSubsampling::Cs420,
         ChromaSubsampling::Cs400,
+        ChromaSubsampling::Cs440,
     ]);
 
     assert_eq!(
@@ -82,7 +83,7 @@ fn public_enums_round_trip_by_variant_name() {
 #[test]
 fn unknown_variant_names_are_rejected() {
     assert!(serde_json::from_str::<MatrixCoefficients>("\"FutureMatrix\"").is_err());
-    assert!(serde_json::from_str::<ColourPrimaries>("\"FuturePrimaries\"").is_err());
+    assert!(serde_json::from_str::<ColorPrimaries>("\"FuturePrimaries\"").is_err());
     assert!(serde_json::from_str::<TransferCharacteristics>("\"FutureTransfer\"").is_err());
     assert!(serde_json::from_str::<ColorRange>("\"Broadcast\"").is_err());
     assert!(serde_json::from_str::<BitDepth>("\"Fourteen\"").is_err());

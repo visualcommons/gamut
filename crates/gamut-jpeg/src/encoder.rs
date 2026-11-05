@@ -15,7 +15,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use gamut_color::transfer::srgb_eotf;
-use gamut_color::{ColorRange, rgb_to_ycbcr, xyb};
+use gamut_color::{ColorRange, bt601_rgb_to_ycbcr, xyb};
 use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, PixelFormat, Result, Rgb8};
 use gamut_dsp::jpeg::forward_dct8x8;
 use gamut_dsp::math::round_div_nearest;
@@ -1300,7 +1300,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
         let mut cr = vec![0u8; w * h];
         for i in 0..w * h {
             let (yy, u, v) =
-                rgb_to_ycbcr(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], ColorRange::Full);
+                bt601_rgb_to_ycbcr(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], ColorRange::Full);
             y[i] = yy;
             cb[i] = u;
             cr[i] = v;
@@ -2160,8 +2160,12 @@ mod tests {
         for py in 0..h {
             for px in 0..w {
                 let i = py * w + px;
-                let (y, cb, cr) =
-                    rgb_to_ycbcr(rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2], ColorRange::Full);
+                let (y, cb, cr) = bt601_rgb_to_ycbcr(
+                    rgb[3 * i],
+                    rgb[3 * i + 1],
+                    rgb[3 * i + 2],
+                    ColorRange::Full,
+                );
                 planes[0].data[i] = y;
                 planes[1].data[i] = cb;
                 planes[2].data[i] = cr;
@@ -2212,7 +2216,7 @@ mod tests {
         let mut cr = vec![0u8; w * h];
         for i in 0..w * h {
             let (yy, u, v) =
-                rgb_to_ycbcr(rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2], ColorRange::Full);
+                bt601_rgb_to_ycbcr(rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2], ColorRange::Full);
             y[i] = yy;
             cb[i] = u;
             cr[i] = v;

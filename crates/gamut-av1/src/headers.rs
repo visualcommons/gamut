@@ -10,7 +10,7 @@
 //! while any other CICP triple codes `color_range` explicitly.
 
 use gamut_bitstream::{BitWriter, write_leb128};
-use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Error, Result};
 
 use crate::filter::FrameFilters;
@@ -94,7 +94,7 @@ impl Av1StillConfig {
     #[must_use]
     pub fn is_srgb_shortcut(&self) -> bool {
         !self.monochrome
-            && self.color_primaries == ColourPrimaries::Bt709.code_point()
+            && self.color_primaries == ColorPrimaries::Bt709.code_point()
             && self.transfer_characteristics == TransferCharacteristics::Srgb.code_point()
             && self.matrix_coefficients == MatrixCoefficients::Identity.code_point()
     }
@@ -109,7 +109,7 @@ impl Av1StillConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Av1Colour {
     /// CICP colour primaries.
-    pub primaries: ColourPrimaries,
+    pub primaries: ColorPrimaries,
     /// CICP transfer characteristics.
     pub transfer: TransferCharacteristics,
     /// CICP matrix coefficients. `Identity` means the planes carry GBR, not YCbCr.
@@ -121,7 +121,7 @@ pub struct Av1Colour {
 impl Default for Av1Colour {
     fn default() -> Self {
         Self {
-            primaries: ColourPrimaries::Bt709,
+            primaries: ColorPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
             matrix: MatrixCoefficients::Identity,
             range: ColorRange::Full,

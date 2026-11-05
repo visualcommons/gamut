@@ -59,7 +59,7 @@ backward-compatible; removing or reshaping any of the above would not.
   here keeps a single authoritative definition without coupling tonemap to color. The luma weight
   triples joined them for the same reason: `convert` needs them, and `gamut-png`/`gamut-tiff`/
   `gamut-jxl` depend on core but **not** on `gamut-color`, so defining them there would have added a
-  dependency edge to four crates. `gamut_color::rgb_to_ycbcr` now derives its BT.601 luma row from
+  dependency edge to four crates. `gamut_color::bt601_rgb_to_ycbcr` now derives its BT.601 luma row from
   here rather than restating it.
 - **`convert` is layout, not colorimetry.** It owns the axes the sealed `Pixel` matrix describes —
   channel count, alpha, sample width — and refuses the two layouts that need machinery core does not

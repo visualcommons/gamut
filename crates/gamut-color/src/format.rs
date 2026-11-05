@@ -2,10 +2,11 @@
 //!
 //! These describe a codec's *coded* planes, distinct from an interleaved buffer's layout — that is
 //! the [`Pixel`](gamut_core::Pixel) vocabulary (`Rgb8`, `Rgba8`, …) in `gamut-core`. [`BitDepth`] is
-//! wired into the AV1 reconstruction; [`ChromaSubsampling`] models all four AV1 layouts and carries
-//! the plane geometry ([`ChromaSubsampling::chroma_dimensions`]) that [`Planar8`](crate::Planar8)
-//! uses. All four are coded end to end by `gamut-avif`; `Cs400` (monochrome) is the grey and
-//! alpha planes of both [`Planar8`](crate::Planar8) and [`Planar16`](crate::Planar16).
+//! wired into the AV1 reconstruction; [`ChromaSubsampling`] models all four AV1 layouts plus
+//! JPEG's 4:4:0 and carries the plane geometry ([`ChromaSubsampling::chroma_dimensions`]) that
+//! [`Planar8`](crate::Planar8) uses. The four AV1 layouts are coded end to end by `gamut-avif`;
+//! `Cs400` (monochrome) is the grey and alpha planes of both [`Planar8`](crate::Planar8) and
+//! [`Planar16`](crate::Planar16).
 
 /// Bits per sample of a coded plane.
 ///
@@ -64,8 +65,8 @@ impl BitDepth {
 
 /// Chroma subsampling of the coded planes (AV1 `subsampling_x` / `subsampling_y`, §5.5.2).
 ///
-/// `#[non_exhaustive]`: models the AV1 layouts today; other codecs may add layouts (e.g. TIFF's
-/// 4:1:1) later.
+/// `#[non_exhaustive]`: models the AV1 layouts and JPEG's 4:4:0 today; other codecs may add
+/// layouts (e.g. TIFF's 4:1:1) later.
 ///
 /// `#[repr(u8)]` with explicit, permanent discriminants: this is plain configuration data that
 /// must stay mechanically portable to C (see the workspace charter). The values are append-only —
@@ -85,23 +86,41 @@ pub enum ChromaSubsampling {
     Cs420 = 2,
     /// 4:0:0 — monochrome, no chroma planes (M2).
     Cs400 = 3,
+    /// 4:4:0 — vertically halved chroma at full horizontal resolution: a JPEG sampling-factor
+    /// layout (luma `H = 1, V = 2` over `1×1` chroma, T.81 §A.1.1). AV1 cannot signal it
+    /// (`subsampling_y = 1` requires `subsampling_x = 1`, §6.4.2), so no AV1 path accepts it.
+    Cs440 = 4,
 }
 
 impl ChromaSubsampling {
-    /// Returns `(subsampling_x, subsampling_y)` as the AV1 sequence-header flags. Monochrome is
-    /// signalled by `mono_chrome`, which fixes both flags to 1 (AV1 §6.4.2), not by a subsampling
-    /// combination of its own.
+    /// The `(horizontal, vertical)` decimation factors of each chroma plane against luma: how
+    /// many luma columns, and how many rows, one chroma sample spans — `(1, 1)` for 4:4:4,
+    /// `(2, 1)` for 4:2:2, `(2, 2)` for 4:2:0 and `(1, 2)` for 4:4:0.
     ///
-    /// These are *sample-position shifts* for the two chroma planes, so they double as the plane
-    /// geometry factors — except for [`Cs400`](Self::Cs400), which has no chroma planes at all and
-    /// whose `(1, 1)` is a header convention rather than a geometry. Use
-    /// [`chroma_dimensions`](Self::chroma_dimensions) for plane sizes, which handles that case.
+    /// Each factor is 1 or 2, so its base-2 logarithm (`trailing_zeros`) is the AV1
+    /// `subsampling_x` / `subsampling_y` flag (§5.5.2) and the sample-position shift.
+    /// [`Cs400`](Self::Cs400) has no chroma planes at all; it reports `(2, 2)`, the factors AV1
+    /// §6.4.2 infers under `mono_chrome`, which is a header convention rather than a geometry.
+    /// Use [`chroma_dimensions`](Self::chroma_dimensions) for plane sizes, which handles that
+    /// case.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_color::ChromaSubsampling;
+    ///
+    /// let (fx, fy) = ChromaSubsampling::Cs422.factors();
+    /// assert_eq!((fx, fy), (2, 1));
+    /// // The AV1 header flags are the factors' base-2 logarithms.
+    /// assert_eq!((fx.trailing_zeros(), fy.trailing_zeros()), (1, 0));
+    /// ```
     #[must_use]
-    pub fn subsampling(self) -> (u8, u8) {
+    pub fn factors(self) -> (u32, u32) {
         match self {
-            ChromaSubsampling::Cs444 => (0, 0),
-            ChromaSubsampling::Cs422 => (1, 0),
-            ChromaSubsampling::Cs420 | ChromaSubsampling::Cs400 => (1, 1),
+            ChromaSubsampling::Cs444 => (1, 1),
+            ChromaSubsampling::Cs422 => (2, 1),
+            ChromaSubsampling::Cs420 | ChromaSubsampling::Cs400 => (2, 2),
+            ChromaSubsampling::Cs440 => (1, 2),
         }
     }
 
@@ -130,8 +149,8 @@ impl ChromaSubsampling {
     ///
     /// **Ceiling** division on the subsampled axes, so an odd luma dimension keeps the
     /// half-covering edge sample: 4:2:0 ⇒ `(ceil(width / 2), ceil(height / 2))`, 4:2:2 ⇒
-    /// `(ceil(width / 2), height)`, 4:4:4 ⇒ `(width, height)`. [`Cs400`](Self::Cs400) has no chroma
-    /// planes, so it returns `(0, 0)`.
+    /// `(ceil(width / 2), height)`, 4:4:0 ⇒ `(width, ceil(height / 2))`, 4:4:4 ⇒
+    /// `(width, height)`. [`Cs400`](Self::Cs400) has no chroma planes, so it returns `(0, 0)`.
     ///
     /// This is the **visible** geometry. A codec's *coded* chroma plane may be larger, because it
     /// is derived by halving a padded luma grid rather than by rounding the display size up — see
@@ -143,14 +162,46 @@ impl ChromaSubsampling {
             ChromaSubsampling::Cs444 => (width, height),
             ChromaSubsampling::Cs422 => (width.div_ceil(2), height),
             ChromaSubsampling::Cs420 => (width.div_ceil(2), height.div_ceil(2)),
+            ChromaSubsampling::Cs440 => (width, height.div_ceil(2)),
             ChromaSubsampling::Cs400 => (0, 0),
         }
     }
 }
 
+/// How a decoder reconstructs full-resolution chroma from a subsampled plane.
+///
+/// Every gamut decoder that presents subsampled YCbCr as RGB takes one of these. The default,
+/// [`Interpolated`](Self::Interpolated), matches the format's reference decoder, so a decoded image
+/// sits on the reference's own output. Choose [`Nearest`](Self::Nearest) for the cheaper
+/// sample-replicating reconstruction. The kernels behind both, one rounding-exact port per
+/// reference decoder, are `gamut-dsp`'s `upsample` module.
+///
+/// The discriminants are permanent and new variants are only ever appended, so the value crosses
+/// a C boundary as a plain `u8`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub enum ChromaUpsampling {
+    /// Sample replication: each chroma sample covers every luma sample it was subsampled from.
+    /// Exact at 4:4:4, and the cheapest choice otherwise.
+    Nearest = 0,
+    /// The format's reference interpolating filter: libjpeg-turbo's fancy upsampling for JPEG,
+    /// libwebp's fancy upsampler for WebP, libavif's bilinear filter for AVIF.
+    #[default]
+    Interpolated = 1,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interpolated_is_the_default_and_discriminants_are_pinned() {
+        assert_eq!(ChromaUpsampling::default(), ChromaUpsampling::Interpolated);
+        assert_eq!(ChromaUpsampling::Nearest as u8, 0);
+        assert_eq!(ChromaUpsampling::Interpolated as u8, 1);
+    }
 
     const ALL: [BitDepth; 4] = [
         BitDepth::Eight,
@@ -190,12 +241,18 @@ mod tests {
     }
 
     #[test]
-    fn subsampling_flags() {
-        assert_eq!(ChromaSubsampling::Cs444.subsampling(), (0, 0));
-        assert_eq!(ChromaSubsampling::Cs420.subsampling(), (1, 1));
-        assert_eq!(ChromaSubsampling::Cs422.subsampling(), (1, 0));
-        // Monochrome carries subsampling_x = subsampling_y = 1 (AV1 §6.4.2).
-        assert_eq!(ChromaSubsampling::Cs400.subsampling(), (1, 1));
+    fn factors_per_layout() {
+        assert_eq!(ChromaSubsampling::Cs444.factors(), (1, 1));
+        assert_eq!(ChromaSubsampling::Cs420.factors(), (2, 2));
+        assert_eq!(ChromaSubsampling::Cs422.factors(), (2, 1));
+        assert_eq!(ChromaSubsampling::Cs440.factors(), (1, 2));
+        // Monochrome carries AV1's inferred subsampling_x = subsampling_y = 1 (§6.4.2).
+        assert_eq!(ChromaSubsampling::Cs400.factors(), (2, 2));
+    }
+
+    #[test]
+    fn cs440_has_three_planes() {
+        assert_eq!(ChromaSubsampling::Cs440.num_planes(), 3);
     }
 
     #[test]
@@ -206,6 +263,7 @@ mod tests {
         assert_eq!(ChromaSubsampling::Cs422 as u8, 1);
         assert_eq!(ChromaSubsampling::Cs420 as u8, 2);
         assert_eq!(ChromaSubsampling::Cs400 as u8, 3);
+        assert_eq!(ChromaSubsampling::Cs440 as u8, 4);
     }
 
     #[test]
@@ -231,6 +289,11 @@ mod tests {
                 "4:2:0 halves both axes at {w}x{h}"
             );
             assert_eq!(
+                ChromaSubsampling::Cs440.chroma_dimensions(w, h),
+                (w, h.div_ceil(2)),
+                "4:4:0 halves height only at {w}x{h}"
+            );
+            assert_eq!(
                 ChromaSubsampling::Cs400.chroma_dimensions(w, h),
                 (0, 0),
                 "monochrome has no chroma planes at {w}x{h}"
@@ -240,5 +303,6 @@ mod tests {
         // satisfied by a mutant that replaced both sides with the same wrong expression.
         assert_eq!(ChromaSubsampling::Cs420.chroma_dimensions(17, 13), (9, 7));
         assert_eq!(ChromaSubsampling::Cs422.chroma_dimensions(17, 13), (9, 13));
+        assert_eq!(ChromaSubsampling::Cs440.chroma_dimensions(17, 13), (17, 7));
     }
 }

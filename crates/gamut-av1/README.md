@@ -37,7 +37,8 @@ use gamut_color::Planar8;
 // 8-bit interleaved RGB -> identity 4:4:4 planes -> lossless AV1 keyframe.
 let (width, height) = (64u32, 64u32);
 let rgb = vec![0u8; (width * height * 3) as usize];
-let planes = Planar8::from_rgb8_identity(&rgb, width, height).expect("valid input");
+let dims = gamut_core::Dimensions::new(width, height).expect("non-zero dimensions");
+let planes = Planar8::from_rgb8_identity(&rgb, dims).expect("valid input");
 
 let still = encode_still_lossless_identity(&planes).expect("encode");
 // `still.obus` is the AV1 temporal unit; `still.config` carries the sequence-header

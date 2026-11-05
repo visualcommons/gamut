@@ -25,39 +25,18 @@
 //! - libwebp approximates the 9/3/3/1 sum in two truncating stages through the diagonals.
 //! - libavif sums in floating point and never rounds chroma before its colour conversion. Its
 //!   kernel therefore returns the exact sum in sixteenths of a code value, which
-//!   [`YcbcrMatrix::to_rgb_sixteenths`](crate::YcbcrMatrix::to_rgb_sixteenths) converts.
+//!   `gamut-color`'s `YcbcrMatrix::to_rgb_sixteenths` converts.
 //!
 //! [`taps`] picks the two chroma rows under an output row for a 2:1 vertical ratio. It is the same
-//! function for all three references.
+//! function for all three references, and [`replicate`] is the sample-replicating (nearest)
+//! reconstruction every decoder offers beside its interpolating one. Which of the two a decoder
+//! runs is `gamut-color`'s `ChromaUpsampling` choice.
 //!
 //! The kernels work a row at a time, so a decoder needs only one scratch row per component, not a
 //! full-resolution plane. Each kernel takes the output row length `n` from `out`. The input rows
 //! must then hold at least `ceil(n / 2)` samples. That is the subsampled width libjpeg-turbo,
 //! libwebp and libavif all use, so a component row padded past it (a JPEG block row, say) can be
 //! passed as is. The kernels panic on a shorter row, which is a caller bug and not a data error.
-
-/// How a decoder reconstructs full-resolution chroma from a subsampled plane.
-///
-/// Every gamut decoder that presents subsampled YCbCr as RGB takes one of these. The default,
-/// [`Interpolated`](Self::Interpolated), matches the format's reference decoder (see the
-/// [module documentation](self)), so a decoded image sits on the reference's own output. Choose
-/// [`Nearest`](Self::Nearest) for the cheaper sample-replicating reconstruction.
-///
-/// The discriminants are permanent and new variants are only ever appended, so the value crosses
-/// a C boundary as a plain `u8`.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[non_exhaustive]
-pub enum ChromaUpsampling {
-    /// Sample replication: each chroma sample covers every luma sample it was subsampled from.
-    /// Exact at 4:4:4, and the cheapest choice otherwise.
-    Nearest = 0,
-    /// The format's reference interpolating filter: libjpeg-turbo's fancy upsampling for JPEG,
-    /// libwebp's fancy upsampler for WebP, libavif's bilinear filter for AVIF.
-    #[default]
-    Interpolated = 1,
-}
 
 /// The chroma rows `(near, far)` that output row `row` interpolates between, under a 2:1 vertical
 /// subsampling of a plane `chroma_rows` rows tall.
@@ -88,8 +67,13 @@ fn chroma_width(n: usize) -> (usize, usize) {
     (width, width.saturating_sub(1))
 }
 
-/// Sample replication along one 2:1 axis: output sample `x` takes chroma sample `x / 2`.
-pub(crate) fn replicate(src: &[u8], out: &mut [u8]) {
+/// Sample replication along one 2:1 axis into `out`, one output row long: output sample `x` takes
+/// chroma sample `x / 2`.
+///
+/// # Panics
+///
+/// Panics if `src` holds fewer than `ceil(out.len() / 2)` samples.
+pub fn replicate(src: &[u8], out: &mut [u8]) {
     for (x, o) in out.iter_mut().enumerate() {
         *o = src[x / 2];
     }
@@ -256,15 +240,14 @@ pub mod libavif {
     /// nearest chroma column and `a` the adjacent one: `c - 1` for an even `x` and `c + 1` for an
     /// odd one, clamped to the row. libavif computes the same weighted sum in floating point and
     /// does not round it before its colour conversion. Returning the exact integer sum keeps that
-    /// precision, and [`YcbcrMatrix::to_rgb_sixteenths`] converts it directly. Samples of any
-    /// depth up to 16 bits fit, since the largest sum is `16 · 65535`.
+    /// precision, and `gamut-color`'s `YcbcrMatrix::to_rgb_sixteenths` converts it directly.
+    /// Samples of any depth up to 16 bits fit, since the largest sum is `16 · 65535`.
     ///
     /// # Panics
     ///
     /// Panics if `near` or `far` holds fewer than `ceil(out.len() / 2)` samples.
     ///
     /// [`taps`]: super::taps
-    /// [`YcbcrMatrix::to_rgb_sixteenths`]: crate::YcbcrMatrix::to_rgb_sixteenths
     pub fn bilinear_row(near: &[u16], far: &[u16], out: &mut [u32]) {
         let (_, last) = chroma_width(out.len());
         for (x, o) in out.iter_mut().enumerate() {
@@ -287,13 +270,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interpolated_is_the_default_and_discriminants_are_pinned() {
-        assert_eq!(ChromaUpsampling::default(), ChromaUpsampling::Interpolated);
-        assert_eq!(ChromaUpsampling::Nearest as u8, 0);
-        assert_eq!(ChromaUpsampling::Interpolated as u8, 1);
-    }
-
-    #[test]
     fn taps_pick_the_row_above_on_even_rows_and_below_on_odd_rows() {
         assert_eq!(taps(0, 3), (0, 0)); // top edge: the row above is the edge row
         assert_eq!(taps(1, 3), (0, 1));
@@ -301,6 +277,13 @@ mod tests {
         assert_eq!(taps(3, 3), (1, 2));
         assert_eq!(taps(4, 3), (2, 1));
         assert_eq!(taps(5, 3), (2, 2)); // bottom edge: the row below is the edge row
+    }
+
+    #[test]
+    fn replicate_takes_chroma_sample_x_over_two() {
+        let mut out = [0u8; 5];
+        replicate(&[7, 8, 9, 99], &mut out);
+        assert_eq!(out, [7, 7, 8, 8, 9]);
     }
 
     #[test]

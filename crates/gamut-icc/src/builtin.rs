@@ -5,8 +5,8 @@
 //! §8.4) — or, for [`IccProfile::gray_with_gamma`], the monochrome model of the same class.
 //!
 //! **Colorimetry `gamut-color` can supply is never retyped here**: the primaries and white point
-//! come from [`gamut_color::cicp::ColourPrimaries::chromaticities`] for a CICP code point and from
-//! [`gamut_color::Gamut::chromaticities`] for a named space, the RGB→XYZ construction and
+//! come from [`gamut_color::cicp::ColorPrimaries::chromaticities`] for a CICP code point and from
+//! [`gamut_color::RgbGamut::chromaticities`] for a named space, the RGB→XYZ construction and
 //! the Bradford adaptation to the D50 PCS from [`gamut_color::matrix`], and the ST 2084 curve and
 //! the BT.709-family α and β ([`BT709_ALPHA`] / [`BT709_BETA`], H.273 §8.2) from
 //! [`gamut_color::transfer`].
@@ -34,7 +34,7 @@
 //! [`transfer_characteristics`](gamut_color::SourceProfile::transfer_characteristics) — so they
 //! are reachable only as the named [`BuiltinProfile::AdobeRgb`] and
 //! [`BuiltinProfile::ProPhotoRgb`], whose primaries come from the total
-//! [`Gamut::chromaticities`](gamut_color::Gamut::chromaticities), whose curves are each
+//! [`RgbGamut::chromaticities`](gamut_color::RgbGamut::chromaticities), whose curves are each
 //! encoding's standard one, and whose profiles carry no `cicpType` tag. ProPhoto is the one space
 //! whose own white is D50, so its `chad` is not a real adaptation — only the step from the CIE
 //! chromaticity `(0.3457, 0.3585)` to the PCS's rounded `XYZNumber` (see
@@ -44,12 +44,12 @@
 //! code points 4 and 5 are pure gammas ICC.1:2022 §10.18 encodes exactly, yet
 //! `gamut_color::cicp::TransferCharacteristics` models neither. Code points 1, 6, 14 and 15 are
 //! one curve with a closed form §10.18 defines exactly, so this module encodes all four, and
-//! `TransferCharacteristics` models all four too; `gamut_color::transfer::eotf_for` maps each
-//! to the same Table 3 curve this module writes.
+//! `TransferCharacteristics` models all four too; `gamut_color::transfer::standard_eotf_for` maps
+//! each to the same Table 3 curve this module writes.
 //!
 //! ```
 //! use gamut_color::cicp::TransferCharacteristics as Tc;
-//! use gamut_color::transfer::eotf_for;
+//! use gamut_color::transfer::standard_eotf_for;
 //! use gamut_icc::{Cicp, IccProfile};
 //!
 //! // Each of the four BT.709-family code points has a `TransferCharacteristics` variant …
@@ -60,7 +60,7 @@
 //! // … and each evaluates Table 3's curve: V = 0.5 is 0.259719 in light, the value this module
 //! // writes for the same code points (pinned by `bt709_curve_inverts_the_h273_transfer`).
 //! for tc in [Tc::Bt709, Tc::Bt601, Tc::Bt2020_10, Tc::Bt2020_12] {
-//!     let light = eotf_for(tc).expect("BT.709-family code point has an EOTF")(0.5);
+//!     let light = standard_eotf_for(tc).expect("BT.709-family code point has an EOTF")(0.5);
 //!     assert!((light - 0.259_719).abs() < 1e-6);
 //! }
 //! // The display gammas 2.2 and 2.8 have no variant …
@@ -157,7 +157,7 @@
 //!
 //! [`IccProfile::from_source_profile`] stays on the literal reading. No `SourceProfile` bundle
 //! `gamut-color` defines projects onto transfer 1, 6, 14 or 15 today, and one that did would be
-//! read the way `gamut-color`'s own `eotf_for` reads those code points — as the inverse OETF.
+//! read the way `gamut-color`'s own `standard_eotf_for` reads those code points — as the inverse OETF.
 //!
 //! # HDR: the PQ profile is peak-referred
 //!
@@ -217,11 +217,11 @@
 //! an ID with [`IccWriter::recompute_profile_id`](crate::IccWriter::recompute_profile_id) if one
 //! is wanted.
 
-use gamut_color::cicp::{ColourPrimaries, TransferCharacteristics};
+use gamut_color::cicp::{ColorPrimaries, TransferCharacteristics};
 use gamut_color::linalg::mat_mul3;
 use gamut_color::matrix::{bradford_adapt, rgb_to_xyz_matrix};
 use gamut_color::transfer::{BT709_ALPHA, BT709_BETA, BT1886_GAMMA, pq_eotf};
-use gamut_color::{Gamut, SourceProfile};
+use gamut_color::{Chromaticities, RgbGamut, SourceProfile};
 
 use crate::cicp::Cicp;
 use crate::curve::{Curve, ParametricCurve};
@@ -247,10 +247,6 @@ const SAMPLED_TRC_POINTS: usize = 1024;
 
 /// A 3×3 matrix in row-major order — the shape `gamut_color::matrix` produces and consumes.
 type Matrix3 = [[f64; 3]; 3];
-
-/// CIE 1931 `([R, G, B], white)` chromaticities — the shape both
-/// [`ColourPrimaries::chromaticities`] and [`Gamut::chromaticities`] return.
-type Chromaticities = ([[f64; 2]; 3], [f64; 2]);
 
 /// Adobe RGB (1998) Color Image Encoding §4.3.1.2: the inverse colour component transfer is the
 /// pure power `X^2.19921875`, "obtained from 2 51/256" (hexadecimal `02.33`) — so `563 / 256`,
@@ -299,10 +295,10 @@ pub enum BuiltinProfile {
 struct Space {
     /// The colour-science gamut whose chromaticities give the colorants. Total, so every space
     /// has primaries whether or not ITU-T H.273 gives them a code point.
-    gamut: Gamut,
+    gamut: RgbGamut,
     /// The two CICP axes the space is defined by, when H.273 has a code point for both; this is
     /// what the `cicpType` tag records.
-    axes: Option<(ColourPrimaries, TransferCharacteristics)>,
+    axes: Option<(ColorPrimaries, TransferCharacteristics)>,
     /// The tone curve that encodes the space's transfer.
     trc: Trc,
     /// The text of the `profileDescriptionTag`.
@@ -319,37 +315,37 @@ impl BuiltinProfile {
     fn parts(self) -> Space {
         let (gamut, axes, trc, description) = match self {
             BuiltinProfile::Srgb => (
-                Gamut::Srgb,
-                Some((ColourPrimaries::Bt709, TransferCharacteristics::Srgb)),
+                RgbGamut::Srgb,
+                Some((ColorPrimaries::Bt709, TransferCharacteristics::Srgb)),
                 Trc::Srgb,
                 "sRGB",
             ),
             BuiltinProfile::LinearSrgb => (
-                Gamut::Srgb,
-                Some((ColourPrimaries::Bt709, TransferCharacteristics::Linear)),
+                RgbGamut::Srgb,
+                Some((ColorPrimaries::Bt709, TransferCharacteristics::Linear)),
                 Trc::Gamma(1.0),
                 "Linear sRGB",
             ),
             BuiltinProfile::DisplayP3 => (
-                Gamut::DisplayP3,
-                Some((ColourPrimaries::DisplayP3, TransferCharacteristics::Srgb)),
+                RgbGamut::DisplayP3,
+                Some((ColorPrimaries::DisplayP3, TransferCharacteristics::Srgb)),
                 Trc::Srgb,
                 "Display P3",
             ),
             BuiltinProfile::Bt2020Pq => (
-                Gamut::Bt2020,
-                Some((ColourPrimaries::Bt2020, TransferCharacteristics::Pq)),
+                RgbGamut::Bt2020,
+                Some((ColorPrimaries::Bt2020, TransferCharacteristics::Pq)),
                 Trc::Pq,
                 "BT.2100 PQ",
             ),
             BuiltinProfile::AdobeRgb => (
-                Gamut::AdobeRgb,
+                RgbGamut::AdobeRgb,
                 None,
                 Trc::Gamma(ADOBE_RGB_GAMMA),
                 "Adobe RGB (1998) compatible",
             ),
             BuiltinProfile::ProPhotoRgb => (
-                Gamut::ProPhotoRgb,
+                RgbGamut::ProPhotoRgb,
                 None,
                 Trc::Romm,
                 "ProPhoto RGB (ROMM) compatible",
@@ -398,7 +394,7 @@ impl BuiltinProfile {
     /// The space whose axes are exactly `primaries` and the H.273 transfer code point
     /// `transfer`, if there is one. Lets [`IccProfile::from_cicp`] name a profile it recognizes
     /// instead of describing it by code point.
-    fn for_axes(primaries: ColourPrimaries, transfer: u8) -> Option<Self> {
+    fn for_axes(primaries: ColorPrimaries, transfer: u8) -> Option<Self> {
         Self::ALL.into_iter().find(|space| {
             space
                 .parts()
@@ -486,7 +482,7 @@ fn rgb_is_full_range(cicp: Cicp) -> bool {
 }
 
 /// The `cicpType` value for a pair of CICP axes.
-fn cicp_of(primaries: ColourPrimaries, transfer: TransferCharacteristics) -> Cicp {
+fn cicp_of(primaries: ColorPrimaries, transfer: TransferCharacteristics) -> Cicp {
     rgb_conforming_cicp(Cicp {
         colour_primaries: cicp_byte(primaries.code_point()),
         transfer_characteristics: cicp_byte(transfer.code_point()),
@@ -715,11 +711,16 @@ fn pcs_d50_chromaticity() -> [f64; 2] {
 /// <https://github.com/visualcommons/gamut/issues/606> is the one that would.
 ///
 /// `None` when the chromaticities are degenerate enough to have no RGB→XYZ or adaptation matrix.
-/// A code point that names no chromaticities at all ([`ColourPrimaries::Unspecified`], and any
+/// A code point that names no chromaticities at all ([`ColorPrimaries::Unspecified`], and any
 /// later variant `gamut-color` adds without them) never reaches here: [`IccProfile::from_cicp`]
-/// declines it on the `Option` [`ColourPrimaries::chromaticities`] returns, which is what stops a
+/// declines it on the `Option` [`ColorPrimaries::chromaticities`] returns, which is what stops a
 /// profile claiming the PCS axes as its primaries.
-fn colorants_d50((rgb, white): Chromaticities) -> Option<(Matrix3, Matrix3)> {
+fn colorants_d50(
+    Chromaticities {
+        primaries: rgb,
+        white,
+    }: Chromaticities,
+) -> Option<(Matrix3, Matrix3)> {
     let rgb_to_xyz = rgb_to_xyz_matrix(&rgb, white)?;
     let chad = bradford_adapt(white, pcs_d50_chromaticity())?;
     Some((mat_mul3(&chad, &rgb_to_xyz), chad))
@@ -918,7 +919,7 @@ impl IccProfile {
     ///
     /// Returns `None` when the profile cannot describe the signalling: a primaries code point
     /// with no chromaticities, whether unmodelled or
-    /// [`Unspecified`](ColourPrimaries::Unspecified); a transfer code point with no ICC tone
+    /// [`Unspecified`](ColorPrimaries::Unspecified); a transfer code point with no ICC tone
     /// curve, such as HLG (18) or Unspecified (2); narrow range under coefficients that are not
     /// luma–chroma ones; or a `VideoFullRangeFlag` other than `0` or `1`.
     ///
@@ -1005,7 +1006,7 @@ impl IccProfile {
         if !rgb_is_full_range(cicp) {
             return None;
         }
-        let primaries = ColourPrimaries::from_code_point(u16::from(cicp.colour_primaries))?;
+        let primaries = ColorPrimaries::from_code_point(u16::from(cicp.colour_primaries))?;
         let chromaticities = primaries.chromaticities()?;
         let transfer = cicp.transfer_characteristics;
         let trc = Trc::for_code_point(transfer, reading)?;
@@ -1085,7 +1086,7 @@ impl IccProfile {
     /// ```
     #[must_use]
     pub fn from_source_profile(source: SourceProfile) -> Option<Self> {
-        match (source.colour_primaries(), source.transfer_characteristics()) {
+        match (source.color_primaries(), source.transfer_characteristics()) {
             (Some(primaries), Some(transfer)) => Self::from_cicp(cicp_of(primaries, transfer)),
             _ => BuiltinProfile::for_uncoded_source(source).and_then(Self::builtin),
         }
@@ -1966,7 +1967,7 @@ mod tests {
         }
         for code in codes {
             let primaries =
-                ColourPrimaries::from_code_point(u16::from(code)).expect("a modelled code point");
+                ColorPrimaries::from_code_point(u16::from(code)).expect("a modelled code point");
             let chromaticities = primaries.chromaticities().expect("a modelled code point");
             let profile = rgb_cicp(code, 13).expect("buildable");
             assert_colorants_match_lcms(&format!("primaries {code}"), &profile, chromaticities);
@@ -1978,7 +1979,10 @@ mod tests {
     fn assert_colorants_match_lcms(
         label: &str,
         profile: &IccProfile,
-        (rgb, white): Chromaticities,
+        Chromaticities {
+            primaries: rgb,
+            white,
+        }: Chromaticities,
     ) {
         let reference = lcms2_oracle::rgb_matrix_shaper(white, rgb, [2.2, 2.2, 2.2]);
         let ours = opened_by_lcms(profile);

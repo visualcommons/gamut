@@ -86,8 +86,7 @@ use gamut_color::{ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8};
 
 // 2×2 BT.709 studio-range YCbCr at 4:2:0: four luma samples, one Cb and one Cr.
 let planes = Planar8::from_planes_subsampled(
-    2,
-    2,
+    gamut_core::Dimensions::new(2, 2)?,
     ChromaSubsampling::Cs420,
     [vec![16, 64, 128, 235], vec![128], vec![128]],
 )?;

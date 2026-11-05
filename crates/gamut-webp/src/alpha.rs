@@ -8,8 +8,8 @@
 //! chunk header, the four filters, and both storage methods: **raw** (`C=0`) and **lossless** (`C=1`,
 //! a headerless [`crate::vp8l`] image-stream carrying the residuals in its green channel).
 
-use gamut_color::clip_pixel8;
 use gamut_core::{Dimensions, Error, Result};
+use gamut_dsp::math::clip_pixel8;
 
 use crate::config::Effort;
 use crate::vp8::effort::{AlphaEffort, EFFORT_TABLE};

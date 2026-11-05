@@ -24,6 +24,8 @@ test-support = []
 
 [dependencies]
 gamut-core.workspace = true
+# The reference chroma upsampling kernels `Planar8::to_rgb8_bt601` runs, and the pixel clamps.
+gamut-dsp.workspace = true
 serde = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -49,8 +49,8 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, LazyLock};
 
 use gamut_bitstream::SymbolEncoder;
-use gamut_color::{ChromaSubsampling, Planar8, Planar16, clip_pixel};
-use gamut_dsp::math::{round2, round2_signed};
+use gamut_color::{ChromaSubsampling, Planar8, Planar16};
+use gamut_dsp::math::{clip_pixel, round2, round2_signed};
 
 use crate::cdf;
 use crate::encoder::Speed;
@@ -780,7 +780,7 @@ impl<'a> FrameEncoder<'a> {
     /// (`base_q_idx`; 0 selects the lossless path). 4:4:4, or monochrome with a luma plane only.
     pub(crate) fn new(planes: &'a Planar8, qindex: u8) -> Self {
         Self::over(
-            PlaneSource::Eight([planes.plane(0), planes.plane(1), planes.plane(2)]),
+            PlaneSource::Eight(planes.planes()),
             planes.width() as usize,
             planes.height() as usize,
             planes.subsampling(),
@@ -792,7 +792,7 @@ impl<'a> FrameEncoder<'a> {
     /// Creates an encoder over high-bit-depth planes, at the depth the buffer itself carries.
     pub(crate) fn new16(planes: &'a Planar16, qindex: u8) -> Self {
         Self::over(
-            PlaneSource::High([planes.plane(0), planes.plane(1), planes.plane(2)]),
+            PlaneSource::High(planes.planes()),
             planes.width() as usize,
             planes.height() as usize,
             planes.subsampling(),
@@ -4692,8 +4692,14 @@ fn golomb(sink: &mut impl CoeffSink, x: u32) {
 #[cfg(test)]
 mod tests {
     use gamut_color::Planar8;
+    use gamut_core::Dimensions;
 
     use super::*;
+
+    /// Non-zero test dimensions.
+    fn dims(w: u32, h: u32) -> Dimensions {
+        Dimensions::new(w, h).unwrap()
+    }
 
     #[test]
     fn every_emitted_block_shape_has_a_codable_chroma_residual() {
@@ -4772,7 +4778,7 @@ mod tests {
             .collect();
         let (cw, ch) = ss.chroma_dimensions(n as u32, n as u32);
         let chroma = vec![128u8; (cw * ch) as usize];
-        Planar8::from_planes_subsampled(n as u32, n as u32, ss, [y, chroma.clone(), chroma])
+        Planar8::from_planes_subsampled(dims(n as u32, n as u32), ss, [y, chroma.clone(), chroma])
             .expect("valid planes")
     }
 
@@ -4975,7 +4981,7 @@ mod tests {
             let (x, y) = (i % 64, i / 64);
             px.copy_from_slice(&[((x * 37) ^ (y * 91)) as u8, (x * 13 + y * 7) as u8, 128]);
         }
-        Planar8::from_rgb8_identity(&rgb, 64, 64).unwrap()
+        Planar8::from_rgb8_identity(&rgb, dims(64, 64)).unwrap()
     }
 
     #[test]
@@ -5041,7 +5047,7 @@ mod tests {
             let v = ((cell * 97) % 251) as u8;
             px.copy_from_slice(&[v, v.wrapping_mul(3), 128]);
         }
-        let p = Planar8::from_rgb8_identity(&rgb, 64, 64).unwrap();
+        let p = Planar8::from_rgb8_identity(&rgb, dims(64, 64)).unwrap();
         let leaves = |speed| {
             let mut e = at_speed(&p, 40, speed);
             e.clear_block_decoded(0, 0);
@@ -5067,7 +5073,7 @@ mod tests {
             let v = luma((i % N) as f64, (i / N) as f64);
             px.copy_from_slice(&[128, v as u8, 128]);
         }
-        let p = Planar8::from_rgb8_identity(&rgb, N as u32, N as u32).unwrap();
+        let p = Planar8::from_rgb8_identity(&rgb, dims(N as u32, N as u32)).unwrap();
         let mut e = at_speed(&p, 40, speed);
         let cw = e.geom[0].coded_w;
         for y in 0..N {
@@ -5144,7 +5150,7 @@ mod tests {
             let v = stripes((i % N) as f64, (i / N) as f64);
             px.copy_from_slice(&[128, v as u8, 128]);
         }
-        let p = Planar8::from_rgb8_identity(&rgb, N as u32, N as u32).unwrap();
+        let p = Planar8::from_rgb8_identity(&rgb, dims(N as u32, N as u32)).unwrap();
         let mut e = at_speed(&p, 60, Speed::Thorough);
         let cw = e.geom[0].coded_w;
         for y in 0..N {
@@ -5768,8 +5774,7 @@ mod tests {
                 .collect()
         };
         Planar8::from_planes_subsampled(
-            w,
-            h,
+            dims(w, h),
             ChromaSubsampling::Cs420,
             [luma, chroma(1), chroma(2)],
         )
@@ -6089,7 +6094,7 @@ mod tests {
 
         // The same at 4:4:4, where both shifts are zero and `L` is the luma sample times eight.
         let p444 =
-            Planar8::from_planes(16, 16, [vec![0; 256], vec![0; 256], vec![0; 256]]).unwrap();
+            Planar8::from_planes(dims(16, 16), [vec![0; 256], vec![0; 256], vec![0; 256]]).unwrap();
         let mut e444 = FrameEncoder::new(&p444, 40);
         for (i, v) in e444.recon[0].iter_mut().enumerate() {
             *v = ((i * 5) % 251) as u16;
@@ -6112,8 +6117,7 @@ mod tests {
     fn planes_420(w: u32, h: u32) -> Planar8 {
         let (cw, ch) = ((w as usize).div_ceil(2), (h as usize).div_ceil(2));
         Planar8::from_planes_subsampled(
-            w,
-            h,
+            dims(w, h),
             ChromaSubsampling::Cs420,
             [
                 vec![0; w as usize * h as usize],
@@ -6214,8 +6218,7 @@ mod tests {
         assert_eq!(e.plane_block(2, 3, 8, 8, 1), Some((4, 4, 4, 4)));
         // A shape with no chroma residual reports none rather than a zero-sized block.
         let p422 = Planar8::from_planes_subsampled(
-            16,
-            16,
+            dims(16, 16),
             ChromaSubsampling::Cs422,
             [vec![0; 256], vec![0; 128], vec![0; 128]],
         )
@@ -6327,7 +6330,7 @@ mod tests {
         // Driving the three reference builders directly is what makes the clamp observable: a
         // whole-image encode only reaches it for blocks at the frame edge whose reference run
         // overhangs the coded grid, which no fixture currently produces.
-        let planes = Planar8::from_rgb8_identity(&[0u8; 8 * 8 * 3], 8, 8).unwrap();
+        let planes = Planar8::from_rgb8_identity(&[0u8; 8 * 8 * 3], dims(8, 8)).unwrap();
         let mut e = FrameEncoder::new(&planes, 40);
         assert_eq!((e.geom[0].coded_w, e.geom[0].coded_h), (8, 8));
         // Distinct value per sample, so replicating the wrong one is always visible.
@@ -6389,7 +6392,7 @@ mod tests {
         // column) holds the block's own 4 samples and then repeats the 4th; the `- 1` in each
         // limit is what stops at that 4th. Away from the frame edge, so the plane clamp the test
         // above pins cannot stand in for it, and with a distinct value per sample.
-        let planes = Planar8::from_rgb8_identity(&[0u8; 16 * 16 * 3], 16, 16).unwrap();
+        let planes = Planar8::from_rgb8_identity(&[0u8; 16 * 16 * 3], dims(16, 16)).unwrap();
         let mut e = FrameEncoder::new(&planes, 40);
         for (i, v) in e.recon[0].iter_mut().enumerate() {
             *v = i as u16;
@@ -6410,7 +6413,7 @@ mod tests {
         // §5.11.34 `haveBelowLft` asks about the 4×4 one row down and one column left of the
         // block, and no other: the left and above-left 4×4s (always decoded before it) must not
         // stand in for it, nor the one below-right (never decoded before it).
-        let planes = Planar8::from_rgb8_identity(&[0u8; 16 * 16 * 3], 16, 16).unwrap();
+        let planes = Planar8::from_rgb8_identity(&[0u8; 16 * 16 * 3], dims(16, 16)).unwrap();
         let mut e = FrameEncoder::new(&planes, 40);
         for (i, v) in e.recon[0].iter_mut().enumerate() {
             *v = i as u16;
@@ -6467,8 +6470,7 @@ mod tests {
         let luma: Vec<u8> = (0..17 * 13).map(|i| (i % 251) as u8).collect();
         let chroma: Vec<u8> = (0..9 * 7).map(|i| (i % 241) as u8).collect();
         let planes = Planar8::from_planes_subsampled(
-            17,
-            13,
+            dims(17, 13),
             gamut_color::ChromaSubsampling::Cs420,
             [luma, chroma.clone(), chroma.clone()],
         )
@@ -6516,7 +6518,7 @@ mod tests {
                 c[i] = chroma(col, row);
             }
         }
-        Planar8::from_planes(w, h, [y, c.clone(), c]).expect("valid 4:4:4 planes")
+        Planar8::from_planes(dims(w, h), [y, c.clone(), c]).expect("valid 4:4:4 planes")
     }
 
     #[test]
@@ -6806,7 +6808,7 @@ mod tests {
     /// A 4×4 mid-grey image is enough to construct an encoder; selection depends only on the
     /// residual and the quantizers, not the plane contents.
     fn grey4x4() -> Planar8 {
-        Planar8::from_rgb8_identity(&[128u8; 4 * 4 * 3], 4, 4).unwrap()
+        Planar8::from_rgb8_identity(&[128u8; 4 * 4 * 3], dims(4, 4)).unwrap()
     }
 
     #[test]
@@ -6901,7 +6903,7 @@ mod tests {
     #[test]
     fn predictors_match_spec_formulas() {
         // 12×12 mid-grey image → the coded grid has a block at (4,4) with available neighbours.
-        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], dims(12, 12)).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.geom[0].coded_w;
         // Above row at y=3, x=4..8; left col at x=3, y=4..8; top-left at (3,3).
@@ -6938,7 +6940,7 @@ mod tests {
         // predictor exactly when n = 4 and angle_delta = 0, for every directional mode — including
         // the zone-1/3 modes that read the above-right / below-left extension. All BlockDecoded
         // cells are marked available so both code paths read the same extended references.
-        let p = Planar8::from_rgb8_identity(&[128u8; 16 * 16 * 3], 16, 16).unwrap();
+        let p = Planar8::from_rgb8_identity(&[128u8; 16 * 16 * 3], dims(16, 16)).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.geom[0].coded_w;
         for y in 0..e.geom[0].coded_h {
@@ -6958,7 +6960,7 @@ mod tests {
     fn directional_8x8_angle_delta_in_range() {
         // 8×8 directional prediction with every angle_delta must stay in [0, 255] (no OOB / overflow
         // across all four zones), exercising the extended 16-sample reference arrays.
-        let p = Planar8::from_rgb8_identity(&[128u8; 32 * 32 * 3], 32, 32).unwrap();
+        let p = Planar8::from_rgb8_identity(&[128u8; 32 * 32 * 3], dims(32, 32)).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.geom[0].coded_w;
         for y in 0..e.geom[0].coded_h {
@@ -6993,7 +6995,7 @@ mod tests {
     fn directional_predictors_match_spec() {
         // Block at (4,4) with a ramped above row [60,90,120,150], left column [40,80,120,160],
         // top-left 100.
-        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], dims(12, 12)).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.geom[0].coded_w;
         for (j, &v) in [60u16, 90, 120, 150].iter().enumerate() {
@@ -7030,7 +7032,7 @@ mod tests {
         // Block at (4,4) with a single non-zero reference: AboveRow[0] = 16, every other reference
         // (AboveRow[1..3], LeftCol[0..3], top-left) = 0. FILTER_DC_PRED taps then give a hand-traced
         // recursive result (the lower 4×2 filters the upper 4×2's predicted row 1, §7.11.2.3).
-        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], dims(12, 12)).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.geom[0].coded_w;
         e.recon[0][3 * cw + 4] = 16; // AboveRow[0]
@@ -7046,7 +7048,7 @@ mod tests {
     fn filter_intra_preserves_flat_reference() {
         // Every Intra_Filter_Taps row sums to 16 = 1 << INTRA_FILTER_SCALE_BITS, so a constant
         // reference must reproduce that constant for all five filter-intra modes.
-        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], dims(12, 12)).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.geom[0].coded_w;
         for k in 0..8 {
@@ -7068,7 +7070,7 @@ mod tests {
         // Reconstructed luma with a pure column gradient 80,88,96,104 (constant down each column).
         // For 4:4:4, L = luma*8, lumaAvg = Round2(ΣL, 4); with alpha = 2 the per-column high-freq
         // term Round2Signed(2*(L-avg), 6) is -3,-1,+1,+3, added to a flat DC chroma prediction.
-        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], dims(12, 12)).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.geom[0].coded_w;
         for i in 0..4 {
@@ -7094,7 +7096,7 @@ mod tests {
     fn d45_reads_above_right_when_available() {
         // Block at (4,4) ⇒ superblock-relative (by, bx) = (1, 1). Mark the above-right 4×4 decoded
         // so D45 (pAngle 45) reads the real extended above-row samples 4..8.
-        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], dims(12, 12)).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.geom[0].coded_w;
         for (k, &v) in [10u16, 20, 30, 40, 50, 60, 70, 80].iter().enumerate() {

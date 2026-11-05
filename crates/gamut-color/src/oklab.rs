@@ -12,6 +12,7 @@
 //! vectors within a small tolerance rather than bit-for-bit.
 
 use crate::linalg::matvec3;
+use crate::primaries::RgbGamut;
 
 /// `M2`: cube-root LMS → OKLab `[L, a, b]` (Ottosson).
 pub const M2: [[f64; 3]; 3] = [
@@ -69,72 +70,18 @@ pub const M1_INV_SRGB: [[f64; 3]; 3] = [
     [-0.0041960863, -0.7034186147, 1.7076147010],
 ];
 
-/// Source RGB gamut, selecting the linear-RGB → LMS (`M1`) matrix.
-///
-/// This is a colour-science gamut, distinct from CICP [`ColourPrimaries`] —
-/// Adobe RGB and ProPhoto RGB have no CICP primaries code point. See
-/// [`crate::profile`] for the mapping onto CICP axes.
-///
-/// `#[non_exhaustive]`: more gamuts (with their derived `M1` matrices) may be added later.
-///
-/// [`ColourPrimaries`]: crate::cicp::ColourPrimaries
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Gamut {
-    /// sRGB / BT.709 primaries, D65.
-    Srgb,
-    /// Display P3 (DCI-P3 primaries), D65.
-    DisplayP3,
-    /// Adobe RGB (1998), D65.
-    AdobeRgb,
-    /// ITU-R BT.2020 primaries, D65.
-    Bt2020,
-    /// ProPhoto RGB (ROMM), D50 (Bradford-adapted to D65).
-    ProPhotoRgb,
-}
-
-impl Gamut {
-    /// The linear-RGB → LMS (`M1`) matrix for this gamut.
+// `RgbGamut` lives in `crate::primaries`; its OKLab projection is defined here, beside the
+// matrices it selects.
+impl RgbGamut {
+    /// The OKLab linear-RGB → LMS (`M1`) matrix for this gamut.
     #[must_use]
     pub fn m1_matrix(self) -> &'static [[f64; 3]; 3] {
         match self {
-            Gamut::Srgb => &M1_SRGB,
-            Gamut::DisplayP3 => &M1_DISPLAY_P3,
-            Gamut::AdobeRgb => &M1_ADOBE_RGB,
-            Gamut::Bt2020 => &M1_BT2020,
-            Gamut::ProPhotoRgb => &M1_PROPHOTO_RGB,
-        }
-    }
-
-    /// The CIE 1931 chromaticities of this gamut: `([R, G, B], white)`, each an `(x, y)` pair.
-    ///
-    /// Total, unlike [`ColourPrimaries::chromaticities`](crate::cicp::ColourPrimaries::chromaticities):
-    /// every `Gamut` has primaries, including the two with no ITU-T H.273 code point (Adobe RGB
-    /// and ProPhoto RGB). Where a gamut *does* have a code point the two accessors return the same
-    /// numbers. ProPhoto RGB is the one gamut whose white is D50 rather than D65.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use gamut_color::Gamut;
-    /// use gamut_color::matrix::D50;
-    ///
-    /// let (primaries, white) = Gamut::ProPhotoRgb.chromaticities();
-    /// assert_eq!(white, D50);
-    /// assert_eq!(primaries[2], [0.036598, 0.000105]);
-    /// ```
-    #[must_use]
-    pub fn chromaticities(self) -> ([[f64; 2]; 3], [f64; 2]) {
-        use crate::matrix::{
-            ADOBE_RGB_PRIMARIES, BT2020_PRIMARIES, D50, D65, DISPLAY_P3_PRIMARIES,
-            PROPHOTO_PRIMARIES, SRGB_PRIMARIES,
-        };
-        match self {
-            Gamut::Srgb => (SRGB_PRIMARIES, D65),
-            Gamut::DisplayP3 => (DISPLAY_P3_PRIMARIES, D65),
-            Gamut::AdobeRgb => (ADOBE_RGB_PRIMARIES, D65),
-            Gamut::Bt2020 => (BT2020_PRIMARIES, D65),
-            Gamut::ProPhotoRgb => (PROPHOTO_PRIMARIES, D50),
+            RgbGamut::Srgb => &M1_SRGB,
+            RgbGamut::DisplayP3 => &M1_DISPLAY_P3,
+            RgbGamut::AdobeRgb => &M1_ADOBE_RGB,
+            RgbGamut::Bt2020 => &M1_BT2020,
+            RgbGamut::ProPhotoRgb => &M1_PROPHOTO_RGB,
         }
     }
 }
@@ -144,15 +91,15 @@ impl Gamut {
 /// # Examples
 ///
 /// ```
-/// use gamut_color::Gamut;
+/// use gamut_color::RgbGamut;
 /// use gamut_color::oklab::linear_rgb_to_oklab;
 /// // White maps to L≈1 with near-zero chroma.
-/// let lab = linear_rgb_to_oklab([1.0, 1.0, 1.0], Gamut::Srgb);
+/// let lab = linear_rgb_to_oklab([1.0, 1.0, 1.0], RgbGamut::Srgb);
 /// assert!((lab[0] - 1.0).abs() < 1e-6);
 /// assert!(lab[1].abs() < 1e-6 && lab[2].abs() < 1e-6);
 /// ```
 #[must_use]
-pub fn linear_rgb_to_oklab(rgb: [f64; 3], gamut: Gamut) -> [f64; 3] {
+pub fn linear_rgb_to_oklab(rgb: [f64; 3], gamut: RgbGamut) -> [f64; 3] {
     let lms = matvec3(gamut.m1_matrix(), rgb);
     // `f64::cbrt` is signed, so slightly-negative LMS (out-of-gamut) is handled.
     let lms_cbrt = [lms[0].cbrt(), lms[1].cbrt(), lms[2].cbrt()];
@@ -163,7 +110,7 @@ pub fn linear_rgb_to_oklab(rgb: [f64; 3], gamut: Gamut) -> [f64; 3] {
 ///
 /// Intentionally sRGB-only: this is the inverse [`gamut_map`](crate::gamut_map) uses to test sRGB
 /// gamut membership, and sRGB is the encode target. The forward [`linear_rgb_to_oklab`] takes a
-/// [`Gamut`] because source pixels arrive in many gamuts; the reverse only needs the one target, so
+/// [`RgbGamut`] because source pixels arrive in many gamuts; the reverse only needs the one target, so
 /// per-gamut inverses are deferred until a use case needs them.
 #[must_use]
 pub fn oklab_to_linear_srgb(lab: [f64; 3]) -> [f64; 3] {
@@ -176,48 +123,6 @@ pub fn oklab_to_linear_srgb(lab: [f64; 3]) -> [f64; 3] {
 mod tests {
     use super::*;
 
-    /// The two gamuts with no H.273 code point carry the chromaticities their own encoding
-    /// documents publish, transcribed here independently of `matrix.rs`: Adobe RGB (1998) Color
-    /// Image Encoding §4.3.1.1 (`references/color/adobe-rgb-1998.pdf`) to the four places it
-    /// states, and the ROMM RGB white paper (`references/color/romm-rgb.pdf`, the free stand-in
-    /// for ISO 22028-2) to *its* four places — the crate carries ProPhoto to six, so the ROMM
-    /// gate is half the paper's last digit. These are the only two `Gamut`s
-    /// `ColourPrimaries::chromaticities` cannot vouch for.
-    #[test]
-    fn uncoded_gamuts_carry_their_published_chromaticities() {
-        assert_eq!(
-            Gamut::AdobeRgb.chromaticities(),
-            (
-                [[0.6400, 0.3300], [0.2100, 0.7100], [0.1500, 0.0600]],
-                [0.3127, 0.3290]
-            )
-        );
-        let (primaries, white) = Gamut::ProPhotoRgb.chromaticities();
-        let romm = [[0.7347, 0.2653], [0.1596, 0.8404], [0.0366, 0.0001]];
-        for (got, want) in primaries.iter().flatten().zip(romm.iter().flatten()) {
-            assert!((got - want).abs() <= 0.5e-4, "ROMM primary {got} vs {want}");
-        }
-        assert_eq!(white, [0.3457, 0.3585], "ROMM white is D50");
-    }
-
-    /// Where a gamut has an H.273 primaries code point, the total accessor agrees with the
-    /// code-point one: the two must never become two copies of the same colorimetry.
-    #[test]
-    fn coded_gamuts_agree_with_their_colour_primaries() {
-        use crate::cicp::ColourPrimaries;
-        for (gamut, primaries) in [
-            (Gamut::Srgb, ColourPrimaries::Bt709),
-            (Gamut::DisplayP3, ColourPrimaries::DisplayP3),
-            (Gamut::Bt2020, ColourPrimaries::Bt2020),
-        ] {
-            assert_eq!(
-                Some(gamut.chromaticities()),
-                primaries.chromaticities(),
-                "{gamut:?}"
-            );
-        }
-    }
-
     // The matrix literals need no relationship tests of their own: `derived_matrices_match_literals`
     // (matrix.rs) re-derives every `M1_*` table element-wise to 1e-7, and the golden vectors below
     // run dense values through `M2` / `M2_INV` / `M1_INV_SRGB` (forward and round-trip) at 1e-9.
@@ -229,14 +134,14 @@ mod tests {
     fn matches_chromahash_color_vectors() {
         struct Case {
             linear_rgb: [f64; 3],
-            gamut: Gamut,
+            gamut: RgbGamut,
             oklab: [f64; 3],
             roundtrip_srgb: [f64; 3],
         }
         let cases = [
             Case {
                 linear_rgb: [1.0, 1.0, 1.0],
-                gamut: Gamut::Srgb,
+                gamut: RgbGamut::Srgb,
                 oklab: [
                     0.9999999934735462,
                     0.00000000008095285553011422,
@@ -246,13 +151,13 @@ mod tests {
             },
             Case {
                 linear_rgb: [0.0, 0.0, 0.0],
-                gamut: Gamut::Srgb,
+                gamut: RgbGamut::Srgb,
                 oklab: [0.0, 0.0, 0.0],
                 roundtrip_srgb: [0.0, 0.0, 0.0],
             },
             Case {
                 linear_rgb: [1.0, 0.0, 0.0],
-                gamut: Gamut::Srgb,
+                gamut: RgbGamut::Srgb,
                 oklab: [0.6279553606145517, 0.224863061065974, 0.12584629853073515],
                 roundtrip_srgb: [
                     1.000000000403837,
@@ -262,7 +167,7 @@ mod tests {
             },
             Case {
                 linear_rgb: [0.0, 1.0, 0.0],
-                gamut: Gamut::Srgb,
+                gamut: RgbGamut::Srgb,
                 oklab: [0.8664396115356695, -0.2338875741879084, 0.17949847989672996],
                 roundtrip_srgb: [
                     0.0000000727249208493097,
@@ -272,7 +177,7 @@ mod tests {
             },
             Case {
                 linear_rgb: [0.0, 0.0, 1.0],
-                gamut: Gamut::Srgb,
+                gamut: RgbGamut::Srgb,
                 oklab: [
                     0.4520137183853429,
                     -0.03245698416876397,
@@ -286,7 +191,7 @@ mod tests {
             },
             Case {
                 linear_rgb: [0.5, 0.5, 0.5],
-                gamut: Gamut::Srgb,
+                gamut: RgbGamut::Srgb,
                 oklab: [
                     0.7937005208040498,
                     0.00000000006425243670449277,
@@ -296,7 +201,7 @@ mod tests {
             },
             Case {
                 linear_rgb: [1.0, 0.0, 0.0],
-                gamut: Gamut::DisplayP3,
+                gamut: RgbGamut::DisplayP3,
                 oklab: [0.6485740719370451, 0.262041750679711, 0.1450019283152177],
                 roundtrip_srgb: [
                     1.2249401729722074,
@@ -306,7 +211,7 @@ mod tests {
             },
             Case {
                 linear_rgb: [1.0, 0.0, 0.0],
-                gamut: Gamut::AdobeRgb,
+                gamut: RgbGamut::AdobeRgb,
                 oklab: [0.7022115941248748, 0.251453301384477, 0.14072772598002087],
                 roundtrip_srgb: [
                     1.3983557445296744,
