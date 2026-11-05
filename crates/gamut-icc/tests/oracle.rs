@@ -586,7 +586,7 @@ fn builtin_pq_opened_by_lcms() -> lcms2_oracle::Profile {
 /// test tells the two normalizations apart by a factor of 49.
 ///
 /// The tolerance is two `uInt16` quanta of `Y`: the sampled tone curve interpolates to within one
-/// (see `SAMPLED_TRC_POINTS` in `src/builtin.rs`), and the `s15Fixed16` colorants round on top.
+/// (see `SAMPLED_TRC_POINTS` in `src/builtin/synthesis.rs`), and the `s15Fixed16` colorants round on top.
 /// Measured: `Y` = 0.020294, 5.8e-6 (0.38 quanta) under 0.0203, identically under all three
 /// intents.
 #[test]

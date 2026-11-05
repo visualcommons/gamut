@@ -64,7 +64,7 @@ exponent and the ROMM RGB `(g, a, b, c, d)` set, pinned by
 `adobe_rgb_eotf_standard` / `prophoto_rgb_eotf_standard` and by
 `oracle_uncoded_space_curves_match_gamut_color_through_lcms`; and the PCS D50 of §7.2.16, which is an ICC fact rather than
 a CIE one (see "PCS white" below), pinned by `colorants_sum_to_the_declared_media_white_point` and
-the lcms2 colorant oracle. `src/builtin.rs`'s module documentation tabulates the four. Colorimetry is not the only
+the lcms2 colorant oracle. `src/builtin/mod.rs`'s module documentation tabulates the four. Colorimetry is not the only
 reason to decline: `from_cicp` also refuses signalling this profile *shape* cannot carry, which is
 where narrow range lands — see "CICP fields the profile does not build from" below. `builtin`
 yields `Some` for every `BuiltinProfile` in this release and a test pins that.
@@ -116,7 +116,7 @@ and 5 have no `TransferCharacteristics` variant at all, while all four BT.709-fa
 (`gamut_color::transfer::bt709_eotf`, whose α and β — `BT709_ALPHA` / `BT709_BETA` — the
 parametric tag borrows rather than restates). All four are exactly encodable here as the one curve
 Table 3 defines. Each claim about gamut-color above is an assertion in the doctest on
-`src/builtin.rs`'s module documentation: which of the code points
+`src/builtin/mod.rs`'s module documentation: which of the code points
 `TransferCharacteristics::from_code_point` models, and that `standard_eotf_for` evaluates Table 3's
 `0.259719` at `V = 0.5` for each of the four.
 
