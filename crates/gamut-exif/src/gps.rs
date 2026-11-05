@@ -479,14 +479,26 @@ mod tests {
 
     #[test]
     fn lowercase_references_parse_too() {
-        // `parse` accepts either case on all four axes. Only the uppercase arms were exercised.
-        let mut ifd = sample_ifd();
-        ifd.set(ExifTag::GpsLatitudeRef.tag_id(), Value::Ascii("s".into()));
-        ifd.set(ExifTag::GpsLongitudeRef.tag_id(), Value::Ascii("w".into()));
-        let gps = GpsInfo::from_ifd(&ifd).expect("gps");
+        // `parse` accepts either case for every hemisphere. Each letter is asserted on its own,
+        // because the mutation gate cannot delete one alternative of an or-pattern.
+        for (lat_text, lon_text, lat, lon) in [
+            ("s", "w", LatitudeRef::South, LongitudeRef::West),
+            ("n", "e", LatitudeRef::North, LongitudeRef::East),
+        ] {
+            let mut ifd = sample_ifd();
+            ifd.set(
+                ExifTag::GpsLatitudeRef.tag_id(),
+                Value::Ascii(lat_text.into()),
+            );
+            ifd.set(
+                ExifTag::GpsLongitudeRef.tag_id(),
+                Value::Ascii(lon_text.into()),
+            );
+            let gps = GpsInfo::from_ifd(&ifd).expect("gps");
 
-        assert_eq!(gps.latitude.unwrap().reference, LatitudeRef::South);
-        assert_eq!(gps.longitude.unwrap().reference, LongitudeRef::West);
+            assert_eq!(gps.latitude.unwrap().reference, lat, "{lat_text}");
+            assert_eq!(gps.longitude.unwrap().reference, lon, "{lon_text}");
+        }
     }
 
     #[test]
