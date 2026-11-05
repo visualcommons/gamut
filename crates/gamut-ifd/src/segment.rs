@@ -151,10 +151,10 @@ impl SegmentMap {
         self.file_len
     }
 
-    /// Claims `[start, start + len)` as `kind`. A zero-length claim is ignored. A range that
-    /// reaches past the end of the file is reported in
-    /// [`out_of_bounds`](SegmentReport::out_of_bounds) (as supplied); its in-bounds portion, if
-    /// any, still counts toward classification.
+    /// Claims `[start, start + len)` as `kind`, the end saturating at `u64::MAX`. A zero-length
+    /// claim is ignored. A range that reaches past the end of the file is reported in
+    /// [`out_of_bounds`](SegmentReport::out_of_bounds) (as supplied, up to that saturation); its
+    /// in-bounds portion, if any, still counts toward classification.
     pub fn claim(&mut self, start: u64, len: u64, kind: SpanKind, provenance: Claim) {
         if len == 0 {
             return;

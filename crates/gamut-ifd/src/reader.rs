@@ -491,6 +491,20 @@ pub struct AuditedFile {
 /// [`StreamSource`](crate::StreamSource) and a [`Rebased`](crate::Rebased) view are audited by the
 /// one reader the slice and streaming paths share.
 ///
+/// ```
+/// use gamut_ifd::{ByteOrder, Ifd, StreamSource, TiffFile, Value, Variant, read_audited, write};
+///
+/// let mut ifd = Ifd::new();
+/// ifd.set(256, Value::Short(vec![640]));
+/// let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
+/// let bytes = write(&file).unwrap();
+/// let from_slice = read_audited(&bytes[..]).unwrap();
+/// let from_stream = read_audited(StreamSource::new(std::io::Cursor::new(&bytes))).unwrap();
+/// assert_eq!(from_slice.file, from_stream.file);
+/// assert_eq!(from_slice.report, from_stream.report);
+/// assert!(from_slice.report.is_fully_classified());
+/// ```
+///
 /// This audits the header and the **top-level chain** only; sub-IFDs a codec follows, its
 /// strip/tile data extents, and padding classification are the codec-level audit's job (each
 /// sub-IFD via [`IfdReader::read_ifd_at_audited`](crate::IfdReader::read_ifd_at_audited) over

@@ -1032,7 +1032,7 @@ mod tests {
             error.static_message(),
             Some("TIFF: C2PA manifest store lies outside the file")
         );
-        // Exactly at the end is in bounds: the check is `>`, not `>=`.
+        // Exactly at the end is in bounds: the check is `<=`, not `<`.
         let mut ifd = Ifd::new();
         ifd.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
         let bytes =
