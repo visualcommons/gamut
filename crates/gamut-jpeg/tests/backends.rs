@@ -87,6 +87,8 @@ enum Act {
     Fail,
     /// Accept, then return the late-decline sentinel.
     LateDecline,
+    /// Accept, then fail with an [`Error::Unsupported`] that is *not* the late-decline sentinel.
+    Unsupported,
 }
 
 /// A scripted decode backend: logs when it is consulted, then acts.
@@ -108,6 +110,7 @@ impl JpegStreamDecoder for ScriptedDecoder {
         match self.act {
             Act::Accept => Ok(self.out.clone()),
             Act::LateDecline => Err(backend_declined()),
+            Act::Unsupported => Err(Error::Unsupported("scripted decode unsupported")),
             _ => Err(Error::InvalidInput("scripted decode failure")),
         }
     }
@@ -136,6 +139,7 @@ impl JpegStreamEncoder for ScriptedEncoder {
         match self.act {
             Act::Accept => Ok(self.out.clone()),
             Act::LateDecline => Err(backend_declined()),
+            Act::Unsupported => Err(Error::Unsupported("scripted encode unsupported")),
             _ => Err(Error::InvalidInput("scripted encode failure")),
         }
     }
@@ -408,6 +412,59 @@ fn encode_late_decline_resumes_the_fall_through() {
     assert_eq!(*log.lock().unwrap(), vec!["late", "next"]);
 }
 
+/// Only the exact [`backend_declined`] sentinel resumes the fall-through: an accepting backend's
+/// other `Unsupported` error is terminal, like any other failure.
+#[test]
+fn decode_unsupported_other_than_the_sentinel_is_terminal() {
+    let stream = backend_stream();
+    let log: Log = Arc::default();
+    let mut dec = JpegDecoder::new();
+    dec.push_backend(ScriptedDecoder {
+        name: "unsupported",
+        act: Act::Unsupported,
+        log: log.clone(),
+        out: flat_gray(),
+    });
+    dec.push_backend(ScriptedDecoder {
+        name: "never",
+        act: Act::Accept,
+        log: log.clone(),
+        out: flat_gray(),
+    });
+    let err = DecodeImage::<Gray8>::decode_image(&dec, &stream).unwrap_err();
+    assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+    assert_eq!(err.static_message(), Some("scripted decode unsupported"));
+    assert_eq!(*log.lock().unwrap(), vec!["unsupported"]);
+}
+
+/// The encode twin of [`decode_unsupported_other_than_the_sentinel_is_terminal`].
+#[test]
+fn encode_unsupported_other_than_the_sentinel_is_terminal() {
+    let g = gray_pixels();
+    let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
+    let log: Log = Arc::default();
+    let mut enc = JpegEncoder::new();
+    enc.push_backend(ScriptedEncoder {
+        name: "unsupported",
+        act: Act::Unsupported,
+        log: log.clone(),
+        out: Vec::new(),
+    });
+    enc.push_backend(ScriptedEncoder {
+        name: "never",
+        act: Act::Accept,
+        log: log.clone(),
+        out: backend_stream(),
+    });
+    let mut out = Vec::new();
+    let err = enc.encode_image(gi, &mut out).unwrap_err();
+    assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+    assert_eq!(err.static_message(), Some("scripted encode unsupported"));
+    assert_eq!(*log.lock().unwrap(), vec!["unsupported"]);
+    // The built-in tail never ran either.
+    assert!(out.is_empty());
+}
+
 #[test]
 fn cloning_shares_backends_rather_than_duplicating_them() {
     /// Counts how many encodes the *shared* backend instance saw.
@@ -435,6 +492,131 @@ fn cloning_shares_backends_rather_than_duplicating_them() {
     clone.encode_to_vec(gi).unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(format!("{clone:?}").contains("backends: 1"));
+}
+
+/// A clone copies the *list* of shared backends: a push to either side after the clone is taken
+/// is invisible to the other.
+#[test]
+fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
+    let g = gray_pixels();
+    let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
+    let log: Log = Arc::default();
+    let mut enc = JpegEncoder::new();
+    enc.push_backend(ScriptedEncoder {
+        name: "shared",
+        act: Act::Decline,
+        log: log.clone(),
+        out: Vec::new(),
+    });
+    let mut clone = enc.clone();
+    enc.push_backend(ScriptedEncoder {
+        name: "original-only",
+        act: Act::Decline,
+        log: log.clone(),
+        out: Vec::new(),
+    });
+    clone.push_backend(ScriptedEncoder {
+        name: "clone-only",
+        act: Act::Decline,
+        log: log.clone(),
+        out: Vec::new(),
+    });
+    enc.encode_to_vec(gi).unwrap();
+    clone.encode_to_vec(gi).unwrap();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["shared", "original-only", "shared", "clone-only"]
+    );
+
+    let stream = backend_stream();
+    let log: Log = Arc::default();
+    let mut dec = JpegDecoder::new();
+    dec.push_backend(ScriptedDecoder {
+        name: "shared",
+        act: Act::Decline,
+        log: log.clone(),
+        out: flat_gray(),
+    });
+    let mut clone = dec.clone();
+    dec.push_backend(ScriptedDecoder {
+        name: "original-only",
+        act: Act::Decline,
+        log: log.clone(),
+        out: flat_gray(),
+    });
+    clone.push_backend(ScriptedDecoder {
+        name: "clone-only",
+        act: Act::Decline,
+        log: log.clone(),
+        out: flat_gray(),
+    });
+    let _: ImageBuf<Gray8> = dec.decode_image(&stream).unwrap();
+    let _: ImageBuf<Gray8> = clone.decode_image(&stream).unwrap();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["shared", "original-only", "shared", "clone-only"]
+    );
+}
+
+/// A backend that panics in `supports`, poisoning the lock of the registry slot that holds it.
+struct PanickyEncoder;
+impl JpegStreamEncoder for PanickyEncoder {
+    fn supports(&mut self, _req: &JpegEncodeRequest) -> bool {
+        panic!("backend panicked");
+    }
+    fn encode(
+        &mut self,
+        _req: &JpegEncodeRequest,
+        _image: &RasterRef<'_>,
+    ) -> gamut_core::Result<Vec<u8>> {
+        unreachable!("never accepted")
+    }
+}
+
+/// The decode twin of [`PanickyEncoder`].
+struct PanickyDecoder;
+impl JpegStreamDecoder for PanickyDecoder {
+    fn supports(&mut self, _info: &JpegStreamInfo) -> bool {
+        panic!("backend panicked");
+    }
+    fn decode(&mut self, _info: &JpegStreamInfo, _jpeg: &[u8]) -> gamut_core::Result<DecodedJpeg> {
+        unreachable!("never accepted")
+    }
+}
+
+/// The error every later call reports once a backend has poisoned its slot.
+const POISONED: &str = "JPEG: a backend poisoned the registry lock";
+
+/// A poisoned slot is an error on every later encode, never a silent fall-through to the built-in
+/// encoder (contrast `gamut-jxl`, whose registry recovers the lock).
+#[test]
+fn a_panicking_encode_backend_poisons_the_registry() {
+    let g = gray_pixels();
+    let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
+    let mut enc = JpegEncoder::new();
+    enc.push_backend(PanickyEncoder);
+    let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| enc.encode_to_vec(gi)));
+    assert!(first.is_err(), "the backend's panic unwinds to the caller");
+    let mut out = Vec::new();
+    let err = enc.encode_image(gi, &mut out).unwrap_err();
+    assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+    assert_eq!(err.static_message(), Some(POISONED));
+    assert!(out.is_empty(), "the built-in tail did not run");
+}
+
+/// The decode twin of [`a_panicking_encode_backend_poisons_the_registry`].
+#[test]
+fn a_panicking_decode_backend_poisons_the_registry() {
+    let stream = backend_stream();
+    let mut dec = JpegDecoder::new();
+    dec.push_backend(PanickyDecoder);
+    let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        DecodeImage::<Gray8>::decode_image(&dec, &stream)
+    }));
+    assert!(first.is_err(), "the backend's panic unwinds to the caller");
+    let err = DecodeImage::<Gray8>::decode_image(&dec, &stream).unwrap_err();
+    assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+    assert_eq!(err.static_message(), Some(POISONED));
 }
 
 // ---------------------------------------------------------------------------------------------
