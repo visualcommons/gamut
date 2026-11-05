@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/visualcommons/gamut/compare/gamut-codec-abi-v0.1.2...gamut-codec-abi-v0.2.0) - 2026-11-05
+
+### Other
+
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- *(gamut-codec-abi)* [**breaking**] own the backend registry, codec ids and pixel-format tags ([#1125](https://github.com/visualcommons/gamut/pull/1125))
+
 ## [0.1.2](https://github.com/visualcommons/gamut/compare/gamut-codec-abi-v0.1.1...gamut-codec-abi-v0.1.2) - 2026-10-12
 
 ### Other

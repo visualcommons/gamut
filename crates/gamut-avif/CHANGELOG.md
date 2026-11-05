@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-avif-v2.0.0...gamut-avif-v3.0.0) - 2026-11-05
+
+### Added
+
+- *(gamut-color, gamut-jpeg, gamut-webp, gamut-avif)* [**breaking**] upsample chroma like each reference decoder by default ([#1044](https://github.com/visualcommons/gamut/pull/1044))
+- *(gamut-metadata)* [**breaking**] wire the facade into png, webp, avif and tiff ([#866](https://github.com/visualcommons/gamut/pull/866))
+
+### Fixed
+
+- *(gamut-av1)* code every lossy block at the frame quantizer and loop-filter level ([#1045](https://github.com/visualcommons/gamut/pull/1045))
+
+### Other
+
+- *(gamut-avif)* [**breaking**] adopt MetadataSink for encoder metadata ([#1154](https://github.com/visualcommons/gamut/pull/1154))
+- *(gamut-metadata)* [**breaking**] one MetadataSink for encoders, transparent errors, capability to the umbrella ([#1150](https://github.com/visualcommons/gamut/pull/1150))
+- *(gamut-av1)* [**breaking**] one config-driven still encode per depth and a typed header surface ([#1147](https://github.com/visualcommons/gamut/pull/1147))
+- *(gamut-icc)* [**breaking**] named tag table, repr'd header enums, core Cicp/Error, split builtin ([#1146](https://github.com/visualcommons/gamut/pull/1146))
+- *(gamut-color)* [**breaking**] type ChromaSubsampling::factors as Dimensions ([#1145](https://github.com/visualcommons/gamut/pull/1145))
+- *(gamut-isobmff)* [**breaking**] parse/to_bytes models, non_exhaustive structs, shared Cicp and Range<u64> ([#1142](https://github.com/visualcommons/gamut/pull/1142))
+- *(gamut-color)* [**breaking**] one chroma/CICP vocabulary, kernels to gamut-dsp, Color spelling ([#1135](https://github.com/visualcommons/gamut/pull/1135))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- *(gamut-core)* [**breaking**] opaque Error, private Dimensions fields, shared vocabulary ([#1126](https://github.com/visualcommons/gamut/pull/1126))
+- *(gamut-codec-abi)* [**breaking**] own the backend registry, codec ids and pixel-format tags ([#1125](https://github.com/visualcommons/gamut/pull/1125))
+- pin encoder metadata-carrier precedence in jpeg, webp, avif and jxl ([#1122](https://github.com/visualcommons/gamut/pull/1122))
+- *(avif)* correct C2paBoxPosition's claim that a moov never reaches a parsed AVIF ([#1121](https://github.com/visualcommons/gamut/pull/1121))
+- *(gamut-avif,gamut-heic)* pin colr selection and RGBA conversion differences ([#1119](https://github.com/visualcommons/gamut/pull/1119))
+- *(c2pa)* pin the moov-then-store position and the disclaimer text ([#1118](https://github.com/visualcommons/gamut/pull/1118))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+- [**breaking**] strip placeholder crates gamut-av2, gamut-vvc and gamut-wasm to declarations only ([#1112](https://github.com/visualcommons/gamut/pull/1112))
+- *(gamut-avif)* mutation survey and its three survivors ([#894](https://github.com/visualcommons/gamut/pull/894))
+
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-avif-v1.1.0...gamut-avif-v2.0.0) - 2026-10-12
 
 ### Added

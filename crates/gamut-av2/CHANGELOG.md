@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/visualcommons/gamut/compare/gamut-av2-v0.1.4...gamut-av2-v0.2.0) - 2026-11-05
+
+### Other
+
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+- [**breaking**] strip placeholder crates gamut-av2, gamut-vvc and gamut-wasm to declarations only ([#1112](https://github.com/visualcommons/gamut/pull/1112))
+
 ## [0.1.4](https://github.com/visualcommons/gamut/compare/gamut-av2-v0.1.3...gamut-av2-v0.1.4) - 2026-10-12
 
 ### Other

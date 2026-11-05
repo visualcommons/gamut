@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/visualcommons/gamut/compare/gamut-bitstream-v0.2.4...gamut-bitstream-v0.3.0) - 2026-11-05
+
+### Other
+
+- *(gamut-bitstream)* [**breaking**] mirrored reader/writer verbs and named Huffman types ([#1141](https://github.com/visualcommons/gamut/pull/1141))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- *(gamut-core)* [**breaking**] opaque Error, private Dimensions fields, shared vocabulary ([#1126](https://github.com/visualcommons/gamut/pull/1126))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+- *(gamut-bitstream)* own the T.81 Annex K.2 Huffman table builder shared with gamut-jpeg ([#899](https://github.com/visualcommons/gamut/pull/899))
+
 ## [0.2.4](https://github.com/visualcommons/gamut/compare/gamut-bitstream-v0.2.3...gamut-bitstream-v0.2.4) - 2026-10-12
 
 ### Added

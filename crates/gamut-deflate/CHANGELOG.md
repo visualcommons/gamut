@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/visualcommons/gamut/compare/gamut-deflate-v0.1.1...gamut-deflate-v0.2.0) - 2026-11-05
+
+### Other
+
+- *(gamut-deflate)* [**breaking**] own the bounded inflate; Copy config ([#1143](https://github.com/visualcommons/gamut/pull/1143))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+- *(mutants)* re-anchor every mutation exclusion and check the anchors in CI ([#1113](https://github.com/visualcommons/gamut/pull/1113))
+- *(gamut-png)* re-measure the peak-RSS figures with the Best match cache ([#1002](https://github.com/visualcommons/gamut/pull/1002))
+- *(gamut-deflate)* search each optimal-parse span once ([#971](https://github.com/visualcommons/gamut/pull/971))
+
 ## [0.1.1](https://github.com/visualcommons/gamut/compare/gamut-deflate-v0.1.0...gamut-deflate-v0.1.1) - 2026-10-12
 
 ### Added

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-dsp-v2.0.1...gamut-dsp-v3.0.0) - 2026-11-05
+
+### Other
+
+- *(gamut-color)* [**breaking**] one chroma/CICP vocabulary, kernels to gamut-dsp, Color spelling ([#1135](https://github.com/visualcommons/gamut/pull/1135))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- *(dsp)* [**breaking**] name the jpeg DCT kernels like the av1 ones ([#1124](https://github.com/visualcommons/gamut/pull/1124))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+- *(gamut-dsp)* fixed-point integer IDCT for the JPEG decoder ([#898](https://github.com/visualcommons/gamut/pull/898))
+
 ## [2.0.1](https://github.com/visualcommons/gamut/compare/gamut-dsp-v2.0.0...gamut-dsp-v2.0.1) - 2026-10-12
 
 ### Other

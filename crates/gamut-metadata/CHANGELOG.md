@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-metadata-v2.0.0...gamut-metadata-v3.0.0) - 2026-11-05
+
+### Other
+
+- *(gamut-jpeg)* [**breaking**] shared chroma, metadata, limits and backend seam; own lossless JPEG ([#1158](https://github.com/visualcommons/gamut/pull/1158))
+- *(gamut-metadata)* [**breaking**] one MetadataSink for encoders, transparent errors, capability to the umbrella ([#1150](https://github.com/visualcommons/gamut/pull/1150))
+- *(gamut-exif)* [**breaking**] with_* setters, one error type, one path per item ([#1139](https://github.com/visualcommons/gamut/pull/1139))
+- *(gamut-iptc)* [**breaking**] one path per namespace, named read sources, split extension.rs ([#1134](https://github.com/visualcommons/gamut/pull/1134))
+- *(gamut-xmp)* [**breaking**] parse/to_bytes verbs, with_* setters, sidecar on XmpMeta ([#1131](https://github.com/visualcommons/gamut/pull/1131))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-metadata-v1.0.0...gamut-metadata-v2.0.0) - 2026-10-12
 
 ### Added

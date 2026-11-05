@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/visualcommons/gamut/compare/gamut-ifd-v3.0.0...gamut-ifd-v4.0.0) - 2026-11-05
+
+### Added
+
+- *(ifd)* read a directory that has no next-IFD pointer ([#1040](https://github.com/visualcommons/gamut/pull/1040))
+- *(gamut-ifd)* shared tag registry for TIFF 6.0 and DNG tags ([#892](https://github.com/visualcommons/gamut/pull/892))
+
+### Other
+
+- *(gamut-ifd)* [**breaking**] named-struct returns, one audited reader, core Segment, flat C2PA exports ([#1140](https://github.com/visualcommons/gamut/pull/1140))
+- *(gamut-ifd)* [**breaking**] shared repr(u16) tag-value enums for gamut-tiff and gamut-dng ([#1138](https://github.com/visualcommons/gamut/pull/1138))
+- *(gamut-ifd)* [**breaking**] own the shared TIFF/DNG audit types, extents and writer layout ([#1130](https://github.com/visualcommons/gamut/pull/1130))
+- *(gamut-core)* [**breaking**] opaque Error, private Dimensions fields, shared vocabulary ([#1126](https://github.com/visualcommons/gamut/pull/1126))
+- *(c2pa)* pin the moov-then-store position and the disclaimer text ([#1118](https://github.com/visualcommons/gamut/pull/1118))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-ifd-v2.0.1...gamut-ifd-v3.0.0) - 2026-10-12
 
 ### Added
