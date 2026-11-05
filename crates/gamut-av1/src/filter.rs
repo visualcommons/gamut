@@ -949,7 +949,7 @@ pub(crate) fn loop_restore_wiener_luma(
                     sum += band[bi][x] * tap;
                 }
                 cdef[y * coded_w + x] =
-                    gamut_color::clip_pixel((sum + v_round) >> round1, bit_depth);
+                    gamut_dsp::math::clip_pixel((sum + v_round) >> round1, bit_depth);
             }
         }
     }
@@ -1128,7 +1128,7 @@ pub(crate) fn superres_upscale_plane(
                 let sx = (src_x + k as i32 - 3).clamp(0, src_stride as i32 - 1) as usize;
                 sum += i32::from(tap) * i32::from(src[base + sx]);
             }
-            dst[dbase + x] = gamut_color::clip_pixel(
+            dst[dbase + x] = gamut_dsp::math::clip_pixel(
                 (-sum + (1 << (FILTER_BITS - 1))) >> FILTER_BITS,
                 bit_depth,
             );

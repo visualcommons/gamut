@@ -11,7 +11,8 @@ every future standard additive. The `inverse_*` kernels are bit-exact transcript
 decoder processes — their behaviour is the spec's, frozen forever. The `forward_*` kernels are
 encoder choices whose only contract is consistency with their paired inverse, so their internals
 (basis tables, SIMD) may be rewritten freely under frozen signatures. And because the surface is
-one module per spec family with nothing at the crate root — `av1`, `jpeg` and `math` today — a
+one module per spec family with nothing at the crate root — `av1`, `jpeg`, `math` and `upsample`
+today — a
 future `jxl`/`av2` module can never collide with an existing name.
 
 ## Public surface (frozen at v1)
@@ -25,6 +26,8 @@ future `jxl`/`av2` module can never collide with an existing name.
 | `jpeg::forward_dct8x8` / `jpeg::inverse_dct8x8` | in-place 2-D 8×8 kernels over a raster-order `&mut [i32; 64]`; separable `f64` evaluation of the T.81 §A.3.3 ideal equations, rounded once | frozen, signature *and* output (see the decision below); fast fixed-point kernels are additive new functions |
 | `jpeg::inverse_dct8x8_int` / `jpeg::inverse_dct8x8_int_dc` | the fast inverse beside the pair (issue #896): in-place 13-bit fixed-point LL&M over the same `&mut [i32; 64]`, bit-exact with libjpeg-turbo's `jpeg_idct_islow`, column/row zero shortcuts; `_dc` is the DC-only sparsity hint (`i32 → i32`, the value of every sample) | additive; output frozen as libjpeg's `jidctint.c` arithmetic |
 | `math::round2` `math::round2_signed` `math::clip3` `math::round_div_nearest` | scalar integer ops: AV1 §4.7 rounding/clamp plus the AV1+VP8 forward-quantize rounding | frozen; new fns are additive |
+| `math::clip_pixel8` `math::clip_pixel` | pixel-range saturation (`0..=255`; AV1 `Clip1` at 8/10/12/16 bits), moved from `gamut-color` (#1066); shared by gamut-av1, gamut-webp and gamut-color | frozen |
+| `upsample::taps` `upsample::replicate` `upsample::libjpeg::{h2v1, h2v2, h1v2}` `upsample::libwebp::fancy_row` `upsample::libavif::bilinear_row` | row-at-a-time chroma upsampling kernels, each a rounding-exact port of a reference decoder (libjpeg-turbo `jdsample.c`, libwebp `upsampling.c`, libavif `reformat.c`), moved from `gamut-color` (#1066); oracle parity gated in gamut-jpeg / gamut-webp / gamut-avif | frozen, output included |
 
 Adding modules or functions stays backward-compatible; removing or reshaping any of the above
 would not.

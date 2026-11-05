@@ -7,9 +7,10 @@
 
 use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
-use gamut_color::oklab::{Gamut, linear_rgb_to_oklab};
+use gamut_color::oklab::linear_rgb_to_oklab;
 use gamut_color::transfer::srgb_eotf;
-use gamut_color::{ChromaUpsampling, ColorRange, Yuv420};
+use gamut_color::{ChromaUpsampling, ColorRange, Planar8, RgbGamut};
+use gamut_core::{Dimensions, ImageRef, Rgb8};
 
 fn main() {
     divan::main();
@@ -36,19 +37,25 @@ fn pixels() -> usize {
     (SIDE * SIDE) as usize
 }
 
+fn image(rgb: &[u8]) -> ImageRef<'_, Rgb8> {
+    ImageRef::new(rgb, Dimensions::new(SIDE, SIDE).unwrap()).unwrap()
+}
+
 #[divan::bench]
 fn rgb_to_yuv420(bencher: Bencher) {
     let rgb = gradient_rgb();
-    bencher.counter(ItemsCount::new(pixels())).bench_local(|| {
-        Yuv420::from_rgb8(black_box(&rgb), SIDE, SIDE, ColorRange::Limited).unwrap()
-    });
+    bencher
+        .counter(ItemsCount::new(pixels()))
+        .bench_local(|| Planar8::from_rgb8_bt601(image(black_box(&rgb)), ColorRange::Limited));
 }
 
 #[divan::bench]
 fn yuv420_to_rgb(bencher: Bencher) {
-    let yuv = Yuv420::from_rgb8(&gradient_rgb(), SIDE, SIDE, ColorRange::Limited).unwrap();
+    let yuv = Planar8::from_rgb8_bt601(image(&gradient_rgb()), ColorRange::Limited);
     bencher.counter(ItemsCount::new(pixels())).bench_local(|| {
-        black_box(&yuv).to_rgb8(ColorRange::Limited, ChromaUpsampling::Interpolated)
+        black_box(&yuv)
+            .to_rgb8_bt601(ColorRange::Limited, ChromaUpsampling::Interpolated)
+            .unwrap()
     });
 }
 
@@ -77,7 +84,7 @@ fn linear_rgb_to_oklab_slice(bencher: Bencher) {
     bencher.counter(ItemsCount::new(rgb.len())).bench_local(|| {
         let mut acc = [0.0f64; 3];
         for &px in &rgb {
-            let lab = linear_rgb_to_oklab(black_box(px), Gamut::Srgb);
+            let lab = linear_rgb_to_oklab(black_box(px), RgbGamut::Srgb);
             acc[0] += lab[0];
             acc[1] += lab[1];
             acc[2] += lab[2];

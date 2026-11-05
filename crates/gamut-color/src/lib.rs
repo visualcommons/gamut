@@ -22,12 +22,12 @@
 //! Every module is public, so the full surface — including the colour-science long tail (the `M1` /
 //! `M2` matrices, the `*_standard` transfer-curve variants, the matrix derivations) — is reachable
 //! and grouped under its module. For convenience the crate root additionally re-exports the items
-//! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`],
-//! [`Planar8`] / [`Planar16`] / [`Yuv420`] / [`YcbcrMatrix`] / [`RgbToYcbcr`], the decoders'
-//! [`ChromaUpsampling`] choice (its kernels live in [`upsample`]), the [`clip_pixel`] /
-//! [`rgb_to_ycbcr`] helpers, the colour-science entry types [`Gamut`] and [`SourceProfile`] /
-//! [`SourceTransfer`], and the headline colour-difference metrics [`delta_e_76`] /
-//! [`delta_e_2000`].
+//! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`] and the
+//! decoders' [`ChromaUpsampling`] choice (its kernels live in `gamut-dsp`'s `upsample` module),
+//! [`Planar8`] / [`Planar16`] / [`YcbcrMatrix`] / [`RgbToYcbcr`], the libwebp-exact
+//! [`bt601_rgb_to_ycbcr`] / [`bt601_ycbcr_to_rgb`] pair, the colour-science entry types
+//! [`RgbGamut`] / [`Chromaticities`] and [`SourceProfile`] / [`SourceTransfer`], and the headline
+//! colour-difference metrics [`delta_e_76`] / [`delta_e_2000`].
 //!
 //! # Implemented vs. modeled
 //!
@@ -40,7 +40,7 @@
 //!   or 4:2:0 from 16-bit RGB(A) ([`Planar16`]); monochrome ([`ChromaSubsampling::Cs400`])
 //!   planes from grey or alpha at every one of those depths, in either buffer (`gamut-avif` codes
 //!   all of these end to end); the CICP code-point tables;
-//!   BT.601 YCbCr 4:2:0 ([`ycbcr`]); **the H.273 matrixing and de-matrixing at every modeled bit
+//!   BT.601 YCbCr 4:2:0 ([`ycbcr`], [`Planar8::from_rgb8_bt601`]); **the H.273 matrixing and de-matrixing at every modeled bit
 //!   depth for [`MatrixCoefficients::Bt709`] / `Bt601` / `Bt470Bg` / `Bt2020Ncl` in both ranges
 //!   ([`RgbToYcbcr`] / [`YcbcrMatrix`])**; and the `f64` colour science ([`transfer`], [`oklab`],
 //!   [`lab`], [`xyb`], [`matrix`], [`gamut_map`], [`cct`], [`profile`]) for the sRGB, Display P3,
@@ -54,14 +54,14 @@
 //! [`bt709_eotf`](transfer::bt709_eotf) / [`bt709_oetf`](transfer::bt709_oetf), and `Hlg` to
 //! [`hlg_inverse_oetf`](transfer::hlg_inverse_oetf) / [`hlg_oetf`](transfer::hlg_oetf) (the
 //! scene-referred Table 3 curve; the display-dependent BT.2100 OOTF is not modelled).
-//! [`oetf_for`](transfer::oetf_for) returns `None` for `Pq`, where
-//! [`eotf_for`](transfer::eotf_for) returns `Some`: that arm is the tone-mapping
-//! [`bt2020_pq_to_sdr`](transfer::bt2020_pq_to_sdr), which is not invertible. The standards-pure
-//! pair [`pq_eotf`](transfer::pq_eotf) / [`pq_oetf`](transfer::pq_oetf) is exact in both
-//! directions, and [`standard_eotf_for`](transfer::standard_eotf_for) /
-//! [`standard_oetf_for`](transfer::standard_oetf_for) are the same dispatch with that pair
-//! (normalized to the 10 000 cd/m² peak) in the PQ arm. [`SourceTransfer::eotf`](profile::SourceTransfer::eotf) — the dispatch over the
-//! gamuts with no CICP transfer code point — likewise has no inverse yet.
+//! The CICP dispatch is [`standard_eotf_for`](transfer::standard_eotf_for) /
+//! [`standard_oetf_for`](transfer::standard_oetf_for), exact inverses at every code point either
+//! answers, PQ included: its arm is the ST 2084 pair [`pq_eotf`](transfer::pq_eotf) /
+//! [`pq_oetf`](transfer::pq_oetf) normalized to the 10 000 cd/m² peak. Nothing in that dispatch
+//! tone-maps; an HDR → SDR pipeline composes it with a `gamut-tonemap` curve.
+//! [`SourceTransfer::eotf`](profile::SourceTransfer::eotf) — the dispatch over the source bundles,
+//! including the encoder-exact [`bt2020_pq_to_sdr`](transfer::bt2020_pq_to_sdr) tone map — has no
+//! inverse yet.
 // `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
 // the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
 #![deny(unsafe_code)]
@@ -85,23 +85,20 @@ pub mod lab;
 pub mod linalg;
 pub mod matrix;
 pub mod oklab;
-pub mod pixel;
 pub mod planar;
 pub mod planar16;
+pub mod primaries;
 pub mod profile;
 pub mod transfer;
-pub mod upsample;
 pub mod xyb;
 pub mod ycbcr;
 
 pub use cct::cct_from_xy;
-pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
-pub use format::{BitDepth, ChromaSubsampling};
+pub use cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics};
+pub use format::{BitDepth, ChromaSubsampling, ChromaUpsampling};
 pub use lab::{delta_e_76, delta_e_2000};
-pub use oklab::Gamut;
-pub use pixel::{clip_pixel, clip_pixel8};
 pub use planar::Planar8;
 pub use planar16::Planar16;
+pub use primaries::{Chromaticities, RgbGamut};
 pub use profile::{SourceProfile, SourceTransfer};
-pub use upsample::ChromaUpsampling;
-pub use ycbcr::{RgbToYcbcr, YcbcrMatrix, Yuv420, rgb_to_ycbcr, ycbcr_to_rgb};
+pub use ycbcr::{RgbToYcbcr, YcbcrMatrix, bt601_rgb_to_ycbcr, bt601_ycbcr_to_rgb};

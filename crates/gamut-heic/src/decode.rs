@@ -52,7 +52,7 @@
 //! [`HeifImage::decode_item_rgba8`]; anything outside it is an
 //! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error on *those* surfaces while the planar surface still delivers the samples.
 
-use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, YcbcrMatrix, ycbcr_to_rgb};
+use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, YcbcrMatrix, bt601_ycbcr_to_rgb};
 use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8, Rgba16};
 use gamut_isobmff::ColourInformation;
 
@@ -317,7 +317,7 @@ impl HeifImage {
     ///   frame is too: narrowing it would trade an honest error for silent quality loss, so use
     ///   [`decode_item_rgba16`](Self::decode_item_rgba16) instead.
     ///
-    /// **Which conversion runs.** BT.601 at 8 bits uses [`gamut_color::ycbcr_to_rgb`], gamut-color's
+    /// **Which conversion runs.** BT.601 at 8 bits uses [`gamut_color::bt601_ycbcr_to_rgb`], gamut-color's
     /// libwebp-exact integer inverse; **every other (matrix, depth) pair** uses the H.273-derived
     /// bit-depth-generic [`YcbcrMatrix`]. The two agree to within a rounding unit — the split exists
     /// so the 8-bit BT.601 output this crate has always produced, which the libheif differential
@@ -826,7 +826,7 @@ fn colour_params(item: &HeifItem<'_>) -> Result<(u16, ColorRange)> {
 
 /// The per-frame YCbCr → RGB conversion this crate's colour policy selected.
 enum Converter {
-    /// 8-bit BT.601 through [`ycbcr_to_rgb`], gamut-color's libwebp-exact integer inverse — the
+    /// 8-bit BT.601 through [`bt601_ycbcr_to_rgb`], gamut-color's libwebp-exact integer inverse — the
     /// conversion this crate has always used at 8 bits, kept so shipped output stays byte-identical.
     Bt601Legacy8(ColorRange),
     /// The bit-depth- and matrix-generic H.273 §8.3 de-matrixing.
@@ -864,7 +864,7 @@ impl Converter {
     fn to_rgb(&self, y: u16, cb: u16, cr: u16) -> (u16, u16, u16) {
         match self {
             Converter::Bt601Legacy8(range) => {
-                let (r, g, b) = ycbcr_to_rgb(y as u8, cb as u8, cr as u8, *range);
+                let (r, g, b) = bt601_ycbcr_to_rgb(y as u8, cb as u8, cr as u8, *range);
                 (u16::from(r), u16::from(g), u16::from(b))
             }
             Converter::Generic(matrix) => matrix.to_rgb(y, cb, cr),

@@ -47,8 +47,8 @@ so no profile is rejected for carrying an unmodelled tag.
 `IccProfile::builtin`, `gray_with_gamma`, `from_cicp` and `from_source_profile` construct
 spec-valid v4 three-component matrix/TRC display profiles (§8.4). All four return `Option`: the
 colorimetry they resolve is **gamut-color's, and whatever gamut-color can supply is never retyped
-here** — primaries and white point come from `ColourPrimaries::chromaticities` for a CICP code
-point and from `Gamut::chromaticities` for a named space, the RGB→XYZ
+here** — primaries and white point come from `ColorPrimaries::chromaticities` for a CICP code
+point and from `RgbGamut::chromaticities` for a named space, the RGB→XYZ
 construction and Bradford adaptation from `gamut_color::matrix`, the ST 2084 curve and H.273
 §8.2's BT.709-family α and β (`BT709_ALPHA` / `BT709_BETA`) from `gamut_color::transfer` — and
 those constructors are themselves fallible, so an input whose colorimetry cannot be resolved is
@@ -80,7 +80,7 @@ parsing one; *describing* a colour space is a layer below.)
 (primaries, transfer) pair. Four built-in spaces are coded on the two CICP axes — sRGB, linear sRGB,
 Display P3 and BT.2100 PQ — and carry a `cicpType` tag. Two are not: Adobe RGB (1998) and ProPhoto
 RGB (`BuiltinProfile::AdobeRgb = 4`, `ProPhotoRgb = 5`, issue #537) have no ITU-T H.273 code point
-on either axis, so their primaries come from gamut-color's total `Gamut::chromaticities`, their
+on either axis, so their primaries come from gamut-color's total `RgbGamut::chromaticities`, their
 profiles carry **no** `cicpType` tag (§9.2.17 requires it to be equivalent to the encoding, and
 `Unspecified` is not), and `BuiltinProfile::cicp` returns `None` for them. Each carries its
 encoding's **standard** curve rather than gamut-color's encoder-exact one, because a profile is
@@ -112,12 +112,12 @@ gates, and it is far rarer than codes 4 and 5. The transfer
 axis is keyed on the **raw code point**, not on `gamut_color::cicp::TransferCharacteristics`,
 because the set of curves an ICC tag can encode is not the set gamut-color can evaluate: codes 4
 and 5 have no `TransferCharacteristics` variant at all, while all four BT.709-family codes (1, 6,
-14, 15) do since #675, and `eotf_for` maps each to the same Table 3 curve this crate writes
+14, 15) do since #675, and `standard_eotf_for` maps each to the same Table 3 curve this crate writes
 (`gamut_color::transfer::bt709_eotf`, whose α and β — `BT709_ALPHA` / `BT709_BETA` — the
 parametric tag borrows rather than restates). All four are exactly encodable here as the one curve
 Table 3 defines. Each claim about gamut-color above is an assertion in the doctest on
 `src/builtin.rs`'s module documentation: which of the code points
-`TransferCharacteristics::from_code_point` models, and that `eotf_for` evaluates Table 3's
+`TransferCharacteristics::from_code_point` models, and that `standard_eotf_for` evaluates Table 3's
 `0.259719` at `V = 0.5` for each of the four.
 
 **Two readings of the BT.709 family.** `from_cicp` reads codes 1, 6, 14 and 15 literally — the

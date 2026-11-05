@@ -33,7 +33,7 @@ fn gradient_planes() -> Planar8 {
             rgb[i + 2] = x.wrapping_add(y.wrapping_mul(7)) as u8;
         }
     }
-    Planar8::from_rgb8_identity(&rgb, side, side).unwrap()
+    Planar8::from_rgb8_identity(&rgb, gamut_core::Dimensions::new(side, side).unwrap()).unwrap()
 }
 
 fn source_bytes() -> usize {

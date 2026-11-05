@@ -9,16 +9,19 @@
 //!   (8/10/12/16). [`YcbcrMatrix`] is what a still-image container reaches for when it has a `colr`
 //!   box and a decoded frame — 10-bit HDR HEIC/AVIF included; [`RgbToYcbcr`] is what an encoder
 //!   reaches for to code a lossy still in YCbCr.
-//! - [`rgb_to_ycbcr`] / [`ycbcr_to_rgb`] / [`Yuv420`] — the **VP8** layer, 8-bit BT.601 only. Its
-//!   limited-range inverse is a bit-exact port of libwebp's `VP8YUVToR/G/B` (`src/dsp/yuv.h`),
-//!   pinned per pixel against libwebp by gamut-webp's oracle tests.
+//! - [`bt601_rgb_to_ycbcr`] / [`bt601_ycbcr_to_rgb`], and the 4:2:0
+//!   [`Planar8::from_rgb8_bt601`](crate::Planar8::from_rgb8_bt601) /
+//!   [`Planar8::to_rgb8_bt601`](crate::Planar8::to_rgb8_bt601) built on them — the **VP8** layer,
+//!   8-bit BT.601 only. Its limited-range inverse is a bit-exact port of libwebp's
+//!   `VP8YUVToR/G/B` (`src/dsp/yuv.h`), pinned per pixel against libwebp by gamut-webp's oracle
+//!   tests.
 //!
 //! The VP8 layer is **not** a special case of the H.273 one, and the H.273 one is not built on it.
 //! Both are correct BT.601, and they differ only in how they round: libwebp's Q6 `MultHi`
 //! truncates intermediates and the full-range arm's Q16 constants are truncated transcriptions,
 //! while [`YcbcrMatrix`] / [`RgbToYcbcr`] derive exactly and round once at Q20. They therefore
 //! agree on the great majority of 8-bit triples and differ by **at most 1 LSB** on the rest. Use
-//! [`rgb_to_ycbcr`] / [`ycbcr_to_rgb`] when you must match libwebp byte for byte (i.e. WebP); use
+//! [`bt601_rgb_to_ycbcr`] / [`bt601_ycbcr_to_rgb`] when you must match libwebp byte for byte (i.e. WebP); use
 //! the H.273 pair everywhere else.
 //!
 //! # The VP8 layer
@@ -36,22 +39,21 @@
 //!   JPEG convention. Kept for callers that genuinely want full-range BT.601; it is **not** what a
 //!   WebP file should carry.
 //!
-//! Chroma is box-subsampled (2×2 average) on the way down. On the way up, [`Yuv420::to_rgb8`] takes
-//! a [`ChromaUpsampling`]. [`ChromaUpsampling::Interpolated`] is libwebp's fancy upsampler, ported
-//! exactly ([`crate::upsample::libwebp`]), so RGB from a WebP decode is byte-identical to
-//! `dwebp`'s default output. [`ChromaUpsampling::Nearest`] replicates each chroma sample across its
+//! Chroma is box-subsampled (2×2 average) on the way down. On the way up,
+//! [`Planar8::to_rgb8_bt601`](crate::Planar8::to_rgb8_bt601) takes a
+//! [`ChromaUpsampling`](crate::ChromaUpsampling). `Interpolated` is libwebp's fancy upsampler,
+//! ported exactly (`gamut_dsp::upsample::libwebp`), so RGB from a WebP decode is byte-identical to
+//! `dwebp`'s default output. `Nearest` replicates each chroma sample across its
 //! 2×2 luma block (`dwebp -nofancy`). Sharp-YUV downsampling on the encode side is not implemented.
 //! This conversion is deliberately *not* on the VP8 codec's bit-exact path (the codec operates on
 //! YCbCr planes directly); it backs the public RGB API.
 
 use gamut_core::luminance::BT601_LUMA_WEIGHTS;
-use gamut_core::{Dimensions, Error, Result};
+use gamut_core::{Error, Result};
+use gamut_dsp::math::{clip_pixel, clip_pixel8};
 
 use crate::cicp::{ColorRange, MatrixCoefficients};
 use crate::format::BitDepth;
-use crate::planar::pixel_count;
-use crate::upsample::{ChromaUpsampling, libwebp, replicate, taps};
-use crate::{clip_pixel, clip_pixel8};
 
 /// Fixed-point fractional bits for the conversion coefficients.
 ///
@@ -101,12 +103,12 @@ fn vp8_clip8(v: i32) -> u8 {
 /// # Examples
 ///
 /// ```
-/// use gamut_color::{rgb_to_ycbcr, ColorRange};
+/// use gamut_color::{bt601_rgb_to_ycbcr, ColorRange};
 /// // Limited-range BT.601 (what WebP uses): black → luma 16, neutral chroma 128.
-/// assert_eq!(rgb_to_ycbcr(0, 0, 0, ColorRange::Limited), (16, 128, 128));
+/// assert_eq!(bt601_rgb_to_ycbcr(0, 0, 0, ColorRange::Limited), (16, 128, 128));
 /// ```
 #[must_use]
-pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: ColorRange) -> (u8, u8, u8) {
+pub fn bt601_rgb_to_ycbcr(r: u8, g: u8, b: u8, range: ColorRange) -> (u8, u8, u8) {
     let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
     match range {
         ColorRange::Full => {
@@ -128,7 +130,7 @@ pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: ColorRange) -> (u8, u8, u8) {
 
 /// Converts one BT.601 YCbCr triple in the given [`ColorRange`] back to RGB (each `0..=255`).
 #[must_use]
-pub fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8, range: ColorRange) -> (u8, u8, u8) {
+pub fn bt601_ycbcr_to_rgb(y: u8, cb: u8, cr: u8, range: ColorRange) -> (u8, u8, u8) {
     match range {
         ColorRange::Full => {
             let y = i32::from(y);
@@ -149,206 +151,6 @@ pub fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8, range: ColorRange) -> (u8, u8, u8) {
             let b = vp8_clip8(yy + mult_hi(cb, 33050) - 17685);
             (r, g, b)
         }
-    }
-}
-
-/// A BT.601 YCbCr image in 4:2:0 layout: a `width × height` luma plane and two
-/// `chroma_width × chroma_height` chroma planes, all row-major 8-bit, where the chroma dimensions are
-/// `ceil(width / 2)` and `ceil(height / 2)`. The signal range is a property of the conversion
-/// ([`ColorRange`]), not of the stored planes.
-#[derive(Debug, Clone)]
-pub struct Yuv420 {
-    width: u32,
-    height: u32,
-    y: Vec<u8>,
-    u: Vec<u8>,
-    v: Vec<u8>,
-}
-
-impl Yuv420 {
-    /// Chroma plane width, `ceil(width / 2)`.
-    #[must_use]
-    pub fn chroma_width(width: u32) -> u32 {
-        width.div_ceil(2)
-    }
-
-    /// Chroma plane height, `ceil(height / 2)`.
-    #[must_use]
-    pub fn chroma_height(height: u32) -> u32 {
-        height.div_ceil(2)
-    }
-
-    /// Builds a buffer from existing planes (e.g. a decoder's output), validating their lengths.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
-    /// plane length does not match the dimensions, or if the luma sample count overflows `usize`.
-    pub fn new(width: u32, height: u32, y: Vec<u8>, u: Vec<u8>, v: Vec<u8>) -> Result<Self> {
-        let luma = pixel_count(width, height)?;
-        // Cannot overflow: each chroma plane has at most as many samples as the luma plane
-        // (`ceil(d / 2) <= d` for d >= 1, and 0 for d == 0), and `luma` just fit `usize`.
-        let chroma = Self::chroma_width(width) as usize * Self::chroma_height(height) as usize;
-        if y.len() != luma || u.len() != chroma || v.len() != chroma {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "YUV plane length does not match dimensions",
-            ));
-        }
-        Ok(Self {
-            width,
-            height,
-            y,
-            u,
-            v,
-        })
-    }
-
-    /// Converts an interleaved 8-bit RGB image to YCbCr 4:2:0 in the given [`ColorRange`],
-    /// box-averaging each 2×2 block of chroma (partial edge blocks average only the pixels that exist).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use gamut_color::{Yuv420, ColorRange};
-    /// let rgb = vec![128u8; 4 * 4 * 3]; // 4×4 flat gray
-    /// let yuv = Yuv420::from_rgb8(&rgb, 4, 4, ColorRange::Limited).expect("valid length");
-    /// assert_eq!(yuv.y().len(), 16); // full-resolution luma
-    /// assert_eq!(yuv.u().len(), 4); // 2×2-subsampled chroma
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
-    /// `rgb.len() != width * height * 3`, if that product overflows `usize`, or if either dimension
-    /// is 0.
-    pub fn from_rgb8(rgb: &[u8], width: u32, height: u32, range: ColorRange) -> Result<Self> {
-        let samples = Dimensions::new(width, height)?
-            .sample_count(3)
-            .ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
-            })?;
-        if rgb.len() != samples {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "rgb buffer length does not match dimensions",
-            ));
-        }
-        let (w, h) = (width as usize, height as usize);
-        // Full-resolution luma, plus full-resolution chroma we then average down.
-        let mut y = vec![0u8; w * h];
-        let mut cb_full = vec![0u8; w * h];
-        let mut cr_full = vec![0u8; w * h];
-        for i in 0..w * h {
-            let (yy, cb, cr) = rgb_to_ycbcr(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], range);
-            y[i] = yy;
-            cb_full[i] = cb;
-            cr_full[i] = cr;
-        }
-
-        let cw = Self::chroma_width(width) as usize;
-        let ch = Self::chroma_height(height) as usize;
-        let mut u = vec![0u8; cw * ch];
-        let mut v = vec![0u8; cw * ch];
-        for cy in 0..ch {
-            for cx in 0..cw {
-                let (mut su, mut sv, mut count) = (0u32, 0u32, 0u32);
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let (px, py) = (cx * 2 + dx, cy * 2 + dy);
-                        if px < w && py < h {
-                            su += u32::from(cb_full[py * w + px]);
-                            sv += u32::from(cr_full[py * w + px]);
-                            count += 1;
-                        }
-                    }
-                }
-                u[cy * cw + cx] = ((su + count / 2) / count) as u8;
-                v[cy * cw + cx] = ((sv + count / 2) / count) as u8;
-            }
-        }
-        Ok(Self {
-            width,
-            height,
-            y,
-            u,
-            v,
-        })
-    }
-
-    /// Converts back to an interleaved 8-bit RGB image in the given [`ColorRange`], reconstructing
-    /// full-resolution chroma with `upsampling`.
-    ///
-    /// [`ChromaUpsampling::Interpolated`] is libwebp's fancy upsampler
-    /// ([`crate::upsample::libwebp::fancy_row`]), which together with the libwebp-exact
-    /// [`ycbcr_to_rgb`] makes the output byte-identical to libwebp's default RGB decode.
-    /// [`ChromaUpsampling::Nearest`] replicates each chroma sample across its 2×2 luma block.
-    #[must_use]
-    pub fn to_rgb8(&self, range: ColorRange, upsampling: ChromaUpsampling) -> Vec<u8> {
-        let (w, h) = (self.width as usize, self.height as usize);
-        let cw = Self::chroma_width(self.width) as usize;
-        let ch = Self::chroma_height(self.height) as usize;
-        let mut out = vec![0u8; w * h * 3];
-        if w == 0 {
-            // `new` admits a zero-width buffer; it has no rows to convert.
-            return out;
-        }
-        let (mut u_row, mut v_row) = (vec![0u8; w], vec![0u8; w]);
-        for (py, line) in out.chunks_exact_mut(w * 3).enumerate() {
-            let (near, far) = taps(py, ch);
-            let (near, far) = (near * cw..(near + 1) * cw, far * cw..(far + 1) * cw);
-            for (plane, row) in [(&self.u, &mut u_row), (&self.v, &mut v_row)] {
-                match upsampling {
-                    ChromaUpsampling::Nearest => replicate(&plane[near.clone()], row),
-                    ChromaUpsampling::Interpolated => {
-                        libwebp::fancy_row(&plane[near.clone()], &plane[far.clone()], row);
-                    }
-                }
-            }
-            let luma = &self.y[py * w..(py + 1) * w];
-            for (((px, &y), &u), &v) in line
-                .as_chunks_mut::<3>()
-                .0
-                .iter_mut()
-                .zip(luma)
-                .zip(&u_row)
-                .zip(&v_row)
-            {
-                let (r, g, b) = ycbcr_to_rgb(y, u, v, range);
-                *px = [r, g, b];
-            }
-        }
-        out
-    }
-
-    /// Image width in pixels.
-    #[must_use]
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    /// Image height in pixels.
-    #[must_use]
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// The full-resolution luma plane (`width * height` samples, row-major).
-    #[must_use]
-    pub fn y(&self) -> &[u8] {
-        &self.y
-    }
-
-    /// The subsampled Cb (U) plane.
-    #[must_use]
-    pub fn u(&self) -> &[u8] {
-        &self.u
-    }
-
-    /// The subsampled Cr (V) plane.
-    #[must_use]
-    pub fn v(&self) -> &[u8] {
-        &self.v
     }
 }
 
@@ -408,7 +210,7 @@ fn round_clip_at(acc: i64, frac: u32, bit_depth: u32) -> u16 {
 /// The derivation is exact integer arithmetic and the conversion is fixed-point, so this path is
 /// bit-exact and deterministic — unlike the crate's `f64` colour science.
 ///
-/// See the [module documentation](self) for why this is *not* built on [`ycbcr_to_rgb`].
+/// See the [module documentation](self) for why this is *not* built on [`bt601_ycbcr_to_rgb`].
 ///
 /// # Examples
 ///
@@ -561,7 +363,7 @@ impl YcbcrMatrix {
     /// each component in `0..=(1 << bit_depth) - 1`.
     ///
     /// `cb` and `cr` are 16 times the chroma value, which is the unrounded weighted sum
-    /// [`crate::upsample::libavif::bilinear_row`] returns. The conversion is
+    /// [`gamut_dsp::upsample::libavif::bilinear_row`] returns. The conversion is
     /// [`to_rgb`](Self::to_rgb)'s with the chroma's four fractional bits carried through to the
     /// single final rounding, so `to_rgb_sixteenths(y, 16 * cb, 16 * cr)` equals
     /// `to_rgb(y, cb, cr)`. Rounding interpolated chroma to whole code values first would add up
@@ -614,7 +416,7 @@ impl YcbcrMatrix {
 /// (matrix coefficients, range, bit depth) triple — the **coding** direction, and the exact
 /// inverse-in-intent of [`YcbcrMatrix`].
 ///
-/// An encoder builds one per image and calls [`from_rgb`](Self::from_rgb) per pixel; the two types
+/// An encoder builds one per image and calls [`convert`](Self::convert) per pixel; the two types
 /// share this module's weight table, range anchors and rounding, so the pair cannot drift apart.
 /// The split is by *direction* rather than one type with two halves because the two are not needed
 /// together: a decoder never matrixes, and a monochrome plane
@@ -633,7 +435,7 @@ impl YcbcrMatrix {
 ///
 /// let m = RgbToYcbcr::new(MatrixCoefficients::Bt709, ColorRange::Full, BitDepth::Eight)?;
 /// // Neutral grey stays neutral: chroma centred, luma unchanged.
-/// assert_eq!(m.from_rgb(128, 128, 128), (128, 128, 128));
+/// assert_eq!(m.convert(128, 128, 128), (128, 128, 128));
 /// # Ok::<(), gamut_core::Error>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -708,7 +510,7 @@ impl RgbToYcbcr {
     /// Converts one R'G'B' triple to Y'CbCr, each component in `0..=(1 << bit_depth) - 1`.
     #[must_use]
     #[inline]
-    pub fn from_rgb(self, r: u16, g: u16, b: u16) -> (u16, u16, u16) {
+    pub fn convert(self, r: u16, g: u16, b: u16) -> (u16, u16, u16) {
         let bits = u32::from(self.depth.bits());
         let (r, g, b) = (i64::from(r), i64::from(g), i64::from(b));
         let dot =
@@ -755,7 +557,7 @@ mod tests {
                         + i32::from(b) * 7_471
                         + HALF)
                         >> FIX;
-                    let (y, _, _) = rgb_to_ycbcr(r, g, b, Full);
+                    let (y, _, _) = bt601_rgb_to_ycbcr(r, g, b, Full);
                     assert_eq!(i32::from(y), expected, "luma drifted at ({r}, {g}, {b})");
                 }
             }
@@ -765,27 +567,27 @@ mod tests {
     #[test]
     fn full_range_color_anchors() {
         // Standard JFIF/BT.601 full-range values: black/white span the whole luma range.
-        assert_eq!(rgb_to_ycbcr(0, 0, 0, Full), (0, 128, 128));
-        assert_eq!(rgb_to_ycbcr(255, 255, 255, Full), (255, 128, 128));
-        assert_eq!(rgb_to_ycbcr(255, 0, 0, Full), (76, 85, 255));
-        let (y, cb, cr) = rgb_to_ycbcr(128, 128, 128, Full);
+        assert_eq!(bt601_rgb_to_ycbcr(0, 0, 0, Full), (0, 128, 128));
+        assert_eq!(bt601_rgb_to_ycbcr(255, 255, 255, Full), (255, 128, 128));
+        assert_eq!(bt601_rgb_to_ycbcr(255, 0, 0, Full), (76, 85, 255));
+        let (y, cb, cr) = bt601_rgb_to_ycbcr(128, 128, 128, Full);
         assert_eq!((cb, cr), (128, 128));
         assert!((i32::from(y) - 128).abs() <= 1);
         // Neutral gray inverts to itself. Every channel lands on 128 — away from the 0/255 clamp —
-        // so the `+ HALF` rounding term of each `ycbcr_to_rgb` component is observable (a mutated
+        // so the `+ HALF` rounding term of each `bt601_ycbcr_to_rgb` component is observable (a mutated
         // `- HALF` shifts each result to 127).
-        assert_eq!(ycbcr_to_rgb(128, 128, 128, Full), (128, 128, 128));
+        assert_eq!(bt601_ycbcr_to_rgb(128, 128, 128, Full), (128, 128, 128));
     }
 
     #[test]
     fn limited_range_matches_libwebp_anchors() {
         // Studio swing: black→16, white→235, neutral chroma 128. Red matches libwebp's per-pixel
         // VP8RGBToY/U/V (src/dsp/yuv.h) exactly, pinning the port independent of the FFI oracle.
-        assert_eq!(rgb_to_ycbcr(0, 0, 0, Limited), (16, 128, 128));
-        assert_eq!(rgb_to_ycbcr(255, 255, 255, Limited), (235, 128, 128));
-        assert_eq!(rgb_to_ycbcr(255, 0, 0, Limited), (82, 90, 240));
+        assert_eq!(bt601_rgb_to_ycbcr(0, 0, 0, Limited), (16, 128, 128));
+        assert_eq!(bt601_rgb_to_ycbcr(255, 255, 255, Limited), (235, 128, 128));
+        assert_eq!(bt601_rgb_to_ycbcr(255, 0, 0, Limited), (82, 90, 240));
         // The inverse round-trips that red back to (near) pure red via libwebp's VP8YUVToR/G/B.
-        let (r, g, b) = ycbcr_to_rgb(82, 90, 240, Limited);
+        let (r, g, b) = bt601_ycbcr_to_rgb(82, 90, 240, Limited);
         assert!(
             r >= 254 && g <= 2 && b <= 2,
             "limited red inverse = ({r},{g},{b})"
@@ -808,8 +610,8 @@ mod tests {
         ];
         for range in [Full, Limited] {
             for (r, g, b) in colors {
-                let (y, cb, cr) = rgb_to_ycbcr(r, g, b, range);
-                let (r2, g2, b2) = ycbcr_to_rgb(y, cb, cr, range);
+                let (y, cb, cr) = bt601_rgb_to_ycbcr(r, g, b, range);
+                let (r2, g2, b2) = bt601_ycbcr_to_rgb(y, cb, cr, range);
                 let err = (i32::from(r) - i32::from(r2)).abs().max(
                     (i32::from(g) - i32::from(g2))
                         .abs()
@@ -824,27 +626,6 @@ mod tests {
     }
 
     #[test]
-    fn new_validates_plane_lengths() {
-        assert!(Yuv420::new(4, 4, vec![0; 16], vec![0; 4], vec![0; 4]).is_ok());
-        assert!(Yuv420::new(4, 4, vec![0; 16], vec![0; 3], vec![0; 4]).is_err());
-        assert!(Yuv420::new(4, 4, vec![0; 15], vec![0; 4], vec![0; 4]).is_err());
-    }
-
-    #[test]
-    fn rejects_bad_rgb_length() {
-        assert!(Yuv420::from_rgb8(&[0, 1, 2, 3], 1, 1, Limited).is_err());
-        assert!(Yuv420::from_rgb8(&[], 0, 1, Limited).is_err());
-    }
-
-    #[test]
-    fn rejects_overflowing_dimensions() {
-        // Near-max dimensions must yield Err, not an overflow panic (debug) or a wrapped length
-        // check (32-bit release): width * height * 3 exceeds usize even on 64-bit targets.
-        assert!(Yuv420::from_rgb8(&[], u32::MAX, u32::MAX, Limited).is_err());
-        assert!(Yuv420::new(u32::MAX, u32::MAX, vec![], vec![], vec![]).is_err());
-    }
-
-    #[test]
     fn vp8_clip8_fast_path_and_clamps() {
         // In-range values (`v & !MASK2 == 0`) take the `>> FIX2` fast path; out-of-range values clamp
         // hard to 0 (low) or 255 (high). The negative case pins `v < 0` against `v == 0`.
@@ -853,142 +634,6 @@ mod tests {
         assert_eq!(vp8_clip8(MASK2), (MASK2 >> FIX2) as u8); // largest in-range value (= 255)
         assert_eq!(vp8_clip8(MASK2 + 1), 255); // first out-of-range high
         assert_eq!(vp8_clip8(-1), 0); // out-of-range low
-    }
-
-    #[test]
-    fn box_subsample_matches_reference_for_varying_image() {
-        // A spatially-varying 5x3 image (odd dims ⇒ partial edge blocks, incl. a 1-pixel corner) so
-        // the chroma box-average exercises the source coordinates `cx*2`/`cy*2` and the per-block
-        // `count` rounding. An independent reference re-derives the expected U/V; any mutated
-        // coordinate or rounding in `from_rgb8` diverges from it.
-        let (w, h) = (5usize, 3usize);
-        let mut rgb = vec![0u8; w * h * 3];
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y * w + x) * 3;
-                rgb[i] = (x * 50).min(255) as u8;
-                rgb[i + 1] = (y * 90).min(255) as u8;
-                rgb[i + 2] = ((x + y) * 35).min(255) as u8;
-            }
-        }
-        let yuv = Yuv420::from_rgb8(&rgb, w as u32, h as u32, Full).unwrap();
-        // 5x3 luma ⇒ chroma is ceil(5/2) x ceil(3/2) = 3 x 2, as literals — re-deriving them from
-        // chroma_width/chroma_height here would let a broken round-up hide. The odd sizes pin it.
-        assert_eq!(Yuv420::chroma_width(w as u32), 3);
-        assert_eq!(Yuv420::chroma_height(h as u32), 2);
-        assert_eq!(yuv.y().len(), 15);
-        assert_eq!((yuv.u().len(), yuv.v().len()), (6, 6));
-        let (cw, ch) = (3usize, 2usize);
-        for cy in 0..ch {
-            for cx in 0..cw {
-                let (mut su, mut sv, mut count) = (0u32, 0u32, 0u32);
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let (px, py) = (cx * 2 + dx, cy * 2 + dy);
-                        if px < w && py < h {
-                            let i = (py * w + px) * 3;
-                            let (_, cb, cr) = rgb_to_ycbcr(rgb[i], rgb[i + 1], rgb[i + 2], Full);
-                            su += u32::from(cb);
-                            sv += u32::from(cr);
-                            count += 1;
-                        }
-                    }
-                }
-                assert_eq!(
-                    yuv.u()[cy * cw + cx],
-                    ((su + count / 2) / count) as u8,
-                    "u[{cx},{cy}]"
-                );
-                assert_eq!(
-                    yuv.v()[cy * cw + cx],
-                    ((sv + count / 2) / count) as u8,
-                    "v[{cx},{cy}]"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn to_rgb8_nearest_replicates_chroma() {
-        // Distinct per-position Y/U/V so the nearest-chroma index `(py/2)*cw + (px/2)` and the luma
-        // index `py*w + px` both matter; an independent reference upsamples identically. An empty
-        // `vec![]` body, a mutated index, or wrong index arithmetic all diverge.
-        let (w, h) = (5u32, 3u32);
-        let cw = Yuv420::chroma_width(w);
-        let chh = Yuv420::chroma_height(h);
-        let y: Vec<u8> = (0..w * h).map(|i| (i * 7 % 251) as u8).collect();
-        let u: Vec<u8> = (0..cw * chh).map(|i| (30 + i * 17 % 200) as u8).collect();
-        let v: Vec<u8> = (0..cw * chh).map(|i| (220 - i * 13 % 200) as u8).collect();
-        let yuv = Yuv420::new(w, h, y.clone(), u.clone(), v.clone()).unwrap();
-        assert_eq!((yuv.width(), yuv.height()), (w, h));
-        let out = yuv.to_rgb8(Full, ChromaUpsampling::Nearest);
-        assert_eq!(out.len(), (w * h * 3) as usize);
-        let (wu, cwu) = (w as usize, cw as usize);
-        for py in 0..h as usize {
-            for px in 0..wu {
-                let ci = (py / 2) * cwu + (px / 2);
-                let (r, g, b) = ycbcr_to_rgb(y[py * wu + px], u[ci], v[ci], Full);
-                let o = (py * wu + px) * 3;
-                assert_eq!(
-                    (out[o], out[o + 1], out[o + 2]),
-                    (r, g, b),
-                    "pixel ({px},{py})"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn to_rgb8_of_an_empty_buffer_is_empty() {
-        // `new` admits zero dimensions; converting them must not panic in either mode.
-        for (w, h) in [(0u32, 3u32), (3, 0), (0, 0)] {
-            let chroma = (Yuv420::chroma_width(w) * Yuv420::chroma_height(h)) as usize;
-            let yuv = Yuv420::new(
-                w,
-                h,
-                vec![0; (w * h) as usize],
-                vec![0; chroma],
-                vec![0; chroma],
-            )
-            .unwrap();
-            for upsampling in [ChromaUpsampling::Nearest, ChromaUpsampling::Interpolated] {
-                assert!(
-                    yuv.to_rgb8(Limited, upsampling).is_empty(),
-                    "{w}x{h} {upsampling:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn to_rgb8_interpolated_runs_libwebps_fancy_upsampler_per_plane() {
-        // Each output row interpolates between chroma row `py / 2` and its neighbour above (even
-        // rows) or below (odd rows), clamped to the plane: libwebp's `EmitFancyRGB` row order. U
-        // and V carry different data, so swapping them, reading the wrong row, or replicating
-        // instead of interpolating all diverge from this independently assembled expectation.
-        let (w, h) = (5u32, 5u32);
-        let (cw, ch) = (3usize, 3usize);
-        let y: Vec<u8> = (0..w * h).map(|i| (16 + i * 9 % 219) as u8).collect();
-        let u: Vec<u8> = (0..9u32).map(|i| (40 + i * 23 % 180) as u8).collect();
-        let v: Vec<u8> = (0..9u32).map(|i| (210 - i * 19 % 170) as u8).collect();
-        let yuv = Yuv420::new(w, h, y.clone(), u.clone(), v.clone()).unwrap();
-        let out = yuv.to_rgb8(Limited, ChromaUpsampling::Interpolated);
-        let rows: [(usize, usize); 5] = [(0, 0), (0, 1), (1, 0), (1, 2), (2, 1)];
-        let wu = w as usize;
-        for (py, &(near, far)) in rows.iter().enumerate() {
-            let row = |p: &[u8], r: usize| p[r * cw..(r + 1) * cw].to_vec();
-            let (mut ur, mut vr) = (vec![0u8; wu], vec![0u8; wu]);
-            libwebp::fancy_row(&row(&u, near), &row(&u, far), &mut ur);
-            libwebp::fancy_row(&row(&v, near), &row(&v, far), &mut vr);
-            for px in 0..wu {
-                let (r, g, b) = ycbcr_to_rgb(y[py * wu + px], ur[px], vr[px], Limited);
-                let o = (py * wu + px) * 3;
-                assert_eq!(&out[o..o + 3], &[r, g, b], "pixel ({px},{py})");
-            }
-        }
-        assert_eq!(ch, Yuv420::chroma_height(h) as usize);
-        // Interpolation really happened: it differs from replication on this content.
-        assert_ne!(out, yuv.to_rgb8(Limited, ChromaUpsampling::Nearest));
     }
 
     // ---- YcbcrMatrix ------------------------------------------------------------------------
@@ -1393,7 +1038,7 @@ mod tests {
                 (128, 128, 128),
                 (200, 60, 200),
             ] {
-                let want = ycbcr_to_rgb(y, cb, cr, range);
+                let want = bt601_ycbcr_to_rgb(y, cb, cr, range);
                 let got = m.to_rgb(u16::from(y), u16::from(cb), u16::from(cr));
                 for (a, b) in [
                     (got.0, u16::from(want.0)),
@@ -1462,8 +1107,8 @@ mod tests {
         for r in (0..=255u16).step_by(5) {
             for g in (0..=255u16).step_by(7) {
                 for b in (0..=255u16).step_by(11) {
-                    let (ey, ecb, ecr) = rgb_to_ycbcr(r as u8, g as u8, b as u8, Full);
-                    let got = m.from_rgb(r, g, b);
+                    let (ey, ecb, ecr) = bt601_rgb_to_ycbcr(r as u8, g as u8, b as u8, Full);
+                    let got = m.convert(r, g, b);
                     for (got, want, name) in [
                         (got.0, u16::from(ey), "Y"),
                         (got.1, u16::from(ecb), "Cb"),
@@ -1494,21 +1139,21 @@ mod tests {
         // (Kr = 0.2126) has Y = round(255·0.2126) = 54, Cr at its positive extreme (255) and Cb at
         // its negative one: Cb = round(255·(0 − 0.2126)/(2·0.9278)) + 128 = round(−29.2) + 128 = 99.
         let m709 = RgbToYcbcr::new(Bt709, Full, Eight).unwrap();
-        assert_eq!(m709.from_rgb(255, 0, 0), (54, 99, 255));
+        assert_eq!(m709.convert(255, 0, 0), (54, 99, 255));
         // Pure blue: Y = round(255·0.0722) = 18, Cb at +255, Cr = round(255·(0 − 0.0722)/(2·0.7874))
         // + 128 = round(−11.7) + 128 = 116.
-        assert_eq!(m709.from_rgb(0, 0, 255), (18, 255, 116));
+        assert_eq!(m709.convert(0, 0, 255), (18, 255, 116));
 
         // BT.601 (Kr = 0.299): pure red → Y = round(255·0.299) = 76.
         let m601 = RgbToYcbcr::new(Bt601, Full, Eight).unwrap();
-        assert_eq!(m601.from_rgb(255, 0, 0).0, 76);
+        assert_eq!(m601.convert(255, 0, 0).0, 76);
         // BT.2020 (Kr = 0.2627): pure red → Y = round(255·0.2627) = 67.
         let m2020 = RgbToYcbcr::new(Bt2020Ncl, Full, Eight).unwrap();
-        assert_eq!(m2020.from_rgb(255, 0, 0).0, 67);
+        assert_eq!(m2020.convert(255, 0, 0).0, 67);
         // The three matrices really are distinct — a mutated weight table that collapsed them
         // would still pass a round-trip test.
-        assert_ne!(m709.from_rgb(255, 0, 0), m601.from_rgb(255, 0, 0));
-        assert_ne!(m709.from_rgb(255, 0, 0), m2020.from_rgb(255, 0, 0));
+        assert_ne!(m709.convert(255, 0, 0), m601.convert(255, 0, 0));
+        assert_ne!(m709.convert(255, 0, 0), m2020.convert(255, 0, 0));
         // BT.470 B,G names the same de-matrixing as BT.601 in this direction too.
         assert_eq!(
             RgbToYcbcr::new(Bt470Bg, Full, Eight).unwrap(),
@@ -1532,12 +1177,12 @@ mod tests {
             };
             let max = max as u16;
             assert_eq!(
-                m.from_rgb(0, 0, 0),
+                m.convert(0, 0, 0),
                 (black as u16, centre as u16, centre as u16),
                 "{mc:?} {range:?} {depth:?} black"
             );
             assert_eq!(
-                m.from_rgb(max, max, max),
+                m.convert(max, max, max),
                 (white as u16, centre as u16, centre as u16),
                 "{mc:?} {range:?} {depth:?} white"
             );
@@ -1565,7 +1210,7 @@ mod tests {
                 for g in (0..=usize::from(max)).step_by(step + 1) {
                     for b in (0..=usize::from(max)).step_by(step + 2) {
                         let (r, g, b) = (r as u16, g as u16, b as u16);
-                        let (y, cb, cr) = fwd.from_rgb(r, g, b);
+                        let (y, cb, cr) = fwd.convert(r, g, b);
                         let (r2, g2, b2) = inv.to_rgb(y, cb, cr);
                         for (src, back, name) in [(r, r2, "R"), (g, g2, "G"), (b, b2, "B")] {
                             assert!(
@@ -1585,7 +1230,7 @@ mod tests {
         // A caller can hand an 8-bit matrix a sample above 255 (a widened 10-bit plane, say); the
         // result must clamp to the depth, not wrap through the `as u16` narrowing.
         let m = RgbToYcbcr::new(Bt709, Full, Eight).unwrap();
-        assert_eq!(m.from_rgb(4095, 0, 0), (255, 0, 255));
-        assert_eq!(m.from_rgb(0, 4095, 0).0, 255);
+        assert_eq!(m.convert(4095, 0, 0), (255, 0, 255));
+        assert_eq!(m.convert(0, 4095, 0).0, 255);
     }
 }

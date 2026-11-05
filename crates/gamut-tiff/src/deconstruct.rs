@@ -20,9 +20,9 @@ use gamut_ifd::{
     UnknownFieldType, UnknownTag, Value, audit as ifd_audit,
 };
 
-use crate::compression::Compression;
+use crate::compression::tiff_compression;
 use crate::decoder::TiffDecoder;
-use crate::ifd::{PhotometricInterpretation, Predictor};
+use crate::ifd::{tiff_photometric, tiff_predictor};
 use crate::tags;
 
 /// Walks `data` and returns a [`DeconstructReport`] classifying every byte.
@@ -101,10 +101,10 @@ impl Findings {
     }
 
     /// Flags `Compression`, `PhotometricInterpretation`, and `Predictor` values whose code this
-    /// crate does not recognise.
+    /// crate does not recognise — TIFF's own sets, so a code only DNG assigns is flagged too.
     fn check_codes(&mut self, ifd: &Ifd, page: usize) {
         if let Some(code) = ifd.get_u32(tags::COMPRESSION)
-            && Compression::try_from(code).is_err()
+            && tiff_compression(code).is_err()
         {
             self.anomalies.push(Anomaly::unknown_code(
                 page,
@@ -114,7 +114,7 @@ impl Findings {
             ));
         }
         if let Some(code) = ifd.get_u32(tags::PHOTOMETRIC_INTERPRETATION)
-            && PhotometricInterpretation::try_from(code).is_err()
+            && tiff_photometric(code).is_err()
         {
             self.anomalies.push(Anomaly::unknown_code(
                 page,
@@ -124,7 +124,7 @@ impl Findings {
             ));
         }
         if let Some(code) = ifd.get_u32(tags::PREDICTOR)
-            && Predictor::try_from(code).is_err()
+            && tiff_predictor(code).is_err()
         {
             self.anomalies.push(Anomaly::unknown_code(
                 page,

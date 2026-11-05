@@ -1,7 +1,8 @@
-//! Well-known **structural** pointer tags, and the shared **tag registry**.
+//! Well-known **structural** pointer tags, the shared **tag registry**, and the shared **value
+//! codes** of four tags.
 //!
-//! This crate deliberately owns no tag *semantics* — what `ImageWidth` or `Compression` mean is
-//! codec business. The pointer tags are the one principled exception, because they are
+//! This crate deliberately owns no tag *semantics* — what an `ImageWidth`, or a `Compression`
+//! scheme, means to the pixels is codec business. The pointer tags are the one principled exception, because they are
 //! *structure*: their values locate other directories (or, for [`MAKER_NOTE`], a byte blob
 //! vendors fill with a rebased mini-IFD), i.e. they name the directory graph itself — the graph
 //! [`read_tree`](crate::read_tree) / [`IfdReader::read_tree`](crate::IfdReader::read_tree)
@@ -29,11 +30,22 @@
 //!
 //! Each row records what a *conformant writer* must emit. A reader is not bound by it: real files
 //! carry other types and counts, and nothing in this crate rejects them.
+//!
+//! # Shared value codes
+//!
+//! The codes four tags carry are shared the same way: [`Compression`],
+//! [`PhotometricInterpretation`], [`Predictor`] and [`SampleFormat`] name every code TIFF 6.0 and
+//! DNG 1.7.1.0 assign to tags 259, 262, 317 and 339, so gamut-tiff and gamut-dng spell a code
+//! alike. Which of those codes a codec admits, decodes or encodes is its own business.
 
 use TagCount::{Any, Exact};
 
 use crate::FieldType;
 use crate::FieldType::{Ascii, Byte, Double, Float, Long, Rational, SRational, Short, Undefined};
+
+mod values;
+
+pub use values::{Compression, PhotometricInterpretation, Predictor, SampleFormat};
 
 /// `SubIFDs` (330, 0x014A) — offsets of child image directories (TIFF/EP and DNG raw,
 /// reduced-resolution, and mask subfiles).

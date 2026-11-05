@@ -9,7 +9,7 @@ use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, AvifImage, ChromaFormat, ChromaUpsampling,
     DecodeLimits, DecodeOptions, DecodedFrame, ObuType, Subsampling, iter_obus,
 };
-use gamut_color::{ColorRange, ycbcr_to_rgb};
+use gamut_color::{ColorRange, bt601_ycbcr_to_rgb};
 use gamut_core::{Error, ErrorKind, Result};
 use gamut_isobmff::{
     CleanAperture, ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, OverlayOffset,
@@ -1229,7 +1229,7 @@ fn combined_transforms_apply_in_ipma_order() {
 
 #[test]
 fn bt601_limited_and_full_range_are_golden() {
-    use gamut_color::{ColorRange, ycbcr_to_rgb};
+    use gamut_color::{ColorRange, bt601_ycbcr_to_rgb};
     // 4x4, 4:2:0, matrix 6 (BT.601). Limited vs full must differ; assert both against
     // gamut_color.
     for full in [false, true] {
@@ -1248,7 +1248,7 @@ fn bt601_limited_and_full_range_are_golden() {
                 let yv = ey(15, x, y, 8) as u8;
                 let cb = ecb(15, cx, cy, 8) as u8;
                 let cr = ecr(15, cx, cy, 8) as u8;
-                let (r, g, b) = ycbcr_to_rgb(yv, cb, cr, range);
+                let (r, g, b) = bt601_ycbcr_to_rgb(yv, cb, cr, range);
                 let o = ((y * 4 + x) * 4) as usize;
                 assert_eq!(
                     &rgba.as_samples()[o..o + 4],
@@ -1334,7 +1334,7 @@ fn bt709_and_bt2020_are_golden_against_the_h273_matrix() {
 
 #[test]
 fn bt601_444_uses_full_chroma_resolution() {
-    use gamut_color::{ColorRange, ycbcr_to_rgb};
+    use gamut_color::{ColorRange, bt601_ycbcr_to_rgb};
     // A 4:4:4 BT.601 frame: the chroma column index must be `x` (not `x / 2`). Deleting the
     // `Yuv444` match arm falls through to the subsampled `x / 2`, reading the wrong Cb/Cr column
     // — caught by a golden that varies the chroma across adjacent columns.
@@ -1349,7 +1349,7 @@ fn bt601_444_uses_full_chroma_resolution() {
             let yv = ey(15, x, y, 8) as u8;
             let cb = ecb(15, x, y, 8) as u8; // 4:4:4: chroma index == luma index
             let cr = ecr(15, x, y, 8) as u8;
-            let (r, g, b) = ycbcr_to_rgb(yv, cb, cr, ColorRange::Limited);
+            let (r, g, b) = bt601_ycbcr_to_rgb(yv, cb, cr, ColorRange::Limited);
             let o = ((y * 3 + x) * 4) as usize;
             assert_eq!(&rgba.as_samples()[o..o + 4], &[r, g, b, 255], "({x},{y})");
         }
@@ -1655,7 +1655,7 @@ fn bt601_at_eight_bit_still_uses_the_libwebp_inverse() {
         for y in 0..4u32 {
             for x in 0..4u32 {
                 let (cx, cy) = (x / 2, y / 2);
-                let (r, g, b) = ycbcr_to_rgb(
+                let (r, g, b) = bt601_ycbcr_to_rgb(
                     ey(15, x, y, 8) as u8,
                     ecb(15, cx, cy, 8) as u8,
                     ecr(15, cx, cy, 8) as u8,

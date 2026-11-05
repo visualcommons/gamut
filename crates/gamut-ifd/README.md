@@ -2,7 +2,11 @@
 
 `gamut-ifd` is a pure-Rust implementation of the **TIFF Image File Directory (IFD) container core**:
 the byte-order header, the field-type / value model, the IFD chain, and the offset-driven read/write
-spine. It models *structure only* — no pixels, compression, or photometry.
+spine. It models *structure only* — no pixels, compression, or photometry. It does name the codes
+the `Compression`, `PhotometricInterpretation`, `Predictor` and `SampleFormat` tags carry
+(`tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat}`), so gamut-tiff and
+gamut-dng spell them alike; what a code does to the pixels, and whether a codec supports it, stays
+the codec's.
 
 ## Goals
 
@@ -70,6 +74,12 @@ identity and value shape, not meaning, and is read by `gamut-tiff` and `gamut-dn
 standard tags) and `gamut-exif` (to name 0th-IFD tags CIPA DC-008 does not define). Tags from
 specifications not vendored here — TIFF/EP, the Adobe technical notes, and the vendor lineages
 exiv2 folds into its standard tables — are deliberately absent.
+
+It also names the **value codes** of the four tags every TIFF-based codec reads alike —
+`tags::Compression`, `PhotometricInterpretation`, `Predictor` and `SampleFormat` (issue #1133): one
+`#[repr(u16)]` enum each over the union of the codes TIFF 6.0 and DNG 1.7.1.0 assign, read with
+`TryFrom<u16>` and written with `u16::from`. Which codes a codec admits, decodes or encodes stays
+with the codec.
 
 ```rust
 use gamut_ifd::tags::{DNG, TIFF6, TagCount};

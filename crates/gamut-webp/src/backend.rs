@@ -43,7 +43,7 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_codec_abi as abi;
-use gamut_color::Yuv420;
+use gamut_color::{ChromaSubsampling, Planar8};
 use gamut_core::{Dimensions, Error, Result};
 use gamut_riff::FourCc;
 
@@ -141,8 +141,10 @@ impl CodestreamInfo {
 /// converting between the two.
 #[derive(Debug, Clone)]
 pub enum DecodedRaster {
-    /// A `VP8 ` reconstruction: limited-range BT.601 YCbCr 4:2:0 at visible resolution.
-    Yuv420(Yuv420),
+    /// A `VP8 ` reconstruction: limited-range BT.601 YCbCr planes at visible resolution, laid out
+    /// [`ChromaSubsampling::Cs420`] (any other layout is refused by
+    /// [`dimensions`](Self::dimensions)).
+    Yuv420(Planar8),
     /// A `VP8L` reconstruction: `0xAARRGGBB` pixels in scan order.
     Argb {
         /// The image dimensions; `pixels` holds `width * height` entries.
@@ -167,14 +169,29 @@ impl DecodedRaster {
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
-    /// [`Yuv420`](DecodedRaster::Yuv420) raster has a zero width or height, which no
-    /// [`Dimensions`] can describe.
+    /// [`Yuv420`](DecodedRaster::Yuv420) raster's planes are not 4:2:0, the only layout VP8
+    /// codes.
     pub fn dimensions(&self) -> Result<Dimensions> {
         match self {
-            DecodedRaster::Yuv420(yuv) => Dimensions::new(yuv.width(), yuv.height()),
+            DecodedRaster::Yuv420(yuv) => yuv420_dimensions(yuv),
             DecodedRaster::Argb { dimensions, .. } => Ok(*dimensions),
         }
     }
+}
+
+/// The dimensions of a VP8 raster's planes, refusing any layout but 4:2:0.
+///
+/// The one place a [`Planar8`] is admitted as a VP8 raster: the codec-abi encode adapter hands
+/// these planes to a foreign backend with 4:2:0 strides, so a raster of any other layout must be
+/// stopped here rather than read past the end of its chroma planes.
+fn yuv420_dimensions(yuv: &Planar8) -> Result<Dimensions> {
+    if yuv.subsampling() != ChromaSubsampling::Cs420 {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "WebP: a VP8 raster must be 4:2:0 planes",
+        ));
+    }
+    Dimensions::new(yuv.width(), yuv.height())
 }
 
 /// What an encode backend is being asked to produce: which codestream, at what size and quality.
@@ -245,8 +262,9 @@ impl WebpEncodeRequest {
 /// natively — the encode-side mirror of [`DecodedRaster`].
 #[derive(Debug, Clone, Copy)]
 pub enum RasterRef<'a> {
-    /// Limited-range BT.601 YCbCr 4:2:0, the `VP8 ` encoder's input.
-    Yuv420(&'a Yuv420),
+    /// Limited-range BT.601 YCbCr planes laid out [`ChromaSubsampling::Cs420`], the `VP8 `
+    /// encoder's input (any other layout is refused by [`dimensions`](Self::dimensions)).
+    Yuv420(&'a Planar8),
     /// `0xAARRGGBB` pixels in scan order, the `VP8L` encoder's input.
     Argb {
         /// The image dimensions; `pixels` holds `width * height` entries.
@@ -271,11 +289,10 @@ impl RasterRef<'_> {
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
-    /// [`Yuv420`](RasterRef::Yuv420) raster has a zero width or height, which no [`Dimensions`]
-    /// can describe.
+    /// [`Yuv420`](RasterRef::Yuv420) raster's planes are not 4:2:0, the only layout VP8 codes.
     pub fn dimensions(&self) -> Result<Dimensions> {
         match self {
-            RasterRef::Yuv420(yuv) => Dimensions::new(yuv.width(), yuv.height()),
+            RasterRef::Yuv420(yuv) => yuv420_dimensions(yuv),
             RasterRef::Argb { dimensions, .. } => Ok(*dimensions),
         }
     }
@@ -465,10 +482,9 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
         let (w, h) = (dims.width() as usize, dims.height() as usize);
         match info.codestream() {
             WebpCodestream::Vp8 => {
-                let (cw, ch) = (
-                    Yuv420::chroma_width(dims.width()) as usize,
-                    Yuv420::chroma_height(dims.height()) as usize,
-                );
+                let (cw, ch) =
+                    ChromaSubsampling::Cs420.chroma_dimensions(dims.width(), dims.height());
+                let (cw, ch) = (cw as usize, ch as usize);
                 let mut y = vec![0u8; w * h];
                 let mut u = vec![0u8; cw * ch];
                 let mut v = vec![0u8; cw * ch];
@@ -494,12 +510,10 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
                         "WebP: codec-abi decode backend failed",
                     ));
                 }
-                Ok(DecodedRaster::Yuv420(Yuv420::new(
-                    dims.width(),
-                    dims.height(),
-                    y,
-                    u,
-                    v,
+                Ok(DecodedRaster::Yuv420(Planar8::from_planes_subsampled(
+                    dims,
+                    ChromaSubsampling::Cs420,
+                    [y, u, v],
                 )?))
             }
             WebpCodestream::Vp8l => {
@@ -577,7 +591,12 @@ impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
         let mut argb_bytes = Vec::new();
         let desc = match raster {
             RasterRef::Yuv420(yuv) => {
-                let cw = Yuv420::chroma_width(dims.width()) as usize;
+                // `raster.dimensions()` above refused every layout but 4:2:0, so these strides
+                // describe the planes exactly.
+                let (cw, _) =
+                    ChromaSubsampling::Cs420.chroma_dimensions(dims.width(), dims.height());
+                let cw = cw as usize;
+                let [y, u, v] = yuv.planes();
                 abi::ImageDesc::new(
                     PIXEL_FORMAT_YUV420,
                     dims.width(),
@@ -585,9 +604,9 @@ impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
                     8,
                     3,
                     [
-                        yuv.y().as_ptr().cast_mut(),
-                        yuv.u().as_ptr().cast_mut(),
-                        yuv.v().as_ptr().cast_mut(),
+                        y.as_ptr().cast_mut(),
+                        u.as_ptr().cast_mut(),
+                        v.as_ptr().cast_mut(),
                         core::ptr::null_mut(),
                     ],
                     [dims.width() as usize, cw, cw, 0],
@@ -689,7 +708,12 @@ mod tests {
 
     #[test]
     fn rasters_report_their_codestream_and_dimensions() {
-        let yuv = Yuv420::new(2, 2, vec![0; 4], vec![0; 1], vec![0; 1]).unwrap();
+        let yuv = Planar8::from_planes_subsampled(
+            dims(2, 2),
+            ChromaSubsampling::Cs420,
+            [vec![0; 4], vec![0; 1], vec![0; 1]],
+        )
+        .unwrap();
         let raster = DecodedRaster::Yuv420(yuv.clone());
         assert_eq!(raster.codestream(), WebpCodestream::Vp8);
         assert_eq!(raster.dimensions().unwrap(), dims(2, 2));
@@ -714,14 +738,31 @@ mod tests {
     }
 
     #[test]
-    fn zero_sided_yuv420_rasters_have_no_dimensions() {
-        for (width, height) in [(0, 2), (2, 0)] {
-            let yuv = Yuv420::new(width, height, Vec::new(), Vec::new(), Vec::new()).unwrap();
+    fn yuv420_rasters_of_any_other_layout_have_no_dimensions() {
+        // A `Planar8` cannot be zero-sided, but it can be the wrong layout; the codec-abi adapter
+        // would hand such planes to a foreign backend with 4:2:0 strides, so both raster types
+        // refuse them.
+        for (subsampling, chroma) in [
+            (ChromaSubsampling::Cs444, 4),
+            (ChromaSubsampling::Cs422, 2),
+            (ChromaSubsampling::Cs440, 2),
+            (ChromaSubsampling::Cs400, 0),
+        ] {
+            let yuv = Planar8::from_planes_subsampled(
+                dims(2, 2),
+                subsampling,
+                [vec![0; 4], vec![0; chroma], vec![0; chroma]],
+            )
+            .unwrap();
             for err in [
                 DecodedRaster::Yuv420(yuv.clone()).dimensions().unwrap_err(),
                 RasterRef::Yuv420(&yuv).dimensions().unwrap_err(),
             ] {
-                assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+                assert_eq!(
+                    err.kind(),
+                    gamut_core::ErrorKind::InvalidInput,
+                    "{subsampling:?}"
+                );
             }
         }
     }

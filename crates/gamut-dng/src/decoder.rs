@@ -28,7 +28,8 @@ use crate::subimage::{
     DepthInfo, MaskSubArea, SemanticMaskInfo, SubImage, SubImageData, SubImageKind,
 };
 use crate::values::{
-    CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy, SampleFormat,
+    CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy,
+    SampleFormat, dng_compression, dng_photometric,
 };
 use crate::{bitpack, compression, lossless_jpeg, tags};
 
@@ -374,12 +375,11 @@ impl DngDecoder {
         };
 
         let raw_ifd = &tracked[raw_index];
-        let compression =
-            Compression::from_code(raw_ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
-                .ok_or_else(|| {
-                    Error::unsupported(env!("CARGO_PKG_NAME"), "DNG: unknown compression")
-                })?;
-        let computed = if compression.is_lossy() {
+        let compression = dng_compression(raw_ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
+            .ok_or_else(|| {
+            Error::unsupported(env!("CARGO_PKG_NAME"), "DNG: unknown compression")
+        })?;
+        let computed = if compression::is_lossy(compression) {
             let grid = chunk_grid(
                 raw_ifd,
                 raw_ifd.get_u32(tags::IMAGE_WIDTH).unwrap_or(0) as usize,
@@ -680,7 +680,7 @@ fn is_raw_ifd(ifd: &Ifd) -> bool {
     matches!(
         ifd.get_u32(tags::PHOTOMETRIC_INTERPRETATION)
             .and_then(|c| u16::try_from(c).ok())
-            .and_then(PhotometricInterpretation::from_code),
+            .and_then(dng_photometric),
         Some(PhotometricInterpretation::Cfa | PhotometricInterpretation::LinearRaw)
     )
 }
@@ -935,7 +935,8 @@ fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<R
     // JPEG XL data decodes to full-range 16-bit whatever precision the codestream stores (the
     // reference SDK's semantics; Apple ProRAW declares BitsPerSample 10 with WhiteLevel 65535).
     // The reconstructed image therefore carries 16 significant bits.
-    let bits = if ifd.get_u32(tags::COMPRESSION) == Some(u32::from(Compression::JpegXl.code())) {
+    let bits = if ifd.get_u32(tags::COMPRESSION) == Some(u32::from(u16::from(Compression::JpegXl)))
+    {
         16
     } else {
         bits
@@ -943,7 +944,7 @@ fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<R
     let photometric = ifd
         .get_u32(tags::PHOTOMETRIC_INTERPRETATION)
         .and_then(|c| u16::try_from(c).ok())
-        .and_then(PhotometricInterpretation::from_code)
+        .and_then(dng_photometric)
         .ok_or_else(|| {
             Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -1280,16 +1281,10 @@ fn decode_image_data(
     spp: usize,
     bits: u16,
 ) -> Result<Vec<u16>> {
-    let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
+    let compression = dng_compression(ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
         .ok_or_else(|| Error::unsupported(env!("CARGO_PKG_NAME"), "DNG: unknown compression"))?;
     // Reject an undecodable scheme up front, so an empty chunk list cannot mask it.
-    if !matches!(
-        compression,
-        Compression::Uncompressed
-            | Compression::Deflate
-            | Compression::LosslessJpeg
-            | Compression::JpegXl
-    ) {
+    if !compression::is_decodable(compression) {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
             "DNG: this compression is not yet decodable",
@@ -1300,7 +1295,10 @@ fn decode_image_data(
     // u16 sample model represents. Anything else must fail cleanly, not silently misdecode.
     if let Some(formats) = ifd.get_u32_vec(tags::SAMPLE_FORMAT) {
         for format in formats {
-            match u16::try_from(format).ok().and_then(SampleFormat::from_code) {
+            match u16::try_from(format)
+                .ok()
+                .and_then(|f| SampleFormat::try_from(f).ok())
+            {
                 Some(SampleFormat::UnsignedInteger) => {}
                 Some(SampleFormat::FloatingPoint) => {
                     return Err(Error::unsupported(
@@ -1533,7 +1531,7 @@ fn decode_chunk_samples(
         .and_then(|n| n.checked_mul(spp))
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow"))?;
     match compression {
-        Compression::Uncompressed | Compression::Deflate => {
+        Compression::None | Compression::Deflate => {
             // Cap inflation at the packed length this chunk's geometry implies: a Deflate chunk
             // that expands past it cannot be a valid sample stream, and the cap is what keeps a
             // hostile zlib stream from allocating without bound.
@@ -1567,7 +1565,7 @@ fn decode_chunk_samples(
         // components need not match the chunk's geometry — only the total sample count must
         // (DNG 1.7.1, "Compression": real CFA writers store a two-component stream at half
         // width).
-        Compression::LosslessJpeg => {
+        Compression::Jpeg => {
             let jpeg = lossless_jpeg::decode(chunk)?;
             if jpeg.samples.len() != want {
                 return Err(Error::invalid_input(

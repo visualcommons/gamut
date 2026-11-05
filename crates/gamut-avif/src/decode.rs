@@ -64,11 +64,11 @@
 //! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error on *those* surfaces while the planar surface still delivers the samples.
 
 use gamut_av1::SequenceHeader;
-use gamut_color::upsample::{libavif, taps};
 use gamut_color::{
-    BitDepth, ChromaUpsampling, ColorRange, MatrixCoefficients, YcbcrMatrix, ycbcr_to_rgb,
+    BitDepth, ChromaUpsampling, ColorRange, MatrixCoefficients, YcbcrMatrix, bt601_ycbcr_to_rgb,
 };
 use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8, Rgba16};
+use gamut_dsp::upsample::{libavif, taps};
 use gamut_isobmff::ColourInformation;
 
 use crate::av1c::{Av1Config, ChromaFormat};
@@ -541,7 +541,7 @@ impl AvifImage {
     /// always goes through the H.273-derived, bit-depth-generic [`YcbcrMatrix`], with the
     /// interpolated chroma kept to sixteenths of a code value
     /// ([`YcbcrMatrix::to_rgb_sixteenths`]). Otherwise, that is at 4:4:4 or under
-    /// [`ChromaUpsampling::Nearest`], BT.601 at 8 bits uses [`gamut_color::ycbcr_to_rgb`],
+    /// [`ChromaUpsampling::Nearest`], BT.601 at 8 bits uses [`gamut_color::bt601_ycbcr_to_rgb`],
     /// gamut-color's libwebp-exact integer inverse, and **every other (matrix, depth) pair** uses
     /// [`YcbcrMatrix`]. The two agree to within a rounding unit. The split exists so the 8-bit
     /// BT.601 output this crate has always produced on those paths stays byte-identical.
@@ -557,7 +557,7 @@ impl AvifImage {
     ///
     /// **Chroma upsampling** (4:2:0 / 4:2:2 → 4:4:4) defaults to
     /// [`ChromaUpsampling::Interpolated`]: libavif's own bilinear filter
-    /// ([`gamut_color::upsample::libavif`]), which is what libavif applies by default when built
+    /// ([`gamut_dsp::upsample::libavif`]), which is what libavif applies by default when built
     /// without libyuv. Each pixel weighs its four nearest chroma samples 9/3/3/1 (3/1 along the
     /// row at 4:2:2), treats chroma as centred between luma samples, and repeats edge samples.
     /// libavif ignores the sequence header's `chroma_sample_position` here, and so does this
@@ -1322,7 +1322,7 @@ impl AvifImage {
 
 /// The per-frame YCbCr → RGB conversion this crate's colour policy selected.
 enum Converter {
-    /// 8-bit BT.601 through [`ycbcr_to_rgb`], gamut-color's libwebp-exact integer inverse — the
+    /// 8-bit BT.601 through [`bt601_ycbcr_to_rgb`], gamut-color's libwebp-exact integer inverse — the
     /// conversion this crate has always used at 8 bits, kept so shipped output stays byte-identical.
     Bt601Legacy8(ColorRange),
     /// The bit-depth- and matrix-generic H.273 §8.3 de-matrixing.
@@ -1375,7 +1375,7 @@ impl Converter {
     fn to_rgb(&self, y: u16, cb: u16, cr: u16) -> (u16, u16, u16) {
         match self {
             Converter::Bt601Legacy8(range) => {
-                let (r, g, b) = ycbcr_to_rgb(y as u8, cb as u8, cr as u8, *range);
+                let (r, g, b) = bt601_ycbcr_to_rgb(y as u8, cb as u8, cr as u8, *range);
                 (u16::from(r), u16::from(g), u16::from(b))
             }
             Converter::Generic(matrix) => matrix.to_rgb(y, cb, cr),

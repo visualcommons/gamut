@@ -39,9 +39,11 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   states its own edges, and most — not all — of them include `gamut-core`. ← `thiserror`,
   `serde` (optional, `serde` feature).
 - **gamut-color** — shared primitive: coded-plane formats, CICP code points, planar buffers and
-  `f64` colour science. ← core, `serde` (optional, `serde` feature).
+  `f64` colour science; its 4:2:0 BT.601 conversion runs `gamut-dsp`'s chroma upsampling kernels.
+  ← core, dsp, `serde` (optional, `serde` feature).
 - **gamut-bitstream** — shared primitive: bit readers/writers and entropy coders. ← core.
-- **gamut-dsp** — shared primitive: per-spec transform kernels and integer arithmetic. ← nothing.
+- **gamut-dsp** — shared primitive: per-spec transform kernels, the reference decoders' chroma
+  upsampling kernels, and integer arithmetic (rounding, pixel-range clamps). ← nothing.
   Like `gamut-codec-abi` and `gamut-deflate`, it depends on no crate at all.
 - **gamut-tonemap** — scalar tone-mapping curves for HDR→SDR pipelines: the `ToneCurve` trait
   over eight operators (Linear/Clamp/Exposure/Reinhard/ReinhardExtended/ACES/Hable/Drago),
@@ -78,8 +80,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   codec-abi, color, dsp, cmm (optional, `cmm` feature: `decode_srgb` applies the embedded ICC
   profile), icc (optional, `cmm` feature), metadata (optional, `metadata` feature).
 - **gamut-avif** ← av1, isobmff, core, color, codec-abi (pluggable `Av1StillEncoder`
-  codestream seam; `gamut-av1` is the implicit software tail), metadata (optional, `metadata`
-  feature).
+  codestream seam; `gamut-av1` is the implicit software tail), dsp (libavif's chroma
+  upsampling kernel), metadata (optional, `metadata` feature).
 - **gamut-webp** — WebP codec. ← core, codec-abi, color, dsp, riff, metadata (optional,
   `metadata` feature). Like gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw
   `MetadataBlock`-ready payloads, and wires them to the facade's typed models only behind that

@@ -226,29 +226,39 @@ fn libwebp_decodes_every_gamut_encoder_path() {
     assert_gamut_encode_libwebp_decode(&many, w, h, "many-color");
 }
 
+/// 4:2:0 chroma plane dimensions for a `w`×`h` luma plane, as `usize`.
+fn chroma_dims(w: u32, h: u32) -> (usize, usize) {
+    let (cw, ch) = gamut_color::ChromaSubsampling::Cs420.chroma_dimensions(w, h);
+    (cw as usize, ch as usize)
+}
+
+/// Assembles a 4:2:0 `Planar8` from its three planes.
+fn yuv420(w: u32, h: u32, y: Vec<u8>, u: Vec<u8>, v: Vec<u8>) -> gamut_color::Planar8 {
+    gamut_color::Planar8::from_planes_subsampled(
+        Dimensions::new(w, h).unwrap(),
+        gamut_color::ChromaSubsampling::Cs420,
+        [y, u, v],
+    )
+    .unwrap()
+}
+
 /// Builds a structured YUV 4:2:0 image (real residuals to exercise the transforms/tokens).
-fn synthetic_yuv(w: u32, h: u32) -> gamut_color::Yuv420 {
+fn synthetic_yuv(w: u32, h: u32) -> gamut_color::Planar8 {
     let (wu, hu) = (w as usize, h as usize);
-    let (cw, ch) = (
-        gamut_color::Yuv420::chroma_width(w) as usize,
-        gamut_color::Yuv420::chroma_height(h) as usize,
-    );
+    let (cw, ch) = chroma_dims(w, h);
     let y = (0..wu * hu)
         .map(|i| ((i * 9 + (i / wu) * 5) & 0xff) as u8)
         .collect();
     let u = (0..cw * ch).map(|i| ((i * 3 + 80) & 0xff) as u8).collect();
     let v = (0..cw * ch).map(|i| ((i * 7 + 150) & 0xff) as u8).collect();
-    gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
+    yuv420(w, h, y, u, v)
 }
 
 /// B_PRED-favorable content: each 4×4 region carries a different gradient direction, so a single
 /// whole-block mode predicts the macroblock poorly and gamut's encoder picks per-subblock `B_PRED`.
-fn detailed_yuv(w: u32, h: u32) -> gamut_color::Yuv420 {
+fn detailed_yuv(w: u32, h: u32) -> gamut_color::Planar8 {
     let (wu, hu) = (w as usize, h as usize);
-    let (cw, ch) = (
-        gamut_color::Yuv420::chroma_width(w) as usize,
-        gamut_color::Yuv420::chroma_height(h) as usize,
-    );
+    let (cw, ch) = chroma_dims(w, h);
     let y = (0..wu * hu)
         .map(|i| {
             let (x, yy) = (i % wu, i / wu);
@@ -263,19 +273,16 @@ fn detailed_yuv(w: u32, h: u32) -> gamut_color::Yuv420 {
         .collect();
     let u = (0..cw * ch).map(|i| ((i * 3) & 0xff) as u8).collect();
     let v = (0..cw * ch).map(|i| ((i * 9 + 70) & 0xff) as u8).collect();
-    gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
+    yuv420(w, h, y, u, v)
 }
 
 /// Builds a YUV 4:2:0 image with **photographic-like statistics** directly in the YUV domain (so the
 /// bit-exact YUV conformance gate stays independent of the RGB↔YCbCr layer, which PR4 pins
 /// separately): a smooth luma gradient + low-amplitude detail + hard region edges, with gently
 /// varying chroma. RNG-free and `seed`-parameterised, like [`common::photo_like_rgba`].
-fn photo_like_yuv(w: u32, h: u32, seed: u32) -> gamut_color::Yuv420 {
+fn photo_like_yuv(w: u32, h: u32, seed: u32) -> gamut_color::Planar8 {
     let (wu, hu) = (w as usize, h as usize);
-    let (cw, ch) = (
-        gamut_color::Yuv420::chroma_width(w) as usize,
-        gamut_color::Yuv420::chroma_height(h) as usize,
-    );
+    let (cw, ch) = chroma_dims(w, h);
     let hash = |x: i64, y: i64, k: i64| -> i64 {
         let mut v = x.wrapping_mul(374_761_393)
             ^ y.wrapping_mul(668_265_263)
@@ -313,7 +320,7 @@ fn photo_like_yuv(w: u32, h: u32, seed: u32) -> gamut_color::Yuv420 {
             clamp(140 + yy * 60 / chi + (hash(x, yy, 2) - 128) / 16)
         })
         .collect();
-    gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
+    yuv420(w, h, y, u, v)
 }
 
 #[test]
@@ -333,17 +340,17 @@ fn gamut_lossy_bpred_matches_libwebp_bit_exact() {
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
             assert_eq!(
-                gamut.y(),
+                gamut.planes()[0],
                 lib.y.as_slice(),
                 "B_PRED Y mismatch at {w}x{h} q{quant_index}"
             );
             assert_eq!(
-                gamut.u(),
+                gamut.planes()[1],
                 lib.u.as_slice(),
                 "B_PRED U mismatch at {w}x{h} q{quant_index}"
             );
             assert_eq!(
-                gamut.v(),
+                gamut.planes()[2],
                 lib.v.as_slice(),
                 "B_PRED V mismatch at {w}x{h} q{quant_index}"
             );
@@ -423,9 +430,21 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
                 let webp = write_simple_lossy(&payload).unwrap();
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
-                assert_eq!(gamut.y(), lib.y.as_slice(), "{label} Y at {w}x{h} q{q}");
-                assert_eq!(gamut.u(), lib.u.as_slice(), "{label} U at {w}x{h} q{q}");
-                assert_eq!(gamut.v(), lib.v.as_slice(), "{label} V at {w}x{h} q{q}");
+                assert_eq!(
+                    gamut.planes()[0],
+                    lib.y.as_slice(),
+                    "{label} Y at {w}x{h} q{q}"
+                );
+                assert_eq!(
+                    gamut.planes()[1],
+                    lib.u.as_slice(),
+                    "{label} U at {w}x{h} q{q}"
+                );
+                assert_eq!(
+                    gamut.planes()[2],
+                    lib.v.as_slice(),
+                    "{label} V at {w}x{h} q{q}"
+                );
             }
         }
     }
@@ -457,17 +476,17 @@ fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
             assert_eq!(
-                gamut.y(),
+                gamut.planes()[0],
                 lib.y.as_slice(),
                 "Y mismatch at {w}x{h} q{quant_index}"
             );
             assert_eq!(
-                gamut.u(),
+                gamut.planes()[1],
                 lib.u.as_slice(),
                 "U mismatch at {w}x{h} q{quant_index}"
             );
             assert_eq!(
-                gamut.v(),
+                gamut.planes()[2],
                 lib.v.as_slice(),
                 "V mismatch at {w}x{h} q{quant_index}"
             );
@@ -504,9 +523,21 @@ fn gamut_lossy_yuv_realistic_and_large_matches_libwebp() {
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
-            assert_eq!(gamut.y(), lib.y.as_slice(), "Y at {w}x{h} q{quant_index}");
-            assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{quant_index}");
-            assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{quant_index}");
+            assert_eq!(
+                gamut.planes()[0],
+                lib.y.as_slice(),
+                "Y at {w}x{h} q{quant_index}"
+            );
+            assert_eq!(
+                gamut.planes()[1],
+                lib.u.as_slice(),
+                "U at {w}x{h} q{quant_index}"
+            );
+            assert_eq!(
+                gamut.planes()[2],
+                lib.v.as_slice(),
+                "V at {w}x{h} q{quant_index}"
+            );
         }
     }
 }
@@ -587,9 +618,21 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
                 assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
-                assert_eq!(gamut.y(), lib.y.as_slice(), "Y {deltas:?} at {w}x{h} q{q}");
-                assert_eq!(gamut.u(), lib.u.as_slice(), "U {deltas:?} at {w}x{h} q{q}");
-                assert_eq!(gamut.v(), lib.v.as_slice(), "V {deltas:?} at {w}x{h} q{q}");
+                assert_eq!(
+                    gamut.planes()[0],
+                    lib.y.as_slice(),
+                    "Y {deltas:?} at {w}x{h} q{q}"
+                );
+                assert_eq!(
+                    gamut.planes()[1],
+                    lib.u.as_slice(),
+                    "U {deltas:?} at {w}x{h} q{q}"
+                );
+                assert_eq!(
+                    gamut.planes()[2],
+                    lib.v.as_slice(),
+                    "V {deltas:?} at {w}x{h} q{q}"
+                );
             }
         }
     }
@@ -615,9 +658,21 @@ fn gamut_decodes_patched_vp8_profiles_like_libwebp() {
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&patched).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims v{version} {w}x{h}");
-            assert_eq!(gamut.y(), lib.y.as_slice(), "Y v{version} at {w}x{h}");
-            assert_eq!(gamut.u(), lib.u.as_slice(), "U v{version} at {w}x{h}");
-            assert_eq!(gamut.v(), lib.v.as_slice(), "V v{version} at {w}x{h}");
+            assert_eq!(
+                gamut.planes()[0],
+                lib.y.as_slice(),
+                "Y v{version} at {w}x{h}"
+            );
+            assert_eq!(
+                gamut.planes()[1],
+                lib.u.as_slice(),
+                "U v{version} at {w}x{h}"
+            );
+            assert_eq!(
+                gamut.planes()[2],
+                lib.v.as_slice(),
+                "V v{version} at {w}x{h}"
+            );
         }
     }
 }
@@ -658,9 +713,9 @@ fn gamut_decodes_libwebp_lossy_bit_exact() {
                 .to_yuv420();
             let lib = libwebp_decode_yuv(&webp);
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
-            assert_eq!(gamut.y(), lib.y.as_slice(), "Y at {w}x{h} q{q}");
-            assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{q}");
-            assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{q}");
+            assert_eq!(gamut.planes()[0], lib.y.as_slice(), "Y at {w}x{h} q{q}");
+            assert_eq!(gamut.planes()[1], lib.u.as_slice(), "U at {w}x{h} q{q}");
+            assert_eq!(gamut.planes()[2], lib.v.as_slice(), "V at {w}x{h} q{q}");
         }
     }
 }
@@ -690,9 +745,9 @@ fn gamut_decodes_libwebp_lossy_realistic_and_large() {
                 .to_yuv420();
             let lib = libwebp_decode_yuv(&webp);
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
-            assert_eq!(gamut.y(), lib.y.as_slice(), "Y at {w}x{h} q{q}");
-            assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{q}");
-            assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{q}");
+            assert_eq!(gamut.planes()[0], lib.y.as_slice(), "Y at {w}x{h} q{q}");
+            assert_eq!(gamut.planes()[1], lib.u.as_slice(), "U at {w}x{h} q{q}");
+            assert_eq!(gamut.planes()[2], lib.v.as_slice(), "V at {w}x{h} q{q}");
         }
     }
 }
@@ -805,9 +860,9 @@ fn gamut_decodes_libwebp_lossy_forced_features_bit_exact() {
                 .to_yuv420();
             let lib = libwebp_decode_yuv(&webp);
             assert_eq!((lib.width, lib.height), (w, h), "dims {label} at {w}x{h}");
-            assert_eq!(gamut.y(), lib.y.as_slice(), "Y {label} at {w}x{h}");
-            assert_eq!(gamut.u(), lib.u.as_slice(), "U {label} at {w}x{h}");
-            assert_eq!(gamut.v(), lib.v.as_slice(), "V {label} at {w}x{h}");
+            assert_eq!(gamut.planes()[0], lib.y.as_slice(), "Y {label} at {w}x{h}");
+            assert_eq!(gamut.planes()[1], lib.u.as_slice(), "U {label} at {w}x{h}");
+            assert_eq!(gamut.planes()[2], lib.v.as_slice(), "V {label} at {w}x{h}");
         }
     }
 }
@@ -820,7 +875,7 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
     // libwebp sums-then-converts (a rounding-order difference). A regression to full-range — the bug
     // this fix closed — would shift luma by ~17 and fail the `assert_eq` below.
     use common::libwebp_rgba_to_yuv;
-    use gamut_color::{ColorRange, Yuv420};
+    use gamut_color::{ColorRange, Planar8};
 
     let chroma_max = |a: &[u8], b: &[u8]| {
         a.iter()
@@ -831,16 +886,24 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
     };
     for &(w, h) in DIMENSIONS.iter().chain(&[(128u32, 96u32), (300, 70)]) {
         let rgba = photo_like_rgba(w, h, 0x5eed);
-        let gamut =
-            Yuv420::from_rgb8(&rgba_to_rgb(&rgba), w, h, ColorRange::Limited).expect("from_rgb8");
+        let rgb = rgba_to_rgb(&rgba);
+        let src =
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).expect("dims")).expect("rgb image");
+        let gamut = Planar8::from_rgb8_bt601(src, ColorRange::Limited);
         let lib = libwebp_rgba_to_yuv(&rgba, w, h);
         assert_eq!(
-            gamut.y(),
+            gamut.planes()[0],
             lib.y.as_slice(),
             "luma must be bit-exact at {w}x{h}"
         );
-        assert!(chroma_max(gamut.u(), &lib.u) <= 2, "U within 2 at {w}x{h}");
-        assert!(chroma_max(gamut.v(), &lib.v) <= 2, "V within 2 at {w}x{h}");
+        assert!(
+            chroma_max(gamut.planes()[1], &lib.u) <= 2,
+            "U within 2 at {w}x{h}"
+        );
+        assert!(
+            chroma_max(gamut.planes()[2], &lib.v) <= 2,
+            "V within 2 at {w}x{h}"
+        );
     }
 }
 
@@ -888,7 +951,7 @@ fn gamut_decodes_libwebp_lossy_rgb_bit_exact() {
     // The decode direction in RGB: gamut and libwebp decode the *same* libwebp-encoded stream to
     // identical RGB. The planes already match bit for bit (above), the YUV→RGB inverse is
     // libwebp's own (gamut-color's `limited_range_matches_libwebp_anchors`), and the default chroma
-    // upsampling is libwebp's fancy upsampler (`gamut_color::upsample::libwebp`, issue #1016). The
+    // upsampling is libwebp's fancy upsampler (`gamut_dsp::upsample::libwebp`, issue #1016). The
     // dimensions cover odd sizes, single rows and columns, and the 1×1 and 2×2 edge cases. Before
     // #1016 gamut replicated chroma and this was bounded at 24.
     let mut sizes = DIMENSIONS.to_vec();
@@ -1207,17 +1270,17 @@ fn libwebp_decodes_every_effort_level_bit_exactly() {
                     let lib = libwebp_decode_yuv(&webp);
                     let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
                     assert_eq!(
-                        gamut.y(),
+                        gamut.planes()[0],
                         lib.y.as_slice(),
                         "effort {level} {kind} Y {w}x{h} q{q}"
                     );
                     assert_eq!(
-                        gamut.u(),
+                        gamut.planes()[1],
                         lib.u.as_slice(),
                         "effort {level} {kind} U {w}x{h} q{q}"
                     );
                     assert_eq!(
-                        gamut.v(),
+                        gamut.planes()[2],
                         lib.v.as_slice(),
                         "effort {level} {kind} V {w}x{h} q{q}"
                     );
