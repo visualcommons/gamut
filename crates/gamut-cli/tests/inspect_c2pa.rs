@@ -757,9 +757,10 @@ fn a_dng_reports_its_reserved_store_beside_the_accounting() {
 /// A PNG the encoder signed with `store`, and the `caBX` chunk span it reported.
 fn signed_png(store: &[u8]) -> (Vec<u8>, gamut::png::C2paSpan) {
     let rgb = [0x40u8; 8 * 8 * 3];
-    let (file, report) = gamut::png::PngEncoder::new()
+    let mut file = Vec::new();
+    let report = gamut::png::PngEncoder::new()
         .with_c2pa(store)
-        .encode_with_report(rgb_image(&rgb))
+        .encode_with_report(rgb_image(&rgb), &mut file)
         .expect("encode");
     (file, report.c2pa.expect("a store was written"))
 }

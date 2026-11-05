@@ -424,9 +424,10 @@ impl C2paSummary {
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let pixels = vec![0u8; 3 * 4];
 /// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
-/// let (png, report) = PngEncoder::new()
+/// let mut png = Vec::new();
+/// let report = PngEncoder::new()
 ///     .with_c2pa_reserved(16)?
-///     .encode_with_report(image)?;
+///     .encode_with_report(image, &mut png)?;
 ///
 /// let summary = c2pa_summary(&png)?;
 /// assert_eq!(summary.store, report.c2pa);
@@ -583,9 +584,10 @@ impl<'a> ChunkReader<'a> {
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let pixels = vec![0u8; 3 * 4];
 /// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
-/// let (mut png, report) = PngEncoder::new()
+/// let mut png = Vec::new();
+/// let report = PngEncoder::new()
 ///     .with_c2pa_reserved(16)?
-///     .encode_with_report(image)?;
+///     .encode_with_report(image, &mut png)?;
 /// let span = report.c2pa.expect("a reservation was made");
 ///
 /// // ... hash `png` with `span.chunk` excluded, sign, and receive a 16-byte store ...

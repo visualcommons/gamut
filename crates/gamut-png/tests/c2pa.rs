@@ -15,9 +15,40 @@ use common::{
 };
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Indexed8, Rgb8, Rgba8};
 use gamut_png::{
-    Background, ModificationTime, PhysicalDimensions, PhysicalUnit, PngDecoder, PngEncoder,
-    PngPalette, SegmentKind, SrgbIntent, deconstruct, fill_c2pa,
+    Background, ModificationTime, PhysicalDimensions, PhysicalUnit, PngDecoder, PngEncodeReport,
+    PngEncoder, PngPalette, SegmentKind, SrgbIntent, deconstruct, fill_c2pa,
 };
+
+/// [`PngEncoder::encode_with_report`] into a fresh buffer, returning the PNG beside its report.
+trait Reported {
+    fn reported(&self, image: ImageRef<'_, Rgb8>) -> (Vec<u8>, PngEncodeReport);
+}
+
+impl Reported for PngEncoder {
+    fn reported(&self, image: ImageRef<'_, Rgb8>) -> (Vec<u8>, PngEncodeReport) {
+        let mut png = Vec::new();
+        let report = self.encode_with_report(image, &mut png).expect("encode");
+        (png, report)
+    }
+}
+
+/// The report counts the bytes this PNG took and spans the store from this PNG's first byte,
+/// not the buffer's: appended after other bytes, it is the report a fresh buffer gets.
+#[test]
+fn the_report_counts_and_spans_from_this_png_not_the_buffer() {
+    let (pixels, dims) = rgb_source();
+    let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
+    let encoder = PngEncoder::new()
+        .with_c2pa_reserved(16)
+        .expect("a reservable length");
+    let (alone, fresh) = encoder.reported(image);
+    assert_eq!(fresh.len, alone.len());
+
+    let mut out = b"prefix".to_vec();
+    let appended = encoder.encode_with_report(image, &mut out).expect("encode");
+    assert_eq!(appended, fresh);
+    assert_eq!(&out[6..], alone.as_slice());
+}
 
 /// A stand-in manifest store of `len` bytes: not all zero, no two runs alike, so a fill is
 /// visible byte for byte. Opaque here, as every store is.
@@ -145,8 +176,7 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
     let (png, report) = PngEncoder::new()
         .with_c2pa_reserved(40)
         .expect("a reservable length")
-        .encode_with_report(image)
-        .expect("encode");
+        .reported(image);
     let span = report.c2pa.expect("a reservation is reported");
     assert_eq!(span.payload.len(), 40);
     assert_eq!(span.chunk.len(), 40 + 12);
@@ -166,8 +196,7 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
     let (empty, report) = PngEncoder::new()
         .with_c2pa_reserved(0)
         .expect("a reservable length")
-        .encode_with_report(image)
-        .expect("encode");
+        .reported(image);
     let span = report.c2pa.expect("an empty reservation is still a chunk");
     assert_eq!(span.payload.len(), 0);
     assert_eq!(&empty[span.chunk.clone()][..8], b"\0\0\0\0caBX");
@@ -205,8 +234,7 @@ fn filling_a_reservation_changes_only_the_chunk_span() {
     let (reserved, report) = everything_else()
         .with_c2pa_reserved(64)
         .expect("a reservable length")
-        .encode_with_report(image)
-        .expect("encode");
+        .reported(image);
     let span = report.c2pa.expect("span");
     let first = store(64);
     let second: Vec<u8> = first.iter().map(|b| !b).collect();
@@ -300,7 +328,7 @@ fn the_exclusion_span_is_the_whole_chunk_at_known_offsets() {
 fn without_a_store_there_is_no_chunk_and_no_span() {
     let (pixels, dims) = rgb_source();
     let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
-    let (png, report) = everything_else().encode_with_report(image).expect("encode");
+    let (png, report) = everything_else().reported(image);
     assert_eq!(report.c2pa, None);
     assert!(!chunk_types(&png).contains(b"caBX"));
     assert_eq!(deconstruct(&png).expect("deconstruct").c2pa(), None);
@@ -453,8 +481,7 @@ fn a_reserved_store_is_filled_in_place_to_the_same_bytes_as_a_second_encode() {
     let (mut reserved, report) = everything_else()
         .with_c2pa_reserved(64)
         .expect("a reservable length")
-        .encode_with_report(image)
-        .expect("encode");
+        .reported(image);
     let span = report.c2pa.expect("span");
     let outside_before: Vec<u8> = (0..reserved.len())
         .filter(|i| !span.chunk.contains(i))

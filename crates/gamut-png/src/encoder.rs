@@ -134,7 +134,10 @@ fn run_trials(trial: &(impl Fn(FilterStrategy) -> Result<Vec<u8>> + Sync)) -> Re
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PngEncodeReport {
-    /// Where the C2PA manifest-store chunk landed — the whole `caBX` span a `c2pa.hash.data`
+    /// The number of bytes appended to the output — the whole PNG.
+    pub len: usize,
+    /// Where the C2PA manifest-store chunk landed, as offsets from the first byte of this PNG
+    /// (not of the output buffer it was appended to) — the whole `caBX` span a `c2pa.hash.data`
     /// exclusion must cover, and the payload a signer fills — when [`with_c2pa`] or
     /// [`with_c2pa_reserved`] was set; `None` when neither was.
     ///
@@ -1265,17 +1268,18 @@ impl PngEncoder {
         Ok(self)
     }
 
-    /// Encodes `image` as [`EncodeImage::encode_to_vec`] does and reports where the C2PA
-    /// manifest-store chunk landed, for the reserve-then-fill flow described at
-    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved).
+    /// Encodes `image`, appending it to `out` as [`EncodeImage::encode_image`] does, and reports
+    /// how many bytes the PNG took and where the C2PA manifest-store chunk landed, for the
+    /// reserve-then-fill flow described at [`with_c2pa_reserved`](Self::with_c2pa_reserved).
     ///
-    /// The report is read back from the bytes written — the same walk
+    /// The span is read back from the bytes written — the same walk
     /// [`PngReport::c2pa`](crate::PngReport::c2pa) performs, over the same rule (the first
     /// CRC-valid `caBX` before the first `IDAT`) — so it cannot disagree with what a later
-    /// [`deconstruct`](crate::deconstruct) of the same bytes reports. There is deliberately no
-    /// indexed twin of this method: [`encode_indexed8`](Self::encode_indexed8) needs a palette and
-    /// does not fit this shape, and `deconstruct(&png)?.c2pa()` gives an indexed caller the same
-    /// span, which [`fill_c2pa`](crate::fill_c2pa) then fills.
+    /// [`deconstruct`](crate::deconstruct) of the same bytes reports. Its offsets count from the
+    /// first byte of this PNG, not of `out`. There is deliberately no indexed twin of this method:
+    /// [`encode_indexed8`](Self::encode_indexed8) needs a palette and does not fit this shape, and
+    /// `deconstruct(&png)?.c2pa()` gives an indexed caller the same span, which
+    /// [`fill_c2pa`](crate::fill_c2pa) then fills.
     ///
     /// # Errors
     ///
@@ -1285,13 +1289,15 @@ impl PngEncoder {
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
-    ) -> Result<(Vec<u8>, PngEncodeReport)>
+        out: &mut Vec<u8>,
+    ) -> Result<PngEncodeReport>
     where
         Self: EncodeImage<P>,
     {
-        let png = self.encode_to_vec(image)?;
-        let c2pa = chunk::find_c2pa(&png);
-        Ok((png, PngEncodeReport { c2pa }))
+        let start = out.len();
+        let len = self.encode_image(image, out)?;
+        let c2pa = chunk::find_c2pa(&out[start..]);
+        Ok(PngEncodeReport { len, c2pa })
     }
 
     /// Encodes an 8-bit indexed (palette) image. Indexed colour does not fit the single-buffer
