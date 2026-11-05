@@ -9,7 +9,7 @@ The shared HEIF/MIAF still-image layer (issue #1078). Rows are components; the c
 | --- | --- | --- |
 | Role-typed item model (`HeifImage`, `HeifItem`, `ItemKind`) | ISO/IEC 23008-12 §6, §9; MIAF §7 | ✅ |
 | Alpha / depth auxiliaries (MIAF/CICP and HEVC URNs) | ISO/IEC 23008-12 §6.5.8; MIAF §7.3.5 | ✅ |
-| `irot`/`imir` composed into an EXIF `Orientation` | ISO/IEC 23008-12:2022 §6.5.10–§6.5.12 | ✅ |
+| `irot`/`imir` composed into an EXIF `Orientation` | ISO/IEC 23008-12:2022 §6.5 (`imir` §6.5.12) | ✅ |
 | Derivation walk (`iden`, `grid`), cycle/depth guard | ISO/IEC 23008-12 §6.6.2 | ✅ |
 | `iovl` compositing (RGBA surfaces only) | ISO/IEC 23008-12 §6.6.2.4 | ✅ |
 | `DecodeLimits` size and work caps, fallible allocation | — | ✅ |
