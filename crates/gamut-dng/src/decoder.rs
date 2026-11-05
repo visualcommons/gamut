@@ -2120,7 +2120,7 @@ mod tests {
             decode_raw_image(&TrackedIfd::new(&ifd), &bomb, ByteOrder::LittleEndian).unwrap_err();
         assert_eq!(
             err.static_message(),
-            Some("DNG: Deflate stream inflates past the expected size")
+            Some("zlib stream inflates past the expected size")
         );
     }
 

@@ -54,9 +54,9 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
 
 - **Encode + decode**, both directions Adobe-validated: CFA mosaic and `LinearRaw` photometry;
   **strips and DNG-1.7 tiles**; **uncompressed, Deflate/ZIP (8), lossless JPEG (7), and
-  JPEG XL (52546)** compression (Deflate encodes with `gamut-deflate` and inflates with
-  `miniz_oxide`; JXL decode is pure-Rust jxl-rs, encode is the opt-in `jxl-encode` cargo feature
-  over libjxl) with row/column interleave handling; the
+  JPEG XL (52546)** compression (Deflate encodes with `gamut-deflate` and inflates with its
+  bounded `inflate_zlib` over `miniz_oxide`; JXL decode is pure-Rust jxl-rs, encode is the opt-in
+  `jxl-encode` cargo feature over libjxl) with row/column interleave handling; the
   colour-calibration profile (ColorMatrix1/2, CameraCalibration, ForwardMatrix, dual illuminant,
   AnalogBalance, BaselineExposure, profile identity); the full level model (`RawLevels`: the
   BlackLevel repeat pattern with RATIONAL values, `BlackLevelDeltaH/V`, per-plane `WhiteLevel`,

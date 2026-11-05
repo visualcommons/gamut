@@ -15,10 +15,20 @@ categories.workspace = true
 [lints]
 workspace = true
 
+# The default build has no dependency at all. `inflate` adds the bounded zlib inflate the
+# workspace's decoders share (`inflate_zlib`), delegating the decode itself to the safe, fuzzed
+# `miniz_oxide` and reporting failures as `gamut-core` errors under the caller's origin.
+[features]
+inflate = ["dep:gamut-core", "dep:miniz_oxide"]
+
+[dependencies]
+gamut-core = { workspace = true, optional = true }
+miniz_oxide = { version = "0.8", optional = true }
+
 [dev-dependencies]
 # Differential cross-check oracle: a vendored, statically-linked zlib (built from the
 # `third_party/zlib` submodule). Dev-only and excluded from the workspace. gamut ships no
-# inflater, so zlib is the reference that proves the encoder's output decodes correctly.
+# inflater of its own, so zlib is the reference that proves the encoder's output decodes correctly.
 zlib-oracle = { path = "../../tooling/zlib-oracle" }
 # Benchmark baselines only (dev-only — no effect on the crate's zero runtime dependencies):
 # `miniz_oxide` is the pure-Rust encoder behind `flate2`/the `png` crate (the fast/general tier)

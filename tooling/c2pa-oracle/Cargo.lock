@@ -1002,6 +1002,10 @@ dependencies = [
 [[package]]
 name = "gamut-deflate"
 version = "0.1.1"
+dependencies = [
+ "gamut-core",
+ "miniz_oxide 0.8.9",
+]
 
 [[package]]
 name = "gamut-dng"
@@ -1014,7 +1018,6 @@ dependencies = [
  "gamut-ifd",
  "gamut-jxl",
  "gamut-metadata",
- "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -1102,7 +1105,6 @@ dependencies = [
  "gamut-codec-abi",
  "gamut-core",
  "gamut-deflate",
- "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -1120,7 +1122,6 @@ dependencies = [
  "gamut-core",
  "gamut-deflate",
  "gamut-ifd",
- "miniz_oxide 0.8.9",
 ]
 
 [[package]]

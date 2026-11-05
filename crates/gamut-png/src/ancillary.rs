@@ -755,7 +755,7 @@ impl Ancillary {
             data.push(0); // compression method: 0 = zlib/deflate
             DeflateEncoder::new()
                 .with_level(Level::Best)
-                .with_effort(effort)
+                .with_deflate_passes(effort)
                 .zlib_compress(profile, &mut data);
             chunk::write_chunk(out, *b"iCCP", &data);
         }
@@ -1109,7 +1109,7 @@ fn write_text(out: &mut Vec<u8>, entry: &TextEntry, effort: u8) {
     let compress = |payload: &[u8], data: &mut Vec<u8>| {
         DeflateEncoder::new()
             .with_level(Level::Best)
-            .with_effort(effort)
+            .with_deflate_passes(effort)
             .zlib_compress(payload, data);
     };
     let mut data = entry.keyword.clone();
@@ -1189,7 +1189,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = vec![0u8; 8]; // fake signature
-        a.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         assert_eq!(
             find_chunk(&out, b"gAMA"),
             Some(45455u32.to_be_bytes().to_vec())
@@ -1205,7 +1205,7 @@ mod tests {
         a.set_time(2026, 6, 13, 1, 2, 3);
         a.add_text_latin1("Title", "hi");
         let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         let phys = find_chunk(&out, b"pHYs").unwrap();
         assert_eq!(&phys[0..4], 2835u32.to_be_bytes());
         assert_eq!(phys[8], 1); // metre
@@ -1228,7 +1228,7 @@ mod tests {
         assert_eq!(a.time, None, "month 13 is not written");
         assert_eq!(a.time_notice(), Some(MetadataNotice::TimeOutOfRange));
         let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         assert_eq!(find_chunk(&out, b"tIME"), None);
         assert!(!MetadataNotice::TimeOutOfRange.carried());
 
@@ -1251,7 +1251,7 @@ mod tests {
         a.add_text_compressed("After", "set later");
         a.set_time(2026, 9, 6, 0, 0, 0);
         let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
 
         let mut types = Vec::new();
         let mut i = 8;
@@ -1273,7 +1273,11 @@ mod tests {
         );
         // Unset, no chunk at all.
         let mut none = vec![0u8; 8];
-        Ancillary::default().write_post_plte(&mut none, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        Ancillary::default().write_post_plte(
+            &mut none,
+            DeflateEncoder::DEFAULT_DEFLATE_PASSES,
+            RGB8,
+        );
         assert_eq!(find_chunk(&none, b"caBX"), None);
     }
 
@@ -1282,7 +1286,7 @@ mod tests {
         let mut a = Ancillary::default();
         a.set_icc_profile(name, b"profile");
         let mut pre = vec![0u8; 8];
-        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         (find_chunk(&pre, b"iCCP"), a.iccp_notice())
     }
 
@@ -1375,14 +1379,14 @@ mod tests {
             ..Default::default()
         };
         let mut pre = vec![0u8; 8];
-        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         let iccp = find_chunk(&pre, b"iCCP").unwrap();
         assert_eq!(&iccp[..2], b"p\0"); // profile name + null
         assert_eq!(iccp[2], 0); // compression method
         assert_eq!(iccp[3], 0x78); // zlib CMF byte begins the compressed profile
 
         let mut post = vec![0u8; 8];
-        a.write_post_plte(&mut post, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_post_plte(&mut post, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         assert_eq!(
             find_chunk(&post, b"eXIf").unwrap(),
             vec![0x49, 0x49, 0x2A, 0x00]
@@ -1396,7 +1400,7 @@ mod tests {
         let mut a = Ancillary::default();
         a.add_text_compressed("Comment", "the quick brown fox");
         let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         let data = find_chunk(&out, b"zTXt").unwrap();
         assert_eq!(&data[..8], b"Comment\0");
         assert_eq!(data[8], 0); // compression method
@@ -1662,13 +1666,13 @@ mod tests {
             ..Default::default()
         };
         let mut pre = vec![0u8; 8];
-        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_EFFORT, indexed(8));
+        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_DEFLATE_PASSES, indexed(8));
         assert_eq!(find_chunk(&pre, b"sBIT"), Some(vec![5, 6, 5]));
 
         let mut post = vec![0u8; 8];
         a.write_post_plte(
             &mut post,
-            DeflateEncoder::DEFAULT_EFFORT,
+            DeflateEncoder::DEFAULT_DEFLATE_PASSES,
             header(ColorType::Grayscale, 8),
         );
         assert_eq!(find_chunk(&post, b"bKGD"), None);
@@ -1678,7 +1682,7 @@ mod tests {
     /// text annotation actually becomes.
     fn post_plte(a: &Ancillary) -> Vec<u8> {
         let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         out
     }
 
@@ -1787,7 +1791,7 @@ mod tests {
         assert!(a.validate().is_ok(), "the pair is legal");
 
         let mut out = vec![0u8; 8];
-        a.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         assert_eq!(find_chunk(&out, b"sRGB"), Some(vec![0]));
         assert!(
             find_chunk(&out, b"iCCP").is_some(),
@@ -2194,7 +2198,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = vec![0u8; 8];
-        full.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        full.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         assert_eq!(find_chunk(&out, b"cICP"), Some(vec![9, 16, 0, 1]));
 
         let narrow = Ancillary {
@@ -2202,7 +2206,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = vec![0u8; 8];
-        narrow.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        narrow.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         assert_eq!(find_chunk(&out, b"cICP"), Some(vec![1, 13, 0, 0]));
     }
 }

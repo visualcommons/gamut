@@ -44,7 +44,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
 - **gamut-bitstream** — shared primitive: bit readers/writers and entropy coders. ← core.
 - **gamut-dsp** — shared primitive: per-spec transform kernels, the reference decoders' chroma
   upsampling kernels, and integer arithmetic (rounding, pixel-range clamps). ← nothing.
-  Like `gamut-codec-abi` and `gamut-deflate`, it depends on no crate at all.
+  Like `gamut-codec-abi`, it depends on no crate at all (`gamut-deflate` does too in its default
+  build).
 - **gamut-tonemap** — scalar tone-mapping curves for HDR→SDR pipelines: the `ToneCurve` trait
   over eight operators (Linear/Clamp/Exposure/Reinhard/ReinhardExtended/ACES/Hable/Drago),
   between `gamut-color`'s transfer functions and the SDR re-encode. ← core.
@@ -92,13 +93,15 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   decode itself is out of scope here). ← isobmff, core, codec-abi, color, metadata (optional,
   `metadata` feature).
 - **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png,
-  gamut-tiff and gamut-dng; deliberately encoder-only — workspace decoders inflate via
-  `miniz_oxide`. ← nothing. No dependency at all, not even `gamut-core`.
+  gamut-tiff and gamut-dng, and their one shared bounded inflate (`inflate_zlib`, behind the
+  optional `inflate` feature, over `miniz_oxide`; no in-house decoder by design). ← core
+  (optional, `inflate` feature), `miniz_oxide` (optional, `inflate` feature). The default build
+  has no dependency at all.
 - **gamut-png** — PNG codec (3rd edition, W3C): space-efficient encoder and spec-compliant
   decoder — all colour types/bit depths, Adam7 *decoding*, all filters, decode limits for
   hostile input, ancillary metadata surfaced as raw `MetadataBlock`-ready payloads
   (eXIf/iCCP/XMP/text) plus parsed gAMA/cHRM/sRGB/cICP. APNG out of scope (decodes as the
-  default image). ← core, codec-abi, deflate, `miniz_oxide` (for inflate),
+  default image). ← core, codec-abi, deflate (encode, and inflate via its `inflate` feature),
   `crc32fast` (**maintainer-approved** for the chunk CRC that every encode pays on its critical
   path — hardware CRC-32 on x86-64/aarch64, table fallback elsewhere including wasm32, and it
   keeps its `unsafe` to itself, so gamut-png stays `#![deny(unsafe_code)]`), metadata
@@ -121,13 +124,13 @@ The list is the one place edges are written; each crate's oracle is kept in the 
 - **gamut-tiff** — natively still-image TIFF 6.0; its IFD/tag container is the shared
   **gamut-ifd** primitive (with `bigtiff`), not isobmff/riff. Adds pixel modes plus
   compressions (None/PackBits/LZW/CCITT/Deflate; JPEG-in-TIFF deferred). ← ifd, core,
-  bitstream, deflate (Deflate encode), `miniz_oxide` (Deflate decode), metadata (optional,
+  bitstream, deflate (Deflate encode, and decode via its `inflate` feature), metadata (optional,
   `metadata` feature).
 - **gamut-dng** — DNG (Adobe Digital Negative) 1.7.1 raw encoder + decoder, a TIFF/EP
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw
   photometry, uncompressed/Deflate/lossless-JPEG/JPEG XL, colour-calibration profile,
-  EXIF/XMP/ICC metadata. ← ifd, bitstream, color, metadata, core, deflate (Deflate encode),
-  `miniz_oxide` (Deflate decode), jxl (JPEG XL, `Compression = 52546`). MSB-first sub-byte packing reuses
+  EXIF/XMP/ICC metadata. ← ifd, bitstream, color, metadata, core, deflate (Deflate encode, and
+  decode via its `inflate` feature), jxl (JPEG XL, `Compression = 52546`). MSB-first sub-byte packing reuses
   `gamut-bitstream`; the DNG §6 `AsShotWhiteXY` → camera-neutral conversion reuses
   `gamut-color`'s chromaticity/3×3/CCT math; `DngMetadata` carries the facade's own models — a
   DNG `ExifIFD` *is* an EXIF sub-IFD, so it is `gamut-exif`'s `Exif` over the same `gamut-ifd`

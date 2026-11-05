@@ -17,8 +17,8 @@ Graphics, W3C 3rd edition) images:
   tEXt/zTXt/iTXt, and the C2PA manifest store in `caBX`) ready for
   `gamut_metadata::MetadataBlock`, plus parsed gAMA/cHRM/sRGB/cICP values. Hostile input is
   bounded: configurable dimension caps and byte budgets guard every allocation, and zlib bombs
-  (IDAT or metadata) fail cleanly. Inflation uses `miniz_oxide`, the workspace's blessed
-  decode-side inflate.
+  (IDAT or metadata) fail cleanly. Inflation uses `gamut-deflate`'s bounded `inflate_zlib`
+  over `miniz_oxide`, the workspace's one decode-side inflate.
 - **C2PA carriage** (issue #440). The manifest store is located, bounded, carried and reserved —
   never parsed or judged. `with_c2pa` / `with_c2pa_reserved` put it as the last chunk before
   `IDAT`; `encode_with_report` / `PngReport::c2pa` name the chunk's whole span (length, type,

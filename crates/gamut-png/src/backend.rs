@@ -11,9 +11,10 @@
 //! ISA-L). So PNG is **in scope** for #241: this module lets a caller route the IDAT stream through
 //! any of them without forking the crate.
 //!
-//! Out of the box the choice is compile-time: encode goes through the in-house, encoder-only
-//! [`gamut_deflate`] (zopfli-class), decode inflates via `miniz_oxide`. Both stay as the implicit
-//! *tail* of the registry; nothing changes for a caller that pushes no backend.
+//! Out of the box the choice is compile-time: encode goes through the in-house [`gamut_deflate`]
+//! encoder (zopfli-class), decode through [`gamut_deflate::inflate_zlib`], its bounded wrapper over
+//! `miniz_oxide`. Both stay as the implicit *tail* of the registry; nothing changes for a caller
+//! that pushes no backend.
 //!
 //! # What crosses the seam
 //!
@@ -43,8 +44,8 @@
 //!    does not retry a later backend or the built-in tail, because a partially-produced result must
 //!    never be silently masked.
 //! 4. The built-in implementation is the implicit **tail**, tried last: [`gamut_deflate`] for
-//!    encode, `miniz_oxide` for decode. Should the in-house inflater of issue #196 land, it slots
-//!    into the decode tail with no change to this surface.
+//!    encode, [`gamut_deflate::inflate_zlib`] for decode. A different inflater behind that
+//!    function would slot into the decode tail with no change to this surface.
 //!
 //! # Security invariant: the host owns the zlib-bomb cap
 //!

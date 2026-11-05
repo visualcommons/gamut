@@ -1,30 +1,23 @@
-//! Bounded zlib inflation (RFC 1950/1951) — the decoder's one point of contact with
-//! [`miniz_oxide`].
+//! Bounded zlib inflation (RFC 1950/1951) for the decoder: [`gamut_deflate::inflate_zlib`] bound
+//! to this crate's origin.
 //!
 //! PNG compressed payloads (IDAT, iCCP, zTXt, compressed iTXt) are attacker-controlled, so every
 //! inflation carries a hard output cap: a tiny stream claiming to inflate without bound (a "zlib
-//! bomb") fails cleanly instead of exhausting memory.
+//! bomb") fails cleanly instead of exhausting memory. The inflate, its cap and its error
+//! classification are the workspace's one shared copy in `gamut-deflate`; the short-output check
+//! stays with each caller here (for example `PNG: IDAT is shorter than the image`).
 
-use gamut_core::{Error, Result};
-use miniz_oxide::inflate::TINFLStatus;
+use gamut_core::Result;
 
-/// Inflates a zlib stream, refusing to produce more than `max_out` bytes.
+/// Inflates a zlib stream, refusing to produce more than `max_out` bytes. Errors carry this
+/// crate's name as their [`origin`](gamut_core::Error::origin).
 ///
 /// # Errors
 ///
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream
 /// is corrupt, truncated, or would inflate past `max_out`.
 pub(crate) fn inflate_zlib(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
-    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, max_out).map_err(|error| {
-        let classified = match error.status {
-            TINFLStatus::HasMoreOutput => Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "PNG: compressed data inflates past the expected size",
-            ),
-            _ => Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: corrupt zlib stream"),
-        };
-        classified.with_detail(format!("miniz status {:?}", error.status))
-    })
+    gamut_deflate::inflate_zlib(data, max_out, env!("CARGO_PKG_NAME"))
 }
 
 #[cfg(test)]
@@ -51,11 +44,12 @@ mod tests {
         // damaged file.
         match inflate_zlib(&zlib, payload.len() - 1) {
             Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
-                let msg = error.static_message().unwrap_or_default();
-                assert!(
-                    msg.contains("inflates past"),
-                    "cap-specific message, got {msg:?}"
+                assert_eq!(
+                    error.static_message(),
+                    Some("zlib stream inflates past the expected size"),
+                    "cap-specific message"
                 );
+                assert_eq!(error.origin(), Some("gamut-png"));
                 assert!(error.detail().is_some());
             }
             other => panic!("expected the cap error, got {other:?}"),
@@ -63,12 +57,13 @@ mod tests {
         assert!(inflate_zlib(&zlib, payload.len()).is_ok());
     }
 
-    /// Every non-cap failure is the *corrupt-stream* error, not the cap one: the classification
-    /// in [`inflate_zlib`]'s fall-through arm is what this pins.
+    /// Every non-cap failure is the *corrupt-stream* error, not the cap one, attributed to this
+    /// crate rather than to `gamut-deflate`.
     fn assert_corrupt(result: Result<Vec<u8>>) {
         let error = result.expect_err("corrupt input must be rejected");
         assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
-        assert_eq!(error.static_message(), Some("PNG: corrupt zlib stream"));
+        assert_eq!(error.static_message(), Some("corrupt zlib stream"));
+        assert_eq!(error.origin(), Some("gamut-png"));
         assert!(error.detail().is_some());
     }
 

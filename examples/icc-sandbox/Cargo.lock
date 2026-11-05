@@ -845,6 +845,10 @@ dependencies = [
 [[package]]
 name = "gamut-deflate"
 version = "0.1.1"
+dependencies = [
+ "gamut-core",
+ "miniz_oxide 0.8.9",
+]
 
 [[package]]
 name = "gamut-dsp"
@@ -897,7 +901,6 @@ dependencies = [
  "gamut-codec-abi",
  "gamut-core",
  "gamut-deflate",
- "miniz_oxide 0.8.9",
 ]
 
 [[package]]

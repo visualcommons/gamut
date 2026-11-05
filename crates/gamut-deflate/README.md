@@ -13,10 +13,13 @@ behind the codecs that embed DEFLATE streams — most directly [`gamut-png`](../
   optimal parse (a shortest-path LZ77 search against an iteratively refined entropy model) with
   per-block dynamic Huffman codes and cost-driven block splitting, and consistently beats zlib at
   maximum effort — see [Why this crate](#why-this-crate).
-- **Encoder-only.** Inflating DEFLATE is a solved problem, so — per gamut's encoder-first philosophy
-  — this crate does not decode; see [Scope](#scope). Correctness is proven differentially against the
-  canonical C `zlib` (see [Validation](#validation)).
-- **Self-contained and safe.** 100% safe Rust (`#![deny(unsafe_code)]`), no internal dependencies.
+- **Encoder in-house, inflate delegated.** Inflating DEFLATE is a solved problem, so — per gamut's
+  encoder-first philosophy — this crate implements no decoder; its optional `inflate` feature wraps
+  `miniz_oxide` as one bounded inflate for the workspace's decoders. See [Scope](#scope).
+  Correctness is proven differentially against the canonical C `zlib` (see
+  [Validation](#validation)).
+- **Self-contained and safe.** 100% safe Rust (`#![deny(unsafe_code)]`); the default build has no
+  dependency at all.
 
 ## Why this crate
 
@@ -46,11 +49,11 @@ reproduces this row only against that revision of the file.
 that the optimal parse prices each match length at its own nearest distance (zopfli's `sublen`)
 rather than at the longest match's; what remains of the gap is `zopfli`'s 15 optimization passes +
 package-merge length-limiting, vs. this crate's default 6 passes + a count-floor heuristic. The pass budget is configurable via
-`DeflateEncoder::with_effort` (0 = the lazy seed parse only; 15 ≈ zopfli's budget), so size-vs-time
+`DeflateEncoder::with_deflate_passes` (0 = the lazy seed parse only; 15 ≈ zopfli's budget), so size-vs-time
 curves can be swept along one axis. `DeflateEncoder::with_optimal_parse_limit` is the second axis:
 the optimal parse works in spans of at most 1 MiB by default, each with its own refined cost model
 and each free to reference the history before it, so input size alone never disables it. If you need
-inflate, streaming, or gzip framing, reach for
+general-purpose inflate, streaming, or gzip framing, reach for
 `flate2`/`miniz_oxide` instead — this crate is deliberately narrower (see [Scope](#scope)).
 
 ## Usage
@@ -73,7 +76,7 @@ DeflateEncoder::new().with_level(Level::Best).zlib_compress(&data, &mut zlib);
 let mut dense = Vec::new();
 DeflateEncoder::new()
     .with_level(Level::Best)
-    .with_effort(15)
+    .with_deflate_passes(15)
     .with_optimal_parse_limit(4 << 20)
     .zlib_compress(&data, &mut dense);
 ```
@@ -83,9 +86,13 @@ DeflateEncoder::new()
 - **Formats:** raw DEFLATE (RFC 1951) and the zlib wrapper (RFC 1950). gzip framing (RFC 1952) is out
   of scope — no gamut image format uses it — as is its CRC-32; zlib's integrity check is Adler-32,
   exposed as `adler32` (PNG's unrelated chunk CRC-32 lives in `gamut-png`).
-- **Encoder-only, by design.** Inflating untrusted input is a security-sensitive, fully-solved
-  problem; the workspace's decoders that need it (the DNG decoder today; a future TIFF/PNG decoder)
-  depend on the safe, fuzzed `miniz_oxide` rather than a fresh implementation here.
+- **No in-house decoder, by design.** Inflating untrusted input is a security-sensitive,
+  fully-solved problem, so the optional **`inflate`** feature delegates it to the safe, fuzzed
+  `miniz_oxide` rather than a fresh implementation: `inflate_zlib(data, max_out, origin)` inflates
+  one zlib stream, refuses to produce more than `max_out` bytes, and reports a cap overrun apart
+  from corruption as a `gamut-core` error carrying the caller's `origin`. Output shorter than the
+  cap is returned as is: whether that is acceptable is the caller's format rule. The PNG, TIFF and
+  DNG decoders all inflate through it.
 - **One-shot.** The whole input compresses in a single call into a caller-owned `Vec<u8>`; there is
   no streaming encoder, which matches whole-image encoding.
 

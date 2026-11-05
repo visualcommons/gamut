@@ -62,10 +62,10 @@
 //! costs the SDK X".
 //!
 //! **On the two `*/deflate` rows neither arm's inflate is gamut-authored, and both are pinned.**
-//! `gamut-deflate` is deliberately encoder-only, so this crate inflates with `miniz_oxide`; the
-//! reference arm calls zlib, because the SDK includes `<zlib.h>` unconditionally. A Deflate row is
-//! therefore `miniz_oxide` against stock zlib — not gamut's own codec against the SDK's, which is
-//! how the wording here once read.
+//! This crate inflates through `gamut_deflate::inflate_zlib`, a bounded wrapper over `miniz_oxide`
+//! (`gamut-deflate` writes no inflater of its own); the reference arm calls zlib, because the SDK
+//! includes `<zlib.h>` unconditionally. A Deflate row is therefore `miniz_oxide` against stock
+//! zlib — not gamut's own codec against the SDK's, which is how the wording here once read.
 //!
 //! The distinction that decides whether such a row is reproducible is **pinning**, not
 //! authorship. `miniz_oxide` is pinned by `Cargo.lock` to one version and one checksum. The
@@ -866,8 +866,8 @@ measurement of it. No number is printed for it, because a printed number is read
 the compressed rows as: gamut's figure includes preview and metadata work the SDK arm does not do,
 by an amount this harness does not measure.
 
-On the `*/deflate` rows neither arm's inflate is gamut's own: `gamut-deflate` is encoder-only, so
-this crate inflates with miniz_oxide, and the SDK calls zlib because it includes <zlib.h>
+On the `*/deflate` rows neither arm's inflate is gamut's own: gamut_deflate::inflate_zlib is a
+bounded wrapper over miniz_oxide, and the SDK calls zlib because it includes <zlib.h>
 unconditionally. Read those rows as miniz_oxide against stock zlib. Both are pinned: miniz_oxide
 by Cargo.lock, and zlib by the third_party/zlib submodule commit, built by zlib-oracle and linked
 statically into this executable -- so the run launched through cargo and the same binary run

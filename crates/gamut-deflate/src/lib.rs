@@ -16,15 +16,17 @@
 //! [`zopfli`](https://docs.rs/zopfli) crate; `README.md` carries the head-to-head numbers. Lower
 //! levels trade ratio back for speed.
 //!
-//! # Encoder only
+//! # Encoder in-house, inflate delegated
 //!
-//! Following gamut's encoder-first philosophy, this crate **does not decode**. Inflating DEFLATE is a
-//! thoroughly solved problem — `miniz_oxide` is a safe, fuzzed, pure-Rust decoder already used across
-//! the ecosystem — and decompressing untrusted input is a security-sensitive surface best left to a
-//! hardened implementation. Decoders in this workspace that need inflate (the DNG, PNG and TIFF
-//! decoders) depend on `miniz_oxide` directly. Encoder
-//! correctness is instead proven differentially: the dev-only `zlib-oracle` inflates this crate's
-//! output with the canonical C `zlib` and asserts it round-trips to the original bytes.
+//! Following gamut's encoder-first philosophy, this crate **implements no decoder**. Inflating
+//! DEFLATE is a thoroughly solved problem — `miniz_oxide` is a safe, fuzzed, pure-Rust decoder
+//! already used across the ecosystem — and decompressing untrusted input is a security-sensitive
+//! surface best left to a hardened implementation. The optional **`inflate`** feature wraps it as
+//! `inflate_zlib`: a zlib inflate bounded by a caller-supplied output cap, reporting failures as
+//! `gamut-core` errors under the caller's origin. It is the one inflate the workspace's decoders
+//! (PNG, TIFF, DNG) share; the default build stays dependency-free. Encoder correctness is proven
+//! differentially: the dev-only `zlib-oracle` inflates this crate's output with the canonical C
+//! `zlib` and asserts it round-trips to the original bytes.
 //!
 //! # Scope
 //!
@@ -64,9 +66,13 @@ mod block;
 mod dynamic;
 mod encoder;
 mod huffman;
+#[cfg(feature = "inflate")]
+mod inflate;
 mod lz77;
 mod symbols;
 mod zlib;
 
 pub use adler32::adler32;
 pub use encoder::{DeflateEncoder, Level};
+#[cfg(feature = "inflate")]
+pub use inflate::inflate_zlib;

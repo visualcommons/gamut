@@ -25,6 +25,5 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Inflate for the PDF's FlateDecode object and content streams. The same crate (and the same
-# version) the workspace's decoders already inflate with -- `gamut-deflate` is deliberately
-# encoder-only.
+# version) the workspace's decoders inflate with, beneath `gamut-deflate`'s `inflate_zlib`.
 miniz_oxide = "=0.8.9"

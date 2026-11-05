@@ -166,7 +166,7 @@ fn effort_budgets_round_trip() {
             let mut out = Vec::new();
             DeflateEncoder::new()
                 .with_level(Level::Best)
-                .with_effort(effort)
+                .with_deflate_passes(effort)
                 .zlib_compress(&data, &mut out);
             assert_eq!(
                 zlib_oracle::inflate_zlib(&out).unwrap(),
@@ -180,7 +180,7 @@ fn effort_budgets_round_trip() {
 
 /// The effort knob must actually steer the optimal parse: on an input where the refined cost model
 /// beats the lazy seed, zero passes and the default budget produce different streams, more effort
-/// is no larger, and the builder default is exactly `DEFAULT_EFFORT` passes.
+/// is no larger, and the builder default is exactly `DEFAULT_DEFLATE_PASSES` passes.
 #[test]
 fn effort_is_live_and_defaults_to_six() {
     // Mixed structured + noisy bytes: verified to make the cost-model refinement change the parse.
@@ -191,14 +191,14 @@ fn effort_is_live_and_defaults_to_six() {
         let mut out = Vec::new();
         DeflateEncoder::new()
             .with_level(Level::Best)
-            .with_effort(effort)
+            .with_deflate_passes(effort)
             .zlib_compress(&data, &mut out);
         out
     };
     let lazy_seed = at(0);
-    let six = at(6); // literal 6: pins DEFAULT_EFFORT's value, not just its plumbing
+    let six = at(6); // literal 6: pins DEFAULT_DEFLATE_PASSES's value, not just its plumbing
     assert_ne!(lazy_seed, six, "effort must change the emitted stream");
-    assert_eq!(DeflateEncoder::DEFAULT_EFFORT, 6);
+    assert_eq!(DeflateEncoder::DEFAULT_DEFLATE_PASSES, 6);
 
     let mut default_out = Vec::new();
     DeflateEncoder::new()
@@ -329,7 +329,7 @@ fn large_and_boundary_round_trip() {
         let mut zl = Vec::new();
         DeflateEncoder::new()
             .with_level(level)
-            .with_effort(0)
+            .with_deflate_passes(0)
             .zlib_compress(&big, &mut zl);
         assert_eq!(
             zlib_oracle::inflate_zlib(&zl).unwrap(),
@@ -370,7 +370,11 @@ fn best_beats_default_above_the_optimal_parse_limit() {
     };
 
     let default = size(DeflateEncoder::new().with_level(Level::Default));
-    let best = size(DeflateEncoder::new().with_level(Level::Best).with_effort(2));
+    let best = size(
+        DeflateEncoder::new()
+            .with_level(Level::Best)
+            .with_deflate_passes(2),
+    );
     assert!(
         best < default,
         "Best ({best}) must beat Default ({default}) on a {}-byte input",
@@ -397,7 +401,7 @@ fn optimal_parse_limit_is_live() {
         let mut out = Vec::new();
         DeflateEncoder::new()
             .with_level(Level::Best)
-            .with_effort(2)
+            .with_deflate_passes(2)
             .with_optimal_parse_limit(limit)
             .zlib_compress(&data, &mut out);
         assert_eq!(zlib_oracle::inflate_zlib(&out).unwrap(), data);
@@ -424,7 +428,7 @@ fn zero_optimal_parse_limit_terminates() {
     let mut out = Vec::new();
     DeflateEncoder::new()
         .with_level(Level::Best)
-        .with_effort(1)
+        .with_deflate_passes(1)
         .with_optimal_parse_limit(0)
         .zlib_compress(&data, &mut out);
     assert_eq!(zlib_oracle::inflate_zlib(&out).unwrap(), data);

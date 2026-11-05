@@ -788,6 +788,7 @@ name = "gamut-deflate"
 version = "0.1.1"
 dependencies = [
  "divan",
+ "gamut-core",
  "miniz_oxide 0.8.9",
  "zlib-oracle",
  "zopfli",
@@ -997,7 +998,6 @@ dependencies = [
  "gamut-ifd",
  "gamut-metadata",
  "libtiff-oracle",
- "miniz_oxide 0.8.9",
 ]
 
 [[package]]

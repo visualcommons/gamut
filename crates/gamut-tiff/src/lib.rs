@@ -9,7 +9,8 @@
 //! EXIF); this crate adds the codec on top and re-exports the structural types from its root so its
 //! public API is unchanged. It further layers on the shared primitives: [`gamut_core`] (traits /
 //! errors / typed pixel formats), [`gamut_bitstream`] (LZW and CCITT bit coding), and
-//! [`gamut_deflate`](https://crates.io/crates/gamut-deflate) plus `miniz_oxide` for Adobe Deflate.
+//! [`gamut_deflate`](https://crates.io/crates/gamut-deflate) for Adobe Deflate (its encoder, and
+//! the bounded inflate behind its `inflate` feature).
 //! The differencing predictor is TIFF-specific and lives in this crate;
 //! the deferred colour-space work (YCbCr, CIE L\*a\*b\*) and JPEG-in-TIFF will bring back the
 //! `gamut-color` and `gamut-dsp` edges additively when they land (see `STATUS.md`).

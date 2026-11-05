@@ -2,10 +2,10 @@
 //!
 //! Adobe Photoshop TIFF Technical Note 3 defines every image segment as an independent RFC 1950
 //! zlib stream. Encoding uses the workspace's space-optimising [`gamut_deflate`]; bounded inflation
-//! delegates the security-sensitive decode surface to [`miniz_oxide`], as `gamut-png` does.
+//! is its shared [`gamut_deflate::inflate_zlib`], as in `gamut-png` and `gamut-dng`. The
+//! short-output check is this format's rule, so it stays here.
 
 use gamut_core::{Error, Result};
-use miniz_oxide::inflate::TINFLStatus;
 
 /// Compresses one already-packed strip or tile as a complete zlib stream.
 pub fn encode(raw: &[u8]) -> Vec<u8> {
@@ -16,18 +16,7 @@ pub fn encode(raw: &[u8]) -> Vec<u8> {
 
 /// Inflates one zlib stream to exactly `expected` bytes.
 pub fn decode(zlib: &[u8], expected: usize) -> Result<Vec<u8>> {
-    let decoded = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(zlib, expected).map_err(
-        |error| {
-            let classified = match error.status {
-                TINFLStatus::HasMoreOutput => Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "TIFF: Deflate stream exceeds the expected size",
-                ),
-                _ => Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: corrupt Deflate stream"),
-            };
-            classified.with_detail(format!("miniz status {:?}", error.status))
-        },
-    )?;
+    let decoded = gamut_deflate::inflate_zlib(zlib, expected, env!("CARGO_PKG_NAME"))?;
     if decoded.len() != expected {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
@@ -49,8 +38,9 @@ mod tests {
         let too_long = decode(&zlib, raw.len() - 1).unwrap_err();
         assert_eq!(
             too_long.static_message(),
-            Some("TIFF: Deflate stream exceeds the expected size")
+            Some("zlib stream inflates past the expected size")
         );
+        assert_eq!(too_long.origin(), Some("gamut-tiff"));
         assert!(too_long.detail().is_some());
         assert_eq!(
             decode(&zlib, raw.len() + 1).unwrap_err().static_message(),
@@ -62,15 +52,13 @@ mod tests {
     fn corruption_and_truncation_are_rejected() {
         assert_eq!(
             decode(&[], 1).unwrap_err().static_message(),
-            Some("TIFF: corrupt Deflate stream")
+            Some("corrupt zlib stream")
         );
         let mut zlib = encode(&[1, 2, 3, 4]);
         zlib.pop();
         let truncated = decode(&zlib, 4).unwrap_err();
-        assert_eq!(
-            truncated.static_message(),
-            Some("TIFF: corrupt Deflate stream")
-        );
+        assert_eq!(truncated.static_message(), Some("corrupt zlib stream"));
+        assert_eq!(truncated.origin(), Some("gamut-tiff"));
         assert!(truncated.detail().is_some());
     }
 }
