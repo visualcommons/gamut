@@ -17,7 +17,7 @@ software** (`references/jpeg`, ISO/IEC 10918-7) for spec-exact behaviour. The ga
 directions in `tests/oracle.rs`: **encode** (gamut encodes → libjpeg-turbo decodes → matches source
 within tolerance) and **decode** (libjpeg-turbo encodes → gamut decodes → matches libjpeg-turbo's
 own decode of the same stream, gray/4:4:4 **byte-identical** (asserted as exact equality since
-issue #896: the decoder's IDCT is `gamut_dsp::jpeg::idct8x8_int`, libjpeg-turbo's accurate integer
+issue #896: the decoder's IDCT is `gamut_dsp::jpeg::inverse_dct8x8_int`, libjpeg-turbo's accurate integer
 IDCT bit for bit, where the `f64` reference kernel left up to 3 codes of rounding), and since issue #1016
 4:2:2/4:2:0/4:4:0 **byte-identical** too: the default chroma upsampling is libjpeg-turbo's fancy
 upsampling, ported exactly into `gamut_color::upsample::libjpeg`, and `ChromaUpsampling::Nearest` is held

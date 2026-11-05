@@ -1363,7 +1363,7 @@ mod tests {
 
     use gamut_color::{ColorRange, ycbcr_to_rgb};
     use gamut_core::{Cmyk8, DecodeImage, Dimensions, Gray8, ImageBuf, Rgb8};
-    use gamut_dsp::jpeg::idct8x8_int;
+    use gamut_dsp::jpeg::inverse_dct8x8_int;
 
     use super::*;
     use crate::bitwriter::BitWriter;
@@ -1492,7 +1492,7 @@ mod tests {
         for (i, cell) in zz.iter_mut().enumerate() {
             *cell = coeffs[i] * i32::from(quant[i]);
         }
-        idct8x8_int(&mut zz);
+        inverse_dct8x8_int(&mut zz);
         let expected: Vec<u8> = zz.iter().map(|&s| (s + 128).clamp(0, 255) as u8).collect();
 
         let (ldc, lac, ..) = std_enc();

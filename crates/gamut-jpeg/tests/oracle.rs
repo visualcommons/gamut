@@ -12,7 +12,7 @@
 //! Tolerances are **measured**, then asserted with a margin; each bound cites the measured worst
 //! case in a comment. The exception is decode-vs-decode parity, asserted **byte-identical** in
 //! every mode. gamut's IDCT is libjpeg-turbo's accurate integer IDCT
-//! (`gamut_dsp::jpeg::idct8x8_int`, issue #896), and its default chroma upsampling is
+//! (`gamut_dsp::jpeg::inverse_dct8x8_int`, issue #896), and its default chroma upsampling is
 //! libjpeg-turbo's fancy upsampling (`gamut_color::upsample::libjpeg`, issue #1016), so nothing
 //! between the coefficients and the pixels differs. `ChromaUpsampling::Nearest` is held to
 //! libjpeg-turbo with fancy upsampling off (`djpeg -nosmooth`) the same way. Content is deterministic (a smooth gradient for fidelity-vs-source, a fixed

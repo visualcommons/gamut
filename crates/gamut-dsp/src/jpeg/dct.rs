@@ -1,8 +1,8 @@
 //! JPEG-1 8×8 forward and inverse discrete cosine transforms (ITU-T T.81 | ISO/IEC 10918-1
 //! §A.3.3).
 //!
-//! [`fdct8x8`] and [`idct8x8`] are direct transcriptions of the *informative* ideal FDCT / IDCT
-//! equations of T.81 §A.3.3:
+//! [`forward_dct8x8`] and [`inverse_dct8x8`] are direct transcriptions of the *informative* ideal
+//! FDCT / IDCT equations of T.81 §A.3.3:
 //!
 //! ```text
 //! FDCT:  S_vu = 1/4 · C_u C_v · Σ_{x=0}^{7} Σ_{y=0}^{7} s_yx · cos((2x+1)uπ/16) · cos((2y+1)vπ/16)
@@ -17,9 +17,10 @@
 //! performance tuning (fixed-point / fast-DCT kernels) is deliberately out of scope for issue #28.
 //!
 //! Both transforms are **separable**: the 2-D kernel is the product of two 1-D cosine kernels, so
-//! `fdct8x8` transforms each row (spatial index `x` → frequency `u`) then each column (`y` → `v`),
-//! and `idct8x8` inverts column-then-row. The row/column pass order does not affect the real-valued
-//! result; the single rounding is applied only when writing the integer output.
+//! `forward_dct8x8` transforms each row (spatial index `x` → frequency `u`) then each column
+//! (`y` → `v`), and `inverse_dct8x8` inverts column-then-row. The row/column pass order does not
+//! affect the real-valued result; the single rounding is applied only when writing the integer
+//! output.
 //!
 //! Sample orientation follows T.81 Figure A.4: `s_yx` is the sample at row `y`, column `x`, and
 //! both blocks are stored in **raster (row-major, natural) order** — element `y·8 + x` for samples
@@ -76,9 +77,9 @@ fn inverse_1d(input: &[f64; 8], cos: &[[f64; 8]; 8]) -> [f64; 8] {
 
 /// Rounds a transform result to the nearest integer, ties **away from zero** ([`f64::round`]).
 ///
-/// The same rule is used by [`fdct8x8`] and [`idct8x8`] so the two directions are consistent. The
-/// `as i32` cast saturates on out-of-range inputs (Rust's defined float→int behaviour), but a valid
-/// 8-/12-bit block never approaches `i32::MAX`.
+/// The same rule is used by [`forward_dct8x8`] and [`inverse_dct8x8`] so the two directions are
+/// consistent. The `as i32` cast saturates on out-of-range inputs (Rust's defined float→int
+/// behaviour), but a valid 8-/12-bit block never approaches `i32::MAX`.
 fn round_to_i32(value: f64) -> i32 {
     value.round() as i32
 }
@@ -101,15 +102,15 @@ fn round_to_i32(value: f64) -> i32 {
 ///
 /// # Examples
 /// ```
-/// use gamut_dsp::jpeg::fdct8x8;
+/// use gamut_dsp::jpeg::forward_dct8x8;
 ///
 /// // A flat (constant) block collapses to a pure DC coefficient: S_00 = 8·c, all AC = 0.
 /// let mut block = [10i32; 64];
-/// fdct8x8(&mut block);
+/// forward_dct8x8(&mut block);
 /// assert_eq!(block[0], 80);
 /// assert!(block[1..].iter().all(|&c| c == 0));
 /// ```
-pub fn fdct8x8(block: &mut [i32; 64]) {
+pub fn forward_dct8x8(block: &mut [i32; 64]) {
     let cos = cosine_table();
     let mut work = [0.0f64; 64];
 
@@ -143,7 +144,7 @@ pub fn fdct8x8(block: &mut [i32; 64]) {
 /// `block` holds the 64 dequantized DCT coefficients in raster (row-major) order — element
 /// `v·8 + u` is `S_vu`. On return `block` holds the reconstructed samples in raster order
 /// (`y·8 + x` is `s_yx`), each rounded to the nearest integer with ties away from zero — the same
-/// rounding rule as [`fdct8x8`].
+/// rounding rule as [`forward_dct8x8`].
 ///
 /// # Output
 /// The result is the **level-shifted** reconstruction: it is *not* clamped and the `2^(P-1)` level
@@ -152,15 +153,15 @@ pub fn fdct8x8(block: &mut [i32; 64]) {
 ///
 /// # Examples
 /// ```
-/// use gamut_dsp::jpeg::idct8x8;
+/// use gamut_dsp::jpeg::inverse_dct8x8;
 ///
 /// // A pure DC coefficient reconstructs to a flat block: s_yx = S_00 / 8 everywhere.
 /// let mut block = [0i32; 64];
 /// block[0] = 80;
-/// idct8x8(&mut block);
+/// inverse_dct8x8(&mut block);
 /// assert!(block.iter().all(|&s| s == 10));
 /// ```
-pub fn idct8x8(block: &mut [i32; 64]) {
+pub fn inverse_dct8x8(block: &mut [i32; 64]) {
     let cos = cosine_table();
     let mut work = [0.0f64; 64];
 
@@ -220,8 +221,8 @@ fn descale(x: i64, n: u32) -> i32 {
 
 /// One 8-point Loeffler–Ligtenberg–Moschytz inverse DCT as `jidctint.c` evaluates it: the even
 /// part (inputs 0, 2, 4, 6) and the odd part (inputs 1, 3, 5, 7), returning the eight outputs
-/// before the pass's [`descale`]. Both passes of [`idct8x8_int`] run exactly this body; they differ
-/// only in the shift applied afterwards.
+/// before the pass's [`descale`]. Both passes of [`inverse_dct8x8_int`] run exactly this body; they
+/// differ only in the shift applied afterwards.
 fn llm_1d(s: [i64; 8]) -> [i64; 8] {
     // Even part: the rotator is √2·c6.
     let z1 = (s[2] + s[6]) * FIX_0_541196100;
@@ -261,12 +262,12 @@ fn llm_1d(s: [i64; 8]) -> [i64; 8] {
 /// the Loeffler–Ligtenberg–Moschytz factorisation).
 ///
 /// `block` holds the 64 dequantized coefficients in raster (row-major) order, as for
-/// [`idct8x8`]; on return it holds the level-shifted reconstruction in raster order, likewise
-/// neither clamped nor shifted back by `2^(P-1)` (§A.3.1 is the decoder's job). Unlike
-/// [`idct8x8`] the samples are not the ideal §A.3.3 values rounded once: they are the
+/// [`inverse_dct8x8`]; on return it holds the level-shifted reconstruction in raster order,
+/// likewise neither clamped nor shifted back by `2^(P-1)` (§A.3.1 is the decoder's job). Unlike
+/// [`inverse_dct8x8`] the samples are not the ideal §A.3.3 values rounded once: they are the
 /// fixed-point approximation, which meets the IEEE 1180-1990 accuracy bounds (peak error 1,
-/// per-sample mean square error ≤ 0.06) that the T.83 compliance tests build on. [`idct8x8`]
-/// stays the reference this kernel is measured against.
+/// per-sample mean square error ≤ 0.06) that the T.83 compliance tests build on.
+/// [`inverse_dct8x8`] stays the reference this kernel is measured against.
 ///
 /// # Bit exactness
 /// For every block whose samples land in libjpeg's range-limit window (any block a conformant
@@ -279,20 +280,20 @@ fn llm_1d(s: [i64; 8]) -> [i64; 8] {
 /// A column whose seven AC coefficients are zero, and a row of the intermediate whose AC terms
 /// are zero, take `jidctint.c`'s shortcut, which gives the same value as the full butterfly.
 /// A caller that already knows a block is DC-only (a decoder that saw an end-of-block straight
-/// after the DC) can skip the kernel altogether with [`idct8x8_int_dc`].
+/// after the DC) can skip the kernel altogether with [`inverse_dct8x8_int_dc`].
 ///
 /// # Examples
 /// ```
-/// use gamut_dsp::jpeg::{idct8x8_int, idct8x8_int_dc};
+/// use gamut_dsp::jpeg::{inverse_dct8x8_int, inverse_dct8x8_int_dc};
 ///
 /// // A pure DC coefficient reconstructs to a flat block, and the DC shortcut agrees.
 /// let mut block = [0i32; 64];
 /// block[0] = 80;
-/// idct8x8_int(&mut block);
+/// inverse_dct8x8_int(&mut block);
 /// assert!(block.iter().all(|&s| s == 10));
-/// assert_eq!(idct8x8_int_dc(80), 10);
+/// assert_eq!(inverse_dct8x8_int_dc(80), 10);
 /// ```
-pub fn idct8x8_int(block: &mut [i32; 64]) {
+pub fn inverse_dct8x8_int(block: &mut [i32; 64]) {
     let mut ws = [0i32; 64];
 
     // Pass 1: columns, keeping PASS1_BITS extra fractional bits.
@@ -328,21 +329,22 @@ pub fn idct8x8_int(block: &mut [i32; 64]) {
     }
 }
 
-/// The value every sample of [`idct8x8_int`] takes for a block whose only nonzero coefficient is
-/// the dequantized DC term `dc`: the sparsity hint, for a caller that knows the 63 AC terms are
-/// zero and need not build the block at all.
+/// The value every sample of [`inverse_dct8x8_int`] takes for a block whose only nonzero
+/// coefficient is the dequantized DC term `dc`: the sparsity hint, for a caller that knows the 63
+/// AC terms are zero and need not build the block at all.
 ///
-/// Level-shifted and unclamped like [`idct8x8_int`]'s output, and equal to it for every `dc`.
+/// Level-shifted and unclamped like [`inverse_dct8x8_int`]'s output, and equal to it for every
+/// `dc`.
 ///
 /// # Examples
 /// ```
-/// use gamut_dsp::jpeg::idct8x8_int_dc;
+/// use gamut_dsp::jpeg::inverse_dct8x8_int_dc;
 ///
-/// assert_eq!(idct8x8_int_dc(-1024), -128);
-/// assert_eq!(idct8x8_int_dc(12), 2); // 1.5 rounds half up
+/// assert_eq!(inverse_dct8x8_int_dc(-1024), -128);
+/// assert_eq!(inverse_dct8x8_int_dc(12), 2); // 1.5 rounds half up
 /// ```
 #[must_use]
-pub fn idct8x8_int_dc(dc: i32) -> i32 {
+pub fn inverse_dct8x8_int_dc(dc: i32) -> i32 {
     descale(i64::from(dc.wrapping_shl(PASS1_BITS)), PASS1_BITS + 3)
 }
 
@@ -380,7 +382,7 @@ mod tests {
     }
 
     /// Independent O(64²) evaluation of the ideal (unrounded) §A.3.3 IDCT equation, oracle for
-    /// [`idct8x8`].
+    /// [`inverse_dct8x8`].
     fn direct_idct(block: &[i32; 64]) -> [f64; 64] {
         let mut out = [0.0f64; 64];
         for y in 0..8usize {
@@ -412,10 +414,10 @@ mod tests {
     }
 
     /// The workhorse: over a battery of deterministic pseudo-random blocks spanning the full 8-bit
-    /// and 12-bit level-shifted domains, the separable [`fdct8x8`] must round the independent direct
-    /// §A.3.3 double sum to the nearest integer. This pins index orientation (x/y ↔ u/v), the
-    /// `¼·C_u·C_v` scale, and every cosine argument — a swapped index, off-by-one, or wrong constant
-    /// diverges by far more than half a unit.
+    /// and 12-bit level-shifted domains, the separable [`forward_dct8x8`] must round the
+    /// independent direct §A.3.3 double sum to the nearest integer. This pins index orientation
+    /// (x/y ↔ u/v), the `¼·C_u·C_v` scale, and every cosine argument — a swapped index,
+    /// off-by-one, or wrong constant diverges by far more than half a unit.
     #[test]
     fn fdct_matches_direct_formula() {
         let mut rng = Lcg::new(0x1234_5678_9abc_def0);
@@ -425,7 +427,7 @@ mod tests {
                 *s = rng.level_shifted_sample(8);
             }
             let mut got = block;
-            fdct8x8(&mut got);
+            forward_dct8x8(&mut got);
             assert_rounds(&got, &direct_fdct(&block), "fdct 8-bit");
         }
         for _ in 0..200 {
@@ -434,12 +436,13 @@ mod tests {
                 *s = rng.level_shifted_sample(12);
             }
             let mut got = block;
-            fdct8x8(&mut got);
+            forward_dct8x8(&mut got);
             assert_rounds(&got, &direct_fdct(&block), "fdct 12-bit");
         }
     }
 
-    /// Same battery for the inverse: [`idct8x8`] must round the independent direct double sum.
+    /// Same battery for the inverse: [`inverse_dct8x8`] must round the independent direct double
+    /// sum.
     #[test]
     fn idct_matches_direct_formula() {
         let mut rng = Lcg::new(0x0fed_cba9_8765_4321);
@@ -449,7 +452,7 @@ mod tests {
                 *c = rng.level_shifted_sample(8);
             }
             let mut got = coeffs;
-            idct8x8(&mut got);
+            inverse_dct8x8(&mut got);
             assert_rounds(&got, &direct_idct(&coeffs), "idct 8-bit");
         }
         for _ in 0..200 {
@@ -458,7 +461,7 @@ mod tests {
                 *c = rng.level_shifted_sample(12);
             }
             let mut got = coeffs;
-            idct8x8(&mut got);
+            inverse_dct8x8(&mut got);
             assert_rounds(&got, &direct_idct(&coeffs), "idct 12-bit");
         }
     }
@@ -500,7 +503,7 @@ mod tests {
     fn fdct_constant_block_is_dc() {
         for c in [-128i32, -1, 0, 1, 42, 127] {
             let mut block = [c; 64];
-            fdct8x8(&mut block);
+            forward_dct8x8(&mut block);
             assert_eq!(block[0], 8 * c, "DC for constant {c}");
             assert!(block[1..].iter().all(|&x| x == 0), "AC not zero for {c}");
         }
@@ -510,9 +513,9 @@ mod tests {
     #[test]
     fn zero_block_is_fixed_point() {
         let mut block = [0i32; 64];
-        fdct8x8(&mut block);
+        forward_dct8x8(&mut block);
         assert_eq!(block, [0i32; 64]);
-        idct8x8(&mut block);
+        inverse_dct8x8(&mut block);
         assert_eq!(block, [0i32; 64]);
     }
 
@@ -523,7 +526,7 @@ mod tests {
         for k in [-1024i32, -8, 0, 8, 80, 1024] {
             let mut block = [0i32; 64];
             block[0] = k;
-            idct8x8(&mut block);
+            inverse_dct8x8(&mut block);
             assert!(block.iter().all(|&s| s == k / 8), "flat value for DC {k}");
         }
     }
@@ -545,7 +548,7 @@ mod tests {
                 block[y * 8 + x] = profile[y];
             }
         }
-        fdct8x8(&mut block);
+        forward_dct8x8(&mut block);
         for v in 0..8 {
             for u in 1..8 {
                 assert_eq!(block[v * 8 + u], 0, "vertical: AC at (v={v}, u={u})");
@@ -560,7 +563,7 @@ mod tests {
                 block[y * 8 + x] = profile[x];
             }
         }
-        fdct8x8(&mut block);
+        forward_dct8x8(&mut block);
         for v in 1..8 {
             for u in 0..8 {
                 assert_eq!(block[v * 8 + u], 0, "horizontal: AC at (v={v}, u={u})");
@@ -582,8 +585,8 @@ mod tests {
                 *s = rng.level_shifted_sample(8);
             }
             let mut block = original;
-            fdct8x8(&mut block);
-            idct8x8(&mut block);
+            forward_dct8x8(&mut block);
+            inverse_dct8x8(&mut block);
             for (idx, (&r, &o)) in block.iter().zip(original.iter()).enumerate() {
                 assert!(
                     (r - o).abs() <= 1,
@@ -620,8 +623,8 @@ mod tests {
 
     /// One IEEE 1180-1990 run: `blocks` random blocks of samples in `[-low, high]` (negated when
     /// `negate`), forward-transformed by the ideal DCT and rounded, the coefficients clipped to
-    /// `[-2048, 2047]`; then the reference ([`idct8x8`]) and the kernel under test
-    /// ([`idct8x8_int`]) each reconstruct them, both clipped to `[-256, 255]`.
+    /// `[-2048, 2047]`; then the reference ([`inverse_dct8x8`]) and the kernel under test
+    /// ([`inverse_dct8x8_int`]) each reconstruct them, both clipped to `[-256, 255]`.
     fn ieee1180_run(low: i32, high: i32, negate: bool, blocks: usize) -> Ieee1180Stats {
         let mut rng = Ieee1180Rand(1);
         let mut sum = [0i64; 64];
@@ -633,14 +636,14 @@ mod tests {
                 let v = rng.next(low, high);
                 *s = if negate { -v } else { v };
             }
-            fdct8x8(&mut coeffs);
+            forward_dct8x8(&mut coeffs);
             for c in &mut coeffs {
                 *c = (*c).clamp(-2048, 2047);
             }
             let mut reference = coeffs;
-            idct8x8(&mut reference);
+            inverse_dct8x8(&mut reference);
             let mut test = coeffs;
-            idct8x8_int(&mut test);
+            inverse_dct8x8_int(&mut test);
             for i in 0..64 {
                 let err = test[i].clamp(-256, 255) - reference[i].clamp(-256, 255);
                 peak = peak.max(err.abs());
@@ -705,7 +708,7 @@ mod tests {
     #[test]
     fn int_zero_block_is_zero() {
         let mut block = [0i32; 64];
-        idct8x8_int(&mut block);
+        inverse_dct8x8_int(&mut block);
         assert_eq!(block, [0i32; 64]);
     }
 
@@ -721,9 +724,9 @@ mod tests {
                 let mut coeffs = [0i32; 64];
                 coeffs[pos] = amplitude;
                 let mut ideal = coeffs;
-                idct8x8(&mut ideal);
+                inverse_dct8x8(&mut ideal);
                 let mut got = coeffs;
-                idct8x8_int(&mut got);
+                inverse_dct8x8_int(&mut got);
                 for (i, (&g, &r)) in got.iter().zip(ideal.iter()).enumerate() {
                     assert!(
                         (g - r).abs() <= 1,
@@ -751,9 +754,9 @@ mod tests {
                 };
             }
             let mut ideal = coeffs;
-            idct8x8(&mut ideal);
+            inverse_dct8x8(&mut ideal);
             let mut got = coeffs;
-            idct8x8_int(&mut got);
+            inverse_dct8x8_int(&mut got);
             for (i, (&g, &r)) in got.iter().zip(ideal.iter()).enumerate() {
                 assert!((g - r).abs() <= 1, "sample {i} got {g}, ideal {r}");
             }
@@ -769,8 +772,8 @@ mod tests {
         for dc in (-2048..=2047).chain(extremes) {
             let mut block = [0i32; 64];
             block[0] = dc;
-            idct8x8_int(&mut block);
-            let flat = idct8x8_int_dc(dc);
+            inverse_dct8x8_int(&mut block);
+            let flat = inverse_dct8x8_int_dc(dc);
             assert!(
                 block.iter().all(|&s| s == flat),
                 "dc {dc}: {block:?} vs {flat}"
@@ -793,7 +796,7 @@ mod tests {
             (-12, -1),
             (-13, -2),
         ] {
-            assert_eq!(idct8x8_int_dc(dc), expected, "dc {dc}");
+            assert_eq!(inverse_dct8x8_int_dc(dc), expected, "dc {dc}");
         }
     }
 }
