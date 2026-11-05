@@ -433,6 +433,28 @@ fn encode_unsupported_after_accepting_is_terminal() {
     assert!(out.is_empty());
 }
 
+/// A colour encode at 4:0:0 has no three-component JPEG frame, so it is refused before any pushed
+/// backend is consulted — even one that would accept the job.
+#[test]
+fn rgb_at_4_0_0_is_refused_before_a_backend_is_asked() {
+    let c = rgb_pixels();
+    let ci = ImageRef::<Rgb8>::new(&c, dims()).unwrap();
+    let log: Log = Arc::default();
+    let enc = JpegEncoder::new()
+        .with_subsampling(ChromaSubsampling::Cs400)
+        .with_backend(ScriptedEncoder {
+            name: "accepting",
+            act: Act::Accept,
+            log: log.clone(),
+            out: backend_stream(),
+        });
+    let mut out = Vec::new();
+    let err = enc.encode_image(ci, &mut out).unwrap_err();
+    assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+    assert!(log.lock().unwrap().is_empty());
+    assert!(out.is_empty());
+}
+
 #[test]
 fn cloning_shares_backends_rather_than_duplicating_them() {
     /// Counts how many encodes the *shared* backend instance saw.
