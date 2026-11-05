@@ -79,7 +79,7 @@ pub struct DngMetadata {
     /// [`DngEncoder::with_c2pa_reserved`](crate::DngEncoder::with_c2pa_reserved) and the
     /// exclusion ranges [`DngEncoder::encode_with_report`](crate::DngEncoder::encode_with_report)
     /// reports. A store copied out of another file is invalid by construction, which is why
-    /// [`gamut_metadata::Metadata::encode`] never hands one back
+    /// [`gamut_metadata::Metadata::to_blocks`] never hands one back
     /// ([`gamut_metadata::C2paPolicy`]). The bytes are written exactly as given: the TIFF byte
     /// order does not govern them (§A.3.6). On decode this is the store the file carries in the
     /// last IFD of its main chain; its byte ranges are

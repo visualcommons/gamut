@@ -194,7 +194,7 @@ exclusion ranges. Now:
   so this is **semver-major**: every struct literal gains `c2pa: None`. Unlike the other
   carriers, a store is bound to one exact file — it is a signed hash over the bytes around it —
   so the only valid input is one an external signer computed over *this* encoder's output;
-  `gamut_metadata::Metadata::encode` never hands one back (`C2paPolicy::Drop`).
+  `gamut_metadata::Metadata::to_blocks` never hands one back (`C2paPolicy::Drop`).
 - **Placement** is gamut-ifd's (`reserve_c2pa_entry` / `append_c2pa_store`, the shared
   statement of §A.3.6, reused by #446): the
   entry goes in IFD 0 — the last and only IFD of this crate's main chain, the form the Adobe
