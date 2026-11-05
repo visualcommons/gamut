@@ -10,7 +10,7 @@
 use gamut_core::{Error, Gray8, Gray16, ImageRef, Result, Rgb16, Rgba16};
 
 use crate::format::{BitDepth, ChromaSubsampling};
-use crate::planar::downsample_box;
+use crate::planar::{downsample_box, pixel_count};
 use crate::ycbcr::RgbToYcbcr;
 
 /// How far a full-range 16-bit sample is shifted down to reach `bit_depth`.
@@ -131,11 +131,7 @@ impl Planar16 {
         bit_depth: BitDepth,
         planes: [Vec<u16>; 3],
     ) -> Result<Self> {
-        let n = (width as usize)
-            .checked_mul(height as usize)
-            .ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
-            })?;
+        let n = pixel_count(width, height)?;
         if planes[0].len() != n {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),

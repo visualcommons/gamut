@@ -49,6 +49,7 @@ use gamut_core::{Dimensions, Error, Result};
 
 use crate::cicp::{ColorRange, MatrixCoefficients};
 use crate::format::BitDepth;
+use crate::planar::pixel_count;
 use crate::upsample::{ChromaUpsampling, libwebp, replicate, taps};
 use crate::{clip_pixel, clip_pixel8};
 
@@ -184,11 +185,7 @@ impl Yuv420 {
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
     /// plane length does not match the dimensions, or if the luma sample count overflows `usize`.
     pub fn new(width: u32, height: u32, y: Vec<u8>, u: Vec<u8>, v: Vec<u8>) -> Result<Self> {
-        let luma = (width as usize)
-            .checked_mul(height as usize)
-            .ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
-            })?;
+        let luma = pixel_count(width, height)?;
         // Cannot overflow: each chroma plane has at most as many samples as the luma plane
         // (`ceil(d / 2) <= d` for d >= 1, and 0 for d == 0), and `luma` just fit `usize`.
         let chroma = Self::chroma_width(width) as usize * Self::chroma_height(height) as usize;
