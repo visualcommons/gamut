@@ -161,7 +161,7 @@ defect, not a restatement of a documented default:
 | `jpeg_decode` | `gamut-jpeg` | `JpegDecoder::metadata`, `DecodeImage<Rgb8>` | default (#1024): a 64 MiB raster budget with dimensions at the format's 16-bit ceiling. The target restates it explicitly through `with_limits`. `permissive` policy, so CMYK/YCCK converts |
 | `webp_decode` | `gamut-webp` | `DecodeImage<Rgba8>` | default — no configurable limit (#1025); the 14-bit frame dimensions bound it, but not inside libFuzzer's 2048 MB RSS limit: a conformant 16 384 × 16 384 lossless frame peaks above it, so an OOM report needs the triage the target's doc gives |
 | `riff_chunks` | `gamut-riff` | `RiffReader` (to `None`), `MetadataChunks::read`, `WebpLayout::parse`, `c2pa_summary` | — |
-| `jxl_decode` | `gamut-jxl` | `info`, `embedded_icc_profile`, `metadata_boxes`, `DecodeImage<Rgba8>`, and `decode_partial_image` where the full decode fails | `decode` feature only (no libjxl build); `permissive` policy |
+| `jxl_decode` | `gamut-jxl` | `info`, `embedded_icc_profile`, `metadata_boxes`, `DecodeImage<Rgba8>`, and `decode_partial` where the full decode fails | default `DecodeLimits` (64 MiB of decoded samples, beneath the fixed `1 << 28`-sample jxl-rs ceiling); `decode` feature only (no libjxl build); `permissive` policy |
 | `av1_inspect` | `gamut-av1` | `Av1Decoder::inspect` | default `DecodeLimits` |
 | `icc_parse` | `gamut-icc` | `IccProfile::parse` | lenient (strict only adds refusals) |
 | `exif_parse` | `gamut-exif` | `ExifReader::parse_with_report`, then `gps`, `thumbnail_bytes`, `MakerNote::canon` | `with_entry_recovery` and `with_byte_audit` on: the widest walk |
@@ -171,17 +171,19 @@ defect, not a restatement of a documented default:
 `gamut-deflate` has no target because it has no decoder, and `gamut-av2`/`gamut-vvc` none because
 they are stubs with no function bodies.
 
-**Two of them run slowly by design, not by defect.** In the 60-second local run that preceded them,
+**Two of them ran slowly by design, not by defect.** In the 60-second local run that preceded them,
 `webp_decode` and `jxl_decode` both wrote `slow-unit-*` artifacts and ran at under a hundred
 executions per second, against thousands for the rest. Both are decompression amplification that
 the formats permit and the crates' contracts state: a 54-byte lossy WebP declaring a 4176 × 4176
 frame decodes to 70 MB of RGBA (about 1 s in a release build), and a 5-byte JPEG XL header declaring
-9717 × 8098 makes `decode_partial_image` return its documented zero-filled `HeaderOnly` buffer at
-those dimensions (about 1.1 s). Neither is a crash, and neither target narrows its input to avoid
-them: an input the format allows is an input the target searches. That the WebP decoder offers no
-caller-set limit at all, and the JPEG XL one only a fixed one, is the decoder-limits posture
-question #311's audit filed separately, as #1025 and #1026. The third filing, #1024, gave
-`JpegDecoder` its bounded default.
+9717 × 8098 made the partial decode return a zero-filled `HeaderOnly` buffer at those dimensions
+(~314 MB of RGBA, about 1.1 s). Neither is a crash, and neither target narrows its input to avoid
+them: an input the format allows is an input the target searches. The JPEG XL one no longer runs
+slowly: `JxlDecoder` now carries a bounded `DecodeLimits` default (#1026, delivered through
+`with_limits` by #1080), so that header is refused against its 64 MiB budget before any buffer is
+sized. That the WebP decoder offers no caller-set limit at all is the decoder-limits posture
+question #311's audit filed separately, as #1025; the third filing, #1024, gave `JpegDecoder` its
+bounded default.
 
 **A check is only listed here if it can fail — and each target's module doc names the injected
 defect that made *each listed check* fail**, with the message it produced and the command that

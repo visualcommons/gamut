@@ -4,8 +4,10 @@
 //! decoder is gamut's wrapper over the pure-Rust `jxl` crate (jxl-rs): gamut-jxl's own `unsafe` is
 //! confined to its `ffi` module, which wraps the libjxl **encoder** and is not built here — the
 //! dependency is taken with `default-features = false, features = ["decode"]`, so this target needs
-//! no cmake and no C++ toolchain. Its hostile-input bound is the wrapper's `PIXEL_LIMIT` (`1 << 28`
-//! samples), applied to every decode it starts.
+//! no cmake and no C++ toolchain. Its hostile-input bound is `JxlDecoder::new()`'s default
+//! `DecodeLimits` — 64 MiB of decoded samples, checked against the parsed header before any buffer
+//! is sized — beneath the wrapper's fixed `PIXEL_LIMIT` (`1 << 28` samples), both applied to every
+//! decode it starts.
 //!
 //! What it searches is therefore the wrapper *and* the decoder underneath, together: a panic, a
 //! hang or an allocation past libFuzzer's malloc limit in either is a defect, and one inside jxl-rs

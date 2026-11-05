@@ -26,8 +26,8 @@ use crate::error::map_decode_error;
 /// (a 16-bit RGBA image at this limit is ~512 MiB of output) while comfortably admitting every
 /// realistic still image. The limit is deliberately generous and fixed: it is the ceiling, and a
 /// caller with a smaller budget tightens below it through
-/// [`JxlDecoder::with_max_dimensions`](crate::JxlDecoder::with_max_dimensions) and
-/// [`JxlDecoder::with_max_image_bytes`](crate::JxlDecoder::with_max_image_bytes), which
+/// [`JxlDecoder::with_limits`](crate::JxlDecoder::with_limits), whose
+/// [`DecodeLimits`] (64 MiB of decoded samples by default)
 /// [`decode_raw`] checks against the parsed header.
 const PIXEL_LIMIT: usize = 1 << 28;
 
