@@ -45,40 +45,40 @@ let out = edited.to_bytes();                // Exif\0\0 + TIFF, ready to re-embe
 ```
 
 For a bare TIFF stream (PNG `eXIf` / WebP `EXIF`) or a byte-order override, use [`ExifWriter`];
-[`ExifReader`] carries the read-side options (`require_marker`, `strict`) and two further entry
-points:
+[`ExifReader`] carries the read-side options (`with_marker_required`, `with_strict`) and two
+further entry points:
 
 - **`parse_from`** reads through [`gamut_ifd::ReadAt`] instead of a slice, so the EXIF of a
   300 MB raw file costs a few hundred bytes of I/O rather than the whole file. `parse` is the
   `&[u8]` case of it — one parse engine, two entry points. It is deliberately synchronous: an
   async caller drives the source itself, which keeps a runtime dependency out of the crate.
-- **`parse_with_report`** (and its `parse_from_with_report` twin) returns a `ReadReport` alongside
-  the `Exif`, naming each region the lenient reader discarded — a malformed Exif/GPS/Interop
+- **`parse_with_report`** (and its `parse_from_with_report` twin) returns a `ReadOutcome` holding
+  the `Exif` and a `ReadReport` naming each region the lenient reader discarded — a malformed Exif/GPS/Interop
   sub-IFD, an unusable thumbnail range or strip set, or a top-level directory past the 1st IFD —
   with the tag that addressed it, the offset it carried, and a typed reason. `parse` stays silent, as before.
   It also names, in `ReadReport::dropped_entries`, every entry a repeated tag shadowed in a
   directory the model keeps (the last occurrence wins). The report is complete over those regions
   and entries, but its drop lists are **not** a byte-completeness verdict: bytes no structure
-  claims are `audit_bytes`' question, below. A `strict` report is not always empty either:
+  claims are `with_byte_audit`'s question, below. A strict report is not always empty either:
   strictness rejects *malformed* regions, while a trailing directory and a shadowed duplicate are
   both fully read and merely unrepresentable, so they are reported in both modes.
-- **`recover_entries(true)`** makes the lenient reader recover per *entry*: a directory with one
+- **`with_entry_recovery(true)`** makes the lenient reader recover per *entry*: a directory with one
   unreadable entry (a value outside the stream, an `ASCII` value that is not UTF-8) survives minus
   that entry, which `ReadReport::dropped_entries` names (`EntryDropReason::Unreadable`), instead
   of failing whole. Off by default.
-- **`audit_bytes(true)`** adds `ReadReport::byte_audit`, `gamut-ifd`'s byte-completeness verdict
+- **`with_byte_audit(true)`** adds `ReadReport::byte_audit`, `gamut-ifd`'s byte-completeness verdict
   over the TIFF stream: every byte classified, or the unclaimed ones named by offset. Off by
   default — it is a second, whole-structure walk of the source.
 
 ```rust
 # use gamut_exif::ExifReader;
 # fn demo(bytes: &[u8]) -> Result<(), gamut_exif::ExifError> {
-let (exif, report) = ExifReader::new().parse_with_report(bytes)?;
-for dropped in report.dropped() {
+let outcome = ExifReader::new().parse_with_report(bytes)?;
+for dropped in outcome.report.dropped() {
     // e.g. "dropped GPS (tag 0x8825) at offset 65535: addresses bytes outside the EXIF blob"
     eprintln!("{dropped}");
 }
-# let _ = exif;
+# let _ = outcome.exif;
 # Ok(())
 # }
 ```
@@ -124,7 +124,7 @@ the typed [`GpsConversionError`].
 ## Unreadable thumbnails
 
 A 1st IFD whose thumbnail cannot be read is a **loss**, named in the read report and **rejected by
-`strict`** with `ExifError::BadThumbnail`:
+`with_strict(true)`** with `ExifError::BadThumbnail`:
 
 - `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` —
   `DropReason::ThumbnailLengthMissing`.

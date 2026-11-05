@@ -24,7 +24,7 @@
 //! of `parse_from` and stays silent.
 //!
 //! A 1st IFD carrying `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` is named in
-//! the report and rejected in [`strict`](ExifReader::strict) mode as the unreadable range it is —
+//! the report and rejected in [`strict`](ExifReader::with_strict) mode as the unreadable range it is —
 //! an offset with nothing to size it addresses bytes that cannot be read. That rule is structural,
 //! not a support level: Exif 3.0 §4.6.9.2 Table 21 states the pair's level only *per
 //! thumbnail-format column*, an axis that is not the two-valued `Compression` tag — which this
@@ -110,7 +110,7 @@ pub use maker_note::fujifilm::FujifilmMakerNote;
 pub use maker_note::leica::{Leica4Tags, Leica9Tags, LeicaMakerNote};
 pub use maker_note::sony::SonyMakerNote;
 pub use maker_note::{MakerNote, MakerNoteDialect, MakerNoteLayout, MakerNoteVendor, OffsetBase};
-pub use reader::ExifReader;
+pub use reader::{ExifReader, ReadOutcome};
 pub use report::{DropReason, Dropped, DroppedEntry, DroppedRegion, EntryDropReason, ReadReport};
 pub use tag::{ExifTag, IfdKind, TagCount};
 pub use thumbnail::Thumbnail;

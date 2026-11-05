@@ -77,7 +77,7 @@ fn exiv2_reading(tag: ExifTag, code: u32) -> Option<String> {
     let mut exif = Exif::new(ByteOrder::LittleEndian);
     exif.set_tag(tag, value_of(tag, code));
     let bytes = ExifWriter::new()
-        .marker(false)
+        .with_marker(false)
         .write(&exif)
         .expect("gamut writes the tag");
     let key = format!("{}.{}", exiv2_group(tag.ifd()), tag.name());

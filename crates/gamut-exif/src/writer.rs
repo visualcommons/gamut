@@ -137,14 +137,14 @@ impl ExifWriter {
     ///
     /// Pass `false` for a bare TIFF stream — what the PNG `eXIf` and WebP `EXIF` chunks carry.
     #[must_use]
-    pub fn marker(mut self, yes: bool) -> Self {
+    pub fn with_marker(mut self, yes: bool) -> Self {
         self.marker = yes;
         self
     }
 
     /// Overrides the byte order the stream is written in (default: the [`Exif`]'s own order).
     #[must_use]
-    pub fn byte_order(mut self, order: ByteOrder) -> Self {
+    pub fn with_byte_order(mut self, order: ByteOrder) -> Self {
         self.byte_order = Some(order);
         self
     }
@@ -350,7 +350,10 @@ mod tests {
         let exif = sample(ByteOrder::LittleEndian);
         let with = ExifWriter::new().write(&exif).expect("write");
         assert_eq!(&with[..6], MARKER);
-        let bare = ExifWriter::new().marker(false).write(&exif).expect("write");
+        let bare = ExifWriter::new()
+            .with_marker(false)
+            .write(&exif)
+            .expect("write");
         assert_ne!(&bare[..2], MARKER);
         // A bare stream begins with the TIFF byte-order mark and re-parses.
         assert_eq!(&bare[..2], b"II");
@@ -361,7 +364,7 @@ mod tests {
     fn byte_order_override_rewrites_endianness() {
         let exif = sample(ByteOrder::LittleEndian);
         let be = ExifWriter::new()
-            .byte_order(ByteOrder::BigEndian)
+            .with_byte_order(ByteOrder::BigEndian)
             .write(&exif)
             .expect("write");
         let parsed = Exif::parse(&be).expect("parse");
@@ -468,7 +471,7 @@ mod tests {
             for jpeg in [None, Some(vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0xD9])] {
                 let exif = with_strip_thumbnail(order, &strips, jpeg.clone());
                 let parsed = ExifReader::new()
-                    .strict(true)
+                    .with_strict(true)
                     .parse(&exif.to_bytes().expect("write"))
                     .expect("round-trip parse");
                 let thumb = parsed.thumbnail().expect("thumbnail");
@@ -527,7 +530,10 @@ mod tests {
         let mut exif = Exif::new(ByteOrder::LittleEndian);
         exif.set_tag(ExifTag::Make, Value::Ascii("NIKON CORPORATION".into()));
         exif.set_tag(ExifTag::MakerNote, Value::Undefined(blob.clone()));
-        let bytes1 = ExifWriter::new().marker(false).write(&exif).expect("write");
+        let bytes1 = ExifWriter::new()
+            .with_marker(false)
+            .write(&exif)
+            .expect("write");
 
         let mut parsed = Exif::parse(&bytes1).expect("parse");
         let at = parsed.maker_note_offset().expect("offset recorded") as usize;
@@ -539,7 +545,7 @@ mod tests {
             Value::Ascii("a description long enough to move every following directory".into()),
         );
         let bytes2 = ExifWriter::new()
-            .marker(false)
+            .with_marker(false)
             .write(&parsed)
             .expect("write");
         assert_eq!(
@@ -561,14 +567,17 @@ mod tests {
         let blob: Vec<u8> = (0..32u16).map(|b| b as u8).collect();
         let mut exif = Exif::new(ByteOrder::LittleEndian);
         exif.set_tag(ExifTag::MakerNote, Value::Undefined(blob.clone()));
-        let bytes1 = ExifWriter::new().marker(false).write(&exif).expect("write");
+        let bytes1 = ExifWriter::new()
+            .with_marker(false)
+            .write(&exif)
+            .expect("write");
         let mut parsed = Exif::parse(&bytes1).expect("parse");
         // Balloon the 0th IFD so the directory region engulfs the note's old offset.
         for tag in 0x8000..0x8060u16 {
             parsed.image_mut().set(tag, Value::Short(vec![1]));
         }
         let bytes2 = ExifWriter::new()
-            .marker(false)
+            .with_marker(false)
             .write(&parsed)
             .expect("write");
         let reparsed = Exif::parse(&bytes2).expect("reparse");

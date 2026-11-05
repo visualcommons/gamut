@@ -8,9 +8,9 @@
 //!
 //! The reader is configured for its **widest** reach rather than its default:
 //!
-//! - `recover_entries(true)`, so an unreadable entry is skipped and the walk continues through the
-//!   rest of its directory instead of stopping there;
-//! - `audit_bytes(true)` through `parse_with_report`, which adds a second, whole-structure walk of
+//! - `with_entry_recovery(true)`, so an unreadable entry is skipped and the walk continues through
+//!   the rest of its directory instead of stopping there;
+//! - `with_byte_audit(true)` through `parse_with_report`, which adds a second, whole-structure walk of
 //!   the stream — every directory and value — that the default parse never makes.
 //!
 //! The marker stays optional (the default), so both a bare TIFF stream and an `Exif\0\0`-prefixed
@@ -27,10 +27,13 @@ use gamut_exif::ExifReader;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let reader = ExifReader::new().recover_entries(true).audit_bytes(true);
-    let Ok((exif, _report)) = reader.parse_with_report(data) else {
+    let reader = ExifReader::new()
+        .with_entry_recovery(true)
+        .with_byte_audit(true);
+    let Ok(outcome) = reader.parse_with_report(data) else {
         return;
     };
+    let exif = outcome.exif;
     let _ = exif.gps();
     let _ = exif.thumbnail_bytes();
     if let (Some(note), Some(at)) = (exif.maker_note(), exif.maker_note_offset()) {

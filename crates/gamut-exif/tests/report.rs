@@ -11,7 +11,7 @@
 //! report's offsets and the crate's error offsets are deliberately in different frames, and — over
 //! a truncation sweep — that no sub-IFD is ever dropped without being named.
 
-use gamut_exif::{DropReason, DroppedRegion, ExifReader};
+use gamut_exif::{DropReason, DroppedRegion, ExifReader, ReadOutcome};
 use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, write};
 
 /// `ExifIFD` pointer (Exif 3.0 §4.6.3).
@@ -65,7 +65,7 @@ fn a_dangling_sub_ifd_pointer_is_named_with_its_tag_offset_and_reason() {
             image.set(tag, Value::Long(vec![DANGLING]));
         }
 
-        let (exif, report) = ExifReader::new()
+        let ReadOutcome { exif, report, .. } = ExifReader::new()
             .parse_with_report(&tiff(vec![image]))
             .expect("a dangling pointer must not fail a lenient parse");
 
@@ -100,7 +100,7 @@ fn an_in_bounds_pointer_to_corrupt_bytes_is_reported_as_malformed() {
     let bytes = tiff(vec![image]);
     assert!(bytes.len() > 1, "offset 1 must really be inside the stream");
 
-    let (exif, report) = ExifReader::new()
+    let ReadOutcome { exif, report, .. } = ExifReader::new()
         .parse_with_report(&bytes)
         .expect("lenient parse");
 
@@ -119,7 +119,7 @@ fn an_out_of_bounds_thumbnail_range_is_named() {
     thumb.set(THUMB_OFFSET, Value::Long(vec![DANGLING]));
     thumb.set(THUMB_LENGTH, Value::Long(vec![16]));
 
-    let (exif, report) = ExifReader::new()
+    let ReadOutcome { exif, report, .. } = ExifReader::new()
         .parse_with_report(&tiff(vec![image_ifd(), thumb]))
         .expect("lenient parse");
 
@@ -157,7 +157,11 @@ fn a_well_formed_blob_reports_no_drops() {
     image.set_sub_ifd(EXIF_IFD, vec![exif]);
     image.set_sub_ifd(GPS_INFO, vec![gps]);
 
-    let (parsed, report) = ExifReader::new()
+    let ReadOutcome {
+        exif: parsed,
+        report,
+        ..
+    } = ExifReader::new()
         .parse_with_report(&tiff(vec![image]))
         .expect("parse");
 
@@ -192,7 +196,7 @@ fn a_top_level_directory_past_the_thumbnail_is_named() {
         }
         let bytes = tiff(ifds);
 
-        let (exif, report) = ExifReader::new()
+        let ReadOutcome { exif, report, .. } = ExifReader::new()
             .parse_with_report(&bytes)
             .expect("a long chain must still parse");
         assert_eq!(exif.make(), Some("Canon"), "the 0th IFD survives");
@@ -254,7 +258,12 @@ fn a_truncated_blob_never_drops_a_sub_ifd_without_naming_it() {
     let mut drops = 0_usize;
     for end in 0..full.len() {
         let data = &full[..end];
-        let Ok((parsed, report)) = ExifReader::new().parse_with_report(data) else {
+        let Ok(ReadOutcome {
+            exif: parsed,
+            report,
+            ..
+        }) = ExifReader::new().parse_with_report(data)
+        else {
             continue;
         };
         parses += 1;
@@ -315,7 +324,7 @@ fn a_thumbnail_offset_without_a_length_is_named() {
         thumb.set(THUMB_OFFSET, Value::Long(vec![4])); // ...in bounds, so not OutOfBounds
         // ...and deliberately no THUMB_LENGTH.
 
-        let (exif, report) = ExifReader::new()
+        let ReadOutcome { exif, report, .. } = ExifReader::new()
             .parse_with_report(&tiff(vec![image_ifd(), thumb]))
             .expect("lenient parse");
 
@@ -366,8 +375,8 @@ fn a_thumbnail_with_no_jpeg_range_reports_nothing() {
             }
             let blob = tiff(vec![image_ifd(), thumb]);
             for strict in [false, true] {
-                let (exif, report) = ExifReader::new()
-                    .strict(strict)
+                let ReadOutcome { exif, report, .. } = ExifReader::new()
+                    .with_strict(strict)
                     .parse_with_report(&blob)
                     .expect("no range was addressed, so there is nothing to reject");
                 assert!(
@@ -398,8 +407,8 @@ fn a_strict_parse_still_reports_a_trailing_directory() {
     let mut trailing = Ifd::new();
     trailing.set(0x0131, Value::Ascii("trailing".into())); // Software
 
-    let (exif, report) = ExifReader::new()
-        .strict(true)
+    let ReadOutcome { exif, report, .. } = ExifReader::new()
+        .with_strict(true)
         .parse_with_report(&tiff(vec![image_ifd(), thumb, trailing]))
         .expect("a well-formed long chain must not fail even in strict mode");
 
@@ -426,7 +435,7 @@ fn report_offsets_ignore_the_marker_but_error_offsets_include_it() {
 
     // The report frame is marker-invariant.
     let offsets = |blob: &[u8]| -> Vec<u64> {
-        let (_, report) = ExifReader::new().parse_with_report(blob).expect("parse");
+        let ReadOutcome { report, .. } = ExifReader::new().parse_with_report(blob).expect("parse");
         report.dropped().iter().map(|d| d.offset()).collect()
     };
     assert_eq!(offsets(&bare), vec![u64::from(DANGLING)]);

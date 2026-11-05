@@ -21,7 +21,7 @@ use gamut_ifd::{
 
 use crate::error::{ExifError, Result};
 use crate::exif::{EXIF_IFD_POINTER, Exif, MARKER};
-use crate::reader::ExifReader;
+use crate::reader::{ExifReader, ReadOutcome};
 use crate::report::{
     DropReason, Dropped, DroppedEntry, DroppedRegion, EntryDropReason, ReadReport,
 };
@@ -53,7 +53,7 @@ impl ExifReader {
     ///
     /// Returns [`ExifError::MissingMarker`] when the marker is required but absent, an
     /// [`ExifError::Core`] when the TIFF stream is malformed or the source fails, or (in
-    /// [`strict`](Self::strict) mode) [`ExifError::InvalidIfd`] /
+    /// [`strict`](Self::with_strict) mode) [`ExifError::InvalidIfd`] /
     /// [`ExifError::BadThumbnail`] when a sub-IFD pointer or thumbnail range is unusable.
     ///
     /// An offset inside an error message is a position in `source` — the byte source the caller
@@ -82,19 +82,19 @@ impl ExifReader {
     /// # Errors
     ///
     /// As [`parse_from`](Self::parse_from).
-    pub fn parse_from_with_report<S: ReadAt>(&self, mut source: S) -> Result<(Exif, ReadReport)> {
+    pub fn parse_from_with_report<S: ReadAt>(&self, mut source: S) -> Result<ReadOutcome> {
         let mut report = ReadReport::new();
         let exif = self.parse_source(&mut source, &mut report)?;
         if self.audit_bytes {
             report.set_byte_audit(self.byte_audit(&mut source)?);
         }
-        Ok((exif, report))
+        Ok(ReadOutcome { exif, report })
     }
 
     /// The byte-completeness verdict over the TIFF stream in `source`: `gamut-ifd`'s audit walk,
     /// following the three EXIF pointer tags. `None` when the walk cannot read the top-level chain
     /// strictly — after a successful parse, only an unreadable entry anywhere in that chain under
-    /// [`recover_entries`](Self::recover_entries) does that: one it skipped in the 0th or 1st IFD,
+    /// [`with_entry_recovery`](Self::with_entry_recovery) does that: one it skipped in the 0th or 1st IFD,
     /// or one in a trailing (3rd or later) directory, which the recovering parse reads but never
     /// decodes and so names no skip for. A transport failure propagates.
     fn byte_audit<S: ReadAt>(&self, mut source: S) -> Result<Option<SegmentReport>> {
@@ -107,7 +107,7 @@ impl ExifReader {
     }
 
     /// Whether an unreadable entry is skipped rather than failing its directory: asked for, and
-    /// not overruled by [`strict`](Self::strict).
+    /// not overruled by [`strict`](Self::with_strict).
     fn recovers(&self) -> bool {
         self.recover_entries && !self.strict
     }
@@ -596,7 +596,7 @@ fn fetch<S: ReadAt>(reader: &mut IfdReader<S>, offset: u32, length: u32) -> Resu
 /// The offset is taken from the **one** `MakerNote` entry the model holds, so the pin and the
 /// note's bytes always describe the same record (#790). A directory may carry the tag more than
 /// once, and its decode keeps only one occurrence: the last, or under
-/// [`recover_entries`](ExifReader::recover_entries) the last *readable* one. Every other
+/// [`with_entry_recovery`](ExifReader::with_entry_recovery) the last *readable* one. Every other
 /// occurrence the decode discarded — shadowed, or skipped as unreadable — is already named in
 /// `report` as an Exif-IFD [`DroppedEntry`] at its record's offset, so the survivor is the entry
 /// `report` does not name. Reading that answer off the decode's own findings, rather than
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(exif.make(), Some("Canon"));
     }
 
-    /// The marker is detected through the source, not by slicing: the same `require_marker`
+    /// The marker is detected through the source, not by slicing: the same `with_marker_required`
     /// contract `parse` has must hold for a stream, or the two entry points disagree.
     #[test]
     fn the_marker_is_detected_through_the_source() {
@@ -686,12 +686,12 @@ mod tests {
 
         assert!(
             ExifReader::new()
-                .require_marker(true)
+                .with_marker_required(true)
                 .parse_from(StreamSource::new(Cursor::new(marked)))
                 .is_ok()
         );
         let err = ExifReader::new()
-            .require_marker(true)
+            .with_marker_required(true)
             .parse_from(StreamSource::new(Cursor::new(bare.clone())))
             .expect_err("a bare TIFF stream must be rejected");
         assert!(matches!(err, ExifError::MissingMarker), "{err:?}");
@@ -704,11 +704,11 @@ mod tests {
     }
 
     /// A source shorter than the 6-byte marker cannot be read for one; it is unmarked, and
-    /// `require_marker` says so rather than reporting a torn read.
+    /// `with_marker_required` says so rather than reporting a torn read.
     #[test]
     fn a_source_too_short_for_the_marker_is_unmarked() {
         let err = ExifReader::new()
-            .require_marker(true)
+            .with_marker_required(true)
             .parse_from(&b"Exi"[..])
             .expect_err("three bytes cannot carry the marker");
         assert!(matches!(err, ExifError::MissingMarker), "{err:?}");
@@ -841,7 +841,7 @@ mod tests {
     #[test]
     fn the_deep_fixture_has_a_pin_a_thumbnail_and_a_trailing_directory_to_lose() {
         let data = deep_blob();
-        let (exif, report) = ExifReader::new()
+        let ReadOutcome { exif, report } = ExifReader::new()
             .parse_from_with_report(&data[..])
             .expect("parse");
         assert!(
@@ -940,7 +940,7 @@ mod tests {
     fn strip_thumbnail_bytes_are_read_and_their_offsets_leave_the_model() {
         let strips: [&[u8]; 2] = [b"abc", b"defgh"];
         let exif = ExifReader::new()
-            .strict(true)
+            .with_strict(true)
             .parse(&strip_blob(&strips))
             .expect("parse");
         let thumb = exif.thumbnail().expect("thumbnail");
@@ -1044,7 +1044,7 @@ mod tests {
     fn unreadable_strips_are_dropped_and_their_offsets_leave_the_model() {
         for (name, offsets, counts, at, reason, _) in unreadable_strip_cases() {
             let blob = strip_pair_blob(&offsets, counts);
-            let (exif, report) = ExifReader::new()
+            let ReadOutcome { exif, report } = ExifReader::new()
                 .parse_with_report(&blob)
                 .expect("lenient parse");
             assert_eq!(
@@ -1063,8 +1063,11 @@ mod tests {
             );
 
             let emitted = exif.to_bytes().expect("write");
-            let (reparsed, report) = ExifReader::new()
-                .strict(true)
+            let ReadOutcome {
+                exif: reparsed,
+                report,
+            } = ExifReader::new()
+                .with_strict(true)
                 .parse_with_report(&emitted)
                 .expect("the emitted blob must be strictly valid");
             assert!(report.is_empty(), "{name}: {:?}", report.dropped());
@@ -1077,7 +1080,7 @@ mod tests {
     fn unreadable_strips_are_rejected_strictly() {
         for (name, offsets, counts, _, _, why) in unreadable_strip_cases() {
             let err = ExifReader::new()
-                .strict(true)
+                .with_strict(true)
                 .parse(&strip_pair_blob(&offsets, counts))
                 .expect_err(name);
             assert_eq!(
@@ -1098,8 +1101,8 @@ mod tests {
             ("empty", Value::Long(vec![])),
         ] {
             let blob = strip_pair_blob(&offsets, |_| Some(Value::Long(vec![1])));
-            let (exif, report) = ExifReader::new()
-                .strict(true)
+            let ReadOutcome { exif, report } = ExifReader::new()
+                .with_strict(true)
                 .parse_with_report(&blob)
                 .expect("strict parse");
             assert!(report.is_empty(), "{name}: {:?}", report.dropped());
@@ -1142,7 +1145,7 @@ mod tests {
             (vec![(ptr, 0xFFFF), (len, 16)], DropReason::OutOfBounds),
             (vec![(ptr, 4)], DropReason::ThumbnailLengthMissing),
         ] {
-            let (exif, report) = ExifReader::new()
+            let ReadOutcome { exif, report } = ExifReader::new()
                 .parse_with_report(&thumbnail_blob(&fields))
                 .expect("lenient parse");
             assert_eq!(report.dropped().len(), 1, "{:?}", report.dropped());
@@ -1151,8 +1154,11 @@ mod tests {
             assert_eq!(thumb.ifd().get(ptr), None, "{reason:?}: pointer kept");
 
             let emitted = exif.to_bytes().expect("write");
-            let (reparsed, report) = ExifReader::new()
-                .strict(true)
+            let ReadOutcome {
+                exif: reparsed,
+                report,
+            } = ExifReader::new()
+                .with_strict(true)
                 .parse_with_report(&emitted)
                 .expect("the emitted blob must be strictly valid");
             assert!(report.is_empty(), "{reason:?}: {:?}", report.dropped());
@@ -1174,7 +1180,7 @@ mod tests {
         let len = ExifTag::JpegInterchangeFormatLength.tag_id();
         for value in [Value::Ascii("x".into()), Value::Long(vec![4, 8])] {
             let blob = thumbnail_blob_of(&[(ptr, value.clone()), (len, Value::Long(vec![16]))]);
-            let (exif, report) = ExifReader::new()
+            let ReadOutcome { exif, report } = ExifReader::new()
                 .parse_with_report(&blob)
                 .expect("lenient parse");
             assert!(report.is_empty(), "{value:?}: {:?}", report.dropped());
@@ -1183,8 +1189,11 @@ mod tests {
             assert_eq!(thumb.jpeg(), None, "{value:?}");
 
             let emitted = exif.to_bytes().expect("write");
-            let (reparsed, report) = ExifReader::new()
-                .strict(true)
+            let ReadOutcome {
+                exif: reparsed,
+                report,
+            } = ExifReader::new()
+                .with_strict(true)
                 .parse_with_report(&emitted)
                 .expect("the emitted blob must be strictly valid");
             assert!(report.is_empty(), "{value:?}: {:?}", report.dropped());
@@ -1204,7 +1213,8 @@ mod tests {
             thumbnail_blob(&[(len, 16)]),
             deep_blob(),
         ] {
-            let (exif, report) = ExifReader::new().parse_with_report(&blob).expect("parse");
+            let ReadOutcome { exif, report } =
+                ExifReader::new().parse_with_report(&blob).expect("parse");
             assert!(
                 report
                     .dropped()
@@ -1250,7 +1260,9 @@ mod tests {
             ("default", ExifReader::new()),
             (
                 "recovering+audit",
-                ExifReader::new().recover_entries(true).audit_bytes(true),
+                ExifReader::new()
+                    .with_entry_recovery(true)
+                    .with_byte_audit(true),
             ),
         ];
         for (mode, reader) in readers {
@@ -1265,7 +1277,10 @@ mod tests {
     /// outcome to the law above.
     fn sweep_transport_failures(name: &str, reader: &ExifReader, data: &[u8]) {
         {
-            let (clean, clean_report) = reader.parse_from_with_report(data).expect("clean parse");
+            let ReadOutcome {
+                exif: clean,
+                report: clean_report,
+            } = reader.parse_from_with_report(data).expect("clean parse");
             let (mut failures, mut successes) = (0, 0);
             for budget in 0..200 {
                 let source = FailingAfter {
@@ -1273,7 +1288,7 @@ mod tests {
                     budget,
                 };
                 match reader.parse_from_with_report(source) {
-                    Ok((exif, report)) => {
+                    Ok(ReadOutcome { exif, report }) => {
                         successes += 1;
                         assert_eq!(
                             report, clean_report,
@@ -1316,7 +1331,7 @@ mod tests {
     ///
     /// The marker probe is the one read that happens before any parsing, and its result is a
     /// three-way question — marked, unmarked, or unknown — collapsed onto a boolean. Deciding
-    /// "unmarked" from a failed read makes `require_marker(true)` answer `MissingMarker` for a blob
+    /// "unmarked" from a failed read makes `with_marker_required(true)` answer `MissingMarker` for a blob
     /// that may well carry one, which sends a caller to the wrong conclusion entirely. The split is
     /// keyed on the error kind, so a short slice still reads as genuinely unmarked — which
     /// `a_source_too_short_for_the_marker_is_unmarked` pins.
@@ -1328,7 +1343,7 @@ mod tests {
             budget: 0,
         };
         let err = ExifReader::new()
-            .require_marker(true)
+            .with_marker_required(true)
             .parse_from(source)
             .expect_err("a source that cannot be read must not parse");
         match err {
@@ -1407,7 +1422,8 @@ mod tests {
                     assert!(parsed.is_err(), "{kind:?}: a top-level directory is fatal");
                 }
                 _ => {
-                    let (_, report) = parsed.expect("a sub-IFD is dropped, not fatal");
+                    let ReadOutcome { report, .. } =
+                        parsed.expect("a sub-IFD is dropped, not fatal");
                     assert_eq!(report.dropped().len(), 1, "{kind:?}: {report:?}");
                     assert_eq!(report.dropped()[0].reason(), DropReason::Malformed);
                     assert_eq!(report.dropped_entries(), &[]);
@@ -1423,8 +1439,8 @@ mod tests {
     fn recovery_keeps_the_directory_and_names_the_skipped_entry() {
         for (kind, tag, kept) in POISON_SITES {
             let data = poisoned_blob(kind, tag);
-            let (exif, report) = ExifReader::new()
-                .recover_entries(true)
+            let ReadOutcome { exif, report } = ExifReader::new()
+                .with_entry_recovery(true)
                 .parse_with_report(&data)
                 .unwrap_or_else(|e| panic!("{kind:?}: recovery must not fail: {e}"));
             assert!(exif.get(kind, kept).is_some(), "{kind:?}: neighbour lost");
@@ -1450,11 +1466,14 @@ mod tests {
         for (kind, tag, kept) in POISON_SITES {
             let data = poisoned_blob(kind, tag);
             let recovered = ExifReader::new()
-                .recover_entries(true)
+                .with_entry_recovery(true)
                 .parse(&data)
                 .expect("recover");
             let bytes = recovered.to_bytes().expect("to_bytes");
-            let (again, report) = ExifReader::new()
+            let ReadOutcome {
+                exif: again,
+                report,
+            } = ExifReader::new()
                 .parse_with_report(&bytes)
                 .expect("the rewrite parses without recovery");
             assert!(report.is_empty(), "{kind:?}: {report:?}");
@@ -1466,7 +1485,9 @@ mod tests {
     /// Strictness overrules recovery: it rejects exactly what recovery would skip.
     #[test]
     fn strict_mode_ignores_recovery() {
-        let reader = ExifReader::new().strict(true).recover_entries(true);
+        let reader = ExifReader::new()
+            .with_strict(true)
+            .with_entry_recovery(true);
         let image = poisoned_blob(IfdKind::Image, 0x0110);
         assert!(matches!(reader.parse(&image), Err(ExifError::Core(_))));
         let exif = poisoned_blob(IfdKind::Exif, 0xA434);
@@ -1483,7 +1504,7 @@ mod tests {
         for data in [healthy_blob(), deep_blob()] {
             let plain = ExifReader::new().parse_with_report(&data).expect("plain");
             let recovering = ExifReader::new()
-                .recover_entries(true)
+                .with_entry_recovery(true)
                 .parse_with_report(&data)
                 .expect("recovering");
             assert_eq!(recovering, plain);
@@ -1498,7 +1519,7 @@ mod tests {
         data.extend_from_slice(b"II\x2a\x00\x00\x00\x00\x00"); // first IFD offset = 0
         let plain = ExifReader::new().parse(&data).expect_err("no IFD");
         let recovering = ExifReader::new()
-            .recover_entries(true)
+            .with_entry_recovery(true)
             .parse(&data)
             .expect_err("no IFD");
         assert_eq!(recovering.to_string(), plain.to_string());
@@ -1507,7 +1528,7 @@ mod tests {
     /// No audit is run, or reported, unless asked for.
     #[test]
     fn a_report_carries_no_byte_audit_unless_asked() {
-        let (_, report) = ExifReader::new()
+        let ReadOutcome { report, .. } = ExifReader::new()
             .parse_with_report(&healthy_blob())
             .expect("parse");
         assert_eq!(report.byte_audit(), None);
@@ -1518,8 +1539,8 @@ mod tests {
     #[test]
     fn a_written_blob_audits_as_fully_classified() {
         for data in [healthy_blob(), deep_blob()] {
-            let (_, report) = ExifReader::new()
-                .audit_bytes(true)
+            let ReadOutcome { report, .. } = ExifReader::new()
+                .with_byte_audit(true)
                 .parse_with_report(&data)
                 .expect("parse");
             let audit = report.byte_audit().expect("asked for");
@@ -1535,8 +1556,8 @@ mod tests {
         let mut data = healthy_blob();
         let tiff_len = (data.len() - MARKER.len()) as u64;
         data.extend_from_slice(&[0xAB; 16]);
-        let (_, report) = ExifReader::new()
-            .audit_bytes(true)
+        let ReadOutcome { report, .. } = ExifReader::new()
+            .with_byte_audit(true)
             .parse_with_report(&data)
             .expect("parse");
         assert!(report.is_empty(), "nothing was *dropped*: {report:?}");
@@ -1550,14 +1571,16 @@ mod tests {
     /// so there is no verdict — but the parse itself still succeeds.
     #[test]
     fn a_recovered_parse_is_audited_by_the_strict_walk() {
-        let reader = ExifReader::new().recover_entries(true).audit_bytes(true);
-        let (_, report) = reader
+        let reader = ExifReader::new()
+            .with_entry_recovery(true)
+            .with_byte_audit(true);
+        let ReadOutcome { report, .. } = reader
             .parse_with_report(&poisoned_blob(IfdKind::Exif, 0xA434))
             .expect("parse");
         let audit = report.byte_audit().expect("the top-level chain reads");
         assert!(!audit.is_fully_classified(), "{audit:?}");
 
-        let (exif, report) = reader
+        let ReadOutcome { exif, report } = reader
             .parse_with_report(&poisoned_blob(IfdKind::Image, 0x0110))
             .expect("parse");
         assert_eq!(exif.make(), Some("Canon"));
@@ -1600,9 +1623,9 @@ mod tests {
             ExifReader::new().parse(&data).is_err(),
             "without recovery the trailing entry is fatal, so the fixture really is unreadable"
         );
-        let (exif, report) = ExifReader::new()
-            .recover_entries(true)
-            .audit_bytes(true)
+        let ReadOutcome { exif, report } = ExifReader::new()
+            .with_entry_recovery(true)
+            .with_byte_audit(true)
             .parse_with_report(&data)
             .expect("parse");
         assert_eq!(exif.make(), Some("Canon"));
@@ -1662,10 +1685,10 @@ mod tests {
         let (data, records) = shadowed_blob();
         for reader in [
             ExifReader::new(),
-            ExifReader::new().strict(true),
-            ExifReader::new().recover_entries(true),
+            ExifReader::new().with_strict(true),
+            ExifReader::new().with_entry_recovery(true),
         ] {
-            let (exif, report) = reader.parse_with_report(&data).expect("parse");
+            let ReadOutcome { exif, report } = reader.parse_with_report(&data).expect("parse");
             assert_eq!(report.dropped(), &[], "{reader:?}");
             let entries = report.dropped_entries();
             assert_eq!(
@@ -1701,7 +1724,10 @@ mod tests {
     fn a_shadowed_parse_round_trips_without_the_shadowed_entries() {
         let (data, _) = shadowed_blob();
         let exif = ExifReader::new().parse(&data).expect("parse");
-        let (again, report) = ExifReader::new()
+        let ReadOutcome {
+            exif: again,
+            report,
+        } = ExifReader::new()
             .parse_with_report(&exif.to_bytes().expect("to_bytes"))
             .expect("reparse");
         assert!(report.is_empty(), "{report:?}");
@@ -1731,8 +1757,11 @@ mod tests {
             .position(|w| w == (DUPLICATE + 1).to_le_bytes())
             .expect("the second record");
         tiff[at..at + 2].copy_from_slice(&DUPLICATE.to_le_bytes());
-        for reader in [ExifReader::new(), ExifReader::new().recover_entries(true)] {
-            let (_, report) = reader.parse_with_report(&tiff).expect("parse");
+        for reader in [
+            ExifReader::new(),
+            ExifReader::new().with_entry_recovery(true),
+        ] {
+            let ReadOutcome { report, .. } = reader.parse_with_report(&tiff).expect("parse");
             assert_eq!(report.dropped_entries(), &[], "{reader:?}");
             assert_eq!(report.dropped().len(), 1, "{reader:?}: {report:?}");
             assert_eq!(report.dropped()[0].region(), DroppedRegion::TrailingIfd);
@@ -1795,8 +1824,8 @@ mod tests {
         let (data, [_, second]) = duplicate_maker_note_blob(true);
         for reader in [
             ExifReader::new(),
-            ExifReader::new().strict(true),
-            ExifReader::new().recover_entries(true),
+            ExifReader::new().with_strict(true),
+            ExifReader::new().with_entry_recovery(true),
         ] {
             let exif = reader.parse(&data).expect("parse");
             assert_eq!(
@@ -1814,7 +1843,7 @@ mod tests {
     fn a_recovered_maker_note_pins_the_readable_survivor() {
         let (data, [first, _]) = duplicate_maker_note_blob(false);
         let exif = ExifReader::new()
-            .recover_entries(true)
+            .with_entry_recovery(true)
             .parse(&data)
             .expect("parse");
         assert_eq!(
