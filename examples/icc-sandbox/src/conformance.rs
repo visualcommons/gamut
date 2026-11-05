@@ -176,11 +176,9 @@ pub fn run(battery: &Battery) -> Result<Report, String> {
                 if bpc && intent == RenderingIntent::IccAbsoluteColorimetric {
                     continue;
                 }
-                let options = TransformOptions {
-                    intent,
-                    black_point_compensation: bpc,
-                    ..TransformOptions::default()
-                };
+                let options = TransformOptions::default()
+                    .with_intent(intent)
+                    .with_black_point_compensation(bpc);
                 let pair = format!("{} → {}", src_kind.name(), dst_kind.name());
                 let ours = IccTransform::between(src, dst, options)
                     .map_err(|e| format!("{pair}: gamut-cmm: {e}"))?;
