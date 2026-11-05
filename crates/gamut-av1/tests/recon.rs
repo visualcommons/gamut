@@ -18,9 +18,8 @@
 use std::num::NonZeroUsize;
 
 use gamut_av1::{
-    Av1Colour, EncodeOptions, Speed, Tiling, encode_still_intra, encode_still_intra_superres,
-    encode_still_intra_with, encode_still_intra_with_options, encode_still_intra_with_speed,
-    encode_still_intra16_with, encode_still_intra16_with_options, encode_still_intra16_with_speed,
+    Av1Color, Av1EncodeConfig, Effort, StillWithRecon, Tiling, encode_still_with_recon,
+    encode_still16_with_recon,
 };
 use gamut_color::cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16, RgbToYcbcr};
@@ -65,19 +64,22 @@ fn planes_subsampled(
 }
 
 /// The colour a subsampled stream must carry: identity is not conformant below 4:4:4 (§6.4.2).
-fn colour_for(matrix: MatrixCoefficients, range: ColorRange) -> Av1Colour {
-    Av1Colour {
-        primaries: ColorPrimaries::Bt709,
-        transfer: TransferCharacteristics::Srgb,
+fn colour_for(matrix: MatrixCoefficients, range: ColorRange) -> Av1Color {
+    Av1Color::new(
+        ColorPrimaries::Bt709,
+        TransferCharacteristics::Srgb,
         matrix,
         range,
-    }
+    )
 }
 
 /// Encodes `planes` at `qindex`, then decodes the OBU stream with both reference decoders and
 /// asserts each reproduces the encoder's reconstruction byte-for-byte.
 fn check(planes: &Planar8, qindex: u8) {
-    check_with(encode_still_intra(planes, qindex).unwrap(), qindex);
+    check_with(
+        encode_still_with_recon(planes, &Av1EncodeConfig::new(qindex)).unwrap(),
+        qindex,
+    );
 }
 
 /// The in-loop filters a stream signals, as gamut's own header parser reads them back: the
@@ -96,9 +98,9 @@ struct Filters {
 /// [`check`], returning the in-loop filters the stream signals. 8-bit 4:4:4 only: that is the
 /// header parser's scope.
 fn check_filters(planes: &Planar8, qindex: u8) -> Filters {
-    let encoded = encode_still_intra(planes, qindex).unwrap();
+    let encoded = encode_still_with_recon(planes, &Av1EncodeConfig::new(qindex)).unwrap();
     let frame = gamut_av1::Av1Decoder::new()
-        .inspect(&encoded.0.obus)
+        .inspect(&encoded.still.obus)
         .unwrap()
         .frame;
     check_with(encoded, qindex);
@@ -111,8 +113,8 @@ fn check_filters(planes: &Planar8, qindex: u8) -> Filters {
 }
 
 /// The body of [`check`], over an already-encoded still, so colour-parameterized cases share it.
-fn check_with(encoded: (gamut_av1::EncodedStill, gamut_av1::ReconImage), qindex: u8) {
-    let (still, recon) = encoded;
+fn check_with(encoded: StillWithRecon, qindex: u8) {
+    let StillWithRecon { still, recon, .. } = encoded;
     let (w, h) = (recon.width as usize, recon.height as usize);
 
     // A standalone Section-5 OBU stream needs a temporal-delimiter OBU first (AVIF omits it inside
@@ -739,14 +741,14 @@ fn every_tile_layout_matches_both_decoders() {
         Tiling::new(6, 6),
     ];
     for tiling in tilings {
-        let options = EncodeOptions::default()
+        let layout = Av1EncodeConfig::new(0)
             .with_tiling(tiling)
             .with_threads(three);
         for &q in &[0u8, 20, 90, 200] {
             for &(w, h) in &[(200, 150), (130, 200), (64, 129)] {
                 let p = planes(w, h, directional);
                 check_with(
-                    encode_still_intra_with_options(&p, q, Av1Colour::default(), options).unwrap(),
+                    encode_still_with_recon(&p, &layout.with_qindex(q)).unwrap(),
                     q,
                 );
             }
@@ -763,19 +765,23 @@ fn every_tile_layout_matches_both_decoders() {
                 directional,
             );
             check_with(
-                encode_still_intra_with_options(&p, 60, colour, options).unwrap(),
+                encode_still_with_recon(&p, &layout.with_qindex(60).with_color(colour)).unwrap(),
                 60,
             );
         }
         let mono = mono_planes(200, 150, |x, y| directional(x, y)[0] ^ directional(x, y)[2]);
         check_with(
-            encode_still_intra_with_options(&mono, 60, Av1Colour::monochrome(), options).unwrap(),
+            encode_still_with_recon(
+                &mono,
+                &layout.with_qindex(60).with_color(Av1Color::monochrome()),
+            )
+            .unwrap(),
             60,
         );
         // The high-bit-depth entry point takes the same layout.
         let deep = planes16(200, 150, BitDepth::Ten, texture16(BitDepth::Ten));
         check_with(
-            encode_still_intra16_with_options(&deep, 40, Av1Colour::default(), options).unwrap(),
+            encode_still16_with_recon(&deep, &layout.with_qindex(40)).unwrap(),
             40,
         );
     }
@@ -817,34 +823,38 @@ fn restoration_units_decided_one_by_one_match_both_decoders() {
     // others are not (pinned by the encoder's own unit test) — so each unit's `use_wiener` is
     // coded at its own superblock and applied to its own samples, and both decoders must agree.
     // That unit test codes the full search, so this one names `Thorough` to code the same frame.
-    let (still, recon) = encode_still_intra_with_speed(
+    let encoded = encode_still_with_recon(
         &planes(640, 64, smooth_field),
-        110,
-        Av1Colour::default(),
-        Speed::Thorough,
+        &Av1EncodeConfig::new(110).with_effort(Effort::Thorough),
     )
     .unwrap();
-    let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
+    let header = gamut_av1::Av1Decoder::new()
+        .inspect(&encoded.still.obus)
+        .unwrap();
     assert_eq!(
         header.frame.lr.frame_restoration_type[0],
         gamut_av1::RestorationType::Wiener
     );
-    check_with((still, recon), 110);
+    check_with(encoded, 110);
     // With superres the units are counted on the upscaled frame — three here, where the coded
     // width alone would count two — and a superblock's columns are scaled up onto that grid
     // (§5.11.57): 640 upscaled from 427 (SuperresDenom 12) and from 320 (SuperresDenom 16). Both
     // decoders read the unit signalling at the scaled positions.
     for denom in [3u8, 7] {
-        let (still, recon) =
-            gamut_av1::encode_still_intra_superres(&planes(640, 64, smooth_field), 200, denom)
-                .unwrap();
-        let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
+        let encoded = encode_still_with_recon(
+            &planes(640, 64, smooth_field),
+            &Av1EncodeConfig::new(200).with_superres(denom),
+        )
+        .unwrap();
+        let header = gamut_av1::Av1Decoder::new()
+            .inspect(&encoded.still.obus)
+            .unwrap();
         assert_eq!(
             header.frame.lr.frame_restoration_type[0],
             gamut_av1::RestorationType::Wiener,
             "denom {denom}"
         );
-        check_with((still, recon), 200);
+        check_with(encoded, 200);
     }
 }
 
@@ -855,19 +865,19 @@ fn restoration_unit_rows_are_each_signalled_once_in_both_decoders() {
     // superblock row its top falls in, counted from the superblock's first sample row (`r * 4`
     // over the 256-sample unit), so the second unit is coded at row 256 and not again at 320 —
     // a row counted any other way codes it twice or never, and both decoders lose sync.
-    let (still, recon) = encode_still_intra_with_speed(
+    let encoded = encode_still_with_recon(
         &planes(64, 640, |x, y| smooth_field(y, x)),
-        110,
-        Av1Colour::default(),
-        Speed::Thorough,
+        &Av1EncodeConfig::new(110).with_effort(Effort::Thorough),
     )
     .unwrap();
-    let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
+    let header = gamut_av1::Av1Decoder::new()
+        .inspect(&encoded.still.obus)
+        .unwrap();
     assert_eq!(
         header.frame.lr.frame_restoration_type[0],
         gamut_av1::RestorationType::Wiener
     );
-    check_with((still, recon), 110);
+    check_with(encoded, 110);
 }
 
 #[test]
@@ -886,19 +896,19 @@ fn restoration_units_of_a_grid_are_signalled_in_raster_order_in_both_decoders() 
             [v, v, v]
         }
     };
-    let (still, recon) = encode_still_intra_with_speed(
+    let encoded = encode_still_with_recon(
         &planes(512, 512, field),
-        110,
-        Av1Colour::default(),
-        Speed::Thorough,
+        &Av1EncodeConfig::new(110).with_effort(Effort::Thorough),
     )
     .unwrap();
-    let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
+    let header = gamut_av1::Av1Decoder::new()
+        .inspect(&encoded.still.obus)
+        .unwrap();
     assert_eq!(
         header.frame.lr.frame_restoration_type[0],
         gamut_av1::RestorationType::Wiener
     );
-    check_with((still, recon), 110);
+    check_with(encoded, 110);
 }
 
 #[test]
@@ -915,7 +925,9 @@ fn superres_matches_dav1d() {
     for &denom in &[0u8, 3, 7] {
         for &(w, h) in &[(64, 32), (100, 48), (33, 20), (80, 130)] {
             let p = planes(w, h, texture);
-            let (still, recon) = gamut_av1::encode_still_intra_superres(&p, 40, denom).unwrap();
+            let StillWithRecon { still, recon, .. } =
+                encode_still_with_recon(&p, &Av1EncodeConfig::new(40).with_superres(denom))
+                    .unwrap();
             let mut stream = vec![0x12u8, 0x00];
             stream.extend_from_slice(&still.obus);
             let decoded = dav1d_oracle::decode_obu(&stream)
@@ -983,32 +995,36 @@ fn non_identity_colour_config_matches_dav1d() {
     };
     let colours = [
         // BT.709 full range — what the AVIF encoder's lossy default signals.
-        Av1Colour {
-            primaries: ColorPrimaries::Bt709,
-            transfer: TransferCharacteristics::Srgb,
-            matrix: MatrixCoefficients::Bt709,
-            range: ColorRange::Full,
-        },
+        Av1Color::new(
+            ColorPrimaries::Bt709,
+            TransferCharacteristics::Srgb,
+            MatrixCoefficients::Bt709,
+            ColorRange::Full,
+        ),
         // …and studio range, so the coded bit is exercised at both values.
-        Av1Colour {
-            primaries: ColorPrimaries::Bt709,
-            transfer: TransferCharacteristics::Srgb,
-            matrix: MatrixCoefficients::Bt709,
-            range: ColorRange::Limited,
-        },
+        Av1Color::new(
+            ColorPrimaries::Bt709,
+            TransferCharacteristics::Srgb,
+            MatrixCoefficients::Bt709,
+            ColorRange::Limited,
+        ),
         // A non-BT.709 primaries/matrix pair, so the shortcut is missed on more than one field.
-        Av1Colour {
-            primaries: ColorPrimaries::Bt2020,
-            transfer: TransferCharacteristics::Srgb,
-            matrix: MatrixCoefficients::Bt2020Ncl,
-            range: ColorRange::Full,
-        },
+        Av1Color::new(
+            ColorPrimaries::Bt2020,
+            TransferCharacteristics::Srgb,
+            MatrixCoefficients::Bt2020Ncl,
+            ColorRange::Full,
+        ),
     ];
     for colour in colours {
         for &q in &[0u8, 12, 64, 200] {
             for &(w, h) in &[(8, 8), (17, 13), (64, 48), (100, 70)] {
                 let p = planes(w, h, texture);
-                check_with(encode_still_intra_with(&p, q, colour).unwrap(), q);
+                check_with(
+                    encode_still_with_recon(&p, &Av1EncodeConfig::new(q).with_color(colour))
+                        .unwrap(),
+                    q,
+                );
             }
         }
     }
@@ -1077,10 +1093,10 @@ fn subsampled_420_reconstruction_matches_both_decoders() {
             textured,
         );
         check_with(
-            encode_still_intra_with(
+            encode_still_with_recon(
                 &p,
-                40,
-                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+                &Av1EncodeConfig::new(40)
+                    .with_color(colour_for(MatrixCoefficients::Bt709, ColorRange::Full)),
             )
             .unwrap(),
             40,
@@ -1103,10 +1119,10 @@ fn subsampled_420_reconstruction_matches_at_every_quantizer_context() {
             textured,
         );
         check_with(
-            encode_still_intra_with(
+            encode_still_with_recon(
                 &p,
-                q,
-                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+                &Av1EncodeConfig::new(q)
+                    .with_color(colour_for(MatrixCoefficients::Bt709, ColorRange::Full)),
             )
             .unwrap(),
             q,
@@ -1124,7 +1140,11 @@ fn subsampled_420_reconstruction_matches_across_matrices_and_ranges() {
         for range in [ColorRange::Full, ColorRange::Limited] {
             let p = planes_subsampled(20, 20, ChromaSubsampling::Cs420, matrix, range, textured);
             check_with(
-                encode_still_intra_with(&p, 60, colour_for(matrix, range)).unwrap(),
+                encode_still_with_recon(
+                    &p,
+                    &Av1EncodeConfig::new(60).with_color(colour_for(matrix, range)),
+                )
+                .unwrap(),
                 60,
             );
         }
@@ -1160,10 +1180,10 @@ fn subsampled_422_reconstruction_matches_both_decoders() {
             textured,
         );
         check_with(
-            encode_still_intra_with(
+            encode_still_with_recon(
                 &p,
-                40,
-                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+                &Av1EncodeConfig::new(40)
+                    .with_color(colour_for(MatrixCoefficients::Bt709, ColorRange::Full)),
             )
             .unwrap(),
             40,
@@ -1183,10 +1203,10 @@ fn subsampled_422_reconstruction_matches_at_every_quantizer_context() {
             textured,
         );
         check_with(
-            encode_still_intra_with(
+            encode_still_with_recon(
                 &p,
-                q,
-                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+                &Av1EncodeConfig::new(q)
+                    .with_color(colour_for(MatrixCoefficients::Bt709, ColorRange::Full)),
             )
             .unwrap(),
             q,
@@ -1216,10 +1236,10 @@ fn subsampled_422_reconstruction_matches_on_a_period_two_vertical_stripe() {
             stripe,
         );
         check_with(
-            encode_still_intra_with(
+            encode_still_with_recon(
                 &p,
-                30,
-                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+                &Av1EncodeConfig::new(30)
+                    .with_color(colour_for(MatrixCoefficients::Bt709, ColorRange::Full)),
             )
             .unwrap(),
             30,
@@ -1256,10 +1276,10 @@ fn subsampled_422_reconstruction_matches_on_every_cdef_direction() {
             ramp,
         );
         check_with(
-            encode_still_intra_with(
+            encode_still_with_recon(
                 &p,
-                80,
-                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+                &Av1EncodeConfig::new(80)
+                    .with_color(colour_for(MatrixCoefficients::Bt709, ColorRange::Full)),
             )
             .unwrap(),
             80,
@@ -1294,10 +1314,10 @@ fn subsampled_420_reconstruction_matches_on_palette_content() {
             flat_runs,
         );
         check_with(
-            encode_still_intra_with(
+            encode_still_with_recon(
                 &p,
-                60,
-                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+                &Av1EncodeConfig::new(60)
+                    .with_color(colour_for(MatrixCoefficients::Bt709, ColorRange::Full)),
             )
             .unwrap(),
             60,
@@ -1330,10 +1350,10 @@ fn subsampled_422_reconstruction_matches_on_palette_content() {
             flat_runs,
         );
         check_with(
-            encode_still_intra_with(
+            encode_still_with_recon(
                 &p,
-                60,
-                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+                &Av1EncodeConfig::new(60)
+                    .with_color(colour_for(MatrixCoefficients::Bt709, ColorRange::Full)),
             )
             .unwrap(),
             60,
@@ -1372,7 +1392,11 @@ fn monochrome_reconstruction_matches_both_decoders() {
         for &(w, h) in &[(8, 8), (17, 13), (32, 32), (64, 48), (100, 70)] {
             let p = mono_planes(w, h, texture);
             check_with(
-                encode_still_intra_with(&p, q, Av1Colour::monochrome()).unwrap(),
+                encode_still_with_recon(
+                    &p,
+                    &Av1EncodeConfig::new(q).with_color(Av1Color::monochrome()),
+                )
+                .unwrap(),
                 q,
             );
         }
@@ -1395,13 +1419,19 @@ fn monochrome_flat_and_two_tone_content_matches_both_decoders() {
     for &q in &[0u8, 8, 64, 200] {
         for &(w, h) in &[(16, 16), (33, 21), (64, 64)] {
             check_with(
-                encode_still_intra_with(&mono_planes(w, h, |_, _| 137), q, Av1Colour::monochrome())
-                    .unwrap(),
+                encode_still_with_recon(
+                    &mono_planes(w, h, |_, _| 137),
+                    &Av1EncodeConfig::new(q).with_color(Av1Color::monochrome()),
+                )
+                .unwrap(),
                 q,
             );
             check_with(
-                encode_still_intra_with(&mono_planes(w, h, two_tone), q, Av1Colour::monochrome())
-                    .unwrap(),
+                encode_still_with_recon(
+                    &mono_planes(w, h, two_tone),
+                    &Av1EncodeConfig::new(q).with_color(Av1Color::monochrome()),
+                )
+                .unwrap(),
                 q,
             );
         }
@@ -1412,16 +1442,23 @@ fn monochrome_flat_and_two_tone_content_matches_both_decoders() {
 fn monochrome_rejects_the_identity_matrix() {
     // §5.5.2 infers `subsampling_x = subsampling_y = 1` for a monochrome stream and §6.4.2 allows
     // MC_IDENTITY only at 0/0, so the default colour is non-conformant here. Rejecting it keeps
-    // `Av1Colour::default()` from silently producing a stream a decoder may refuse.
+    // `Av1Color::default()` from silently producing a stream a decoder may refuse.
     let p = mono_planes(16, 16, |x, _| x as u8);
-    let err = encode_still_intra(&p, 40).expect_err("identity is not conformant when monochrome");
+    let err = encode_still_with_recon(&p, &Av1EncodeConfig::new(40))
+        .expect_err("identity is not conformant when monochrome");
     assert!(
         err.static_message()
             .is_some_and(|m| m.contains("monochrome stream cannot signal the identity matrix")),
         "unexpected diagnostic: {err:?}"
     );
     // The same buffer encodes once the matrix is a conformant one.
-    assert!(encode_still_intra_with(&p, 40, Av1Colour::monochrome()).is_ok());
+    assert!(
+        encode_still_with_recon(
+            &p,
+            &Av1EncodeConfig::new(40).with_color(Av1Color::monochrome())
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1431,15 +1468,15 @@ fn monochrome_rejects_superres() {
     // The combination is refused rather than half-supported, and the check runs before the matrix
     // rule so the reported reason is the one that actually applies.
     let p = mono_planes(32, 16, |x, y| (x ^ y) as u8);
-    let err = encode_still_intra_superres(&p, 40, 0)
+    let err = encode_still_with_recon(&p, &Av1EncodeConfig::new(40).with_superres(0))
         .expect_err("superres over a monochrome source is refused");
     assert_eq!(
         err.static_message(),
-        Some("AV1: superres over a monochrome source is not implemented")
+        Some("AV1: superres is implemented for 4:4:4 sources only")
     );
     // The same request succeeds for a 4:4:4 source, so the guard keys on the plane count.
     let rgb = planes(32, 16, |x, y| [x as u8, y as u8, 0]);
-    assert!(encode_still_intra_superres(&rgb, 40, 0).is_ok());
+    assert!(encode_still_with_recon(&rgb, &Av1EncodeConfig::new(40).with_superres(0)).is_ok());
 }
 
 // ---- high bit depth (#398) --------------------------------------------------------------------
@@ -1480,8 +1517,8 @@ fn high_bit_depth_lossless_reconstruction_matches_both_decoders() {
     for bits in [BitDepth::Ten, BitDepth::Twelve] {
         for &(w, h) in &[(1, 1), (8, 8), (17, 13), (64, 48)] {
             let src = planes16(w, h, bits, texture16(bits));
-            let encoded = encode_still_intra16_with(&src, 0, Av1Colour::default()).unwrap();
-            assert_eq!(encoded.1.bit_depth, bits);
+            let encoded = encode_still16_with_recon(&src, &Av1EncodeConfig::new(0)).unwrap();
+            assert_eq!(encoded.recon.bit_depth, bits);
             check_with(encoded, 0);
         }
     }
@@ -1497,15 +1534,16 @@ fn high_bit_depth_lossy_reconstruction_matches_both_decoders() {
     //
     // The lossy colour is BT.709 YCbCr, which leaves the §5.5.2 sRGB shortcut — so 12-bit also
     // exercises the coded `subsampling_x` bit that only profile 2 at 12 bits emits.
-    let colour = Av1Colour {
-        matrix: MatrixCoefficients::Bt709,
-        ..Av1Colour::default()
-    };
+    let colour = Av1Color::default().with_matrix(MatrixCoefficients::Bt709);
     for bits in [BitDepth::Ten, BitDepth::Twelve] {
         for &q in &[4u8, 20, 40, 90, 160, 255] {
             for &(w, h) in &[(8, 8), (17, 13), (40, 24), (100, 70)] {
                 let src = planes16(w, h, bits, texture16(bits));
-                check_with(encode_still_intra16_with(&src, q, colour).unwrap(), q);
+                check_with(
+                    encode_still16_with_recon(&src, &Av1EncodeConfig::new(q).with_color(colour))
+                        .unwrap(),
+                    q,
+                );
             }
         }
     }
@@ -1520,16 +1558,15 @@ fn high_bit_depth_flat_and_two_tone_content_matches_both_decoders() {
         let max = bits.max_value();
         for &q in &[4u8, 40, 160] {
             check_with(
-                encode_still_intra16_with(
+                encode_still16_with_recon(
                     &planes16(48, 32, bits, |_, _| [max, 0, max / 2]),
-                    q,
-                    Av1Colour::default(),
+                    &Av1EncodeConfig::new(q),
                 )
                 .unwrap(),
                 q,
             );
             check_with(
-                encode_still_intra16_with(
+                encode_still16_with_recon(
                     &planes16(48, 32, bits, |x, y| {
                         let v = if (x / 8 + y / 8).is_multiple_of(2) {
                             max
@@ -1538,8 +1575,7 @@ fn high_bit_depth_flat_and_two_tone_content_matches_both_decoders() {
                         };
                         [v, v, v]
                     }),
-                    q,
-                    Av1Colour::default(),
+                    &Av1EncodeConfig::new(q),
                 )
                 .unwrap(),
                 q,
@@ -1570,7 +1606,11 @@ fn high_bit_depth_monochrome_matches_both_decoders() {
             )
             .unwrap();
             check_with(
-                encode_still_intra16_with(&src, q, Av1Colour::monochrome()).unwrap(),
+                encode_still16_with_recon(
+                    &src,
+                    &Av1EncodeConfig::new(q).with_color(Av1Color::monochrome()),
+                )
+                .unwrap(),
                 q,
             );
         }
@@ -1600,10 +1640,10 @@ fn an_eight_bit_planar16_encodes_exactly_as_planar8_does() {
                 std::array::from_fn(|i| eight.planes()[i].iter().copied().map(u16::from).collect()),
             )
             .unwrap();
-            let a = encode_still_intra_with(&eight, q, Av1Colour::default()).unwrap();
-            let b = encode_still_intra16_with(&wide, q, Av1Colour::default()).unwrap();
-            assert_eq!(a.0.obus, b.0.obus, "{w}x{h} q{q}");
-            assert_eq!(a.1.planes, b.1.planes, "{w}x{h} q{q}");
+            let a = encode_still_with_recon(&eight, &Av1EncodeConfig::new(q)).unwrap();
+            let b = encode_still16_with_recon(&wide, &Av1EncodeConfig::new(q)).unwrap();
+            assert_eq!(a.still.obus, b.still.obus, "{w}x{h} q{q}");
+            assert_eq!(a.recon.planes, b.recon.planes, "{w}x{h} q{q}");
         }
     }
 }
@@ -1613,7 +1653,7 @@ fn sixteen_bit_samples_are_rejected() {
     // `BitDepth::Sixteen` is a `gamut-color` depth for the interleaved 16-bit pipelines, not an AV1
     // one — §6.4.1 defines 8, 10 and 12. It is refused rather than silently coded as 12.
     let src = planes16(8, 8, BitDepth::Sixteen, |_, _| [65535, 0, 30000]);
-    let err = encode_still_intra16_with(&src, 40, Av1Colour::default())
+    let err = encode_still16_with_recon(&src, &Av1EncodeConfig::new(40))
         .expect_err("16-bit samples are not an AV1 depth");
     assert_eq!(
         err.static_message(),
@@ -1651,13 +1691,14 @@ fn every_speed_preset_matches_both_decoders() {
     // bit-exactly — and because each prunes a different set, each reaches a different mix of
     // modes, partitions and transforms, which is exactly what the reconstruction must follow.
     let ycc = colour_for(MatrixCoefficients::Bt709, ColorRange::Full);
-    for &speed in Speed::ALL {
+    for &effort in Effort::ALL {
         for &q in &[8u8, 60, 160] {
             for &(w, h) in &[(64, 64), (100, 70), (160, 96)] {
                 let mix = speed_mix(w, h);
                 let rgb = planes(w, h, &mix);
                 check_with(
-                    encode_still_intra_with_speed(&rgb, q, Av1Colour::default(), speed).unwrap(),
+                    encode_still_with_recon(&rgb, &Av1EncodeConfig::new(q).with_effort(effort))
+                        .unwrap(),
                     q,
                 );
                 for ss in [ChromaSubsampling::Cs420, ChromaSubsampling::Cs422] {
@@ -1670,21 +1711,34 @@ fn every_speed_preset_matches_both_decoders() {
                         &mix,
                     );
                     check_with(
-                        encode_still_intra_with_speed(&src, q, ycc, speed).unwrap(),
+                        encode_still_with_recon(
+                            &src,
+                            &Av1EncodeConfig::new(q).with_color(ycc).with_effort(effort),
+                        )
+                        .unwrap(),
                         q,
                     );
                 }
                 let mono = mono_planes(w, h, |x, y| mix(x, y)[0]);
                 check_with(
-                    encode_still_intra_with_speed(&mono, q, Av1Colour::monochrome(), speed)
-                        .unwrap(),
+                    encode_still_with_recon(
+                        &mono,
+                        &Av1EncodeConfig::new(q)
+                            .with_color(Av1Color::monochrome())
+                            .with_effort(effort),
+                    )
+                    .unwrap(),
                     q,
                 );
                 let deep = planes16(w, h, BitDepth::Ten, |x, y| {
                     mix(x, y).map(|v| u16::from(v) << 2)
                 });
                 check_with(
-                    encode_still_intra16_with_speed(&deep, q, ycc, speed).unwrap(),
+                    encode_still16_with_recon(
+                        &deep,
+                        &Av1EncodeConfig::new(q).with_color(ycc).with_effort(effort),
+                    )
+                    .unwrap(),
                     q,
                 );
             }

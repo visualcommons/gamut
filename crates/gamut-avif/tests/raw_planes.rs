@@ -12,7 +12,7 @@
 //! Building this needs the `third_party/libavif` + `third_party/dav1d` submodules and a C
 //! toolchain, like the crate's other oracle tests.
 
-use gamut_av1::{Av1Colour, encode_still_intra_with_speed, encode_still_intra16_with_speed};
+use gamut_av1::Av1Color;
 use gamut_avif::{
     AlphaMode, Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, DecodedFrame, RawPlanes,
 };
@@ -179,10 +179,10 @@ fn lossy_subsampled_planes_decode_to_gamut_av1s_own_reconstruction() {
     // other planes", and the reconstruction equality above is the exact claim.
     const QUALITY: u8 = 90;
     const MEAN_ERROR_8: f64 = 12.0;
-    let colour = |matrix| Av1Colour {
-        matrix,
-        range: ColorRange::Limited,
-        ..Av1Colour::default()
+    let colour = |matrix| {
+        Av1Color::DEFAULT
+            .with_matrix(matrix)
+            .with_range(ColorRange::Limited)
     };
     let mean_error = |a: &[Vec<u16>; 3], b: &[Vec<u16>; 3]| -> f64 {
         let diffs: Vec<u16> = a
@@ -198,13 +198,14 @@ fn lossy_subsampled_planes_decode_to_gamut_av1s_own_reconstruction() {
     let raw = RawPlanes::eight(&p8, None, MatrixCoefficients::Bt601, ColorRange::Limited).unwrap();
     let decoded = libavif_oracle::decode_avif(&encoder.encode_raw_planes_to_vec(raw).unwrap())
         .expect("libavif decodes");
-    let (_, recon) = encode_still_intra_with_speed(
+    let recon = gamut_av1::encode_still_with_recon(
         &p8,
-        quality_to_quant(QUALITY),
-        colour(MatrixCoefficients::Bt601),
-        encoder.speed(),
+        &gamut_av1::Av1EncodeConfig::new(quality_to_quant(QUALITY))
+            .with_color(colour(MatrixCoefficients::Bt601))
+            .with_effort(encoder.effort()),
     )
-    .unwrap();
+    .unwrap()
+    .recon;
     assert_eq!(decoded.yuv_format, yuv_format(ChromaSubsampling::Cs420));
     assert_eq!(decoded.planes, recon.planes);
     let err = mean_error(&decoded.planes, &widened(&p8));
@@ -220,13 +221,14 @@ fn lossy_subsampled_planes_decode_to_gamut_av1s_own_reconstruction() {
     .unwrap();
     let decoded = libavif_oracle::decode_avif(&encoder.encode_raw_planes_to_vec(raw).unwrap())
         .expect("libavif decodes");
-    let (_, recon) = encode_still_intra16_with_speed(
+    let recon = gamut_av1::encode_still16_with_recon(
         &p16,
-        quality_to_quant(QUALITY),
-        colour(MatrixCoefficients::Bt2020Ncl),
-        encoder.speed(),
+        &gamut_av1::Av1EncodeConfig::new(quality_to_quant(QUALITY))
+            .with_color(colour(MatrixCoefficients::Bt2020Ncl))
+            .with_effort(encoder.effort()),
     )
-    .unwrap();
+    .unwrap()
+    .recon;
     assert_eq!(decoded.yuv_format, yuv_format(ChromaSubsampling::Cs422));
     assert_eq!(decoded.planes, recon.planes);
     // Four times the 8-bit bound: the same quantizer step is two bits finer relative to a 10-bit

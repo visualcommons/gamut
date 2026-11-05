@@ -31,7 +31,7 @@ encoding** that is:
 ## Usage
 
 ```rust,no_run
-use gamut_av1::encode_still_lossless_identity;
+use gamut_av1::{Av1EncodeConfig, encode_still};
 use gamut_color::Planar8;
 
 // 8-bit interleaved RGB -> identity 4:4:4 planes -> lossless AV1 keyframe.
@@ -40,7 +40,7 @@ let rgb = vec![0u8; (width * height * 3) as usize];
 let dims = gamut_core::Dimensions::new(width, height).expect("non-zero dimensions");
 let planes = Planar8::from_rgb8_identity(&rgb, dims).expect("valid input");
 
-let still = encode_still_lossless_identity(&planes).expect("encode");
+let still = encode_still(&planes, &Av1EncodeConfig::lossless()).expect("encode");
 // `still.obus` is the AV1 temporal unit; `still.config` carries the sequence-header
 // values that `gamut-avif` mirrors into the `av1C`/`colr` boxes.
 std::fs::write("out.obu", &still.obus).unwrap();
@@ -49,38 +49,41 @@ std::fs::write("out.obu", &still.obus).unwrap();
 ## Status
 
 The encoder codes **lossless and lossy all-intra keyframes**, producing the AV1 temporal unit that
-`gamut-avif` wraps in an AVIF still image:
+`gamut-avif` wraps in an AVIF still image. One entry point per sample width — `encode_still` for
+`Planar8`, `encode_still16` for `Planar16`, each with a `_with_recon` twin that also returns the
+encoder's reconstruction — takes an `Av1EncodeConfig` carrying every knob below:
 
-- **Lossless** (`encode_still_lossless_identity`): identity matrix, full range, `DC_PRED` and the
-  forced `TX_4X4` Walsh–Hadamard transform.
-- **Lossy** (`encode_still_intra*`): the eight directional modes with `angle_delta`,
+- **Lossless** (`Av1EncodeConfig::lossless()`, i.e. `qindex = 0`): identity matrix, full range,
+  `DC_PRED` and the forced `TX_4X4` Walsh–Hadamard transform.
+- **Lossy** (`Av1EncodeConfig::new(qindex)`): the eight directional modes with `angle_delta`,
   `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, recursive filter-intra, chroma-from-luma and palette;
   DCT/ADST/identity transforms with variable `tx_depth` and `TX_SET_INTRA_2` type selection;
   recursive partitioning; uniform multi-tile; and the in-loop filters (deblocking, CDEF, loop
   restoration, superres). Every block is coded at the frame-level quantizer and loop-filter level.
 - **Adapting CDFs** (`disable_cdf_update = 0`, AV1 §8.2.6): each tile starts from the §9.4
   defaults and nudges every context toward what it codes.
-- **Colour signalling**: `encode_still_intra_with` takes an `Av1Colour` (the CICP
+- **Colour signalling**: `Av1EncodeConfig::with_color` takes an `Av1Color` (the CICP
   primaries/transfer/matrix triple plus the signal range) and mirrors it into the sequence
   header's `color_config()` and the `av1C`/`colr` values `gamut-avif` stamps.
 - **Chroma sampling** comes from the buffer: 4:4:4, 4:2:2 and 4:2:0 are all coded, and
   **monochrome** (`mono_chrome = 1`) from a `ChromaSubsampling::Cs400` buffer — use
-  `Av1Colour::monochrome()`, since §6.4.2 permits `MC_IDENTITY` only at 4:4:4. The identity matrix
+  `Av1Color::monochrome()`, since §6.4.2 permits `MC_IDENTITY` only at 4:4:4. The identity matrix
   is refused below 4:4:4.
-- **Bit depth** comes from the buffer too: `Planar8` codes 8-bit, and `encode_still_intra16_with`
-  codes a `gamut_color::Planar16` at 10 or 12 bits. `BitDepth::Sixteen` is not an AV1 depth and is
-  rejected; superres has no high-bit-depth entry point.
+- **Bit depth** comes from the buffer too: `Planar8` codes 8-bit, and `encode_still16` codes a
+  `gamut_color::Planar16` at 10 or 12 bits. `BitDepth::Sixteen` is not an AV1 depth and is
+  rejected; superres (`Av1EncodeConfig::with_superres`) is coded for lossy 8-bit 4:4:4 sources only.
 - **`seq_profile`** is a joint function of the two (Annex A.2): Main (0) for 4:2:0 and monochrome,
   High (1) for 4:4:4, and Professional (2) for 4:2:2 or any layout at 12 bits.
-- **Encode speed** is a `Speed` preset (`encode_still_intra_with_speed`): each step prunes the
-  lossy mode-decision search; the default is `Speed::Balanced`.
-- **Tiling and threads** are `EncodeOptions` (`encode_still_intra_with_options`): a `Tiling` picks
+- **Encode effort** is an `Effort` preset (`Av1EncodeConfig::with_effort`): each step down from
+  `Effort::Thorough` prunes the lossy mode-decision search; the default is `Effort::Balanced`.
+- **Tiling and threads** are `Av1EncodeConfig::with_tiling` / `with_threads`: a `Tiling` picks
   the uniform tile layout, and `threads` caps how many tiles are coded concurrently. The stream
   depends on the layout only, never on the thread count.
 
 ```rust,ignore
 let planes = Planar16::from_planes(w, h, BitDepth::Twelve, [y, u, v])?;
-let (still, recon) = encode_still_intra16_with(&planes, qindex, Av1Colour::default())?;
+let StillWithRecon { still, recon, .. } =
+    encode_still16_with_recon(&planes, &Av1EncodeConfig::new(qindex))?;
 ```
 
 The remaining surface (quantizer matrices and the AVIF-level alpha/metadata/container features)
@@ -102,7 +105,9 @@ use gamut_av1::Av1Decoder;
 let info = Av1Decoder::new().inspect(temporal_unit)?;
 println!(
     "{}x{} at {}-bit",
-    info.frame.upscaled_width, info.frame.frame_height, info.sequence.color.bit_depth,
+    info.frame.upscaled_width,
+    info.frame.frame_height,
+    info.sequence.color.bit_depth.bits(),
 );
 # }
 # Ok(())

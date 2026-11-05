@@ -37,7 +37,7 @@
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
 //!
 //! How many of those candidates the lossy path actually tries is a [`Search`], resolved from the
-//! caller's `Speed` preset; a bare `FrameEncoder` runs the full search. The partition (bottom-up, 8×8 to
+//! caller's `Effort` preset; a bare `FrameEncoder` runs the full search. The partition (bottom-up, 8×8 to
 //! 64×64), the luma mode (with filter-intra) jointly with the transform depth, the transform type
 //! and the CfL alphas are each decided by rate–distortion cost:
 //! every candidate is *trialled* — reconstructed exactly as it would be coded, its symbols priced
@@ -53,7 +53,7 @@ use gamut_color::{ChromaSubsampling, Planar8, Planar16};
 use gamut_dsp::math::{clip_pixel, round2, round2_signed};
 
 use crate::cdf;
-use crate::encoder::Speed;
+use crate::encoder::Effort;
 use crate::filter::{CdefBlocks, CdefStrengths, FrameFilters, LrUnits};
 use crate::geom::{PlaneGeom, has_chroma, plane_residual_size};
 use crate::headers::TileLayout;
@@ -138,7 +138,7 @@ const TX_TYPE_TRIALS: [(TxType, usize); 4] = [
     (TxType::Idtx, 0),
 ];
 
-/// The mode-decision search a frame runs: a [`Speed`] preset resolved into per-tool candidate
+/// The mode-decision search a frame runs: a [`Effort`] preset resolved into per-tool candidate
 /// sets. Every field narrows what the encoder *tries*; none changes how a chosen candidate is
 /// signalled or reconstructed, so every value codes a conformant, bit-exact stream.
 ///
@@ -173,8 +173,8 @@ pub(crate) struct Search {
 }
 
 impl Search {
-    /// The search a [`Speed`] preset runs. The table is documented on [`Speed`].
-    pub(crate) fn for_speed(speed: Speed) -> Self {
+    /// The search a [`Effort`] preset runs. The table is documented on [`Effort`].
+    pub(crate) fn for_effort(effort: Effort) -> Self {
         let thorough = Self {
             directional: &DIRECTIONAL_MODES,
             angle_deltas: &ALL_ANGLE_DELTAS,
@@ -195,11 +195,11 @@ impl Search {
             tx_type_trials: 1,
             ..balanced
         };
-        match speed {
-            Speed::Thorough => thorough,
-            Speed::Balanced => balanced,
-            Speed::Fast => fast,
-            Speed::Fastest => Self {
+        match effort {
+            Effort::Thorough => thorough,
+            Effort::Balanced => balanced,
+            Effort::Fast => fast,
+            Effort::Fastest => Self {
                 directional: &[],
                 cfl_magnitudes: None,
                 tx_type_trials: 0,
@@ -499,10 +499,14 @@ fn max_tx_size_rect(w: usize, h: usize) -> TxSize {
         (64, 16) => TxSize::Tx64x16,
         (64, 32) => TxSize::Tx64x32,
         (64, 64) => TxSize::Tx64x64,
-        // AV1 has no block whose aspect ratio exceeds 4:1, so no other pair is constructible.
-        // Coding one against a mismatched transform would desynchronise the decoder silently, so
-        // fail here instead.
-        _ => panic!("no transform matches this block shape"),
+        // AV1 has no block whose aspect ratio exceeds 4:1, and every caller passes a block (or a
+        // §5.11.38 residual block) the partition search built, so no other pair is constructible.
+        // The invariant is asserted in debug builds; a library path does not panic, so a release
+        // build falls back to the smallest transform rather than abort the caller's process.
+        _ => {
+            debug_assert!(false, "no transform matches a {w}x{h} block");
+            TxSize::Tx4x4
+        }
     }
 }
 
@@ -869,10 +873,10 @@ impl<'a> FrameEncoder<'a> {
             sb_r: 0,
             sb_c: 0,
             block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
-            // The full search, not `Speed::default()`: every public entry point replaces this
+            // The full search, not `Effort::default()`: every public entry point replaces this
             // with its caller's preset through `with_search`, so only the crate's own tests
             // construct an encoder that keeps it, and they are written against the full search.
-            search: Search::for_speed(Speed::Thorough),
+            search: Search::for_effort(Effort::Thorough),
             decided: Vec::new(),
             decided_partitions: Vec::new(),
             sb_decisions: SbDecisions::default(),
@@ -1217,7 +1221,7 @@ impl<'a> FrameEncoder<'a> {
     /// [`crate::filter::choose_deblock_level`] and [`crate::filter::choose_cdef`] search them.
     ///
     /// Cost: this is called once per frame, from the frame-level path after `encode_tiles` has
-    /// returned, over the whole reconstruction. It is the same search at every `Speed`, so a
+    /// returned, over the whole reconstruction. It is the same search at every `Effort`, so a
     /// faster preset does not shorten it, and it runs on one thread whatever the caller's thread
     /// cap — only the tile coding before it is concurrent. Measured, it is about 6–8% of the
     /// tile-coding time: 0.65 s against 11.0 s at 256×256, and 2.68 s against 33.0 s at 512×512.
@@ -2376,9 +2380,14 @@ impl<'a> FrameEncoder<'a> {
         // `bw >> ss_x` — it clamps to a 4-sample minimum.
         let Some((rw, rh)) = plane_residual_size(bw, bh, plane, self.subsampling) else {
             // `BLOCK_INVALID`. Only reachable under 4:2:2 for a taller-than-wide block, which
-            // §6.10.4 forbids and the partition search must never emit; coding one would
-            // produce a stream both reference decoders reject.
-            panic!("no plane-{plane} residual size for a {bw}x{bh} block");
+            // §6.10.4 forbids and the partition search never emits (it drops `PARTITION_VERT`
+            // there). Asserted in debug builds; a library path does not panic, so a release
+            // build codes no residual for the plane rather than abort the caller's process.
+            debug_assert!(
+                false,
+                "no plane-{plane} residual size for a {bw}x{bh} block"
+            );
+            return (0, 0);
         };
         let (pw, ph) = (ptx.width(), ptx.height());
         // §5.11.34 `baseXBlock`/`baseYBlock`: the MI position is scaled into the plane *before*
@@ -3929,7 +3938,7 @@ impl<'a> FrameEncoder<'a> {
         // (`area`): 16/32/64/128/256/512/1024. The 512 and 1024 tables have no neighbour-context
         // dimension. 32 is reachable only with subsampled chroma (TX_4X8 / TX_8X4).
         let eobpt = eobpt_from_eob(eob);
-        sink.symbol(eobpt - 1, CoeffCdf::EobPt(eob_pt_class(area), ptype));
+        sink.symbol(eobpt - 1, CoeffCdf::EobPt(eob_pt_class(job.tx_size), ptype));
         if eobpt >= 3 {
             let nbits = eobpt - 2;
             // §5.11.39 codes `eob - (1 << nbits) - 1` in `nbits` bits. `eob - 1` lies in
@@ -4258,17 +4267,15 @@ impl CoeffCdf {
     }
 }
 
-/// The `eob_pt_*` table (§5.11.39) for a transform coding `area` coefficients, as the index
-/// [`CoeffCdf::EobPt`] carries: 16, 32, 64, 128, 256, 512 and 1024 map to 0..=6.
+/// The `eob_pt_*` table (§5.11.39) for transform `tx`, as the index [`CoeffCdf::EobPt`] carries:
+/// the coded coefficient count — the transform's area with each axis capped at 32 (§7.13), so
+/// 16, 32, 64, 128, 256, 512 or 1024 — maps to `log2(count) - 4`, `0..=6`.
 ///
-/// Deliberately not a catch-all: a transform area with no table of its own would be coded against
-/// the wrong one and desynchronise the decoder, which surfaces only as a corrupt stream. Fail at
-/// the encoder instead.
-fn eob_pt_class(area: usize) -> usize {
-    match area {
-        16 | 32 | 64 | 128 | 256 | 512 | 1024 => area.ilog2() as usize - 4,
-        other => panic!("no eob_pt CDF for a {other}-coefficient transform"),
-    }
+/// Taking the [`TxSize`] rather than a coefficient count makes the function total: every one of
+/// the 19 transform sizes has a capped area in that set, so no count without a table of its own
+/// can reach the coder.
+fn eob_pt_class(tx: TxSize) -> usize {
+    (tx.log2_width().min(5) + tx.log2_height().min(5) - 4) as usize
 }
 
 /// The tile's symbol coder. Normally every symbol goes into the range coder; while a decision
@@ -4741,29 +4748,29 @@ mod tests {
         // `Fastest` offers no rectangle and stops choosing SPLIT below 16. §6.10.4: at 4:2:2 the
         // taller-than-wide half of PARTITION_VERT has no codable chroma residual, so it is never
         // offered there, while 4:4:4 and 4:2:0 code it.
-        let offered = |ss, speed, bw| {
+        let offered = |ss, effort, bw| {
             let p = flat_chroma_luma(16, ss, |_, _| 128);
-            at_speed(&p, 40, speed).partitions_offered(bw)
+            at_effort(&p, 40, effort).partitions_offered(bw)
         };
         for ss in [ChromaSubsampling::Cs444, ChromaSubsampling::Cs420] {
-            assert_eq!(offered(ss, Speed::Thorough, 8), [0, 3], "{ss:?} 8x8");
+            assert_eq!(offered(ss, Effort::Thorough, 8), [0, 3], "{ss:?} 8x8");
             assert_eq!(
-                offered(ss, Speed::Thorough, 16),
+                offered(ss, Effort::Thorough, 16),
                 [0, 1, 2, 3],
                 "{ss:?} 16x16"
             );
-            assert_eq!(offered(ss, Speed::Fast, 32), [0, 1, 2, 3], "{ss:?} 32x32");
-            assert_eq!(offered(ss, Speed::Thorough, 64), [0, 3], "{ss:?} 64x64");
-            assert_eq!(offered(ss, Speed::Fastest, 8), [0], "{ss:?} Fastest 8x8");
+            assert_eq!(offered(ss, Effort::Fast, 32), [0, 1, 2, 3], "{ss:?} 32x32");
+            assert_eq!(offered(ss, Effort::Thorough, 64), [0, 3], "{ss:?} 64x64");
+            assert_eq!(offered(ss, Effort::Fastest, 8), [0], "{ss:?} Fastest 8x8");
             assert_eq!(
-                offered(ss, Speed::Fastest, 16),
+                offered(ss, Effort::Fastest, 16),
                 [0, 3],
                 "{ss:?} Fastest 16x16"
             );
         }
         let cs422 = ChromaSubsampling::Cs422;
-        assert_eq!(offered(cs422, Speed::Thorough, 16), [0, 1, 3]);
-        assert_eq!(offered(cs422, Speed::Thorough, 32), [0, 1, 3]);
+        assert_eq!(offered(cs422, Effort::Thorough, 16), [0, 1, 3]);
+        assert_eq!(offered(cs422, Effort::Thorough, 32), [0, 1, 3]);
     }
 
     /// An `n x n` frame in `ss` whose luma is `luma(x, y)` and whose chroma planes are flat.
@@ -4784,8 +4791,8 @@ mod tests {
 
     /// `select_cfl`'s answer for the 8x8 block at the origin of `planes`, its luma coded `DC_PRED`
     /// over one 8x8 transform.
-    fn cfl_at_origin(planes: &Planar8, speed: Speed) -> Option<(i32, i32)> {
-        at_speed(planes, 40, speed).select_cfl(0, 0, 8, DC_LUMA, TxSize::Tx8x8)
+    fn cfl_at_origin(planes: &Planar8, effort: Effort) -> Option<(i32, i32)> {
+        at_effort(planes, 40, effort).select_cfl(0, 0, 8, DC_LUMA, TxSize::Tx8x8)
     }
 
     #[test]
@@ -4811,7 +4818,7 @@ mod tests {
                 (122 + x * 4) as u8
             }
         });
-        let (au, av) = cfl_at_origin(&up, Speed::Thorough).expect("correlated chroma wants CfL");
+        let (au, av) = cfl_at_origin(&up, Effort::Thorough).expect("correlated chroma wants CfL");
         assert_eq!(au, 2, "positively correlated chroma ⇒ alpha 2");
         assert_eq!(au, av, "both planes carry the same pattern");
 
@@ -4823,7 +4830,7 @@ mod tests {
             }
         });
         let (au, _) =
-            cfl_at_origin(&down, Speed::Thorough).expect("anti-correlated chroma wants CfL");
+            cfl_at_origin(&down, Effort::Thorough).expect("anti-correlated chroma wants CfL");
         assert_eq!(au, -2, "anti-correlated chroma ⇒ alpha -2");
 
         // Flat chroma has no high-frequency content to predict, so plain DC wins and no alpha is
@@ -4835,7 +4842,7 @@ mod tests {
                 if p == 0 { (100 + x * 8) as u8 } else { 128 }
             },
         );
-        assert_eq!(cfl_at_origin(&flat, Speed::Thorough), None);
+        assert_eq!(cfl_at_origin(&flat, Effort::Thorough), None);
     }
 
     #[test]
@@ -4848,13 +4855,13 @@ mod tests {
             1 => (122 + x * 4) as u8,
             _ => 128,
         });
-        assert_eq!(cfl_at_origin(&u_only, Speed::Thorough), Some((2, 0)));
+        assert_eq!(cfl_at_origin(&u_only, Effort::Thorough), Some((2, 0)));
         let v_only = planes_420_with(16, 16, |p, x, _| match p {
             0 => (100 + x * 8) as u8,
             1 => 128,
             _ => (122 + x * 4) as u8,
         });
-        assert_eq!(cfl_at_origin(&v_only, Speed::Thorough), Some((0, 2)));
+        assert_eq!(cfl_at_origin(&v_only, Effort::Thorough), Some((0, 2)));
     }
 
     #[test]
@@ -4866,15 +4873,15 @@ mod tests {
             0 => (100 + x * 8) as u8,
             _ => (122 + x * 4) as u8,
         });
-        let mut e = at_speed(&up, 40, Speed::Thorough);
+        let mut e = at_effort(&up, 40, Effort::Thorough);
         let before = Snapshot::of(&e);
         assert!(e.select_cfl(0, 0, 8, DC_LUMA, TxSize::Tx8x8).is_some());
         assert!(Snapshot::of(&e) == before, "select_cfl changed the encoder");
     }
 
-    /// `planes`' encoder at `qindex`, running the search `speed` resolves to.
-    fn at_speed(planes: &Planar8, qindex: u8, speed: Speed) -> FrameEncoder<'_> {
-        FrameEncoder::new(planes, qindex).with_search(Search::for_speed(speed))
+    /// `planes`' encoder at `qindex`, running the search `effort` resolves to.
+    fn at_effort(planes: &Planar8, qindex: u8, effort: Effort) -> FrameEncoder<'_> {
+        FrameEncoder::new(planes, qindex).with_search(Search::for_effort(effort))
     }
 
     #[test]
@@ -4889,8 +4896,8 @@ mod tests {
                 (122 + x * 4) as u8
             }
         });
-        assert_eq!(cfl_at_origin(&up, Speed::Fast), Some((2, 2)));
-        assert_eq!(cfl_at_origin(&up, Speed::Fastest), None);
+        assert_eq!(cfl_at_origin(&up, Effort::Fast), Some((2, 2)));
+        assert_eq!(cfl_at_origin(&up, Effort::Fastest), None);
 
         // Chroma rising 6 per step wants alpha 3, which the thinned ladder does not hold: `Fast`
         // must settle on a ladder rung instead.
@@ -4901,17 +4908,17 @@ mod tests {
                 (119 + x * 6) as u8
             }
         });
-        assert_eq!(cfl_at_origin(&steep, Speed::Thorough), Some((3, 3)));
+        assert_eq!(cfl_at_origin(&steep, Effort::Thorough), Some((3, 3)));
         let (au, _) =
-            cfl_at_origin(&steep, Speed::Fast).expect("correlated chroma still wants CfL");
+            cfl_at_origin(&steep, Effort::Fast).expect("correlated chroma still wants CfL");
         assert!([2, 4].contains(&au), "alpha {au} is not on the Fast ladder");
     }
 
     /// `select_tx_type`'s choice for the luma 4x4 at the origin of a mid-grey frame at `qindex`
     /// whose residual is `res` (the prediction is the source minus `res`).
-    fn pick_tx(qindex: u8, speed: Speed, res: &[i32; 16]) -> TxChoice {
+    fn pick_tx(qindex: u8, effort: Effort, res: &[i32; 16]) -> TxChoice {
         let p = grey4x4();
-        let e = at_speed(&p, qindex, speed);
+        let e = at_effort(&p, qindex, effort);
         let pred: Vec<i32> = res.iter().map(|&r| 128 - r).collect();
         let site = TxSite {
             plane: 0,
@@ -4932,12 +4939,12 @@ mod tests {
         // `Fastest` DCT_DCT alone, so neither may answer IDTX (symbol 0).
         let mut impulse = [0i32; 16];
         impulse[5] = 220;
-        assert_eq!(pick_tx(48, Speed::Thorough, &impulse).symbol, 0);
-        assert!([1, 2].contains(&pick_tx(48, Speed::Fast, &impulse).symbol));
-        assert_eq!(pick_tx(48, Speed::Fastest, &impulse).symbol, 1);
+        assert_eq!(pick_tx(48, Effort::Thorough, &impulse).symbol, 0);
+        assert!([1, 2].contains(&pick_tx(48, Effort::Fast, &impulse).symbol));
+        assert_eq!(pick_tx(48, Effort::Fastest, &impulse).symbol, 1);
         // A screening trial prices DCT_DCT alone even under the full search.
         let p = grey4x4();
-        let e = at_speed(&p, 48, Speed::Thorough);
+        let e = at_effort(&p, 48, Effort::Thorough);
         let pred: Vec<i32> = impulse.iter().map(|&r| 128 - r).collect();
         let site = TxSite {
             plane: 0,
@@ -4963,12 +4970,12 @@ mod tests {
             },
         );
         assert!(
-            at_speed(&two, 40, Speed::Fast)
+            at_effort(&two, 40, Effort::Fast)
                 .decide_palette(0, 0, 16)
                 .is_some()
         );
         assert!(
-            at_speed(&two, 40, Speed::Fastest)
+            at_effort(&two, 40, Effort::Fastest)
                 .decide_palette(0, 0, 16)
                 .is_none()
         );
@@ -5048,14 +5055,14 @@ mod tests {
             px.copy_from_slice(&[v, v.wrapping_mul(3), 128]);
         }
         let p = Planar8::from_rgb8_identity(&rgb, dims(64, 64)).unwrap();
-        let leaves = |speed| {
-            let mut e = at_speed(&p, 40, speed);
+        let leaves = |effort| {
+            let mut e = at_effort(&p, 40, effort);
             e.clear_block_decoded(0, 0);
             e.encode_partition(0, 0, 64);
             e.mi_bsl.iter().filter(|&&bsl| bsl == 0).count()
         };
-        assert!(leaves(Speed::Thorough) > 0, "the full search reaches 4x4");
-        assert_eq!(leaves(Speed::Fastest), 0, "no 4x4 leaf by choice");
+        assert!(leaves(Effort::Thorough) > 0, "the full search reaches 4x4");
+        assert_eq!(leaves(Effort::Fastest), 0, "no 4x4 leaf by choice");
     }
 
     /// Off-axis stripes: content directional prediction wins on, at a base angle plus a delta.
@@ -5066,7 +5073,7 @@ mod tests {
     /// Luma decisions of the square-block mode searches over a 64x64 frame (one superblock) whose
     /// luma is `luma(x, y)`, with the reconstruction primed to the source so every predictor sees
     /// real neighbours: each interior 8x8 (one 8x8 transform), then each interior 4x4.
-    fn mode_decisions(speed: Speed, luma: fn(f64, f64) -> f64) -> (Vec<LumaMode>, Vec<LumaMode>) {
+    fn mode_decisions(effort: Effort, luma: fn(f64, f64) -> f64) -> (Vec<LumaMode>, Vec<LumaMode>) {
         const N: usize = 64;
         let mut rgb = vec![0u8; N * N * 3];
         for (i, px) in rgb.as_chunks_mut::<3>().0.iter_mut().enumerate() {
@@ -5074,7 +5081,7 @@ mod tests {
             px.copy_from_slice(&[128, v as u8, 128]);
         }
         let p = Planar8::from_rgb8_identity(&rgb, dims(N as u32, N as u32)).unwrap();
-        let mut e = at_speed(&p, 40, speed);
+        let mut e = at_effort(&p, 40, effort);
         let cw = e.geom[0].coded_w;
         for y in 0..N {
             for x in 0..N {
@@ -5099,12 +5106,12 @@ mod tests {
 
     #[test]
     fn select_luma_mode_refines_angles_only_under_the_full_search() {
-        let (thorough, _) = mode_decisions(Speed::Thorough, stripes);
+        let (thorough, _) = mode_decisions(Effort::Thorough, stripes);
         assert!(
             thorough.iter().any(|m| m.angle_delta != 0),
             "off-axis stripes take an angle refinement somewhere: {thorough:?}"
         );
-        let (balanced, _) = mode_decisions(Speed::Balanced, stripes);
+        let (balanced, _) = mode_decisions(Effort::Balanced, stripes);
         assert!(balanced.iter().all(|m| m.angle_delta == 0), "{balanced:?}");
     }
 
@@ -5115,13 +5122,13 @@ mod tests {
 
     #[test]
     fn filter_intra_is_tried_only_below_the_fast_preset() {
-        let (nxn, four) = mode_decisions(Speed::Balanced, shading);
+        let (nxn, four) = mode_decisions(Effort::Balanced, shading);
         assert!(
             nxn.iter().any(|d| d.filter_intra.is_some())
                 && four.iter().any(|d| d.filter_intra.is_some()),
             "some block of each size prefers filter-intra: {nxn:?} {four:?}"
         );
-        let (nxn, four) = mode_decisions(Speed::Fast, shading);
+        let (nxn, four) = mode_decisions(Effort::Fast, shading);
         assert!(nxn.iter().all(|d| d.filter_intra.is_none()), "{nxn:?}");
         assert!(four.iter().all(|d| d.filter_intra.is_none()), "{four:?}");
     }
@@ -5130,12 +5137,12 @@ mod tests {
     fn directional_modes_are_tried_only_below_the_fastest_preset() {
         // ≥8×8 only: `Fastest` codes no lossy 4×4 block (see `Search::directional`), so the 4×4
         // search has no pruned configuration to pin.
-        let (nxn, _) = mode_decisions(Speed::Fast, stripes);
+        let (nxn, _) = mode_decisions(Effort::Fast, stripes);
         assert!(
             nxn.iter().any(|d| is_directional(d.mode)),
             "stripes pick a directional mode: {nxn:?}"
         );
-        let (nxn, _) = mode_decisions(Speed::Fastest, stripes);
+        let (nxn, _) = mode_decisions(Effort::Fastest, stripes);
         assert!(nxn.iter().all(|d| !is_directional(d.mode)), "{nxn:?}");
     }
 
@@ -5151,7 +5158,7 @@ mod tests {
             px.copy_from_slice(&[128, v as u8, 128]);
         }
         let p = Planar8::from_rgb8_identity(&rgb, dims(N as u32, N as u32)).unwrap();
-        let mut e = at_speed(&p, 60, Speed::Thorough);
+        let mut e = at_effort(&p, 60, Effort::Thorough);
         let cw = e.geom[0].coded_w;
         for y in 0..N {
             for x in 0..N {
@@ -5204,23 +5211,23 @@ mod tests {
     #[test]
     fn luma_candidates_follow_the_search_and_the_block_shape() {
         let p = grey4x4();
-        let count = |speed, bw, bh| at_speed(&p, 40, speed).luma_candidates(bw, bh).len();
+        let count = |effort, bw, bh| at_effort(&p, 40, effort).luma_candidates(bw, bh).len();
         // A rectangular block: the SMOOTH family and PAETH, whatever the search.
-        assert_eq!(count(Speed::Thorough, 16, 8), 4);
-        assert_eq!(count(Speed::Fastest, 8, 16), 4);
+        assert_eq!(count(Effort::Thorough, 16, 8), 4);
+        assert_eq!(count(Effort::Fastest, 8, 16), 4);
         // 4x4: all 13 modes, then five filter-intra modes under the full search.
-        assert_eq!(count(Speed::Thorough, 4, 4), 13 + 5);
-        assert_eq!(count(Speed::Fast, 4, 4), 13);
+        assert_eq!(count(Effort::Thorough, 4, 4), 13 + 5);
+        assert_eq!(count(Effort::Fast, 4, 4), 13);
         // ≥8x8: five non-directional modes, 8 directional × 7 deltas, five filter-intra modes.
-        assert_eq!(count(Speed::Thorough, 8, 8), 5 + 56 + 5);
-        assert_eq!(count(Speed::Balanced, 16, 16), 5 + 8 + 5);
-        assert_eq!(count(Speed::Fastest, 32, 32), 5);
+        assert_eq!(count(Effort::Thorough, 8, 8), 5 + 56 + 5);
+        assert_eq!(count(Effort::Balanced, 16, 16), 5 + 8 + 5);
+        assert_eq!(count(Effort::Fastest, 32, 32), 5);
         // Filter-intra up to 32x32 only (§5.11.24): a 64x64 block cannot signal it.
-        assert_eq!(count(Speed::Thorough, 32, 32), 5 + 56 + 5);
-        assert_eq!(count(Speed::Thorough, 64, 64), 5 + 56);
+        assert_eq!(count(Effort::Thorough, 32, 32), 5 + 56 + 5);
+        assert_eq!(count(Effort::Thorough, 64, 64), 5 + 56);
         // Cheapest signalling first: `DC_PRED` opens every square list, the rectangle's opens
         // with `SMOOTH_PRED`, and filter-intra closes them.
-        let e = at_speed(&p, 40, Speed::Thorough);
+        let e = at_effort(&p, 40, Effort::Thorough);
         assert_eq!(e.luma_candidates(8, 8)[0], DC_LUMA);
         assert_eq!(e.luma_candidates(4, 4)[0], DC_LUMA);
         assert_eq!(e.luma_candidates(16, 8)[0].mode, SMOOTH_PRED);
@@ -5257,19 +5264,24 @@ mod tests {
     }
 
     #[test]
-    fn eob_pt_class_names_each_coefficient_count_and_refuses_others() {
-        for (area, class) in [
-            (16, 0),
-            (32, 1),
-            (64, 2),
-            (128, 3),
-            (256, 4),
-            (512, 5),
-            (1024, 6),
+    fn eob_pt_class_names_each_capped_coefficient_count() {
+        // One transform per coded count 16..=1024, then the 64-sample sizes, whose coded region
+        // caps each axis at 32 (§7.13) and so shares the 32-capped size's class.
+        for (tx, class) in [
+            (TxSize::Tx4x4, 0),
+            (TxSize::Tx4x8, 1),
+            (TxSize::Tx8x8, 2),
+            (TxSize::Tx8x16, 3),
+            (TxSize::Tx16x16, 4),
+            (TxSize::Tx16x32, 5),
+            (TxSize::Tx32x32, 6),
+            (TxSize::Tx16x64, 5),
+            (TxSize::Tx64x16, 5),
+            (TxSize::Tx32x64, 6),
+            (TxSize::Tx64x64, 6),
         ] {
-            assert_eq!(eob_pt_class(area), class);
+            assert_eq!(eob_pt_class(tx), class, "{tx:?}");
         }
-        assert!(std::panic::catch_unwind(|| eob_pt_class(48)).is_err());
     }
 
     #[test]
@@ -5486,7 +5498,7 @@ mod tests {
     /// with every sample reconstructed as the source — as a decoder would have the neighbours at
     /// a high enough quality.
     fn primed(planes: &Planar8, qindex: u8) -> FrameEncoder<'_> {
-        let mut e = at_speed(planes, qindex, Speed::Thorough);
+        let mut e = at_effort(planes, qindex, Effort::Thorough);
         e.clear_block_decoded(0, 0);
         for (plane, g) in e.geom.iter().enumerate() {
             for y in 0..g.coded_h {
@@ -5559,7 +5571,7 @@ mod tests {
             "the cases reach NONE and SPLIT"
         );
         // A region offered only PARTITION_NONE is coded that way untrialled.
-        let mut fastest = at_speed(&busy, 40, Speed::Fastest);
+        let mut fastest = at_effort(&busy, 40, Effort::Fastest);
         assert_eq!(fastest.choose_partition(0, 0, 8, 0), 0);
     }
 
@@ -5657,8 +5669,8 @@ mod tests {
         // reconstructed sample it wrote, and must neither code nor adapt anything. The segment id
         // and the deltas are coded only under the block-variation exercise.
         let p = busy64();
-        let mut e =
-            at_speed(&p, 40, Speed::Thorough).with_block_variation(BlockVariation::SyntaxExercise);
+        let mut e = at_effort(&p, 40, Effort::Thorough)
+            .with_block_variation(BlockVariation::SyntaxExercise);
         e.clear_block_decoded(0, 0);
         e.read_deltas = true;
         let before = Snapshot::of(&e);
@@ -5846,7 +5858,7 @@ mod tests {
         // run picks V_PRED and the skipped block reconstructs as 127 instead of 128. `qindex` 200
         // makes a bit of rate outweigh that one-step error (at 40 the search keeps DC_PRED anyway).
         let flat = planes_420_with(16, 16, |_, _, _| 128);
-        let mut e = at_speed(&flat, 200, Speed::Thorough);
+        let mut e = at_effort(&flat, 200, Effort::Thorough);
         e.clear_block_decoded(0, 0);
         assert!(e.block_is_skippable(0, 0, 8));
         let (amode, lmode) = e.y_mode_ctx(0, 0);
@@ -6829,13 +6841,13 @@ mod tests {
     fn tx_type_selection_matches_set2_mapping() {
         // A flat residual concentrates into the DCT DC bin (one coefficient), so DCT_DCT wins and
         // is signaled as Tx_Type_Intra_Inv_Set2 symbol 1.
-        assert_eq!(pick_tx(48, Speed::Thorough, &[40; 16]).symbol, 1);
+        assert_eq!(pick_tx(48, Effort::Thorough, &[40; 16]).symbol, 1);
 
         // A single non-DC impulse stays a single coefficient under the identity transform but
         // spreads across many DCT bins, so IDTX wins and is signaled as symbol 0.
         let mut impulse = [0i32; 16];
         impulse[5] = 220;
-        let idtx = pick_tx(48, Speed::Thorough, &impulse);
+        let idtx = pick_tx(48, Effort::Thorough, &impulse);
         assert_eq!(idtx.symbol, 0);
         assert_eq!(idtx.levels.iter().filter(|&&l| l != 0).count(), 1);
     }

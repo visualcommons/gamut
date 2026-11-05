@@ -4,8 +4,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::Av1Colour;
-use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder, Speed};
+use gamut_av1::Av1Color;
+use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder, Effort};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr,
@@ -50,29 +50,28 @@ fn assert_owned_error(error: &Error, kind: ErrorKind, message: &'static str) {
 /// different colour configuration than it asked for.
 /// The chroma an encoder with this colour codes: lossless pins 4:4:4 (identity requires it), and
 /// the lossy default is 4:2:0.
-fn chroma_for(colour: Av1Colour) -> ChromaSubsampling {
-    if colour == Av1Colour::default() {
+fn chroma_for(colour: Av1Color) -> ChromaSubsampling {
+    if colour == Av1Color::default() {
         ChromaSubsampling::Cs444
     } else {
         ChromaSubsampling::Cs420
     }
 }
 
-fn builtin_obus(base_q_idx: u8, colour: Av1Colour, chroma: ChromaSubsampling) -> Vec<u8> {
+fn builtin_obus(base_q_idx: u8, colour: Av1Color, chroma: ChromaSubsampling) -> Vec<u8> {
     let planes = fixture_planes(colour, chroma);
-    gamut_av1::encode_still_intra_with_speed(
+    gamut_av1::encode_still(
         &planes,
-        base_q_idx,
-        colour,
-        AvifEncoder::new().speed(),
+        &gamut_av1::Av1EncodeConfig::new(base_q_idx)
+            .with_color(colour)
+            .with_effort(AvifEncoder::new().effort()),
     )
     .unwrap()
-    .0
     .obus
 }
 
 /// The fixture in the plane layout `colour` describes: identity GBR, or YCbCr through its matrix.
-fn fixture_planes(colour: Av1Colour, chroma: ChromaSubsampling) -> Planar8 {
+fn fixture_planes(colour: Av1Color, chroma: ChromaSubsampling) -> Planar8 {
     let rgb = fixture();
     match colour.matrix {
         MatrixCoefficients::Identity => Planar8::from_rgb8_identity(&rgb, dims()).unwrap(),
@@ -194,7 +193,7 @@ fn encode16(encoder: &AvifEncoder) -> Result<Vec<u8>> {
 struct Wide {
     log: Arc<Mutex<Vec<String>>>,
     depth_seen: Arc<Mutex<Option<BitDepth>>>,
-    speed_seen: Arc<Mutex<Option<Speed>>>,
+    effort_seen: Arc<Mutex<Option<Effort>>>,
 }
 
 impl Av1StillEncoder for Wide {
@@ -209,16 +208,15 @@ impl Av1StillEncoder for Wide {
     fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
         self.log.lock().unwrap().push("wide:encode16".into());
         *self.depth_seen.lock().unwrap() = Some(req.bit_depth());
-        *self.speed_seen.lock().unwrap() = Some(req.speed());
+        *self.effort_seen.lock().unwrap() = Some(req.effort());
         assert_eq!(planes.bit_depth(), req.bit_depth());
-        Ok(gamut_av1::encode_still_intra16_with_speed(
+        Ok(gamut_av1::encode_still16(
             planes,
-            req.base_q_idx(),
-            req.colour(),
-            req.speed(),
+            &gamut_av1::Av1EncodeConfig::new(req.base_q_idx())
+                .with_color(req.colour())
+                .with_effort(req.effort()),
         )
         .expect("the built-in encoder handles the request")
-        .0
         .obus)
     }
 }
@@ -255,7 +253,7 @@ fn a_backend_that_opts_in_owns_the_high_bit_depth_job() {
     encoder.push_backend(Wide {
         log: Arc::clone(&log),
         depth_seen: Arc::clone(&depth_seen),
-        speed_seen: Arc::new(Mutex::new(None)),
+        effort_seen: Arc::new(Mutex::new(None)),
     });
     let out = encode16(&encoder).expect("the backend owns the job");
     assert_eq!(events(&log), ["wide:encode16"]);
@@ -271,19 +269,19 @@ fn a_backend_that_opts_in_owns_the_high_bit_depth_job() {
 #[test]
 fn a_high_bit_depth_backend_sees_the_chosen_preset() {
     for depth in [BitDepth::Ten, BitDepth::Twelve] {
-        let speed_seen = Arc::new(Mutex::new(None));
+        let effort_seen = Arc::new(Mutex::new(None));
         let mut encoder = AvifEncoder::new()
             .with_bit_depth(depth)
-            .with_speed(Speed::Fastest);
+            .with_effort(Effort::Fastest);
         encoder.push_backend(Wide {
             log: log(),
             depth_seen: Arc::new(Mutex::new(None)),
-            speed_seen: Arc::clone(&speed_seen),
+            effort_seen: Arc::clone(&effort_seen),
         });
         encode16(&encoder).unwrap_or_else(|e| panic!("{depth:?}: {e}"));
         assert_eq!(
-            *speed_seen.lock().unwrap(),
-            Some(Speed::Fastest),
+            *effort_seen.lock().unwrap(),
+            Some(Effort::Fastest),
             "{depth:?}"
         );
     }
@@ -308,13 +306,12 @@ fn a_backend_stream_at_the_wrong_depth_is_rejected() {
                 BitDepth::Ten,
                 planes.planes().map(|p| p.iter().map(|&s| s >> 2).collect()),
             )?;
-            Ok(gamut_av1::encode_still_intra16_with_speed(
+            Ok(gamut_av1::encode_still16(
                 &ten,
-                req.base_q_idx(),
-                req.colour(),
-                req.speed(),
+                &gamut_av1::Av1EncodeConfig::new(req.base_q_idx())
+                    .with_color(req.colour())
+                    .with_effort(req.effort()),
             )?
-            .0
             .obus)
         }
     }
@@ -590,7 +587,9 @@ fn backend_stream_dimensions_must_match() {
     let other =
         Planar8::from_rgb8_identity(&vec![7u8; 16 * 8 * 3], Dimensions::new(16, 8).unwrap())
             .unwrap();
-    let wrong = gamut_av1::encode_still_intra(&other, 0).unwrap().0.obus;
+    let wrong = gamut_av1::encode_still(&other, &gamut_av1::Av1EncodeConfig::new(0))
+        .unwrap()
+        .obus;
     let log = log();
     let mut encoder = AvifEncoder::new();
     encoder.push_backend(Scripted::new("wrong", true, Outcome::Bytes(wrong), &log));
@@ -704,10 +703,12 @@ fn backend_stream_must_be_three_plane() {
         [luma, Vec::new(), Vec::new()],
     )
     .unwrap();
-    let obus = gamut_av1::encode_still_intra_with(&mono, 0, Av1Colour::monochrome())
-        .unwrap()
-        .0
-        .obus;
+    let obus = gamut_av1::encode_still(
+        &mono,
+        &gamut_av1::Av1EncodeConfig::new(0).with_color(Av1Color::monochrome()),
+    )
+    .unwrap()
+    .obus;
     let log = log();
     let mut encoder = AvifEncoder::new();
     encoder.push_backend(Scripted::new("mono", true, Outcome::Bytes(obus), &log));
@@ -917,10 +918,7 @@ fn backend_stream_must_signal_the_requested_chroma() {
     // The default lossy encoder asks for 4:2:0 (profile 0); hand back an otherwise-conformant
     // 4:4:4 stream. `av1C` mirrors the sequence header, so accepting this would publish a chroma
     // format that disagrees with the payload (AV1-ISOBMFF §2.3.4).
-    let colour = Av1Colour {
-        matrix: MatrixCoefficients::Bt709,
-        ..Av1Colour::default()
-    };
+    let colour = Av1Color::DEFAULT.with_matrix(MatrixCoefficients::Bt709);
     let stream = builtin_obus(127, colour, ChromaSubsampling::Cs444);
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
@@ -1020,7 +1018,7 @@ impl BitVec {
 fn backend_stream_must_signal_the_requested_colour() {
     // The default lossy encoder asks for BT.709; hand back an otherwise-conformant stream that
     // signals identity instead.
-    let identity_stream = builtin_obus(127, Av1Colour::default(), ChromaSubsampling::Cs444);
+    let identity_stream = builtin_obus(127, Av1Color::default(), ChromaSubsampling::Cs444);
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
     encoder.push_backend(Scripted::new(
@@ -1053,7 +1051,7 @@ fn backend_stream_must_signal_the_requested_colour() {
         ),
     ] {
         let colour = encoder_colour(&encoder);
-        let base_q_idx = if colour == Av1Colour::default() {
+        let base_q_idx = if colour == Av1Color::default() {
             0
         } else {
             127
@@ -1076,15 +1074,13 @@ fn backend_stream_must_signal_the_requested_colour() {
 
 /// The colour an encoder's configuration selects, mirroring `AvifEncoder::colour` — the test needs
 /// it to build a stream the crate will accept.
-fn encoder_colour(encoder: &AvifEncoder) -> Av1Colour {
+fn encoder_colour(encoder: &AvifEncoder) -> Av1Color {
     let config = encoder.config();
     match config.mode {
-        gamut_avif::AvifMode::Lossless => Av1Colour::default(),
-        _ => Av1Colour {
-            matrix: config.matrix,
-            range: config.range,
-            ..Av1Colour::default()
-        },
+        gamut_avif::AvifMode::Lossless => Av1Color::default(),
+        _ => Av1Color::DEFAULT
+            .with_matrix(config.matrix)
+            .with_range(config.range),
     }
 }
 
@@ -1172,7 +1168,8 @@ impl AbiStub {
     fn capture_config(cfg: &EncodeConfig) -> (u32, u32, Option<u8>) {
         assert!(cfg.is_abi_current(), "struct_size guard filled in");
         // Byte 0 is the `base_q_idx` whatever the blob's length: a non-`Thorough` job (the
-        // default `Balanced` included) appends its speed as byte 1, which `seen_extra` captures.
+        // default `Balanced` included) appends its wire speed value as byte 1, which `seen_extra`
+        // captures.
         let q_idx = (cfg.extra_len >= 1 && !cfg.extra.is_null()).then(|| {
             // SAFETY-equivalent: the adapter documents `extra` as at least one byte, the AV1
             // base_q_idx first, borrowed for the call.
@@ -1248,10 +1245,7 @@ impl Encoder for SharedStub {
 #[test]
 fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
     // The encoder under test is `lossy(50)`, whose colour is the BT.709 default.
-    let colour = Av1Colour {
-        matrix: MatrixCoefficients::Bt709,
-        ..Av1Colour::default()
-    };
+    let colour = Av1Color::DEFAULT.with_matrix(MatrixCoefficients::Bt709);
     let obus = builtin_obus(127, colour, ChromaSubsampling::Cs420);
     // Two chunks, so the adapter's accumulation (not just a single hand-off) is exercised.
     let (head, tail) = obus.split_at(7);
@@ -1305,16 +1299,14 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
     );
 }
 
-/// The speed preset crosses the C seam as `extra[1]` — the `Speed` discriminant — behind the
-/// `base_q_idx`, and only off the full search: a `Thorough` job lowers the one-byte blob a
-/// pre-speed backend was always handed, so the blob's absence still means `Thorough`. The
-/// encoder's default preset, `Balanced`, is off the full search and so carries an explicit byte.
+/// The effort preset crosses the C seam as `extra[1]` — its persisted wire speed value, not the
+/// `Effort` discriminant — behind the `base_q_idx`, and only off the full search: a `Thorough` job
+/// lowers the one-byte blob a pre-preset backend was always handed, so the blob's absence still
+/// means `Thorough`. The encoder's default preset, `Balanced`, is off the full search and so
+/// carries an explicit byte.
 #[test]
-fn abi_adapter_appends_a_non_thorough_speed_to_the_extra_blob() {
-    let colour = Av1Colour {
-        matrix: MatrixCoefficients::Bt709,
-        ..Av1Colour::default()
-    };
+fn abi_adapter_appends_a_non_thorough_effort_to_the_extra_blob() {
+    let colour = Av1Color::DEFAULT.with_matrix(MatrixCoefficients::Bt709);
     let obus = builtin_obus(127, colour, ChromaSubsampling::Cs420);
     let extra_for = |encoder: AvifEncoder| {
         let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(
@@ -1328,12 +1320,12 @@ fn abi_adapter_appends_a_non_thorough_speed_to_the_extra_blob() {
         stub.0.lock().unwrap().seen_extra.clone()
     };
     assert_eq!(
-        extra_for(AvifEncoder::lossy(50).with_speed(Speed::Thorough)),
+        extra_for(AvifEncoder::lossy(50).with_effort(Effort::Thorough)),
         Some(vec![127])
     );
     assert_eq!(extra_for(AvifEncoder::lossy(50)), Some(vec![127, 1]));
     assert_eq!(
-        extra_for(AvifEncoder::lossy(50).with_speed(Speed::Fastest)),
+        extra_for(AvifEncoder::lossy(50).with_effort(Effort::Fastest)),
         Some(vec![127, 3])
     );
 }
@@ -1485,10 +1477,7 @@ fn backend_stream_may_use_the_professional_profile() {
 /// a sample-count stride or a luma-width stride would both get wrong.
 #[test]
 fn abi_adapter_lowers_a_high_bit_depth_job() {
-    let colour = Av1Colour {
-        matrix: MatrixCoefficients::Bt709,
-        ..Av1Colour::default()
-    };
+    let colour = Av1Color::DEFAULT.with_matrix(MatrixCoefficients::Bt709);
     let px = fixture16();
     let img = ImageRef::<Rgb16>::new(&px, dims()).unwrap();
     let m = RgbToYcbcr::new(
@@ -1499,14 +1488,13 @@ fn abi_adapter_lowers_a_high_bit_depth_job() {
     .unwrap();
     let planes =
         Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs420).expect("planes");
-    let obus = gamut_av1::encode_still_intra16_with_speed(
+    let obus = gamut_av1::encode_still16(
         &planes,
-        127,
-        colour,
-        AvifEncoder::lossy(50).speed(),
+        &gamut_av1::Av1EncodeConfig::new(127)
+            .with_color(colour)
+            .with_effort(AvifEncoder::lossy(50).effort()),
     )
     .expect("the built-in encoder handles the request")
-    .0
     .obus;
     // Two chunks, so the adapter's accumulation is exercised rather than a single hand-off.
     let (head, tail) = obus.split_at(7);
@@ -1569,10 +1557,12 @@ fn abi_adapter_lowers_the_requested_depth_not_a_fixed_one() {
         let px = fixture16();
         let img = ImageRef::<Rgb16>::new(&px, dims()).unwrap();
         let planes = Planar16::from_rgb16_identity_view(img, bits);
-        let obus = gamut_av1::encode_still_intra16_with(&planes, 0, Av1Colour::default())
-            .expect("built-in lossless encode")
-            .0
-            .obus;
+        let obus = gamut_av1::encode_still16(
+            &planes,
+            &gamut_av1::Av1EncodeConfig::new(0).with_color(Av1Color::default()),
+        )
+        .expect("built-in lossless encode")
+        .obus;
         let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(
             Status::OK,
             Status::OK,

@@ -7,9 +7,9 @@
 
 use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, AvifImage, ChromaFormat, ChromaUpsampling,
-    DecodeLimits, DecodeOptions, DecodedFrame, ObuType, Subsampling, iter_obus,
+    DecodeLimits, DecodeOptions, DecodedFrame, ObuType, iter_obus,
 };
-use gamut_color::{ColorRange, bt601_ycbcr_to_rgb};
+use gamut_color::{ChromaSubsampling, ColorRange, bt601_ycbcr_to_rgb};
 use gamut_core::{Error, ErrorKind, Result};
 use gamut_isobmff::{
     CleanAperture, ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, OverlayOffset,
@@ -2460,23 +2460,23 @@ fn av1_sequence_header_reads_the_primary_and_alpha_items() {
     assert!(primary.still_picture);
     assert!(primary.reduced_still_picture_header);
     assert_eq!((primary.max_frame_width, primary.max_frame_height), (1, 1));
-    assert_eq!(primary.color.bit_depth, 8);
-    assert_eq!(primary.color.subsampling, Subsampling::Yuv420);
+    assert_eq!(primary.color.bit_depth, gamut_color::BitDepth::Eight);
+    assert_eq!(primary.color.subsampling, ChromaSubsampling::Cs420);
     assert_eq!(
         (
-            primary.color.color_primaries,
-            primary.color.transfer_characteristics,
-            primary.color.matrix_coefficients,
+            primary.color.cicp.colour_primaries,
+            primary.color.cicp.transfer_characteristics,
+            primary.color.cicp.matrix_coefficients,
         ),
         (1, 1, 1)
     );
-    assert!(primary.color.full_range);
+    assert!(primary.color.cicp.full_range);
 
     let alpha_id = image.alpha_auxiliary_of(1).unwrap().id();
     let alpha = image.av1_sequence_header(alpha_id).unwrap();
-    assert_eq!(alpha.color.subsampling, Subsampling::Monochrome);
-    assert_eq!(alpha.color.matrix_coefficients, 2);
-    assert!(!alpha.color.full_range);
+    assert_eq!(alpha.color.subsampling, ChromaSubsampling::Cs400);
+    assert_eq!(alpha.color.cicp.matrix_coefficients, 2);
+    assert!(!alpha.color.cicp.full_range);
 }
 
 /// An item whose `av1C` carries `config_header` in its `configOBUs` and whose payload carries
@@ -2497,8 +2497,8 @@ fn av1_sequence_header_falls_back_to_config_obus() {
     let bytes = file(1, vec![config_obus_item(&header, None)]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let parsed = container.image().av1_sequence_header(1).unwrap();
-    assert_eq!(parsed.color.subsampling, Subsampling::Yuv444);
-    assert_eq!(parsed.color.matrix_coefficients, 1);
+    assert_eq!(parsed.color.subsampling, ChromaSubsampling::Cs444);
+    assert_eq!(parsed.color.cicp.matrix_coefficients, 1);
 }
 
 #[test]
@@ -2508,8 +2508,8 @@ fn av1_sequence_header_prefers_the_payload_over_config_obus() {
     let bytes = file(1, vec![config_obus_item(&in_config, Some(&in_payload))]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let parsed = container.image().av1_sequence_header(1).unwrap();
-    assert_eq!(parsed.color.subsampling, Subsampling::Yuv420);
-    assert_eq!(parsed.color.matrix_coefficients, 2);
+    assert_eq!(parsed.color.subsampling, ChromaSubsampling::Cs420);
+    assert_eq!(parsed.color.cicp.matrix_coefficients, 2);
 }
 
 #[test]

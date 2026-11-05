@@ -1,4 +1,4 @@
-//! The encode-speed preset (issue #654): `AvifEncoder::with_speed` codes every AV1 still of the
+//! The encode-effort preset (issue #654): `AvifEncoder::with_effort` codes every AV1 still of the
 //! file — the colour item and the alpha auxiliary — at `gamut-av1`'s preset, and a conformant
 //! reader (libavif over dav1d) reconstructs each preset's output to exactly the AV1 encoder's own
 //! reconstruction.
@@ -6,8 +6,8 @@
 //! libavif is linked in from the `third_party/libavif` + `third_party/dav1d` submodules via the
 //! `libavif-oracle` dev-dependency (`mise run fetch-av1-oracles` fetches dav1d).
 
-use gamut_av1::{Av1Colour, EncodedStill, ReconImage};
-use gamut_avif::{AvifContainer, AvifEncoder, Speed};
+use gamut_av1::{Av1Color, Av1EncodeConfig, StillWithRecon};
+use gamut_avif::{AvifContainer, AvifEncoder, Effort};
 use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr};
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgba8, Rgba16};
 
@@ -54,11 +54,8 @@ fn source_gray8() -> Vec<u8> {
 }
 
 /// The lossy default colour signalling: BT.709 matrix, full range.
-fn lossy_colour() -> Av1Colour {
-    Av1Colour {
-        matrix: MatrixCoefficients::Bt709,
-        ..Av1Colour::default()
-    }
+fn lossy_colour() -> Av1Color {
+    Av1Color::DEFAULT.with_matrix(MatrixCoefficients::Bt709)
 }
 
 fn bt709(depth: BitDepth) -> RgbToYcbcr {
@@ -83,48 +80,55 @@ fn encode_rgba8(encoder: &AvifEncoder) -> Vec<u8> {
         .unwrap()
 }
 
+/// The `gamut-av1` configuration `lossy(50).with_effort(effort)` codes a still of signalling
+/// `colour` at.
+fn q50(colour: Av1Color, effort: Effort) -> Av1EncodeConfig {
+    Av1EncodeConfig::new(Q50)
+        .with_color(colour)
+        .with_effort(effort)
+}
+
 /// The built-in colour and alpha stills (with their reconstructions) for the 8-bit RGBA source at
-/// `speed` — what `lossy(50).with_speed(speed)` must carry.
-fn rgba8_stills(speed: Speed) -> [(EncodedStill, ReconImage); 2] {
+/// `effort` — what `lossy(50).with_effort(effort)` must carry.
+fn rgba8_stills(effort: Effort) -> [StillWithRecon; 2] {
     let px = source_rgba8();
     let image = ImageRef::<Rgba8>::new(&px, dims()).unwrap();
     let colour = Planar8::from_rgba8_matrix_view(image, bt709(BitDepth::Eight));
     let alpha = Planar8::from_rgba8_alpha_view(image);
     [
-        gamut_av1::encode_still_intra_with_speed(&colour, Q50, lossy_colour(), speed).unwrap(),
-        gamut_av1::encode_still_intra_with_speed(&alpha, Q50, Av1Colour::monochrome(), speed)
-            .unwrap(),
+        gamut_av1::encode_still_with_recon(&colour, &q50(lossy_colour(), effort)).unwrap(),
+        gamut_av1::encode_still_with_recon(&alpha, &q50(Av1Color::monochrome(), effort)).unwrap(),
     ]
 }
 
 #[test]
-fn speed_defaults_to_the_codec_default_and_reports_the_chosen_preset() {
-    // The default has one owner, `gamut-av1`: both constructors take `Speed::default()`, which is
+fn effort_defaults_to_the_codec_default_and_reports_the_chosen_preset() {
+    // The default has one owner, `gamut-av1`: both constructors take `Effort::default()`, which is
     // the middle preset.
-    assert_eq!(AvifEncoder::lossy(50).speed(), Speed::default());
-    assert_eq!(AvifEncoder::lossless().speed(), Speed::default());
-    assert_eq!(Speed::default(), Speed::Balanced);
-    for &speed in Speed::ALL {
-        assert_eq!(AvifEncoder::lossy(50).with_speed(speed).speed(), speed);
+    assert_eq!(AvifEncoder::lossy(50).effort(), Effort::default());
+    assert_eq!(AvifEncoder::lossless().effort(), Effort::default());
+    assert_eq!(Effort::default(), Effort::Balanced);
+    for &effort in Effort::ALL {
+        assert_eq!(AvifEncoder::lossy(50).with_effort(effort).effort(), effort);
     }
 }
 
 #[test]
 fn the_default_preset_codes_the_bytes_of_an_encoder_without_one() {
     assert_eq!(
-        encode_rgba8(&AvifEncoder::lossy(50).with_speed(Speed::default())),
+        encode_rgba8(&AvifEncoder::lossy(50).with_effort(Effort::default())),
         encode_rgba8(&AvifEncoder::lossy(50))
     );
 }
 
 #[test]
-fn lossless_codes_the_same_bytes_at_every_speed() {
+fn lossless_codes_the_same_bytes_at_every_effort() {
     let reference = encode_rgba8(&AvifEncoder::lossless());
-    for &speed in Speed::ALL {
+    for &effort in Effort::ALL {
         assert_eq!(
-            encode_rgba8(&AvifEncoder::lossless().with_speed(speed)),
+            encode_rgba8(&AvifEncoder::lossless().with_effort(effort)),
             reference,
-            "{speed:?}"
+            "{effort:?}"
         );
     }
 }
@@ -132,16 +136,16 @@ fn lossless_codes_the_same_bytes_at_every_speed() {
 #[test]
 fn rgba8_codes_colour_and_alpha_at_the_chosen_preset() {
     let mut seen = Vec::new();
-    for &speed in Speed::ALL {
-        let (colour, alpha) = payloads(&encode_rgba8(&AvifEncoder::lossy(50).with_speed(speed)));
-        let [want_colour, want_alpha] = rgba8_stills(speed);
-        assert_eq!(colour, want_colour.0.obus, "colour at {speed:?}");
-        assert_eq!(alpha, Some(want_alpha.0.obus), "alpha at {speed:?}");
+    for &effort in Effort::ALL {
+        let (colour, alpha) = payloads(&encode_rgba8(&AvifEncoder::lossy(50).with_effort(effort)));
+        let [want_colour, want_alpha] = rgba8_stills(effort);
+        assert_eq!(colour, want_colour.still.obus, "colour at {effort:?}");
+        assert_eq!(alpha, Some(want_alpha.still.obus), "alpha at {effort:?}");
         seen.push((colour, alpha));
     }
     // The fixture separates the presets in both stills, so the equalities above could not hold
-    // with a preset that never reached one of them.
-    let (thorough, fastest) = (&seen[0], &seen[Speed::ALL.len() - 1]);
+    // with a preset that never reached one of them. `Effort::ALL` runs fastest first.
+    let (fastest, thorough) = (&seen[0], &seen[Effort::ALL.len() - 1]);
     assert_ne!(thorough.0, fastest.0, "colour differs across presets");
     assert_ne!(thorough.1, fastest.1, "alpha differs across presets");
 }
@@ -152,23 +156,22 @@ fn rgba16_codes_colour_and_alpha_at_the_chosen_preset() {
     let image = ImageRef::<Rgba16>::new(&px, dims()).unwrap();
     let colour_planes = Planar16::from_rgba16_matrix_view(image, bt709(BitDepth::Ten));
     let alpha_planes = Planar16::from_rgba16_alpha_view(image, BitDepth::Ten);
-    let at = |speed| {
+    let at = |effort| {
         AvifEncoder::lossy(50)
             .with_bit_depth(BitDepth::Ten)
-            .with_speed(speed)
+            .with_effort(effort)
             .encode_to_vec(image)
             .unwrap()
     };
-    let (thorough, _) = payloads(&at(Speed::Thorough));
-    let (colour, alpha) = payloads(&at(Speed::Fastest));
+    let (thorough, _) = payloads(&at(Effort::Thorough));
+    let (colour, alpha) = payloads(&at(Effort::Fastest));
     let want = |planes, colour| {
-        gamut_av1::encode_still_intra16_with_speed(planes, Q50, colour, Speed::Fastest)
+        gamut_av1::encode_still16(planes, &q50(colour, Effort::Fastest))
             .unwrap()
-            .0
             .obus
     };
     assert_eq!(colour, want(&colour_planes, lossy_colour()));
-    assert_eq!(alpha, Some(want(&alpha_planes, Av1Colour::monochrome())));
+    assert_eq!(alpha, Some(want(&alpha_planes, Av1Color::monochrome())));
     assert_ne!(colour, thorough, "the fixture separates the presets");
 }
 
@@ -176,50 +179,47 @@ fn rgba16_codes_colour_and_alpha_at_the_chosen_preset() {
 fn gray8_codes_its_monochrome_still_at_the_chosen_preset() {
     let px = source_gray8();
     let image = ImageRef::<Gray8>::new(&px, dims()).unwrap();
-    let at = |speed| {
+    let at = |effort| {
         AvifEncoder::lossy(50)
-            .with_speed(speed)
+            .with_effort(effort)
             .encode_to_vec(image)
             .unwrap()
     };
-    let want = gamut_av1::encode_still_intra_with_speed(
+    let want = gamut_av1::encode_still(
         &Planar8::from_gray8_view(image),
-        Q50,
-        Av1Colour::monochrome(),
-        Speed::Fastest,
+        &q50(Av1Color::monochrome(), Effort::Fastest),
     )
     .unwrap()
-    .0
     .obus;
-    let (fastest, _) = payloads(&at(Speed::Fastest));
+    let (fastest, _) = payloads(&at(Effort::Fastest));
     assert_eq!(fastest, want);
     assert_ne!(
         fastest,
-        payloads(&at(Speed::Thorough)).0,
+        payloads(&at(Effort::Thorough)).0,
         "the fixture separates the presets"
     );
 }
 
 #[test]
 fn libavif_reconstructs_every_preset_to_the_av1_reconstruction() {
-    for &speed in Speed::ALL {
-        let avif = encode_rgba8(&AvifEncoder::lossy(50).with_speed(speed));
-        let [(_, colour), (_, alpha)] = rgba8_stills(speed);
+    for &effort in Effort::ALL {
+        let avif = encode_rgba8(&AvifEncoder::lossy(50).with_effort(effort));
+        let [colour, alpha] = rgba8_stills(effort).map(|s| s.recon);
 
         let decoded = libavif_oracle::decode_avif(&avif)
-            .unwrap_or_else(|e| panic!("libavif decode failed at {speed:?}: {e}"));
+            .unwrap_or_else(|e| panic!("libavif decode failed at {effort:?}: {e}"));
         for (p, (got, want)) in decoded.planes.iter().zip(&colour.planes).enumerate() {
-            assert_eq!(got, want, "colour plane {p} at {speed:?}");
+            assert_eq!(got, want, "colour plane {p} at {effort:?}");
         }
 
         let (_, _, rgba) = libavif_oracle::decode_rgba(&avif)
-            .unwrap_or_else(|e| panic!("libavif RGBA decode failed at {speed:?}: {e}"));
+            .unwrap_or_else(|e| panic!("libavif RGBA decode failed at {effort:?}: {e}"));
         let merged: Vec<u16> = rgba
             .as_chunks::<4>()
             .0
             .iter()
             .map(|px| u16::from(px[3]))
             .collect();
-        assert_eq!(merged, alpha.planes[0], "alpha at {speed:?}");
+        assert_eq!(merged, alpha.planes[0], "alpha at {effort:?}");
     }
 }

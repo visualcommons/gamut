@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, AvifImage, ChromaFormat,
-    ChromaUpsampling, DecodeOptions, DecodedFrame, Mirror, Rotation, SegmentKind, Subsampling,
+    ChromaUpsampling, DecodeOptions, DecodedFrame, Mirror, Rotation, SegmentKind,
 };
 use gamut_color::{ChromaSubsampling, ColorRange, MatrixCoefficients};
 use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
@@ -810,12 +810,13 @@ fn colour_source_id(img: &AvifImage) -> u32 {
 }
 
 /// libavif's raw `avifPixelFormat` for a sequence header's chroma layout.
-fn avif_pixel_format(subsampling: Subsampling) -> u32 {
+fn avif_pixel_format(subsampling: ChromaSubsampling) -> u32 {
     match subsampling {
-        Subsampling::Yuv444 => 1,
-        Subsampling::Yuv422 => 2,
-        Subsampling::Yuv420 => 3,
-        Subsampling::Monochrome => 4,
+        ChromaSubsampling::Cs444 => 1,
+        ChromaSubsampling::Cs422 => 2,
+        ChromaSubsampling::Cs420 => 3,
+        ChromaSubsampling::Cs400 => 4,
+        other => panic!("AV1 cannot signal {other:?}"),
     }
 }
 
@@ -877,7 +878,11 @@ fn sequence_header_fields_agree_with_libavif() {
             .av1_sequence_header(colour_source_id(img))
             .unwrap_or_else(|e| panic!("{name}: sequence header: {e:?}"))
             .color;
-        assert_eq!(colour.bit_depth, u32::from(oracle.depth), "{name}: depth");
+        assert_eq!(
+            u32::from(colour.bit_depth.bits()),
+            u32::from(oracle.depth),
+            "{name}: depth"
+        );
         assert_eq!(
             avif_pixel_format(colour.subsampling),
             oracle.yuv_format,
@@ -885,9 +890,9 @@ fn sequence_header_fields_agree_with_libavif() {
         );
         assert_eq!(
             (
-                u16::from(colour.color_primaries),
-                u16::from(colour.transfer_characteristics),
-                u16::from(colour.matrix_coefficients),
+                colour.cicp.colour_primaries,
+                colour.cicp.transfer_characteristics,
+                colour.cicp.matrix_coefficients,
             ),
             (
                 oracle.color_primaries,
@@ -896,7 +901,7 @@ fn sequence_header_fields_agree_with_libavif() {
             ),
             "{name}: CICP"
         );
-        assert_eq!(colour.full_range, oracle.full_range, "{name}: range");
+        assert_eq!(colour.cicp.full_range, oracle.full_range, "{name}: range");
     }
 }
 

@@ -121,13 +121,14 @@ fn lossy_roundtrip_via_libavif() {
                 gamut_color::ChromaSubsampling::Cs420,
             )
             .unwrap();
-            let (_, recon) = gamut_av1::encode_still_intra_with_speed(
+            let recon = gamut_av1::encode_still_with_recon(
                 &planes,
-                qidx,
-                lossy_colour(),
-                AvifEncoder::lossy(quality).speed(),
+                &gamut_av1::Av1EncodeConfig::new(qidx)
+                    .with_color(lossy_colour())
+                    .with_effort(AvifEncoder::lossy(quality).effort()),
             )
-            .unwrap();
+            .unwrap()
+            .recon;
 
             let decoded = libavif_oracle::decode_avif(&avif)
                 .unwrap_or_else(|e| panic!("libavif decode failed for {w}x{h} q{quality}: {e}"));
@@ -171,11 +172,8 @@ fn photo_rgb(w: u32, h: u32) -> Vec<u8> {
 
 /// The colour the lossy encoder signals by default: BT.709 primaries/matrix, sRGB transfer, full
 /// range.
-fn lossy_colour() -> gamut_av1::Av1Colour {
-    gamut_av1::Av1Colour {
-        matrix: gamut_color::MatrixCoefficients::Bt709,
-        ..gamut_av1::Av1Colour::default()
-    }
+fn lossy_colour() -> gamut_av1::Av1Color {
+    gamut_av1::Av1Color::DEFAULT.with_matrix(gamut_color::MatrixCoefficients::Bt709)
 }
 
 /// The matching prepared transform.
@@ -323,13 +321,14 @@ fn every_chroma_format_roundtrips_via_libavif() {
             let planes =
                 gamut_color::Planar8::from_rgb8_matrix_subsampled(img, lossy_matrix(), chroma)
                     .unwrap();
-            let (_, recon) = gamut_av1::encode_still_intra_with_speed(
+            let recon = gamut_av1::encode_still_with_recon(
                 &planes,
-                quality_to_quant(60),
-                lossy_colour(),
-                AvifEncoder::lossy(60).speed(),
+                &gamut_av1::Av1EncodeConfig::new(quality_to_quant(60))
+                    .with_color(lossy_colour())
+                    .with_effort(AvifEncoder::lossy(60).effort()),
             )
-            .unwrap();
+            .unwrap()
+            .recon;
 
             let decoded = libavif_oracle::decode_avif(&avif)
                 .unwrap_or_else(|e| panic!("libavif decode failed for {chroma:?} {w}x{h}: {e}"));

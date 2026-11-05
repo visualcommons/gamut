@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
-use gamut::av1::encode_still_lossless_identity;
+use gamut::av1::{Av1EncodeConfig, encode_still};
 use gamut::color::Planar8;
 
 use crate::error::CliError;
@@ -32,7 +32,7 @@ pub(crate) fn run(cmd: &Av1Command) -> Result<(), CliError> {
 fn encode(input: &Path, output: &Path) -> Result<(), CliError> {
     let (rgb, dims) = decode_rgb8(input)?;
     let planes = Planar8::from_rgb8_identity(&rgb, dims)?;
-    let still = encode_still_lossless_identity(&planes)?;
+    let still = encode_still(&planes, &Av1EncodeConfig::lossless())?;
     tracing::info!(
         seq_profile = still.config.seq_profile,
         seq_level_idx_0 = still.config.seq_level_idx_0,

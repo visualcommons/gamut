@@ -5,7 +5,7 @@
 //! test-only [`BlockVariation::SyntaxExercise`]) — all under
 //! `disable_cdf_update = 0` (adapting CDFs, §8.2.6) and `using_qmatrix = 0` (8-bit 4:4:4).
 //!
-//! `color_config()` (§5.5.2) is parameterized by [`Av1Colour`]: the identity/sRGB default takes the
+//! `color_config()` (§5.5.2) is parameterized by [`Av1Color`]: the identity/sRGB default takes the
 //! spec's shortcut, where `color_range` and the subsampling are inferred and no bits are coded,
 //! while any other CICP triple codes `color_range` explicitly.
 
@@ -48,7 +48,11 @@ fn codes_subsampling(cfg: &Av1StillConfig) -> bool {
 /// The sequence-header field values that `gamut-avif` must mirror into `av1C` and `colr`
 /// (AV1-ISOBMFF v1.3.0 §2.3.4). Fixed by the M0 config except `seq_level_idx_0`, which depends on
 /// the image size.
+///
+/// The encoder produces one with every [`EncodedStill`](crate::EncodedStill); a stream another
+/// encoder produced is read back with [`Av1StillConfig::from_sequence_header`].
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Av1StillConfig {
     /// `seq_profile` (§6.4.1): 1 (High) for 8/10-bit 4:4:4, 0 (Main) for an 8/10-bit monochrome
     /// still, 2 (Professional) for anything 12-bit.
@@ -84,6 +88,48 @@ pub struct Av1StillConfig {
 }
 
 impl Av1StillConfig {
+    /// The values a parsed sequence header declares: its profile, its operating point 0's level
+    /// and tier, and its `color_config()` — the depth flags, the chroma layout with `mono_chrome`
+    /// folded in, `chroma_sample_position` and the CICP code points.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_av1::{Av1EncodeConfig, Av1StillConfig, Obu, ObuIter, SequenceHeader, encode_still};
+    /// use gamut_color::Planar8;
+    /// use gamut_core::Dimensions;
+    ///
+    /// let dims = Dimensions::new(8, 8).unwrap();
+    /// let planes = Planar8::from_planes(dims, [vec![0; 64], vec![0; 64], vec![0; 64]]).unwrap();
+    /// let still = encode_still(&planes, &Av1EncodeConfig::lossless()).unwrap();
+    /// let seq = ObuIter::new(&still.obus).next().unwrap().unwrap();
+    /// assert_eq!(seq.obu_type, Obu::SEQUENCE_HEADER);
+    /// let read = Av1StillConfig::from_sequence_header(&SequenceHeader::parse(seq.payload).unwrap());
+    /// assert_eq!(read.seq_profile, still.config.seq_profile);
+    /// assert_eq!(read.matrix_coefficients, still.config.matrix_coefficients);
+    /// ```
+    #[cfg(feature = "decode")]
+    #[must_use]
+    pub fn from_sequence_header(header: &crate::SequenceHeader) -> Self {
+        let color = &header.color;
+        let factors = color.subsampling.factors();
+        Self {
+            seq_profile: header.seq_profile,
+            seq_level_idx_0: header.seq_level_idx,
+            seq_tier_0: header.seq_tier,
+            high_bitdepth: color.bit_depth != gamut_color::BitDepth::Eight,
+            twelve_bit: color.bit_depth == gamut_color::BitDepth::Twelve,
+            monochrome: color.subsampling == gamut_color::ChromaSubsampling::Cs400,
+            chroma_subsampling_x: factors.width().trailing_zeros() as u8,
+            chroma_subsampling_y: factors.height().trailing_zeros() as u8,
+            chroma_sample_position: color.chroma_sample_position,
+            color_primaries: color.cicp.colour_primaries,
+            transfer_characteristics: color.cicp.transfer_characteristics,
+            matrix_coefficients: color.cicp.matrix_coefficients,
+            full_range: color.cicp.full_range,
+        }
+    }
+
     /// Whether `color_config()` takes the AV1 §5.5.2 sRGB shortcut: with BT.709 primaries, the sRGB
     /// transfer function and the identity matrix, `color_range`, `subsampling_x` and
     /// `subsampling_y` are all **inferred** (full range, 4:4:4) and no bits are coded for them.
@@ -105,9 +151,10 @@ impl Av1StillConfig {
 ///
 /// [`Default`] is the M0 configuration — BT.709 primaries, sRGB transfer, **identity** matrix, full
 /// range — i.e. RGB carried directly as 4:4:4 GBR planes, which is what
-/// [`encode_still_intra`](crate::encode_still_intra) and its siblings use.
+/// [`Av1EncodeConfig::new`](crate::Av1EncodeConfig::new) starts from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Av1Colour {
+#[non_exhaustive]
+pub struct Av1Color {
     /// CICP colour primaries.
     pub primaries: ColorPrimaries,
     /// CICP transfer characteristics.
@@ -118,40 +165,86 @@ pub struct Av1Colour {
     pub range: ColorRange,
 }
 
-impl Default for Av1Colour {
+impl Default for Av1Color {
     fn default() -> Self {
-        Self {
-            primaries: ColorPrimaries::Bt709,
-            transfer: TransferCharacteristics::Srgb,
-            matrix: MatrixCoefficients::Identity,
-            range: ColorRange::Full,
-        }
+        Self::DEFAULT
     }
 }
 
-impl Av1Colour {
+impl Av1Color {
+    /// The [`Default`] signalling, usable in `const` context: BT.709 primaries, sRGB transfer,
+    /// identity matrix, full range.
+    pub const DEFAULT: Self = Self::new(
+        ColorPrimaries::Bt709,
+        TransferCharacteristics::Srgb,
+        MatrixCoefficients::Identity,
+        ColorRange::Full,
+    );
+
+    /// The signalling of a CICP triple plus a signal range.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_av1::Av1Color;
+    /// use gamut_color::cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics};
+    ///
+    /// let bt709 = Av1Color::new(
+    ///     ColorPrimaries::Bt709,
+    ///     TransferCharacteristics::Bt709,
+    ///     MatrixCoefficients::Bt709,
+    ///     ColorRange::Limited,
+    /// );
+    /// assert_eq!(bt709.range, ColorRange::Limited);
+    /// ```
+    #[must_use]
+    pub const fn new(
+        primaries: ColorPrimaries,
+        transfer: TransferCharacteristics,
+        matrix: MatrixCoefficients,
+        range: ColorRange,
+    ) -> Self {
+        Self {
+            primaries,
+            transfer,
+            matrix,
+            range,
+        }
+    }
+
+    /// This signalling with the matrix coefficients replaced.
+    #[must_use]
+    pub const fn with_matrix(mut self, matrix: MatrixCoefficients) -> Self {
+        self.matrix = matrix;
+        self
+    }
+
+    /// This signalling with the signal range replaced.
+    #[must_use]
+    pub const fn with_range(mut self, range: ColorRange) -> Self {
+        self.range = range;
+        self
+    }
+
     /// The colour signalling for a **monochrome** still: BT.709 primaries, sRGB transfer, full
     /// range, and `Unspecified` matrix coefficients.
     ///
     /// The matrix is not a free choice here. AV1 §5.5.2 infers `subsampling_x = subsampling_y = 1`
     /// for a monochrome stream, and §6.4.2 makes `MC_IDENTITY` legal *only* when both are 0 — so
-    /// the identity matrix of [`Av1Colour::default`] is non-conformant on a single-plane stream.
+    /// the identity matrix of [`Av1Color::default`] is non-conformant on a single-plane stream.
     /// There is no luma–chroma transform to describe when there is no chroma, so `Unspecified` is
     /// the honest code point (and what AVIF readers expect on an alpha auxiliary item).
     ///
     /// # Examples
     ///
     /// ```
-    /// use gamut_av1::Av1Colour;
+    /// use gamut_av1::Av1Color;
     /// use gamut_color::cicp::MatrixCoefficients;
-    /// assert_eq!(Av1Colour::monochrome().matrix, MatrixCoefficients::Unspecified);
+    /// assert_eq!(Av1Color::monochrome().matrix, MatrixCoefficients::Unspecified);
     /// ```
     #[must_use]
-    pub fn monochrome() -> Self {
-        Self {
-            matrix: MatrixCoefficients::Unspecified,
-            ..Self::default()
-        }
+    pub const fn monochrome() -> Self {
+        Self::DEFAULT.with_matrix(MatrixCoefficients::Unspecified)
     }
 }
 
@@ -208,7 +301,7 @@ fn level_tile_limits(seq_level_idx: u8) -> (usize, usize) {
 ///
 /// Tiles are what makes an AV1 frame parallel: each one is entropy-coded and predicted without
 /// reference to any other, so the encoder can code them concurrently (see
-/// [`EncodeOptions::threads`](crate::EncodeOptions::threads)) and a decoder can decode them
+/// [`Av1EncodeConfig::threads`](crate::Av1EncodeConfig::threads)) and a decoder can decode them
 /// concurrently. What they cost is compression: every tile starts from the default probabilities
 /// and treats its edges as frame edges, so more tiles mean a larger file. The output for a given
 /// layout does not depend on how many threads encoded it.
@@ -236,6 +329,7 @@ fn level_tile_limits(seq_level_idx: u8) -> (usize, usize) {
 /// hold fewer than 8 samples; the encoder coded those widths as two tiles before, a stream that
 /// broke its level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Tiling {
     /// `TileColsLog2` requested: `1 << cols_log2` tile columns.
     pub cols_log2: u8,
@@ -265,9 +359,14 @@ impl Tiling {
     }
 }
 
+impl Tiling {
+    /// The [`Default`] layout, usable in `const` context: two tile columns, one tile row.
+    pub const DEFAULT: Self = Self::new(1, 0);
+}
+
 impl Default for Tiling {
     fn default() -> Self {
-        Self::new(1, 0)
+        Self::DEFAULT
     }
 }
 
@@ -1061,7 +1160,7 @@ mod tests {
             (2176, 8640, Tiling::SINGLE),
             (1920, 1080, Tiling::new(3, 2)),
         ] {
-            let cfg = crate::decode::testutil::still_config(w, h, Av1Colour::default());
+            let cfg = crate::decode::testutil::still_config(w, h, Av1Color::default());
             let seq = SequenceHeader::parse(&sequence_header_payload(&cfg, w, h, true, false))
                 .expect("sequence header parses");
             let l = TileLayout::resolve(req, w as usize, h as usize, cfg.seq_level_idx_0, None);

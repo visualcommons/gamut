@@ -1,17 +1,17 @@
-//! Rate–distortion harness for the [`Speed`] presets (issue #698).
+//! Rate–distortion harness for the [`Effort`] presets (issue #698).
 //!
 //! Each preset prunes the candidates the lossy mode decisions try; it must not buy that time back
 //! as compression. The full search ranks every candidate it shares with a pruned preset by the
 //! same reconstruction-distortion-plus-rate cost, so on a fixed corpus it must need no more bits
 //! than any pruned preset for the same PSNR. This harness encodes a fixed synthetic corpus over a
 //! quantizer ladder at every preset, reports size and PSNR, and asserts that the
-//! Bjøntegaard-delta rate of [`Speed::Thorough`] against each pruned preset is not positive.
+//! Bjøntegaard-delta rate of [`Effort::Thorough`] against each pruned preset is not positive.
 //!
 //! The corpus is the one the issue measured on: 4:4:4 identity stills of natural-image-like
 //! "photo" content (smooth shading, off-axis stripes, light noise) and of "screen" content (flat
 //! tiles ruled by thin black lines). Run with `--nocapture` to see the table.
 
-use gamut_av1::{Av1Colour, ReconImage, Speed, encode_still_intra_with_speed};
+use gamut_av1::{Av1EncodeConfig, Effort, ReconImage, StillWithRecon, encode_still_with_recon};
 use gamut_color::Planar8;
 
 /// Side of the square corpus images.
@@ -90,12 +90,12 @@ fn psnr(src: &Planar8, recon: &ReconImage) -> f64 {
 }
 
 /// One preset's rate–distortion curve: `(PSNR, bytes)` per ladder rung.
-fn curve(src: &Planar8, speed: Speed) -> Vec<(f64, f64)> {
+fn curve(src: &Planar8, effort: Effort) -> Vec<(f64, f64)> {
     LADDER
         .iter()
         .map(|&q| {
-            let (still, recon) =
-                encode_still_intra_with_speed(src, q, Av1Colour::default(), speed).unwrap();
+            let StillWithRecon { still, recon, .. } =
+                encode_still_with_recon(src, &Av1EncodeConfig::new(q).with_effort(effort)).unwrap();
             (psnr(src, &recon), still.obus.len() as f64)
         })
         .collect()
@@ -159,9 +159,9 @@ fn the_full_search_is_not_below_any_pruned_preset_at_the_coarsest_rung() {
     // the full search's curve reaches at least that preset's PSNR.
     let src = photo();
     let rung = LADDER.len() - 1;
-    let thorough = curve(&src, Speed::Thorough);
+    let thorough = curve(&src, Effort::Thorough);
     let mut below = Vec::new();
-    for &speed in &Speed::ALL[1..] {
+    for &speed in Effort::ALL.iter().filter(|&&e| e != Effort::Thorough) {
         let (psnr, bytes) = curve(&src, speed)[rung];
         let reached = psnr_at(&thorough, bytes);
         eprintln!(
@@ -187,9 +187,9 @@ fn the_full_search_is_not_below_any_pruned_preset_at_the_coarsest_rung() {
 /// at the coarsest rungs of the screen image. Each entry is a drift guard, not an allowance: a loss
 /// that grows past its bound fails, and so does one that is gone, so the list cannot outlive the
 /// defect it records.
-const KNOWN_LOSSES: [(&str, Speed, f64); 2] = [
-    ("screen", Speed::Balanced, 0.5),
-    ("screen", Speed::Fast, 0.75),
+const KNOWN_LOSSES: [(&str, Effort, f64); 2] = [
+    ("screen", Effort::Balanced, 0.5),
+    ("screen", Effort::Fast, 0.75),
 ];
 
 #[test]
@@ -198,8 +198,8 @@ fn the_full_search_needs_no_more_bits_than_any_pruned_preset() {
     // whole table and every preset the full search loses to.
     let mut losses = Vec::new();
     for (name, src) in [("photo", photo()), ("screen", screen())] {
-        let curves: Vec<(Speed, Vec<(f64, f64)>)> =
-            Speed::ALL.iter().map(|&s| (s, curve(&src, s))).collect();
+        let curves: Vec<(Effort, Vec<(f64, f64)>)> =
+            Effort::ALL.iter().map(|&s| (s, curve(&src, s))).collect();
         for (speed, points) in &curves {
             let row: Vec<String> = LADDER
                 .iter()
@@ -208,8 +208,8 @@ fn the_full_search_needs_no_more_bits_than_any_pruned_preset() {
                 .collect();
             eprintln!("{name:6} {speed:9?} {}", row.join(" | "));
         }
-        let thorough = &curves[0].1;
-        for (speed, points) in &curves[1..] {
+        let (_, thorough) = curves.iter().find(|(s, _)| *s == Effort::Thorough).unwrap();
+        for (speed, points) in curves.iter().filter(|(s, _)| *s != Effort::Thorough) {
             let bd = bd_rate(points, thorough);
             eprintln!("{name:6} BD-rate Thorough vs {speed:?}: {bd:+.2}%");
             let known = KNOWN_LOSSES
@@ -243,7 +243,7 @@ fn screen_quality_keeps_rising_as_the_quantizer_falls() {
     // quantizer step must buy a clear gain at every preset — well past that ceiling.
     let src = screen();
     let mut flat = Vec::new();
-    for &speed in Speed::ALL {
+    for &speed in Effort::ALL {
         let points = curve(&src, speed);
         for (rung, pair) in LADDER.windows(2).zip(points.windows(2)) {
             let gain = pair[0].0 - pair[1].0;

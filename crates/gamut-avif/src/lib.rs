@@ -34,8 +34,8 @@
 //!   [`gamut_isobmff::IsoBmffImage`]: the validated primary item, alpha/depth auxiliaries,
 //!   thumbnails, Exif/XMP payloads, grid/overlay derivations, and typed properties including the
 //!   [`Av1Config`] `av1C` record ([`AvifItem::av1_config`]), the parsed AV1
-//!   [`SequenceHeader`] ([`AvifImage::av1_sequence_header`], with its [`ColorConfig`] and
-//!   [`Subsampling`] field types), and the OBU layer
+//!   [`SequenceHeader`] ([`AvifImage::av1_sequence_header`], with its [`ColorConfig`] field
+//!   type), and the OBU layer
 //!   ([`iter_obus`]/[`ObuType`]).
 //!
 //! Around the seam, [`AvifImage::decode_item_planar`] resolves item derivation (`grid`/`iden`)
@@ -108,8 +108,8 @@
 //! // The item has no `colr`, so the RGBA surface takes its colour from this sequence header.
 //! let header = container.image().av1_sequence_header(1).unwrap();
 //! assert_eq!((header.max_frame_width, header.max_frame_height), (2, 2));
-//! assert_eq!(header.color.bit_depth, 8);
-//! assert!(!header.color.full_range);
+//! assert_eq!(header.color.bit_depth, gamut_color::BitDepth::Eight);
+//! assert!(!header.color.cicp.full_range);
 //!
 //! // Decode the primary image to RGBA through the stub decoder.
 //! let rgba = container.decode_primary_rgba8(&mut GrayStub).unwrap();
@@ -170,8 +170,8 @@
 //! ([`AvifEncoder::with_chroma`]); a coded depth of 8, 10 or 12 bits
 //! ([`AvifEncoder::with_bit_depth`]); **alpha** as a monochrome auxiliary item with its own
 //! quality and premultiplication mode ([`AvifEncoder::with_alpha_quality`] /
-//! [`AvifEncoder::with_alpha_mode`]); an encode-**speed** preset trading mode-decision search for
-//! time ([`AvifEncoder::with_speed`], `gamut-av1`'s [`Speed`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
+//! [`AvifEncoder::with_alpha_mode`]); an encode-**effort** preset trading mode-decision search for
+//! time ([`AvifEncoder::with_effort`], `gamut-av1`'s [`Effort`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
 //! [`AvifEncoder::with_mirror`]); the **colour and metadata surface** — CICP primaries and transfer
 //! ([`AvifEncoder::with_primaries`] / [`AvifEncoder::with_transfer`]), HDR `clli` / `mdcv`
 //! metadata ([`AvifEncoder::with_content_light_level`] /
@@ -236,7 +236,7 @@ pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodeLimits, DecodeOptions, DecodedFrame};
 pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder, RawPlanes};
-pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
+pub use gamut_av1::{ColorConfig, Effort, SequenceHeader};
 pub use gamut_color::ChromaUpsampling;
 pub use gamut_core::Dimensions;
 // The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-heic` (#505).

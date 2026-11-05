@@ -4,8 +4,7 @@ use core::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{
-    Av1Colour, Av1StillConfig, EncodeOptions, EncodedStill, Speed, encode_still_intra_with_options,
-    encode_still_intra16_with_options,
+    Av1Color, Av1EncodeConfig, Av1StillConfig, Effort, EncodedStill, encode_still, encode_still16,
 };
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients, Planar8, Planar16,
@@ -21,6 +20,7 @@ use gamut_isobmff::{
     PropertyKind, TopLevelBox, content_provenance_payload, content_provenance_reserved,
 };
 
+use crate::av1c::Av1Config;
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
 use crate::clean_alpha::clean_rgba;
 use crate::config::{AvifConfig, AvifMode};
@@ -379,8 +379,8 @@ pub struct AvifEncoder {
     /// indistinguishable from — see [`AvifEncoder::with_keep_opaque_alpha`].
     keep_opaque_alpha: bool,
     /// The `gamut-av1` mode-decision search preset every AV1 still of the file is coded at —
-    /// colour and alpha alike. See [`AvifEncoder::with_speed`].
-    speed: Speed,
+    /// colour and alpha alike. See [`AvifEncoder::with_effort`].
+    effort: Effort,
     /// The most threads an encode may use; `None` is the machine's available parallelism. See
     /// [`AvifEncoder::with_threads`].
     threads: Option<NonZeroUsize>,
@@ -407,7 +407,7 @@ impl std::fmt::Debug for AvifEncoder {
             .field("c2pa", &self.c2pa)
             .field("alpha_mode", &self.alpha_mode)
             .field("keep_opaque_alpha", &self.keep_opaque_alpha)
-            .field("speed", &self.speed)
+            .field("effort", &self.effort)
             .field("threads", &self.threads)
             .field("backends", &self.backends.len())
             .finish()
@@ -450,7 +450,7 @@ impl AvifEncoder {
             c2pa: None,
             alpha_mode: AlphaMode::Unassociated,
             keep_opaque_alpha: false,
-            speed: Speed::default(),
+            effort: Effort::default(),
             threads: Some(NonZeroUsize::MIN),
             backends: Vec::new(),
         }
@@ -482,7 +482,7 @@ impl AvifEncoder {
             c2pa: None,
             alpha_mode: AlphaMode::Unassociated,
             keep_opaque_alpha: false,
-            speed: Speed::default(),
+            effort: Effort::default(),
             threads: Some(NonZeroUsize::MIN),
             backends: Vec::new(),
         }
@@ -735,37 +735,37 @@ impl AvifEncoder {
         self
     }
 
-    /// Selects how much mode-decision search the AV1 encode runs: a [`Speed`] preset trading
+    /// Selects how much mode-decision search the AV1 encode runs: a [`Effort`] preset trading
     /// search for encode time, applied to **every** AV1 still of the file — the colour item and
     /// the alpha auxiliary alike.
     ///
-    /// The preset is `gamut-av1`'s, passed through unchanged; its table on [`Speed`] lists what
-    /// each one prunes. The default is `gamut-av1`'s own [`Speed::default`] ([`Speed::Balanced`]),
-    /// so an encoder without this call codes exactly the bytes `with_speed(Speed::default())`
-    /// does; [`Speed::Thorough`] is the full search. Every preset produces a conformant stream,
+    /// The preset is `gamut-av1`'s, passed through unchanged; its table on [`Effort`] lists what
+    /// each one prunes. The default is `gamut-av1`'s own [`Effort::default`] ([`Effort::Balanced`]),
+    /// so an encoder without this call codes exactly the bytes `with_effort(Effort::default())`
+    /// does; [`Effort::Thorough`] is the full search. Every preset produces a conformant stream,
     /// but the presets are a **time** control, not a size one: the search scores candidates by
     /// prediction error rather than rate, so a faster preset can come out smaller or larger.
     ///
     /// Only lossy coding is searched. [`AvifMode::Lossless`] has one fixed coding path and
-    /// produces the same bytes at every speed. Nor does any preset move a container field:
+    /// produces the same bytes at every effort. Nor does any preset move a container field:
     /// `av1C`, `colr`, `pixi` and the rest mirror the sequence header, which is the same at every
-    /// speed — only the coded tile data differs.
+    /// effort — only the coded tile data differs.
     ///
     /// A [pushed backend](Self::push_backend) receives the preset as
-    /// [`Av1EncodeRequest::speed`] — through [`AbiAv1StillEncoder`](crate::AbiAv1StillEncoder),
+    /// [`Av1EncodeRequest::effort`] — through [`AbiAv1StillEncoder`](crate::AbiAv1StillEncoder),
     /// as the second byte of the `extra` blob (see there) — and is free to map it onto its own
     /// effort scale or to ignore it.
     #[must_use]
-    pub fn with_speed(mut self, speed: Speed) -> Self {
-        self.speed = speed;
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        self.effort = effort;
         self
     }
 
-    /// The [`Speed`] preset this encoder codes at — [`Speed::default`] ([`Speed::Balanced`]) unless
-    /// [`with_speed`](Self::with_speed) chose another.
+    /// The [`Effort`] preset this encoder codes at — [`Effort::default`] ([`Effort::Balanced`]) unless
+    /// [`with_effort`](Self::with_effort) chose another.
     #[must_use]
-    pub fn speed(&self) -> Speed {
-        self.speed
+    pub fn effort(&self) -> Effort {
+        self.effort
     }
 
     /// Caps the threads an encode may use: `Some(n)` uses at most `n`, and `None` uses
@@ -779,7 +779,7 @@ impl AvifEncoder {
     ///   or more threads the alpha is coded on a scoped thread while the colour is coded on the
     ///   calling one; the colour gets the larger half of the budget and the alpha the rest.
     /// - Each still is coded in `gamut-av1`'s tile layout, and its tiles are coded concurrently on
-    ///   that still's share (see [`gamut_av1::EncodeOptions::threads`]). The layout is
+    ///   that still's share (see [`gamut_av1::Av1EncodeConfig::threads`]). The layout is
     ///   `gamut-av1`'s default whatever the thread count — it is what decides the bytes — so a
     ///   still with fewer tiles than threads leaves the extra threads unused.
     ///
@@ -813,11 +813,17 @@ impl AvifEncoder {
             .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
     }
 
-    /// The `gamut-av1` options a still is coded under: this encoder's preset, `gamut-av1`'s
-    /// default tile layout, and `threads`.
-    fn av1_options(&self, threads: NonZeroUsize) -> EncodeOptions {
-        EncodeOptions::default()
-            .with_speed(self.speed)
+    /// The `gamut-av1` configuration a still is coded under: quantizer `base_q_idx` and signalling
+    /// `colour`, at this encoder's preset, `gamut-av1`'s default tile layout, and `threads`.
+    fn av1_config(
+        &self,
+        base_q_idx: u8,
+        colour: Av1Color,
+        threads: NonZeroUsize,
+    ) -> Av1EncodeConfig {
+        Av1EncodeConfig::new(base_q_idx)
+            .with_color(colour)
+            .with_effort(self.effort)
             .with_threads(threads)
     }
 
@@ -920,19 +926,18 @@ impl AvifEncoder {
     /// discards codes, so lossless pins identity/full and ignores both (see
     /// [`AvifEncoder::with_matrix`]). `primaries` and `transfer` touch no sample, so both modes
     /// carry whatever the caller selected.
-    fn colour(&self) -> Av1Colour {
-        let tagged = Av1Colour {
-            primaries: self.config.primaries,
-            transfer: self.config.transfer,
-            ..Av1Colour::default()
-        };
+    fn colour(&self) -> Av1Color {
+        let tagged = Av1Color::new(
+            self.config.primaries,
+            self.config.transfer,
+            Av1Color::DEFAULT.matrix,
+            Av1Color::DEFAULT.range,
+        );
         match self.config.mode {
             AvifMode::Lossless => tagged,
-            _ => Av1Colour {
-                matrix: self.config.matrix,
-                range: self.config.range,
-                ..tagged
-            },
+            _ => tagged
+                .with_matrix(self.config.matrix)
+                .with_range(self.config.range),
         }
     }
 
@@ -945,12 +950,14 @@ impl AvifEncoder {
     /// the encoder scales no samples, so signalling limited range would describe samples it did
     /// not narrow. `primaries` and `transfer` only *tag* the samples, so they carry through as
     /// they do for a colour item.
-    fn monochrome_colour(&self) -> Av1Colour {
-        Av1Colour {
-            primaries: self.config.primaries,
-            transfer: self.config.transfer,
-            ..Av1Colour::monochrome()
-        }
+    fn monochrome_colour(&self) -> Av1Color {
+        let monochrome = Av1Color::monochrome();
+        Av1Color::new(
+            self.config.primaries,
+            self.config.transfer,
+            monochrome.matrix,
+            monochrome.range,
+        )
     }
 
     /// The chroma sampling this configuration codes. Lossless pins 4:4:4 regardless of the
@@ -1288,7 +1295,7 @@ impl AvifEncoder {
     /// AV1 sequence header all follow from that declaration plus the
     /// [`with_primaries`](Self::with_primaries) / [`with_transfer`](Self::with_transfer) tags, so
     /// they agree by construction. Everything else applies as it does to an
-    /// [`EncodeImage`] input: the quality (and so the mode), alpha quality, speed, threads,
+    /// [`EncodeImage`] input: the quality (and so the mode), alpha quality, effort, threads,
     /// backends, orientation, HDR and metadata payloads.
     ///
     /// [`AvifMode::Lossless`] codes the planes bit-exactly, whatever the matrix — no conversion
@@ -1317,12 +1324,12 @@ impl AvifEncoder {
                  apply; premultiply them first and declare AlphaMode::Premultiplied",
             ));
         }
-        let colour = Av1Colour {
-            primaries: self.config.primaries,
-            transfer: self.config.transfer,
-            matrix: planes.matrix,
-            range: planes.range,
-        };
+        let colour = Av1Color::new(
+            self.config.primaries,
+            self.config.transfer,
+            planes.matrix,
+            planes.range,
+        );
         let q = self.base_q_idx();
         let (alpha_q, alpha_colour) = (self.alpha_base_q_idx(), self.monochrome_colour());
         let dims = planes.dims;
@@ -1333,7 +1340,7 @@ impl AvifEncoder {
                     None => (colour_still(self.thread_budget())?, None),
                     Some(a) => {
                         let (s, a) = self.colour_and_alpha(colour_still, |t| {
-                            monochrome_still(a, alpha_q, alpha_colour, self.av1_options(t))
+                            monochrome_still(a, &self.av1_config(alpha_q, alpha_colour, t))
                         })?;
                         (s, Some(a))
                     }
@@ -1345,7 +1352,7 @@ impl AvifEncoder {
                     None => (colour_still(self.thread_budget())?, None),
                     Some(a) => {
                         let (s, a) = self.colour_and_alpha(colour_still, |t| {
-                            monochrome_still16(a, alpha_q, alpha_colour, self.av1_options(t))
+                            monochrome_still16(a, &self.av1_config(alpha_q, alpha_colour, t))
                         })?;
                         (s, Some(a))
                     }
@@ -1447,7 +1454,7 @@ impl AvifEncoder {
                 true,
                 PropertyKind::CodecConfiguration {
                     kind: *b"av1C",
-                    data: av1c_record(c).to_vec(),
+                    data: av1c_record(&Av1Config::for_still(c)).to_vec(),
                 },
             ),
             Property::new(
@@ -1573,7 +1580,7 @@ impl AvifEncoder {
         planes: &Planar8,
         dims: Dimensions,
         base_q_idx: u8,
-        colour: Av1Colour,
+        colour: Av1Color,
         chroma: ChromaSubsampling,
         threads: NonZeroUsize,
     ) -> Result<EncodedStill> {
@@ -1583,7 +1590,7 @@ impl AvifEncoder {
             colour,
             chroma,
             BitDepth::Eight,
-            self.speed,
+            self.effort,
             threads,
         );
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::Eight(planes))?
@@ -1591,13 +1598,7 @@ impl AvifEncoder {
             Some(obus) => {
                 crate::backend::still_from_backend_obus(obus, dims, colour, chroma, BitDepth::Eight)
             }
-            None => Ok(encode_still_intra_with_options(
-                planes,
-                base_q_idx,
-                colour,
-                self.av1_options(threads),
-            )?
-            .0),
+            None => encode_still(planes, &self.av1_config(base_q_idx, colour, threads)),
         }
     }
 
@@ -1609,7 +1610,7 @@ impl AvifEncoder {
         planes: &Planar16,
         dims: Dimensions,
         base_q_idx: u8,
-        colour: Av1Colour,
+        colour: Av1Color,
         threads: NonZeroUsize,
     ) -> Result<EncodedStill> {
         let bit_depth = planes.bit_depth();
@@ -1619,19 +1620,19 @@ impl AvifEncoder {
         // request must describe the planes it actually carries.
         let chroma = planes.subsampling();
         let request = Av1EncodeRequest::new(
-            dims, base_q_idx, colour, chroma, bit_depth, self.speed, threads,
+            dims,
+            base_q_idx,
+            colour,
+            chroma,
+            bit_depth,
+            self.effort,
+            threads,
         );
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::High(planes))? {
             Some(obus) => {
                 crate::backend::still_from_backend_obus(obus, dims, colour, chroma, bit_depth)
             }
-            None => Ok(encode_still_intra16_with_options(
-                planes,
-                base_q_idx,
-                colour,
-                self.av1_options(threads),
-            )?
-            .0),
+            None => encode_still16(planes, &self.av1_config(base_q_idx, colour, threads)),
         }
     }
 
@@ -1658,23 +1659,13 @@ impl AvifEncoder {
 /// anything else — so a backend registered against that contract has no way to decline a
 /// monochrome job, and would be given single-plane input it never agreed to encode. Widening the
 /// request is the additive change that opens this path to backends (`STATUS.md`).
-fn monochrome_still(
-    planes: &Planar8,
-    base_q_idx: u8,
-    colour: Av1Colour,
-    options: EncodeOptions,
-) -> Result<EncodedStill> {
-    Ok(encode_still_intra_with_options(planes, base_q_idx, colour, options)?.0)
+fn monochrome_still(planes: &Planar8, config: &Av1EncodeConfig) -> Result<EncodedStill> {
+    encode_still(planes, config)
 }
 
 /// The high-bit-depth [`monochrome_still`]; the registry is skipped for the same reason.
-fn monochrome_still16(
-    planes: &Planar16,
-    base_q_idx: u8,
-    colour: Av1Colour,
-    options: EncodeOptions,
-) -> Result<EncodedStill> {
-    Ok(encode_still_intra16_with_options(planes, base_q_idx, colour, options)?.0)
+fn monochrome_still16(planes: &Planar16, config: &Av1EncodeConfig) -> Result<EncodedStill> {
+    encode_still16(planes, config)
 }
 
 /// Splits a thread `budget` between an RGBA input's colour still and its alpha auxiliary: the
@@ -1794,7 +1785,7 @@ fn alpha_item(id: u32, alpha: &EncodedStill, dims: Dimensions) -> Item {
                 true,
                 PropertyKind::CodecConfiguration {
                     kind: *b"av1C",
-                    data: av1c_record(&alpha.config).to_vec(),
+                    data: av1c_record(&Av1Config::for_still(&alpha.config)).to_vec(),
                 },
             ),
             Property::new(
@@ -1823,8 +1814,9 @@ fn alpha_item(id: u32, alpha: &EncodedStill, dims: Dimensions) -> Item {
 
 /// The 4-byte `AV1CodecConfigurationRecord` body (empty `configOBUs`) stamped into the `av1C`
 /// property (AV1-ISOBMFF v1.3.0 §2.3.3/§2.3.4). Every field mirrors the AV1 sequence header.
-/// Crate-visible so the `av1c` module's tests can pin writer/reader coherence.
-pub(crate) fn av1c_record(c: &Av1StillConfig) -> [u8; 4] {
+/// Crate-visible so the `av1c` module's tests can pin writer/reader coherence. It writes the four
+/// fixed bytes only: `initial_presentation_delay` is never present and `configOBUs` is empty.
+pub(crate) fn av1c_record(c: &Av1Config) -> [u8; 4] {
     [
         0x81, // marker = 1, version = 1
         (c.seq_profile << 5) + (c.seq_level_idx_0 & 0x1f),
@@ -1910,8 +1902,8 @@ impl EncodeImage<Rgb8> for AvifEncoder {
         // returns — so the configured value would both misdescribe the buffer and reject every
         // conformant backend response.
         let chroma = planes.subsampling();
-        // base_q_idx 0 is the lossless path; encode_still_intra(_, 0) is exactly what
-        // encode_still_lossless_identity does, so a single call covers both modes.
+        // base_q_idx 0 is the lossless path (`Av1EncodeConfig::lossless`), so a single call
+        // covers both modes.
         //
         // Pluggable backends first, in push order; `gamut-av1` is the implicit tail when every
         // backend declines (and the only path taken by an encoder with no backends, which is why
@@ -1989,9 +1981,7 @@ impl EncodeImage<Rgba8> for AvifEncoder {
             |threads| {
                 monochrome_still(
                     &alpha_planes,
-                    self.alpha_base_q_idx(),
-                    self.monochrome_colour(),
-                    self.av1_options(threads),
+                    &self.av1_config(self.alpha_base_q_idx(), self.monochrome_colour(), threads),
                 )
             },
         )?;
@@ -2061,9 +2051,7 @@ impl EncodeImage<Rgba16> for AvifEncoder {
             |threads| {
                 monochrome_still16(
                     &alpha_planes,
-                    self.alpha_base_q_idx(),
-                    self.monochrome_colour(),
-                    self.av1_options(threads),
+                    &self.av1_config(self.alpha_base_q_idx(), self.monochrome_colour(), threads),
                 )
             },
         )?;
@@ -2083,20 +2071,14 @@ impl EncodeImage<Gray8> for AvifEncoder {
     /// bit replication and coded as a monochrome item at that depth.
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
-        let options = self.av1_options(self.thread_budget());
+        let config = self.av1_config(
+            self.base_q_idx(),
+            self.monochrome_colour(),
+            self.thread_budget(),
+        );
         let still = match self.widened_bit_depth()? {
-            None => monochrome_still(
-                &Planar8::from_gray8_view(image),
-                self.base_q_idx(),
-                self.monochrome_colour(),
-                options,
-            )?,
-            Some(depth) => monochrome_still16(
-                &Planar16::from_gray8_view(image, depth),
-                self.base_q_idx(),
-                self.monochrome_colour(),
-                options,
-            )?,
+            None => monochrome_still(&Planar8::from_gray8_view(image), &config)?,
+            Some(depth) => monochrome_still16(&Planar16::from_gray8_view(image, depth), &config)?,
         };
         self.emit(&still, dims, None, out)
     }
@@ -2165,7 +2147,7 @@ mod tests {
             true,
             PropertyKind::CodecConfiguration {
                 kind: *b"av1C",
-                data: av1c_record(&Av1StillConfig {
+                data: av1c_record(&Av1Config {
                     seq_profile,
                     seq_level_idx_0,
                     seq_tier_0: 0,
@@ -2175,10 +2157,8 @@ mod tests {
                     chroma_subsampling_x: 0,
                     chroma_subsampling_y: 0,
                     chroma_sample_position: 0,
-                    color_primaries: 1,
-                    transfer_characteristics: 13,
-                    matrix_coefficients: 1,
-                    full_range: true,
+                    initial_presentation_delay_minus_one: None,
+                    config_obus: Vec::new(),
                 })
                 .to_vec(),
             },
@@ -2273,7 +2253,7 @@ mod tests {
     fn av1c_record_encodes_every_field() {
         // Distinct, non-zero values in every field so each shift, mask, and `+` is observable (a
         // zero term would hide its operator: `0 + x == 0 - x`, `0 << n == 0 >> n`).
-        let c = Av1StillConfig {
+        let c = Av1Config {
             seq_profile: 5,        // 0b101
             seq_level_idx_0: 0x15, // 0b10101
             seq_tier_0: 1,
@@ -2283,11 +2263,8 @@ mod tests {
             chroma_subsampling_x: 1,
             chroma_subsampling_y: 1,
             chroma_sample_position: 2, // 0b10
-            // colr fields are irrelevant to av1C but needed to build the config.
-            color_primaries: 2,
-            transfer_characteristics: 3,
-            matrix_coefficients: 5,
-            full_range: true,
+            initial_presentation_delay_minus_one: None,
+            config_obus: Vec::new(),
         };
         // marker/version 0x81; (seq_profile<<5)+(level&0x1f) = 0xA0+0x15 = 0xB5; the flags byte sets
         // tier/high_bitdepth/twelve_bit/monochrome/subsampling_x/_y plus chroma position 2:
@@ -3054,10 +3031,10 @@ mod tests {
             .collect();
         let image = ImageRef::<Gray8>::new(&px, Dimensions::new(W, H).unwrap()).unwrap();
         for depth in [BitDepth::Ten, BitDepth::Twelve] {
-            let primary_at = |speed| {
+            let primary_at = |effort| {
                 let enc = AvifEncoder::lossy(50)
                     .with_bit_depth(depth)
-                    .with_speed(speed);
+                    .with_effort(effort);
                 let bytes = enc.encode_to_vec(image).unwrap();
                 let container = AvifContainer::parse(&bytes).expect("parses");
                 container
@@ -3067,20 +3044,19 @@ mod tests {
                     .payload
                     .clone()
             };
-            let want = gamut_av1::encode_still_intra16_with_speed(
+            let want = gamut_av1::encode_still16(
                 &Planar16::from_gray8_view(image, depth),
-                127,
-                Av1Colour::monochrome(),
-                Speed::Fastest,
+                &Av1EncodeConfig::new(127)
+                    .with_color(Av1Color::monochrome())
+                    .with_effort(Effort::Fastest),
             )
             .unwrap()
-            .0
             .obus;
-            let fastest = primary_at(Speed::Fastest);
+            let fastest = primary_at(Effort::Fastest);
             assert_eq!(fastest, want, "{depth:?}");
             assert_ne!(
                 fastest,
-                primary_at(Speed::Thorough),
+                primary_at(Effort::Thorough),
                 "{depth:?}: the fixture separates the presets"
             );
         }
