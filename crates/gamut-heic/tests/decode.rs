@@ -2059,6 +2059,113 @@ fn bt601_444_uses_full_chroma_resolution() {
     }
 }
 
+// ---- colour: behaviour pinned before the shared HEIF layer (#1056) ---------------------------
+//
+// gamut-avif and gamut-heic each carry a copy of the planar-to-RGBA conversion and of the `colr`
+// selection, and the copies disagree. These pins record this crate's side of each disagreement as
+// it stands, so the shared layer that replaces both copies changes any of them on purpose: a pin
+// that has to flip is flipped in the change that reconciles it, never silently.
+
+/// Item 1's 8-bit RGBA samples, decoded from a one-item file holding `item`.
+fn rgba8_of(item: Item) -> Result<Vec<u8>> {
+    let bytes = file(1, vec![item]);
+    let container = HeifContainer::parse(&bytes)?;
+    let rgba = container
+        .image()
+        .decode_item_rgba8(1, &mut Mock::default())?;
+    Ok(rgba.into_samples())
+}
+
+#[test]
+fn colr_matrix_2_is_refused_on_both_rgba_surfaces() {
+    // Matrix 2 (unspecified) is not mapped to BT.601 here, unlike gamut-avif, which presents it as
+    // BT.601. `MatrixCoefficients::Unspecified` has no de-matrixing, so both RGBA surfaces refuse
+    // it at 8 and 10 bits alike, while the planar surface still delivers the frame.
+    for bd in [8u8, 10] {
+        let item = coded_item(1, 1, bd, 15, 4, 4, vec![colr(2, true)]);
+        let bytes = file(1, vec![item]);
+        let container = HeifContainer::parse(&bytes).unwrap();
+        assert!(
+            container
+                .image()
+                .decode_item_planar(1, &mut Mock::default())
+                .is_ok(),
+            "bd={bd} planar"
+        );
+        assert!(
+            matches!(
+                container.image().decode_item_rgba8(1, &mut Mock::default()),
+                Err(error) if error.kind() == ErrorKind::Unsupported
+            ),
+            "bd={bd} rgba8"
+        );
+        assert!(
+            matches!(
+                container.image().decode_item_rgba16(1, &mut Mock::default()),
+                Err(error) if error.kind() == ErrorKind::Unsupported
+            ),
+            "bd={bd} rgba16"
+        );
+    }
+}
+
+#[test]
+fn colr_matrix_5_presents_exactly_as_matrix_6_at_eight_bits() {
+    // BT.470 B,G (5) and BT.601 (6) share Kr/Kb, and both take the 8-bit libwebp inverse.
+    for full in [false, true] {
+        let of = |matrix| rgba8_of(coded_item(1, 1, 8, 70, 4, 4, vec![colr(matrix, full)]));
+        assert_eq!(of(5).unwrap(), of(6).unwrap(), "full={full}");
+    }
+}
+
+#[test]
+fn colr_less_colour_item_presents_as_bt601_limited() {
+    // With no `colr`, a 4:2:0 colour item takes the documented default, matrix 6 at limited range.
+    // Base 70 clamps no channel, so the full-range and BT.709 presentations are both distinct.
+    let of = |props| rgba8_of(coded_item(1, 1, 8, 70, 4, 4, props)).unwrap();
+    let colr_less = of(vec![]);
+    assert_eq!(colr_less, of(vec![colr(6, false)]));
+    assert_ne!(colr_less, of(vec![colr(6, true)]));
+    assert_ne!(colr_less, of(vec![colr(1, false)]));
+}
+
+#[test]
+fn bt601_limited_420_presents_these_exact_samples() {
+    // A literal reference for the shared converter: the 4x4 4:2:0 gradient keyed by base 70 at
+    // 8-bit BT.601 limited range. This crate upsamples chroma by nearest neighbour. Base 70 keeps
+    // every channel of every pixel off 0 and 255, so no sample is a clamp that hides the matrix.
+    let got = rgba8_of(coded_item(1, 1, 8, 70, 4, 4, vec![colr(6, false)])).unwrap();
+    assert_eq!(got, BT601_LIMITED_420_BASE70);
+}
+
+#[test]
+fn bt601_limited_444_presents_these_exact_samples() {
+    // A literal reference for the shared converter: the 3x2 4:4:4 gradient keyed by base 70 at
+    // 8-bit BT.601 limited range, again with no channel clamped.
+    let got = rgba8_of(coded_item(1, 3, 8, 70, 3, 2, vec![colr(6, false)])).unwrap();
+    assert_eq!(got, BT601_LIMITED_444_BASE70);
+}
+
+/// The RGBA samples `bt601_limited_420_presents_these_exact_samples` pins.
+///
+/// Only the four pixels that sit on their own chroma sample, (0,0), (3,0), (0,3) and (3,3), match
+/// gamut-avif's interpolated pin of the same frame.
+#[rustfmt::skip]
+const BT601_LIMITED_420_BASE70: [u8; 64] = [
+    114, 44, 27, 255,   117, 47, 30, 255,   132, 43, 44, 255,   136, 47, 47, 255,
+    134, 64, 46, 255,   137, 67, 50, 255,   152, 63, 63, 255,   155, 67, 67, 255,
+    174, 69, 88, 255,   178, 72, 92, 255,   192, 68, 105, 255,  196, 71, 109, 255,
+    194, 88, 108, 255,  198, 92, 112, 255,  212, 88, 125, 255,  216, 91, 129, 255,
+];
+
+/// The RGBA samples `bt601_limited_444_presents_these_exact_samples` pins: the same bytes as
+/// gamut-avif's pin of the same frame, since 4:4:4 needs no upsampling.
+#[rustfmt::skip]
+const BT601_LIMITED_444_BASE70: [u8; 24] = [
+    114, 44, 27, 255,   129, 40, 40, 255,   143, 36, 54, 255,
+    155, 49, 69, 255,   169, 45, 82, 255,   184, 41, 96, 255,
+];
+
 // ---- clap: per-denominator guards, integer division, and offset arithmetic -------------------
 
 /// Decodes a 4x2 identity image carrying a single `clap`, returning the (expected-`Err`) error.
