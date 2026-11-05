@@ -24,7 +24,9 @@
 //! share. For strict archival decoding, [`audit`] classifies **every byte** of a stream into typed
 //! segments ([`SegmentReport`]) under a dual-ledger cross-check: a [`Tracked`] source records what
 //! the parse physically read, and the claims must match — byte accounting as a machine-checked
-//! proof, not a promise (issue #263).
+//! proof, not a promise (issue #263). A codec layers its own tag knowledge on top and reports it
+//! in the shared [`DeconstructReport`] vocabulary ([`Anomaly`], [`Severity`], [`UnknownTag`],
+//! [`UnknownFieldType`]), so gamut-tiff and gamut-dng report alike.
 //!
 //! ## Streaming
 //!
@@ -103,8 +105,8 @@ mod value;
 mod writer;
 
 pub use audit::{
-    Audit, AuditFinding, AuditSpec, Auditor, SkipReason, StandardAuditSpec, audit,
-    standard_data_extents,
+    Anomaly, Audit, AuditFinding, AuditSpec, Auditor, DeconstructReport, Severity, SkipReason,
+    StandardAuditSpec, UnknownFieldType, UnknownTag, audit, standard_data_extents,
 };
 pub use byte_order::ByteOrder;
 pub use entry::{Field, Ifd, SubIfd, Variant};
