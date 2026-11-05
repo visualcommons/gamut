@@ -2079,8 +2079,11 @@ fn rgba8_of(item: Item) -> Result<Vec<u8>> {
 #[test]
 fn colr_matrix_2_is_refused_on_both_rgba_surfaces() {
     // Matrix 2 (unspecified) is not mapped to BT.601 here, unlike gamut-avif, which presents it as
-    // BT.601. `MatrixCoefficients::Unspecified` has no de-matrixing, so both RGBA surfaces refuse
-    // it at 8 and 10 bits alike, while the planar surface still delivers the frame.
+    // BT.601. `MatrixCoefficients::Unspecified` has no de-matrixing, so the RGBA16 surface refuses
+    // it at 8 and 10 bits alike and the RGBA8 surface refuses it at 8 bits, while the planar
+    // surface still delivers the frame. The RGBA8 check runs only at 8 bits: that surface refuses
+    // every frame deeper than 8 bits whatever its matrix, so a 10-bit refusal there would pin
+    // nothing about matrix 2.
     for bd in [8u8, 10] {
         let item = coded_item(1, 1, bd, 15, 4, 4, vec![colr(2, true)]);
         let bytes = file(1, vec![item]);
@@ -2092,13 +2095,15 @@ fn colr_matrix_2_is_refused_on_both_rgba_surfaces() {
                 .is_ok(),
             "bd={bd} planar"
         );
-        assert!(
-            matches!(
-                container.image().decode_item_rgba8(1, &mut Mock::default()),
-                Err(error) if error.kind() == ErrorKind::Unsupported
-            ),
-            "bd={bd} rgba8"
-        );
+        if bd == 8 {
+            assert!(
+                matches!(
+                    container.image().decode_item_rgba8(1, &mut Mock::default()),
+                    Err(error) if error.kind() == ErrorKind::Unsupported
+                ),
+                "bd={bd} rgba8"
+            );
+        }
         assert!(
             matches!(
                 container.image().decode_item_rgba16(1, &mut Mock::default()),
