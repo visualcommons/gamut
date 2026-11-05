@@ -292,7 +292,7 @@ exclude_re = [
     # shifted up by 32 (`u64::from(a) | (u64::from(b) << 32)`). The operands occupy disjoint bits, so
     # `|` is identical to `^`; both `| -> ^` mutations are equivalent.
     # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    '^crates/gamut-ifd/src/value\.rs:(604:65|605:62): replace \| with \^ in Value::decode$',
+    '^crates/gamut-ifd/src/value\.rs:(608:65|609:62): replace \| with \^ in Value::decode$',
     # gamut-dsp `adst_output_permute`: the index is `(d << 3) | (c << 2) | (b << 1) | a`, where each
     # of a/b/c/d is a single bit (0 or 1) shifted to a distinct position, so the OR'd operands never
     # share bits and `|` is identical to `^`. The three `| -> ^` mutations are therefore equivalent.
