@@ -274,7 +274,7 @@ impl PhotoMetadata {
     ///
     /// The value is stored verbatim — XMP legally carries ISO-8601 forms IIM cannot express (e.g.
     /// fractional seconds). Validation happens at IIM projection:
-    /// [`IptcWriter::write_iim`](crate::writer::IptcWriter::write_iim) rejects a value it cannot
+    /// [`IptcWriter::to_iim_block`](crate::writer::IptcWriter::to_iim_block) rejects a value it cannot
     /// split into the `2:55`/`2:60` datasets.
     pub fn set_date_created(&mut self, iso: &str) {
         self.set_simple(WellKnownNs::Photoshop.uri(), "DateCreated", iso);

@@ -11,7 +11,7 @@
 //!
 //! The two overlap heavily; reconciling them (which value wins when both carry the same datum) is
 //! the crate's keystone, surfaced through [`IptcReader::read`] (merge, with a [`ConflictPolicy`])
-//! and [`IptcWriter::write_iim`] (projection back to IIM).
+//! and [`IptcWriter::to_iim_block`] (projection back to IIM).
 //!
 //! Standards: **IPTC-IIM 4.2** and the **IPTC Photo Metadata Standard** (`references/iptc`).
 //!
@@ -42,13 +42,13 @@
 //! accessors:
 //!
 //! ```
-//! use gamut_iptc::{IimBlock, IimDataSet, IptcReader};
+//! use gamut_iptc::{IimBlock, IimDataSet, IptcReader, Sources};
 //!
 //! let iim = IimBlock { datasets: vec![
 //!     IimDataSet { record: 2, dataset: 90, data: b"Lyon".to_vec() },  // City
 //!     IimDataSet { record: 2, dataset: 25, data: b"river".to_vec() }, // Keywords
 //! ] };
-//! let pm = IptcReader::new().read(Some(&iim), None)?;
+//! let pm = IptcReader::new().read(Sources { iim: Some(&iim), xmp: None })?;
 //! assert_eq!(pm.city(), Some("Lyon"));
 //! assert_eq!(pm.keywords(), ["river"]);
 //! # Ok::<(), gamut_iptc::IptcError>(())
@@ -117,5 +117,5 @@ pub use gamut_xmp as xmp;
 pub use iim::{IimBlock, IimDataSet, IimFieldKind, IimTagInfo};
 pub use irb::{IrbBlock, PhotoshopIrb};
 pub use photo_metadata::PhotoMetadata;
-pub use reader::{ConflictPolicy, FieldConflict, IptcReader};
+pub use reader::{ConflictPolicy, FieldConflict, IptcReader, Sources};
 pub use writer::IptcWriter;

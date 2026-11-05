@@ -60,13 +60,15 @@ typed accessors for creator, location, rights, keywords, dates, …). `IptcReade
 two carriers into one view, and `IptcWriter` projects a view back to the legacy carrier:
 
 ```rust
-use gamut_iptc::{IimBlock, IimDataSet, IptcReader, IptcWriter, ConflictPolicy};
+use gamut_iptc::{IimBlock, IimDataSet, IptcReader, IptcWriter, ConflictPolicy, Sources};
 
 let iim = IimBlock { datasets: vec![
     IimDataSet { record: 2, dataset: 90, data: b"Lyon".to_vec() }, // City
 ] };
 // When IIM and XMP disagree, the policy decides; XMP wins by default.
-let merged = IptcReader::new().policy(ConflictPolicy::IimWins).read(Some(&iim), None)?;
+let merged = IptcReader::new()
+    .with_policy(ConflictPolicy::IimWins)
+    .read(Sources { iim: Some(&iim), xmp: None })?;
 assert_eq!(merged.city(), Some("Lyon"));
 
 // ...and back: PhotoMetadata -> 8BIM resource stream (None if there is nothing to embed).

@@ -239,7 +239,9 @@ impl MetadataEmbedder {
         let Some(pm) = meta.iptc() else {
             return Ok(None);
         };
-        let block = IptcWriter::new().charset(self.iim_charset).write_iim(&pm)?;
+        let block = IptcWriter::new()
+            .with_charset(self.iim_charset)
+            .to_iim_block(&pm)?;
         if block.datasets.is_empty() {
             return Ok(None);
         }

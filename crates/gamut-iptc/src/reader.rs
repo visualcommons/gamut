@@ -36,6 +36,18 @@ pub struct FieldConflict {
     pub xmp: Vec<String>,
 }
 
+/// The carriers [`IptcReader::read`] merges, each named for the carrier it is.
+///
+/// Leave a field `None` when the file holds no such carrier; [`Sources::default`] names neither,
+/// and reads as an empty view. The crate-level docs show a read from the IIM carrier alone.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Sources<'a> {
+    /// The legacy IPTC-IIM datasets (see [`IptcReader::read_irb`]).
+    pub iim: Option<&'a IimBlock>,
+    /// The XMP graph carrying IPTC Photo Metadata.
+    pub xmp: Option<&'a XmpMeta>,
+}
+
 /// Reader for IPTC metadata.
 ///
 /// - [`IptcReader::read_irb`] / [`IimBlock::parse`] decode the legacy IIM carrier.
@@ -61,7 +73,7 @@ impl IptcReader {
 
     /// Sets the conflict policy applied by [`IptcReader::read`] and returns the reader.
     #[must_use]
-    pub fn policy(mut self, policy: ConflictPolicy) -> Self {
+    pub fn with_policy(mut self, policy: ConflictPolicy) -> Self {
         self.policy = policy;
         self
     }
@@ -92,9 +104,9 @@ impl IptcReader {
     ///
     /// Returns [`crate::IptcError::Unsupported`] if the block's `1:90` designates a coded
     /// character set gamut does not support — gamut never guess-decodes (see [`crate::charset`]).
-    pub fn read(&self, iim: Option<&IimBlock>, xmp: Option<&XmpMeta>) -> Result<PhotoMetadata> {
-        let pm = xmp.map(PhotoMetadata::from_xmp);
-        reconcile::merge(self.policy, iim, pm.as_ref())
+    pub fn read(&self, sources: Sources<'_>) -> Result<PhotoMetadata> {
+        let pm = sources.xmp.map(PhotoMetadata::from_xmp);
+        reconcile::merge(self.policy, sources.iim, pm.as_ref())
     }
 
     /// Reports the mapped fields on which the two carriers disagree (both present, differing
@@ -147,18 +159,16 @@ mod tests {
             }],
         };
         let meta = xmp_with_city("Tokyo");
+        let both = Sources {
+            iim: Some(&iim),
+            xmp: Some(&meta),
+        };
         // Default policy keeps XMP; IimWins prefers the legacy value.
+        assert_eq!(IptcReader::new().read(both).unwrap().city(), Some("Tokyo"));
         assert_eq!(
             IptcReader::new()
-                .read(Some(&iim), Some(&meta))
-                .unwrap()
-                .city(),
-            Some("Tokyo")
-        );
-        assert_eq!(
-            IptcReader::new()
-                .policy(ConflictPolicy::IimWins)
-                .read(Some(&iim), Some(&meta))
+                .with_policy(ConflictPolicy::IimWins)
+                .read(both)
                 .unwrap()
                 .city(),
             Some("Kyoto")
@@ -214,7 +224,10 @@ mod tests {
         // An unknown 1:90 must surface as Unsupported, never fall back to guess-decoding.
         assert!(
             IptcReader::new()
-                .read(Some(&exotic_charset_block()), None)
+                .read(Sources {
+                    iim: Some(&exotic_charset_block()),
+                    xmp: None,
+                })
                 .is_err()
         );
     }
