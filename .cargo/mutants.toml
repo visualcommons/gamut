@@ -596,7 +596,7 @@ exclude_re = [
     # guard is an optimisation, not a behaviour. Equivalent. (This one comparison only: the bare
     # name used to reach every `>` in every function whose name begins `decode`, nineteen others
     # across gamut-dng, gamut-icc, gamut-jpeg and gamut-webp that nobody argued for.)
-    '^crates/gamut-dng/src/lossless_jpeg\.rs:907:11: replace > with >= in decode$',
+    '^crates/gamut-dng/src/lossless_jpeg\.rs:911:11: replace > with >= in decode$',
     # gamut-dng predictor `x_factor`: deleting the `Predictor::None => Some(0)` arm drops it to
     # `_ => None`, and neither caller can tell the two apart.
     #
