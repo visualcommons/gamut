@@ -164,7 +164,7 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
 
         // C2PA manifest stores located on read and written only as a signing workflow (see
         // `Carrier::C2pa`): gamut-png STATUS.md C1 (`caBX`, `PngMetadata::c2pa`); gamut-webp
-        // STATUS.md M4 "C2PA manifest store" (the `C2PA` chunk, `WebpMetadata::c2pa`); gamut-avif
+        // STATUS.md M4 "C2PA manifest store" (the `C2PA` chunk, `gamut_webp::c2pa_span`); gamut-avif
         // STATUS.md "C2PA carriage" (#444, the top-level `uuid` box, `AvifContainer::c2pa_slot`).
         (Format::Png | Format::WebP | Format::Avif, Carrier::C2pa) => read,
 

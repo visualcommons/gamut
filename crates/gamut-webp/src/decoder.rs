@@ -9,12 +9,11 @@
 //! it to [`gamut_core::convert`] — so WebP applies the same widening and narrowing rules as every
 //! other gamut decoder. Decoding a genuinely transparent file to [`Rgb8`](gamut_core::Rgb8) would
 //! discard the alpha channel, so it is refused unless
-//! [`WebpDecoder::convert_policy`] permits it.
+//! [`WebpDecoder::with_convert_policy`] permits it.
 //!
-//! Every decode is bounded by caller-set resource limits
-//! ([`with_max_dimensions`](WebpDecoder::with_max_dimensions),
-//! [`with_max_image_bytes`](WebpDecoder::with_max_image_bytes)), checked against the bitstream's
-//! own header before any frame-sized allocation and before any backend is offered the job.
+//! Every decode is bounded by caller-set resource limits ([`WebpDecoder::with_limits`]), checked
+//! against the bitstream's own header before any frame-sized allocation and before any backend is
+//! offered the job.
 //!
 //! A lossy bitstream's 4:2:0 chroma is reconstructed with libwebp's fancy upsampler by default
 //! ([`ChromaUpsampling::Interpolated`], via [`gamut_dsp::upsample::libwebp`]). With the
@@ -28,25 +27,29 @@ use std::sync::{Arc, Mutex};
 use gamut_color::{ChromaUpsampling, ColorRange, Planar8};
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
 use gamut_core::{
-    DecodeImage, Dimensions, Error, ImageBuf, Pixel, PixelFormat, Result, Rgb8, Rgba8,
+    DecodeImage, DecodeLimits, Dimensions, Error, ImageBuf, Pixel, PixelFormat, RawMetadata,
+    Result, Rgb8, Rgba8,
 };
-use gamut_riff::{WebpChunkId, WebpLayout};
+use gamut_riff::{MetadataChunks, WebpChunkId, WebpLayout};
 
 use crate::alpha;
 use crate::backend::{
-    CodestreamInfo, DecodedRaster, SharedDecoder, WebpCodestream, WebpCodestreamDecoder,
-    dispatch_decode, peek_dimensions,
+    DecodedWebp, DecoderRegistry, WebpCodestream, WebpCodestreamDecoder, WebpStreamInfo,
+    decode_with_backends, peek_dimensions,
 };
 use crate::vp8l::decoder::{argb_to_rgb8, argb_to_rgba8, decode as decode_vp8l};
-
-/// Default cap on the decoded frame: 64 MiB, a 4096×4096 frame at four bytes per pixel — the same
-/// budget, and the same image, as `gamut-png`'s `PngDecoder` default.
-const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
 
 /// The format's own dimension bound: VP8L codes `width - 1` and `height - 1` in 14 bits each
 /// (RFC 9649 §3.2), so no WebP bitstream declares a side above 16384; a VP8 key frame's 14-bit
 /// fields stop one short of it (RFC 6386 §9.1).
 const FORMAT_MAX_DIMENSION: u32 = 1 << 14;
+
+/// The default [`DecodeLimits`]: each side at the format's own bound, and the workspace's 64 MiB
+/// ([`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`]) on the decoded frame — a 4096×4096 frame at four
+/// bytes per pixel, the same budget as every other gamut decoder.
+const DEFAULT_LIMITS: DecodeLimits = DecodeLimits::new()
+    .with_max_width(FORMAT_MAX_DIMENSION)
+    .with_max_height(FORMAT_MAX_DIMENSION);
 
 /// Bytes the budget charges per pixel: the 8-bit RGBA frame, the widest layout a WebP decodes to and
 /// the size of the VP8L decoder's own ARGB working buffer.
@@ -56,33 +59,28 @@ const BUDGET_BYTES_PER_PIXEL: u64 = 4;
 ///
 /// gamut ships its own decoder because every WebP decoder in the Rust ecosystem ultimately wraps
 /// libwebp; a `#![forbid(unsafe_code)]` decoder removes that crate's memory-unsafety exposure.
-/// The codestream itself may be decoded by a pluggable backend installed with
-/// [`push_backend`](Self::push_backend) — a hardware VP8 decoder, say; with none installed (the
-/// default) the crate's own `vp8`/`vp8l` decoders run. See [`crate::backend`] for the fallback
+/// The codestream itself may be decoded by a pluggable backend added with
+/// [`with_backend`](Self::with_backend) — a hardware VP8 decoder, say; with none added (the
+/// default) the crate's own `vp8`/`vp8l` decoders run. See the crate docs for the fallback
 /// contract.
 ///
 /// # Resource limits
 ///
 /// A WebP's few header bytes can declare a 16384×16384 frame — 1 GiB of RGBA — so the decoder
-/// bounds what it will decode. The defaults accept every dimension the format allows but cap the
-/// decoded frame at 64 MiB ([`with_max_image_bytes`](Self::with_max_image_bytes)); tighten the
-/// dimension caps with [`with_max_dimensions`](Self::with_max_dimensions) when the application
-/// knows its domain. Both are checked against the `VP8 ` key-frame or `VP8L` header before any
-/// frame-sized allocation, and before any [backend](Self::push_backend) is offered the job; a file
-/// over either limit is refused with an
+/// bounds what it will decode with a [`DecodeLimits`] ([`with_limits`](Self::with_limits)). The
+/// default accepts every dimension the format allows but caps the decoded frame at 64 MiB; tighten
+/// the dimension caps when the application knows its domain. Every bound is checked against the
+/// `VP8 ` key-frame or `VP8L` header before any frame-sized allocation, and before any
+/// [backend](Self::with_backend) is offered the job; a file over any limit is refused with an
 /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
 #[derive(Clone)]
 pub struct WebpDecoder {
     /// Pluggable codestream decoders, tried in push order ahead of the built-in tails.
-    backends: Vec<SharedDecoder>,
+    backends: DecoderRegistry,
     /// Which lossy layout conversions a typed decode may perform.
     policy: ConvertPolicy,
-    /// The widest frame accepted, in pixels.
-    max_width: u32,
-    /// The tallest frame accepted, in pixels.
-    max_height: u32,
-    /// The largest decoded frame accepted, in bytes at four bytes per pixel.
-    max_image_bytes: usize,
+    /// The resource bounds a decode enforces.
+    limits: DecodeLimits,
     /// How a lossy bitstream's 4:2:0 chroma is reconstructed.
     upsampling: ChromaUpsampling,
 }
@@ -98,9 +96,7 @@ impl fmt::Debug for WebpDecoder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebpDecoder")
             .field("backends", &self.backends.len())
-            .field("max_width", &self.max_width)
-            .field("max_height", &self.max_height)
-            .field("max_image_bytes", &self.max_image_bytes)
+            .field("limits", &self.limits)
             .field("upsampling", &self.upsampling)
             .finish_non_exhaustive()
     }
@@ -113,42 +109,32 @@ impl WebpDecoder {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            backends: Vec::new(),
+            backends: DecoderRegistry::new(),
             policy: ConvertPolicy::default(),
-            max_width: FORMAT_MAX_DIMENSION,
-            max_height: FORMAT_MAX_DIMENSION,
-            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            limits: DEFAULT_LIMITS,
             upsampling: ChromaUpsampling::default(),
         }
     }
 
-    /// Caps the accepted frame dimensions; a wider or taller frame is refused with an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before any allocation.
-    /// The default is the format's own bound, 16384 on each side.
-    #[must_use]
-    pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
-        self.max_width = width;
-        self.max_height = height;
-        self
-    }
-
-    /// Caps the decoded frame in bytes (default 64 MiB), refusing a larger one with an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before any allocation.
+    /// Sets the resource bounds ([`DecodeLimits`]) the decoder enforces; a frame over any of them is
+    /// refused with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before
+    /// any allocation.
     ///
-    /// The frame is charged at **four bytes per pixel** (`width × height × 4`, the 8-bit RGBA
-    /// frame) whatever the file turns out to hold: whether a lossless image is opaque is known
-    /// only after it is decoded, and the limit has to be decided from the header alone. So the
-    /// budget a caller sets admits the same frames whether they are later presented as
-    /// [`Rgb8`] or [`Rgba8`].
+    /// The default caps each side at the format's own bound, 16384, and the decoded frame at
+    /// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`] (64 MiB). The frame is charged at **four bytes per
+    /// pixel** (`width × height × 4`, the 8-bit RGBA frame) whatever the file turns out to hold:
+    /// whether a lossless image is opaque is known only after it is decoded, and the limit has to
+    /// be decided from the header alone. So a budget admits the same frames whether they are later
+    /// presented as [`Rgb8`] or [`Rgba8`].
     #[must_use]
-    pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
-        self.max_image_bytes = bytes;
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
         self
     }
 
     /// Enforces the dimension and byte-budget limits against the frame a codestream header declares.
     fn check_limits(&self, dims: Dimensions) -> Result<()> {
-        if dims.width() > self.max_width || dims.height() > self.max_height {
+        if dims.width() > self.limits.max_width() || dims.height() > self.limits.max_height() {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "WebP: image exceeds the dimension limit",
@@ -157,7 +143,7 @@ impl WebpDecoder {
         // Two `u32` sides times four cannot overflow `u64`, and `usize` widens into `u64` losslessly
         // on every target Rust supports, so the comparison is exact.
         let bytes = u64::from(dims.width()) * u64::from(dims.height()) * BUDGET_BYTES_PER_PIXEL;
-        if bytes > self.max_image_bytes as u64 {
+        if bytes > self.limits.max_image_bytes() as u64 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "WebP: image exceeds the size limit",
@@ -166,17 +152,18 @@ impl WebpDecoder {
         Ok(())
     }
 
-    /// Installs a codestream decoder backend, returning `&mut self` so pushes chain.
+    /// Adds a codestream decoder backend, returning the updated decoder so calls chain.
     ///
-    /// Backends are tried in **push order**, ahead of the built-in `vp8`/`vp8l` decoders, which
-    /// remain the implicit tails and cannot be removed. A backend declines a job by returning
-    /// `false` from [`supports`](WebpCodestreamDecoder::supports); once it accepts, its error
-    /// propagates and no other decoder is tried.
+    /// Backends are tried in the order they are added, ahead of the built-in `vp8`/`vp8l`
+    /// decoders, which remain the implicit tails and cannot be removed. A backend declines a job
+    /// by returning `false` from [`supports`](WebpCodestreamDecoder::supports); once it accepts,
+    /// its error propagates unchanged and no other decoder is tried.
     ///
-    /// **Cloning a `WebpDecoder` shares its backends**: the registry holds each backend behind an
-    /// [`Arc`], so a clone dispatches to the very same backend objects (and the same interior
-    /// state), it does not copy them.
-    pub fn push_backend(&mut self, backend: impl WebpCodestreamDecoder + 'static) -> &mut Self {
+    /// Cloning a `WebpDecoder` copies its backend list: the clone shares the backend instances
+    /// already added (the same objects, and the same interior state), but a backend added to one
+    /// afterwards is not seen by the other.
+    #[must_use]
+    pub fn with_backend(mut self, backend: impl WebpCodestreamDecoder + Send + 'static) -> Self {
         self.backends.push(Arc::new(Mutex::new(backend)));
         self
     }
@@ -189,42 +176,35 @@ impl WebpDecoder {
     /// header that cannot be peeked is one both built-in decoders reject while reading it —
     /// [`peek_dimensions`] runs their own header readers — so it never reaches a frame-sized
     /// allocation unchecked.
-    fn decode_codestream(
-        &self,
-        codestream: WebpCodestream,
-        payload: &[u8],
-    ) -> Result<DecodedRaster> {
+    fn decode_codestream(&self, codestream: WebpCodestream, payload: &[u8]) -> Result<DecodedWebp> {
         let peeked = peek_dimensions(codestream, payload);
         if let Some(dims) = peeked {
             self.check_limits(dims)?;
-        }
-        if !self.backends.is_empty()
-            && let Some(dims) = peeked
-            && let Some(result) = dispatch_decode(
+            if let Some(raster) = decode_with_backends(
                 &self.backends,
-                &CodestreamInfo::new(codestream, dims),
+                &WebpStreamInfo::new(codestream, dims),
                 payload,
-            )
-        {
-            return result;
+            )? {
+                return Ok(raster);
+            }
         }
         match codestream {
-            WebpCodestream::Vp8 => Ok(DecodedRaster::Yuv420(
-                crate::vp8::frame::decode_frame(payload)?.to_yuv420(),
+            WebpCodestream::Vp8 => Ok(DecodedWebp::Yuv420(
+                crate::vp8::frame::decode_frame(payload)?.to_yuv420()?,
             )),
             WebpCodestream::Vp8l => {
                 let (dimensions, pixels) = decode_vp8l(payload)?;
-                Ok(DecodedRaster::Argb { dimensions, pixels })
+                Ok(DecodedWebp::Argb { dimensions, pixels })
             }
         }
     }
 
     /// Unwraps a lossless decode result, which is ARGB by construction (the registry rejects a
     /// backend that returns the other variant).
-    fn expect_argb(raster: DecodedRaster) -> Result<(Dimensions, Vec<u32>)> {
+    fn expect_argb(raster: DecodedWebp) -> Result<(Dimensions, Vec<u32>)> {
         match raster {
-            DecodedRaster::Argb { dimensions, pixels } => Ok((dimensions, pixels)),
-            DecodedRaster::Yuv420(_) => Err(Error::invalid_input(
+            DecodedWebp::Argb { dimensions, pixels } => Ok((dimensions, pixels)),
+            DecodedWebp::Yuv420(_) => Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "WebP: VP8L decode produced a YUV raster",
             )),
@@ -234,13 +214,13 @@ impl WebpDecoder {
     /// Unwraps a lossy decode result with its dimensions.
     ///
     /// The built-in tail produces 4:2:0 planes by construction, but a pushed backend's raster is
-    /// admitted only through [`DecodedRaster::dimensions`], which refuses any other layout as
+    /// admitted only through [`DecodedWebp::dimensions`], which refuses any other layout as
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput).
-    fn expect_yuv(raster: DecodedRaster) -> Result<(Dimensions, Planar8)> {
+    fn expect_yuv(raster: DecodedWebp) -> Result<(Dimensions, Planar8)> {
         let dims = raster.dimensions()?;
         match raster {
-            DecodedRaster::Yuv420(yuv) => Ok((dims, yuv)),
-            DecodedRaster::Argb { .. } => Err(Error::invalid_input(
+            DecodedWebp::Yuv420(yuv) => Ok((dims, yuv)),
+            DecodedWebp::Argb { .. } => Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "WebP: VP8 decode produced an ARGB raster",
             )),
@@ -253,7 +233,7 @@ impl WebpDecoder {
     /// transparency cannot be decoded as [`Rgb8`]. A file whose alpha is entirely opaque still
     /// decodes as [`Rgb8`], because discarding an all-opaque alpha channel loses nothing.
     #[must_use]
-    pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
+    pub fn with_convert_policy(mut self, policy: ConvertPolicy) -> Self {
         self.policy = policy;
         self
     }
@@ -269,6 +249,59 @@ impl WebpDecoder {
     pub fn with_chroma_upsampling(mut self, upsampling: ChromaUpsampling) -> Self {
         self.upsampling = upsampling;
         self
+    }
+
+    /// Reads a WebP file's embedded metadata chunks without decoding any pixels.
+    ///
+    /// Walks the top-level RIFF chunks and copies out the three metadata payloads verbatim: the
+    /// `EXIF` chunk's bare TIFF stream (a WebP file stores no `"Exif\0\0"` signature, unlike a JPEG
+    /// APP1 segment) and the `XMP ` packet (RFC 9649 §2.7.3), and the `ICCP` colour profile
+    /// (§2.7.2; absent means sRGB is assumed). The spec permits at most one chunk of each kind and
+    /// lets readers keep only the first, which is what this does; the `VP8X` feature flags are
+    /// advisory, so a payload is surfaced because its chunk is present rather than because a flag
+    /// advertises it. A simple (single-bitstream) file, which cannot conformantly carry metadata,
+    /// yields [`RawMetadata::default`].
+    ///
+    /// Payloads are never parsed or re-serialized, so each is byte-for-byte the one a writer
+    /// embedded and can be borrowed straight into `gamut-metadata`'s `MetadataBlock`; with the
+    /// `metadata` feature, the facade's `TypedMetadata` reads the returned value directly. A C2PA
+    /// manifest store is not metadata in this sense: [`c2pa_span`](crate::c2pa_span) and
+    /// [`c2pa_summary`](crate::c2pa_summary) locate it. The limits do not apply: no pixels are
+    /// decoded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data`
+    /// is not a valid RIFF/WebP file, or if a chunk's declared size runs past the end of the data.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+    /// use gamut_webp::{RawMetadata, WebpDecoder, WebpEncoder};
+    ///
+    /// let icc = b"opaque ICC profile bytes";
+    /// let pixels = [10u8, 20, 30];
+    /// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(1, 1)?)?;
+    /// let mut file = Vec::new();
+    /// WebpEncoder::lossless().encode_image(image, &mut file)?;
+    /// assert_eq!(WebpDecoder::new().metadata(&file)?, RawMetadata::default());
+    ///
+    /// file.clear();
+    /// WebpEncoder::lossless()
+    ///     .with_icc_profile(icc)
+    ///     .encode_image(image, &mut file)?;
+    /// let meta = WebpDecoder::new().metadata(&file)?;
+    /// assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()));
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    pub fn metadata(&self, data: &[u8]) -> Result<RawMetadata> {
+        let chunks = MetadataChunks::read(data)?;
+        let mut meta = RawMetadata::default();
+        meta.exif = chunks.exif.map(<[u8]>::to_vec);
+        meta.xmp = chunks.xmp.map(<[u8]>::to_vec);
+        meta.icc = chunks.icc.map(<[u8]>::to_vec);
+        Ok(meta)
     }
 
     /// Sorts the container's chunks and locates the image bitstream.
@@ -343,7 +376,7 @@ impl WebpDecoder {
 
 impl DecodeImage<Rgb8> for WebpDecoder {
     /// An opaque file decodes straight to RGB. One that genuinely carries transparency needs an
-    /// [`AlphaPolicy`](gamut_core::convert::AlphaPolicy) -- see [`WebpDecoder::convert_policy`].
+    /// [`AlphaPolicy`](gamut_core::convert::AlphaPolicy) -- see [`WebpDecoder::with_convert_policy`].
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
         self.present(data)
     }
@@ -386,14 +419,72 @@ mod tests {
     #[test]
     fn debug_renders_the_backend_count_the_limits_and_the_upsampling() {
         let decoder = WebpDecoder::new()
-            .with_max_dimensions(3, 5)
-            .with_max_image_bytes(7)
+            .with_limits(
+                DecodeLimits::new()
+                    .with_max_width(3)
+                    .with_max_height(5)
+                    .with_max_image_bytes(7),
+            )
             .with_chroma_upsampling(ChromaUpsampling::Nearest);
         assert_eq!(
             format!("{decoder:?}"),
-            "WebpDecoder { backends: 0, max_width: 3, max_height: 5, max_image_bytes: 7, \
-             upsampling: Nearest, .. }"
+            "WebpDecoder { backends: 0, limits: DecodeLimits { max_width: 3, max_height: 5, \
+             max_image_bytes: 7 }, upsampling: Nearest, .. }"
         );
+    }
+
+    #[test]
+    fn default_limits_are_the_format_bound_and_the_workspace_budget() {
+        assert_eq!(DEFAULT_LIMITS.max_width(), 16384);
+        assert_eq!(DEFAULT_LIMITS.max_height(), 16384);
+        assert_eq!(
+            DEFAULT_LIMITS.max_image_bytes(),
+            DecodeLimits::DEFAULT_MAX_IMAGE_BYTES
+        );
+    }
+
+    #[test]
+    fn metadata_copies_the_three_payloads_and_not_the_store() {
+        use gamut_riff::{Chunk, Vp8xHeader, write_extended_preserving};
+        let vp8l = RiffReader::new(&solid_lossless_webp(1, 1, 1, 2, 3))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .payload
+            .to_vec();
+        let chunks = MetadataChunks {
+            icc: Some(b"icc"),
+            exif: Some(b"II*\0"),
+            xmp: Some(b"<x/>"),
+            c2pa: Some(b"\0\0\0\x08jumb"),
+        };
+        let header = Vp8xHeader {
+            canvas_width: 1,
+            canvas_height: 1,
+            ..Default::default()
+        };
+        let file = write_extended_preserving(
+            &header,
+            &chunks,
+            &[Chunk {
+                fourcc: FourCc::VP8L,
+                payload: &vp8l,
+            }],
+            &[],
+        )
+        .unwrap();
+        let meta = WebpDecoder::new().metadata(&file).unwrap();
+        assert_eq!(meta.exif.as_deref(), Some(&b"II*\0"[..]));
+        assert_eq!(meta.xmp.as_deref(), Some(&b"<x/>"[..]));
+        assert_eq!(meta.icc.as_deref(), Some(&b"icc"[..]));
+        assert_eq!(
+            WebpDecoder::new()
+                .metadata(&solid_lossless_webp(1, 1, 1, 2, 3))
+                .unwrap(),
+            RawMetadata::default()
+        );
+        assert!(WebpDecoder::new().metadata(b"not a webp").is_err());
     }
 
     #[test]

@@ -12,9 +12,9 @@ use gamut_core::{
 };
 use gamut_riff::{RiffReader, WebpChunkId};
 use gamut_webp::{
-    AbiDecoderBackend, AbiEncoderBackend, CodestreamInfo, DecodedRaster, PIXEL_FORMAT_ARGB,
-    PIXEL_FORMAT_YUV420, RasterRef, WebpCodestream, WebpCodestreamDecoder, WebpCodestreamEncoder,
-    WebpDecoder, WebpEncodeRequest, WebpEncoder,
+    AbiWebpDecoder, AbiWebpEncoder, DecodedWebp, WebpCodestream, WebpCodestreamDecoder,
+    WebpCodestreamEncoder, WebpDecoder, WebpEncodeRequest, WebpEncoder, WebpRasterRef,
+    WebpStreamInfo,
 };
 
 #[track_caller]
@@ -162,21 +162,21 @@ impl ScriptedDecoder {
 }
 
 impl WebpCodestreamDecoder for ScriptedDecoder {
-    fn supports(&mut self, info: &CodestreamInfo) -> bool {
+    fn supports(&mut self, info: &WebpStreamInfo) -> bool {
         self.log.supports.lock().expect("log").push(self.name);
         self.accepts == Some(info.codestream())
     }
 
-    fn decode(&mut self, info: &CodestreamInfo, _payload: &[u8]) -> Result<DecodedRaster> {
+    fn decode(&mut self, info: &WebpStreamInfo, _payload: &[u8]) -> Result<DecodedWebp> {
         self.log.ran.lock().expect("log").push(self.name);
         self.log.clones.fetch_add(1, Ordering::SeqCst);
         let d = info.dimensions();
         match &self.outcome {
-            Outcome::Argb(pixels) => Ok(DecodedRaster::Argb {
+            Outcome::Argb(pixels) => Ok(DecodedWebp::Argb {
                 dimensions: d,
                 pixels: pixels.clone(),
             }),
-            Outcome::Yuv(luma) => Ok(DecodedRaster::Yuv420(scripted_yuv(
+            Outcome::Yuv(luma) => Ok(DecodedWebp::Yuv420(scripted_yuv(
                 d.width(),
                 d.height(),
                 *luma,
@@ -184,7 +184,7 @@ impl WebpCodestreamDecoder for ScriptedDecoder {
             Outcome::Planes(layout) => {
                 let (cw, ch) = layout.chroma_dimensions(d.width(), d.height());
                 let chroma = vec![128; (cw * ch) as usize];
-                Ok(DecodedRaster::Yuv420(Planar8::from_planes_subsampled(
+                Ok(DecodedWebp::Yuv420(Planar8::from_planes_subsampled(
                     d,
                     *layout,
                     [
@@ -232,7 +232,7 @@ impl WebpCodestreamEncoder for ScriptedEncoder {
         self.accepts == Some(req.codestream())
     }
 
-    fn encode(&mut self, _req: &WebpEncodeRequest, _raster: &RasterRef<'_>) -> Result<Vec<u8>> {
+    fn encode(&mut self, _req: &WebpEncodeRequest, _raster: &WebpRasterRef<'_>) -> Result<Vec<u8>> {
         self.log.ran.lock().expect("log").push(self.name);
         self.log.clones.fetch_add(1, Ordering::SeqCst);
         match &self.outcome {
@@ -253,18 +253,19 @@ fn decode_uses_the_first_accepting_backend_in_push_order() {
     let (file, _) = lossless_fixture();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
-        "first",
-        Some(WebpCodestream::Vp8l),
-        Outcome::Argb(vec![0xff00_0000 | 0x0011_2233; 64]),
-        &log,
-    ))
-    .push_backend(ScriptedDecoder::new(
-        "second",
-        Some(WebpCodestream::Vp8l),
-        Outcome::Argb(vec![0xffff_ffff; 64]),
-        &log,
-    ));
+    dec = dec
+        .with_backend(ScriptedDecoder::new(
+            "first",
+            Some(WebpCodestream::Vp8l),
+            Outcome::Argb(vec![0xff00_0000 | 0x0011_2233; 64]),
+            &log,
+        ))
+        .with_backend(ScriptedDecoder::new(
+            "second",
+            Some(WebpCodestream::Vp8l),
+            Outcome::Argb(vec![0xffff_ffff; 64]),
+            &log,
+        ));
 
     let got: ImageBuf<Rgb8> = dec.decode_image(&file).expect("decode");
     assert_eq!(got.dimensions(), dims(8, 8));
@@ -279,18 +280,19 @@ fn decode_skips_decliners_then_uses_the_acceptor() {
     let (file, _) = lossless_fixture();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
-        "declines",
-        None,
-        Outcome::Fail("must not run"),
-        &log,
-    ))
-    .push_backend(ScriptedDecoder::new(
-        "accepts",
-        Some(WebpCodestream::Vp8l),
-        Outcome::Argb(vec![0xff01_0203; 64]),
-        &log,
-    ));
+    dec = dec
+        .with_backend(ScriptedDecoder::new(
+            "declines",
+            None,
+            Outcome::Fail("must not run"),
+            &log,
+        ))
+        .with_backend(ScriptedDecoder::new(
+            "accepts",
+            Some(WebpCodestream::Vp8l),
+            Outcome::Argb(vec![0xff01_0203; 64]),
+            &log,
+        ));
 
     let got: ImageBuf<Rgb8> = dec.decode_image(&file).expect("decode");
     assert_eq!(got.as_samples(), [1u8, 2, 3].repeat(64).as_slice());
@@ -305,18 +307,19 @@ fn decode_falls_back_to_the_builtin_tail_when_all_decline() {
 
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
-        "a",
-        None,
-        Outcome::Fail("must not run"),
-        &log,
-    ))
-    .push_backend(ScriptedDecoder::new(
-        "b",
-        None,
-        Outcome::Fail("must not run"),
-        &log,
-    ));
+    dec = dec
+        .with_backend(ScriptedDecoder::new(
+            "a",
+            None,
+            Outcome::Fail("must not run"),
+            &log,
+        ))
+        .with_backend(ScriptedDecoder::new(
+            "b",
+            None,
+            Outcome::Fail("must not run"),
+            &log,
+        ));
 
     let got: ImageBuf<Rgb8> = dec.decode_image(&file).expect("decode");
     assert_eq!(got.dimensions(), baseline.dimensions());
@@ -335,7 +338,7 @@ fn decode_propagates_an_accepted_backends_error_without_running_the_tail() {
 
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "boom",
         Some(WebpCodestream::Vp8l),
         Outcome::Fail("backend exploded"),
@@ -353,13 +356,13 @@ fn decode_propagates_an_accepted_backends_unsupported_without_falling_through() 
     let (file, _) = lossless_fixture();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "unsupported",
         Some(WebpCodestream::Vp8l),
         Outcome::Unsupported("backend cannot after all"),
         &log,
     ));
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "never",
         Some(WebpCodestream::Vp8l),
         Outcome::Argb(vec![0; 64]),
@@ -379,7 +382,7 @@ fn decode_routing_is_per_codestream() {
 
     // A VP8-only backend must not be *chosen* for a VP8L stream (it is asked, and declines).
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "vp8only",
         Some(WebpCodestream::Vp8),
         Outcome::Yuv(200),
@@ -413,7 +416,7 @@ fn decode_routing_is_per_codestream() {
     // And a VP8L-only backend is never chosen for a VP8 stream.
     let log2 = Arc::new(Log::default());
     let mut dec2 = WebpDecoder::new();
-    dec2.push_backend(ScriptedDecoder::new(
+    dec2 = dec2.with_backend(ScriptedDecoder::new(
         "vp8lonly",
         Some(WebpCodestream::Vp8l),
         Outcome::Argb(vec![0xffff_ffff; 256]),
@@ -431,7 +434,7 @@ fn decode_rejects_a_backends_non_420_vp8_raster_as_invalid_input() {
     let (file, _) = lossy_fixture();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "yuv444",
         Some(WebpCodestream::Vp8),
         Outcome::Planes(ChromaSubsampling::Cs444),
@@ -451,7 +454,7 @@ fn decode_rejects_a_raster_that_does_not_match_the_codestream() {
     let (file, _) = lossless_fixture();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "wrong-raster",
         Some(WebpCodestream::Vp8l),
         Outcome::Yuv(64),
@@ -470,7 +473,7 @@ fn decode_rejects_an_argb_raster_from_a_vp8_backend() {
     let (file, _) = lossy_fixture();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "wrong-raster",
         Some(WebpCodestream::Vp8),
         Outcome::Argb(vec![0xffff_ffff; 256]),
@@ -495,11 +498,11 @@ fn decode_rejects_an_argb_raster_from_a_vp8_backend() {
 struct PanickingDecoder;
 
 impl WebpCodestreamDecoder for PanickingDecoder {
-    fn supports(&mut self, _info: &CodestreamInfo) -> bool {
+    fn supports(&mut self, _info: &WebpStreamInfo) -> bool {
         panic!("backend panic");
     }
 
-    fn decode(&mut self, _info: &CodestreamInfo, _payload: &[u8]) -> Result<DecodedRaster> {
+    fn decode(&mut self, _info: &WebpStreamInfo, _payload: &[u8]) -> Result<DecodedWebp> {
         unreachable!("supports panics first")
     }
 }
@@ -512,7 +515,7 @@ impl WebpCodestreamEncoder for PanickingEncoder {
         panic!("backend panic");
     }
 
-    fn encode(&mut self, _req: &WebpEncodeRequest, _raster: &RasterRef<'_>) -> Result<Vec<u8>> {
+    fn encode(&mut self, _req: &WebpEncodeRequest, _raster: &WebpRasterRef<'_>) -> Result<Vec<u8>> {
         unreachable!("supports panics first")
     }
 }
@@ -521,7 +524,7 @@ impl WebpCodestreamEncoder for PanickingEncoder {
 fn a_panicking_decode_backend_poisons_the_registry() {
     let (file, _) = lossless_fixture();
     let mut dec = WebpDecoder::new();
-    dec.push_backend(PanickingDecoder);
+    dec = dec.with_backend(PanickingDecoder);
 
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -547,7 +550,7 @@ fn a_panicking_encode_backend_poisons_the_registry() {
     // The encoder keeps its own registry, so this can be wrong while the decoder path above is
     // right. Same contract, separately reachable.
     let mut enc = WebpEncoder::lossless();
-    enc.push_backend(PanickingEncoder);
+    enc = enc.with_backend(PanickingEncoder);
 
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -566,7 +569,7 @@ fn a_panicking_encode_backend_poisons_the_registry() {
 
 #[test]
 fn abi_adapters_return_their_wrapped_backend() {
-    let decoder = AbiDecoderBackend::new(AbiFakeDecoder {
+    let decoder = AbiWebpDecoder::new(AbiFakeDecoder {
         accepts: 7,
         status: abi::Status::OK,
         fill: 3,
@@ -582,7 +585,7 @@ fn decode_skips_the_registry_when_the_codestream_header_is_unparseable() {
     let file = gamut_riff::write_simple_lossy(&[0x9d, 0x01, 0x2a]).unwrap();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "never",
         Some(WebpCodestream::Vp8),
         Outcome::Yuv(0),
@@ -599,7 +602,7 @@ fn decode_backends_also_serve_the_rgba_path() {
     let (file, _) = lossless_fixture();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "argb",
         Some(WebpCodestream::Vp8l),
         Outcome::Argb(vec![0x8011_2233; 64]),
@@ -621,18 +624,19 @@ fn decode_backends_also_serve_the_rgba_path() {
 fn encode_uses_the_first_accepting_backend_in_push_order() {
     let log = Arc::new(Log::default());
     let mut enc = WebpEncoder::lossless();
-    enc.push_backend(ScriptedEncoder::new(
-        "first",
-        Some(WebpCodestream::Vp8l),
-        Outcome::Bytes(vec![0xaa, 0xbb, 0xcc]),
-        &log,
-    ))
-    .push_backend(ScriptedEncoder::new(
-        "second",
-        Some(WebpCodestream::Vp8l),
-        Outcome::Bytes(vec![0xff]),
-        &log,
-    ));
+    enc = enc
+        .with_backend(ScriptedEncoder::new(
+            "first",
+            Some(WebpCodestream::Vp8l),
+            Outcome::Bytes(vec![0xaa, 0xbb, 0xcc]),
+            &log,
+        ))
+        .with_backend(ScriptedEncoder::new(
+            "second",
+            Some(WebpCodestream::Vp8l),
+            Outcome::Bytes(vec![0xff]),
+            &log,
+        ));
 
     let file = encode_rgb(&enc, &rgb(8, 8), dims(8, 8)).expect("encode");
     assert_eq!(
@@ -649,18 +653,19 @@ fn encode_skips_decliners_and_falls_back_to_the_builtin_tail() {
 
     let log = Arc::new(Log::default());
     let mut enc = WebpEncoder::lossless();
-    enc.push_backend(ScriptedEncoder::new(
-        "a",
-        None,
-        Outcome::Fail("must not run"),
-        &log,
-    ))
-    .push_backend(ScriptedEncoder::new(
-        "b",
-        None,
-        Outcome::Fail("must not run"),
-        &log,
-    ));
+    enc = enc
+        .with_backend(ScriptedEncoder::new(
+            "a",
+            None,
+            Outcome::Fail("must not run"),
+            &log,
+        ))
+        .with_backend(ScriptedEncoder::new(
+            "b",
+            None,
+            Outcome::Fail("must not run"),
+            &log,
+        ));
     let file = encode_rgb(&enc, &rgb(8, 8), dims(8, 8)).expect("encode");
     assert_eq!(
         file, baseline,
@@ -674,7 +679,7 @@ fn encode_skips_decliners_and_falls_back_to_the_builtin_tail() {
 fn encode_propagates_an_accepted_backends_error_without_running_the_tail() {
     let log = Arc::new(Log::default());
     let mut enc = WebpEncoder::lossy(60);
-    enc.push_backend(ScriptedEncoder::new(
+    enc = enc.with_backend(ScriptedEncoder::new(
         "boom",
         Some(WebpCodestream::Vp8),
         Outcome::Fail("encoder exploded"),
@@ -691,13 +696,13 @@ fn encode_propagates_an_accepted_backends_error_without_running_the_tail() {
 fn encode_propagates_an_accepted_backends_unsupported_without_falling_through() {
     let log = Arc::new(Log::default());
     let mut enc = WebpEncoder::lossy(60);
-    enc.push_backend(ScriptedEncoder::new(
+    enc = enc.with_backend(ScriptedEncoder::new(
         "unsupported",
         Some(WebpCodestream::Vp8),
         Outcome::Unsupported("encoder cannot after all"),
         &log,
     ));
-    enc.push_backend(ScriptedEncoder::new(
+    enc = enc.with_backend(ScriptedEncoder::new(
         "never",
         Some(WebpCodestream::Vp8),
         Outcome::Bytes(vec![0x01, 0x02, 0x03, 0x04]),
@@ -714,7 +719,7 @@ fn encode_routing_is_per_codestream() {
     let log = Arc::new(Log::default());
     // A VP8L-only backend must not be chosen for a lossy (VP8) encode.
     let mut lossy = WebpEncoder::lossy(60);
-    lossy.push_backend(ScriptedEncoder::new(
+    lossy = lossy.with_backend(ScriptedEncoder::new(
         "vp8lonly",
         Some(WebpCodestream::Vp8l),
         Outcome::Bytes(vec![0xde, 0xad]),
@@ -729,7 +734,7 @@ fn encode_routing_is_per_codestream() {
     // A VP8-only backend is chosen for that same lossy encode.
     let log2 = Arc::new(Log::default());
     let mut enc = WebpEncoder::lossy(60);
-    enc.push_backend(ScriptedEncoder::new(
+    enc = enc.with_backend(ScriptedEncoder::new(
         "vp8only",
         Some(WebpCodestream::Vp8),
         Outcome::Bytes(vec![0x01, 0x02, 0x03, 0x04]),
@@ -761,7 +766,7 @@ fn encode_backend_serves_the_transparent_extended_path_while_alph_stays_containe
 
     let log = Arc::new(Log::default());
     let mut enc = WebpEncoder::lossy(60);
-    enc.push_backend(ScriptedEncoder::new(
+    enc = enc.with_backend(ScriptedEncoder::new(
         "vp8",
         Some(WebpCodestream::Vp8),
         Outcome::Bytes(vec![0x5a; 5]),
@@ -791,7 +796,7 @@ fn encode_backend_serves_the_transparent_extended_path_while_alph_stays_containe
 fn clone_shares_encoder_backends() {
     let log = Arc::new(Log::default());
     let mut enc = WebpEncoder::lossless();
-    enc.push_backend(ScriptedEncoder::new(
+    enc = enc.with_backend(ScriptedEncoder::new(
         "shared",
         Some(WebpCodestream::Vp8l),
         Outcome::Bytes(vec![0x77]),
@@ -813,7 +818,7 @@ fn clone_shares_decoder_backends() {
     let (file, _) = lossless_fixture();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "shared",
         Some(WebpCodestream::Vp8l),
         Outcome::Argb(vec![0xff04_0506; 64]),
@@ -833,20 +838,20 @@ fn clone_shares_decoder_backends() {
 fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
     let log = Arc::new(Log::default());
     let mut enc = WebpEncoder::lossless();
-    enc.push_backend(ScriptedEncoder::new(
+    enc = enc.with_backend(ScriptedEncoder::new(
         "shared",
         None,
         Outcome::Bytes(vec![]),
         &log,
     ));
     let mut clone = enc.clone();
-    enc.push_backend(ScriptedEncoder::new(
+    enc = enc.with_backend(ScriptedEncoder::new(
         "original-only",
         None,
         Outcome::Bytes(vec![]),
         &log,
     ));
-    clone.push_backend(ScriptedEncoder::new(
+    clone = clone.with_backend(ScriptedEncoder::new(
         "clone-only",
         None,
         Outcome::Bytes(vec![]),
@@ -862,20 +867,20 @@ fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
     let (file, _) = lossless_fixture();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "shared",
         None,
         Outcome::Argb(vec![]),
         &log,
     ));
     let mut clone = dec.clone();
-    dec.push_backend(ScriptedDecoder::new(
+    dec = dec.with_backend(ScriptedDecoder::new(
         "original-only",
         None,
         Outcome::Argb(vec![]),
         &log,
     ));
-    clone.push_backend(ScriptedDecoder::new(
+    clone = clone.with_backend(ScriptedDecoder::new(
         "clone-only",
         None,
         Outcome::Argb(vec![]),
@@ -894,7 +899,7 @@ fn debug_reports_the_backend_count() {
     let mut enc = WebpEncoder::lossless();
     assert!(format!("{enc:?}").contains("backends: 0"));
     let log = Arc::new(Log::default());
-    enc.push_backend(ScriptedEncoder::new(
+    enc = enc.with_backend(ScriptedEncoder::new(
         "x",
         None,
         Outcome::Bytes(Vec::new()),
@@ -904,7 +909,7 @@ fn debug_reports_the_backend_count() {
 
     let mut dec = WebpDecoder::new();
     assert!(format!("{dec:?}").contains("backends: 0"));
-    dec.push_backend(ScriptedDecoder::new("y", None, Outcome::Yuv(0), &log));
+    dec = dec.with_backend(ScriptedDecoder::new("y", None, Outcome::Yuv(0), &log));
     assert!(format!("{dec:?}").contains("backends: 1"));
 }
 
@@ -939,7 +944,7 @@ impl abi::Decoder for AbiFakeDecoder {
         }
         let (w, h) = (out.width as usize, out.height as usize);
         let plane_len = |i: usize| match out.pixel_format {
-            PIXEL_FORMAT_ARGB => w * h * 4,
+            abi::pixel_format::BGRA => w * h * 4,
             _ if i == 0 => w * h,
             _ => w.div_ceil(2) * h.div_ceil(2),
         };
@@ -997,28 +1002,28 @@ impl abi::Encoder for AbiFakeEncoder {
 
 #[test]
 fn abi_decode_adapter_declines_a_codec_id_it_does_not_accept() {
-    let mut backend = AbiDecoderBackend::new(AbiFakeDecoder {
+    let mut backend = AbiWebpDecoder::new(AbiFakeDecoder {
         accepts: WebpCodestream::Vp8.codec_id(),
         status: abi::Status::OK,
         fill: 0,
         seen_strides: [0; abi::MAX_PLANES],
     });
-    assert!(!backend.supports(&CodestreamInfo::new(WebpCodestream::Vp8l, dims(4, 4))));
-    assert!(backend.supports(&CodestreamInfo::new(WebpCodestream::Vp8, dims(4, 4))));
+    assert!(!backend.supports(&WebpStreamInfo::new(WebpCodestream::Vp8l, dims(4, 4))));
+    assert!(backend.supports(&WebpStreamInfo::new(WebpCodestream::Vp8, dims(4, 4))));
 }
 
 #[test]
 fn abi_decode_adapter_round_trips_both_rasters() {
     // VP8L: one BGRA plane -> 0xAARRGGBB pixels.
-    let mut lossless = AbiDecoderBackend::new(AbiFakeDecoder {
+    let mut lossless = AbiWebpDecoder::new(AbiFakeDecoder {
         accepts: WebpCodestream::Vp8l.codec_id(),
         status: abi::Status::OK,
         fill: 0x11,
         seen_strides: [0; abi::MAX_PLANES],
     });
-    let info = CodestreamInfo::new(WebpCodestream::Vp8l, dims(2, 2));
+    let info = WebpStreamInfo::new(WebpCodestream::Vp8l, dims(2, 2));
     match lossless.decode(&info, &[]).expect("decode") {
-        DecodedRaster::Argb { dimensions, pixels } => {
+        DecodedWebp::Argb { dimensions, pixels } => {
             assert_eq!(dimensions, dims(2, 2));
             assert_eq!(pixels, vec![0x1111_1111u32; 4]);
         }
@@ -1028,15 +1033,15 @@ fn abi_decode_adapter_round_trips_both_rasters() {
     assert_eq!(lossless.into_inner().seen_strides, [8, 0, 0, 0]);
 
     // VP8: three planes, filled 0x20 / 0x21 / 0x22 by plane index.
-    let mut lossy = AbiDecoderBackend::new(AbiFakeDecoder {
+    let mut lossy = AbiWebpDecoder::new(AbiFakeDecoder {
         accepts: WebpCodestream::Vp8.codec_id(),
         status: abi::Status::OK,
         fill: 0x20,
         seen_strides: [0; abi::MAX_PLANES],
     });
-    let info = CodestreamInfo::new(WebpCodestream::Vp8, dims(4, 2));
+    let info = WebpStreamInfo::new(WebpCodestream::Vp8, dims(4, 2));
     match lossy.decode(&info, &[]).expect("decode") {
-        DecodedRaster::Yuv420(yuv) => {
+        DecodedWebp::Yuv420(yuv) => {
             assert_eq!((yuv.width(), yuv.height()), (4, 2));
             let [y, u, v] = yuv.planes();
             assert_eq!(y, vec![0x20u8; 8].as_slice());
@@ -1052,9 +1057,9 @@ fn abi_decode_adapter_round_trips_both_rasters() {
 #[test]
 fn abi_decode_adapter_maps_statuses_to_typed_errors() {
     for codestream in [WebpCodestream::Vp8, WebpCodestream::Vp8l] {
-        let info = CodestreamInfo::new(codestream, dims(2, 2));
+        let info = WebpStreamInfo::new(codestream, dims(2, 2));
         // A late UNSUPPORTED cannot re-open the fallback, so it is a typed Unsupported error.
-        let mut late = AbiDecoderBackend::new(AbiFakeDecoder {
+        let mut late = AbiWebpDecoder::new(AbiFakeDecoder {
             accepts: codestream.codec_id(),
             status: abi::Status::UNSUPPORTED,
             fill: 0,
@@ -1066,7 +1071,7 @@ fn abi_decode_adapter_maps_statuses_to_typed_errors() {
             "WebP: codec-abi decode backend declined after accepting the job",
         );
         // Any other non-OK status is a backend failure.
-        let mut failed = AbiDecoderBackend::new(AbiFakeDecoder {
+        let mut failed = AbiWebpDecoder::new(AbiFakeDecoder {
             accepts: codestream.codec_id(),
             status: abi::Status(-42),
             fill: 0,
@@ -1084,7 +1089,7 @@ fn abi_decode_adapter_maps_statuses_to_typed_errors() {
 fn abi_encode_adapter_streams_chunks_and_describes_the_image() {
     // VP8L: the ARGB pixels are staged as one BGRA plane and the concatenated sink output is the
     // returned chunk payload.
-    let mut lossless = AbiEncoderBackend::new(AbiFakeEncoder {
+    let mut lossless = AbiWebpEncoder::new(AbiFakeEncoder {
         accepts: WebpCodestream::Vp8l.codec_id(),
         status: abi::Status::OK,
         chunks: vec![vec![1, 2], vec![3], vec![4, 5, 6]],
@@ -1097,7 +1102,7 @@ fn abi_encode_adapter_streams_chunks_and_describes_the_image() {
     let payload = lossless
         .encode(
             &req,
-            &RasterRef::Argb {
+            &WebpRasterRef::Argb {
                 dimensions: dims(2, 1),
                 pixels: &pixels,
             },
@@ -1105,11 +1110,11 @@ fn abi_encode_adapter_streams_chunks_and_describes_the_image() {
         .expect("encode");
     assert_eq!(payload, vec![1, 2, 3, 4, 5, 6]);
     let seen = lossless.into_inner();
-    assert_eq!(seen.seen, Some((90, PIXEL_FORMAT_ARGB, 1, 2)));
+    assert_eq!(seen.seen, Some((90, abi::pixel_format::BGRA, 1, 2)));
     assert_eq!(seen.seen_strides, [8, 0, 0, 0], "stride is width * 4 bytes");
 
     // VP8: the YUV planes are described in place.
-    let mut lossy = AbiEncoderBackend::new(AbiFakeEncoder {
+    let mut lossy = AbiWebpEncoder::new(AbiFakeEncoder {
         accepts: WebpCodestream::Vp8.codec_id(),
         status: abi::Status::OK,
         chunks: vec![vec![0xab]],
@@ -1120,12 +1125,12 @@ fn abi_encode_adapter_streams_chunks_and_describes_the_image() {
     let yuv = yuv420(4, 2, [vec![7; 8], vec![8; 2], vec![9; 2]]).expect("yuv");
     assert_eq!(
         lossy
-            .encode(&req, &RasterRef::Yuv420(&yuv))
+            .encode(&req, &WebpRasterRef::Yuv420(&yuv))
             .expect("encode"),
         vec![0xab]
     );
     let seen = lossy.into_inner();
-    assert_eq!(seen.seen, Some((35, PIXEL_FORMAT_YUV420, 3, 4)));
+    assert_eq!(seen.seen, Some((35, abi::pixel_format::I420, 3, 4)));
     assert_eq!(
         seen.seen_strides,
         [4, 2, 2, 0],
@@ -1135,7 +1140,7 @@ fn abi_encode_adapter_streams_chunks_and_describes_the_image() {
 
 #[test]
 fn abi_encode_adapter_declines_and_maps_statuses() {
-    let mut backend = AbiEncoderBackend::new(AbiFakeEncoder {
+    let mut backend = AbiWebpEncoder::new(AbiFakeEncoder {
         accepts: WebpCodestream::Vp8.codec_id(),
         status: abi::Status::OK,
         chunks: Vec::new(),
@@ -1150,7 +1155,7 @@ fn abi_encode_adapter_declines_and_maps_statuses() {
 
     let yuv = yuv420(2, 2, [vec![0; 4], vec![0; 1], vec![0; 1]]).expect("yuv");
     let req = WebpEncodeRequest::new(WebpCodestream::Vp8, dims(2, 2), 50);
-    let mut late = AbiEncoderBackend::new(AbiFakeEncoder {
+    let mut late = AbiWebpEncoder::new(AbiFakeEncoder {
         accepts: WebpCodestream::Vp8.codec_id(),
         status: abi::Status::UNSUPPORTED,
         chunks: Vec::new(),
@@ -1158,11 +1163,11 @@ fn abi_encode_adapter_declines_and_maps_statuses() {
         seen_strides: [0; abi::MAX_PLANES],
     });
     assert_error(
-        late.encode(&req, &RasterRef::Yuv420(&yuv)),
+        late.encode(&req, &WebpRasterRef::Yuv420(&yuv)),
         ErrorKind::Unsupported,
         "WebP: codec-abi encode backend declined after accepting the job",
     );
-    let mut failed = AbiEncoderBackend::new(AbiFakeEncoder {
+    let mut failed = AbiWebpEncoder::new(AbiFakeEncoder {
         accepts: WebpCodestream::Vp8.codec_id(),
         status: abi::Status(9),
         chunks: Vec::new(),
@@ -1170,7 +1175,7 @@ fn abi_encode_adapter_declines_and_maps_statuses() {
         seen_strides: [0; abi::MAX_PLANES],
     });
     assert_error(
-        failed.encode(&req, &RasterRef::Yuv420(&yuv)),
+        failed.encode(&req, &WebpRasterRef::Yuv420(&yuv)),
         ErrorKind::InvalidInput,
         "WebP: codec-abi encode backend failed",
     );
@@ -1181,7 +1186,7 @@ fn abi_adapters_plug_into_the_registries_end_to_end() {
     // Decode: an ABI backend accepted by the registry supplies the picture.
     let (file, _) = lossless_fixture();
     let mut dec = WebpDecoder::new();
-    dec.push_backend(AbiDecoderBackend::new(AbiFakeDecoder {
+    dec = dec.with_backend(AbiWebpDecoder::new(AbiFakeDecoder {
         accepts: WebpCodestream::Vp8l.codec_id(),
         status: abi::Status::OK,
         fill: 0x33,
@@ -1195,7 +1200,7 @@ fn abi_adapters_plug_into_the_registries_end_to_end() {
 
     // Encode: an ABI backend's streamed bytes become the VP8L chunk payload.
     let mut enc = WebpEncoder::lossless();
-    enc.push_backend(AbiEncoderBackend::new(AbiFakeEncoder {
+    enc = enc.with_backend(AbiWebpEncoder::new(AbiFakeEncoder {
         accepts: WebpCodestream::Vp8l.codec_id(),
         status: abi::Status::OK,
         chunks: vec![vec![0xc0, 0xde]],
@@ -1207,7 +1212,7 @@ fn abi_adapters_plug_into_the_registries_end_to_end() {
 
     // A non-matching ABI backend declines, and the built-in tail produces the default bytes.
     let mut enc2 = WebpEncoder::lossless();
-    enc2.push_backend(AbiEncoderBackend::new(AbiFakeEncoder {
+    enc2 = enc2.with_backend(AbiWebpEncoder::new(AbiFakeEncoder {
         accepts: WebpCodestream::Vp8.codec_id(),
         status: abi::Status::OK,
         chunks: vec![vec![0xff]],

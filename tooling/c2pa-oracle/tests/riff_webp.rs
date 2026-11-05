@@ -49,15 +49,22 @@ fn plain_webp() -> Vec<u8> {
 
 /// The fixture with a `len`-byte reservation, and the `C2PA` chunk span `encode_with_report` gave.
 fn reserve_webp(len: usize) -> Result<(Vec<u8>, Vec<std::ops::Range<usize>>, ())> {
-    let (webp, report) = WebpEncoder::lossless()
+    let mut webp = Vec::new();
+    let report = WebpEncoder::lossless()
         .with_c2pa_reserved(len)
         .map_err(asset_error)?
-        .encode_with_report(image(&source_rgb()))
+        .encode_with_report(image(&source_rgb()), &mut webp)
         .map_err(asset_error)?;
     let span = report
         .c2pa
         .ok_or_else(|| OracleError::Asset("encode_with_report reported no C2PA span".into()))?;
-    Ok((webp, vec![span], ()))
+    Ok((webp, vec![usize_range(span)], ()))
+}
+
+/// A file range as indices into the in-memory asset.
+fn usize_range(span: std::ops::Range<u64>) -> std::ops::Range<usize> {
+    let index = |offset: u64| usize::try_from(offset).expect("an in-memory offset fits usize");
+    index(span.start)..index(span.end)
 }
 
 /// The documented fill: encode again with the signed store in place of the reservation.
@@ -84,9 +91,11 @@ fn a_store_signed_around_the_reported_chunk_span_validates_once_re_encoded_in() 
 #[test]
 fn gamut_webp_locates_the_store_c2pa_rs_embedded_at_its_own_superbox_span() {
     let asset = embed(WEBP_MIME, &plain_webp()).expect("c2pa-rs embeds into the gamut WebP");
-    let chunk = c2pa_span(&asset)
-        .expect("gamut-webp reads the WebP c2pa-rs wrote")
-        .expect("gamut-webp finds the `C2PA` chunk c2pa-rs wrote");
+    let chunk = usize_range(
+        c2pa_span(&asset)
+            .expect("gamut-webp reads the WebP c2pa-rs wrote")
+            .expect("gamut-webp finds the `C2PA` chunk c2pa-rs wrote"),
+    );
     // The span covers the chunk header; the store is its payload, eight bytes in.
     let payload = chunk.start + 8..chunk.end;
 
@@ -112,9 +121,11 @@ fn c2pa_rs_excludes_the_whole_chunk_header_included_as_gamut_riff_reports_it() {
     // reference implementation's own embedder does: it is evidence for that decision, not the
     // decision.
     let asset = embed(WEBP_MIME, &plain_webp()).expect("c2pa-rs embeds into the gamut WebP");
-    let chunk = c2pa_span(&asset)
-        .expect("gamut-webp reads the WebP c2pa-rs wrote")
-        .expect("gamut-webp finds the `C2PA` chunk c2pa-rs wrote");
+    let chunk = usize_range(
+        c2pa_span(&asset)
+            .expect("gamut-webp reads the WebP c2pa-rs wrote")
+            .expect("gamut-webp finds the `C2PA` chunk c2pa-rs wrote"),
+    );
 
     assert_eq!(
         data_hash_exclusions(WEBP_MIME, &asset).expect("c2pa-rs's own data hash"),

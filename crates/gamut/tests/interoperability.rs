@@ -89,7 +89,7 @@ fn metadata_facade_round_trips_through_a_webp_file() {
     use gamut::metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
     use gamut::metadata::xmp::{WellKnownNs, XmpMeta};
     use gamut::metadata::{Metadata, MetadataBlock};
-    use gamut::webp::{WebpEncoder, metadata};
+    use gamut::webp::{WebpDecoder, WebpEncoder};
 
     let mut exif = Exif::new(ByteOrder::LittleEndian);
     exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
@@ -115,7 +115,7 @@ fn metadata_facade_round_trips_through_a_webp_file() {
         .encode_image(image, &mut file)
         .unwrap();
 
-    let read = metadata(&file).unwrap();
+    let read = WebpDecoder::new().metadata(&file).unwrap();
     assert_eq!(read.exif, encoded.exif, "EXIF payload is unmodified");
     assert_eq!(read.xmp, encoded.xmp, "XMP payload is unmodified");
     assert_eq!(read.icc, encoded.icc, "ICC payload is unmodified");

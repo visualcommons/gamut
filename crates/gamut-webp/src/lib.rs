@@ -4,9 +4,10 @@
 //! The public surface mirrors [`gamut-avif`](https://docs.rs/gamut-avif): a [`WebpEncoder`]
 //! implementing [`gamut_core::EncodeImage`] and a [`WebpDecoder`] implementing
 //! [`gamut_core::DecodeImage`].
-//! The container layer is [`gamut_riff`]; the codec layer is the [`vp8l`] (lossless, RFC 9649 §3)
-//! and [`vp8`] (lossy intra, RFC 6386) module trees, whose modules each cite the spec section they
-//! implement. The implementation status and milestones are tracked in `STATUS.md`.
+//! The container layer is [`gamut_riff`]; the codec layer is the crate's private `vp8l`
+//! (lossless, RFC 9649 §3) and `vp8` (lossy intra, RFC 6386) module trees, whose modules each cite
+//! the spec section they implement. The implementation status and milestones are tracked in
+//! `STATUS.md`.
 //!
 //! gamut is image-first, so only the intra/key-frame still-image subset of VP8 is in scope (no
 //! inter-frame prediction, motion, or sequences). Both codecs are fully implemented, for
@@ -24,7 +25,7 @@
 //!
 //! - **Unknown-chunk passthrough** — a chunk whose FourCC the container spec does not define is
 //!   ignored on decode, as RFC 9649 §2.7.1.6 asks of readers. Preserving one across a
-//!   decode→encode cycle is opt-in and takes two steps: read the chunks with
+//!   decode→encode cycle is opt-in and takes two steps: read the [`Chunk`]s with
 //!   [`gamut_riff::WebpLayout::parse`] and hand them back via
 //!   [`WebpEncoder::with_unknown_chunks`], which refuses any FourCC
 //!   [`gamut_riff::WebpChunkId`] classifies rather than emitting that chunk twice. The pixel API
@@ -66,17 +67,17 @@
 //! (`ICCP`) plus Exif and XMP metadata (`EXIF` / `XMP `). [`WebpEncoder::with_icc_profile`],
 //! [`WebpEncoder::with_exif`], and [`WebpEncoder::with_xmp`] embed them — promoting a simple file to
 //! the extended (`VP8X`) format, setting the matching feature flags, and emitting the chunks in the
-//! spec's canonical order — and the [`metadata`] free function reads them back out of any WebP file
-//! without decoding pixels. Payloads are never parsed or reserialized here, so they can be borrowed
-//! straight into `gamut-metadata`'s `MetadataBlock` (the still-image [`gamut_core`] traits carry no
-//! metadata channel, which is why this is a separate entry point rather than a decode result field).
+//! spec's canonical order — and [`WebpDecoder::metadata`] reads them back out of any WebP file, as
+//! a [`RawMetadata`], without decoding pixels. Payloads are never parsed or reserialized here, so
+//! they can be borrowed straight into `gamut-metadata`'s `MetadataBlock` (the still-image
+//! [`gamut_core`] traits carry no metadata channel, which is why this is a separate entry point
+//! rather than a decode result field).
 //!
 //! With the optional **`metadata`** Cargo feature the same payloads are wired to the facade's typed
-//! models through its `TypedMetadata` trait: `WebpMetadata::blocks` hands them over as
-//! `MetadataBlock`s and `WebpMetadata::metadata` parses them into a unified `Metadata`, while
-//! `WebpEncoder::with_metadata` / `WebpEncoder::with_encoded_metadata` embed one, routing each
-//! carrier to the raw setters above. The feature is off by default; the dependency direction stays
-//! `gamut-webp → gamut-metadata`.
+//! models: the facade's `TypedMetadata` reads a [`RawMetadata`] into a unified `Metadata`, and
+//! [`WebpEncoder`] is a `MetadataSink`, whose `with_metadata` / `with_encoded_metadata` embed one by
+//! routing each carrier to the raw setters above. The feature is off by default; the dependency
+//! direction stays `gamut-webp → gamut-metadata`.
 //!
 //! # C2PA manifest stores
 //!
@@ -87,11 +88,11 @@
 //! §A.3.7 requires it as the last sub-chunk of the `RIFF`/`WEBP` form, behind even the preserved
 //! unknown chunks — and no `VP8X` feature flag advertises it, RFC 9649 §2.5 defining no C2PA bit.
 //!
-//! [`WebpEncoder::encode_with_report`] returns the file together with the chunk's byte range, and
+//! [`WebpEncoder::encode_with_report`] reports the chunk's byte range in the file it wrote, and
 //! [`c2pa_span`] recovers that range from any WebP file. The range is the chunk's whole span, which
 //! overlaps the chunk header that C2PA 2.4 §18.5.1 keeps out of a `c2pa.hash.data` exclusion — see
-//! [`c2pa_span`] for that open conflict; [`metadata`] surfaces the store's bytes
-//! themselves as [`WebpMetadata::c2pa`].
+//! [`c2pa_span`] for that open conflict; the store's own bytes are `start + 8..end` of it, and
+//! [`c2pa_summary`] reports every `C2PA` chunk with its store's range.
 //!
 //! A file carries **exactly one** store, and that is enforced rather than assumed: the `C2PA` chunk
 //! is refused by [`WebpEncoder::with_unknown_chunks`], never emitted among the preserved chunks by
@@ -102,13 +103,16 @@
 //!
 //! # Pluggable codestream backends
 //!
-//! The RIFF container and the coded picture are separable: [`backend`] exposes one trait pair —
-//! [`WebpCodestreamDecoder`] / [`WebpCodestreamEncoder`], discriminated by [`WebpCodestream`] — that
-//! routes a raw `VP8 ` / `VP8L` chunk payload to a hardware or alternate software codec, installed
-//! with [`WebpDecoder::push_backend`] / [`WebpEncoder::push_backend`]. The crate's own `vp8`/`vp8l`
-//! implementations are the implicit tails, so the default behaviour is unchanged. Backends written
-//! against the shared [`gamut_codec_abi`] seam (issue #241) plug in through [`AbiDecoderBackend`] /
-//! [`AbiEncoderBackend`].
+//! The RIFF container and the coded picture are separable: one trait pair —
+//! [`WebpCodestreamDecoder`] / [`WebpCodestreamEncoder`], discriminated by [`WebpCodestream`] —
+//! routes a raw `VP8 ` / `VP8L` chunk payload to a hardware or alternate software codec, added with
+//! [`WebpDecoder::with_backend`] / [`WebpEncoder::with_backend`]. Backends are tried in the order
+//! they are added; returning `false` from `supports` is the only way to decline, and a backend
+//! that accepts a job and then fails returns its error to the caller unchanged. The crate's own
+//! `vp8`/`vp8l` implementations are the implicit tails, so the default behaviour is unchanged.
+//! Backends written against the shared [`gamut_codec_abi`] seam (issue #241) plug in through
+//! [`AbiWebpDecoder`] / [`AbiWebpEncoder`], which name the two codestreams [`VP8_CODEC_ID`] and
+//! [`VP8L_CODEC_ID`].
 //!
 //! The effort hint rides the typed seam ([`WebpEncodeRequest::effort`]) but deliberately does not
 //! cross the codec ABI: it cannot change what a codestream decodes to, so a backend that ignores it
@@ -121,31 +125,38 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+mod alpha;
+mod backend;
 mod config;
 mod decoder;
 mod encoder;
 mod metadata;
+mod vp8l;
 
-pub mod alpha;
-pub mod backend;
+// Still reachable from outside the crate only because the libwebp differential suite in
+// `tests/oracle.rs` drives the VP8 frame coder directly and cannot move inline under
+// `#![forbid(unsafe_code)]`; see `STATUS.md`. Not part of the supported surface.
+#[doc(hidden)]
 pub mod vp8;
-pub mod vp8l;
 
 pub use backend::{
-    AbiDecoderBackend, AbiEncoderBackend, CodestreamInfo, DecodedRaster, PIXEL_FORMAT_ARGB,
-    PIXEL_FORMAT_YUV420, RasterRef, WebpCodestream, WebpCodestreamDecoder, WebpCodestreamEncoder,
-    WebpEncodeRequest,
+    AbiWebpDecoder, AbiWebpEncoder, DecodedWebp, VP8_CODEC_ID, VP8L_CODEC_ID, WebpCodestream,
+    WebpCodestreamDecoder, WebpCodestreamEncoder, WebpEncodeRequest, WebpRasterRef, WebpStreamInfo,
 };
 pub use config::{Effort, NearLossless, WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
 pub use encoder::{WebpEncodeReport, WebpEncoder};
-pub use gamut_color::ChromaUpsampling;
-pub use gamut_core::Dimensions;
-// The facade types named in the `metadata`-feature signatures, so a caller can spell
-// `WebpMetadata::metadata` / `WebpEncoder::with_metadata` without a direct dependency.
+// The shared vocabulary types this crate's signatures take and return, so a caller needs no direct
+// dependency on gamut-color, gamut-core or gamut-riff to name them.
+pub use gamut_color::{ChromaUpsampling, Planar8};
+pub use gamut_core::{DecodeLimits, Dimensions, RawMetadata};
+// The facade types named in the `metadata`-feature surface, so a caller can spell
+// `WebpEncoder::with_metadata` and read a `RawMetadata` as a `Metadata` without a direct
+// dependency, and the two traits those methods belong to.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataSink, TypedMetadata};
+pub use gamut_riff::Chunk;
 pub use metadata::{
     C2PA_NOT_VALIDATED, C2paChunkPosition, C2paStoreSummary, C2paSummary, C2paUnreadChunk,
-    WebpMetadata, c2pa_span, c2pa_summary, metadata,
+    c2pa_span, c2pa_summary,
 };

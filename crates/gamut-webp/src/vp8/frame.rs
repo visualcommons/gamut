@@ -313,8 +313,13 @@ impl FrameBuffers {
     }
 
     /// Crops the reconstruction to visible-resolution 4:2:0 [`Planar8`] planes.
-    #[must_use]
-    pub fn to_yuv420(&self) -> Planar8 {
+    ///
+    /// # Errors
+    ///
+    /// None in practice: a frame is non-empty (its header's 14-bit sides are checked when it is
+    /// built) and its cropped planes match its dimensions by construction. The `Result` carries
+    /// [`Planar8`]'s own validation out instead of panicking on it.
+    pub fn to_yuv420(&self) -> Result<Planar8> {
         let (w, h) = (self.width as usize, self.height as usize);
         let (cw, ch) = ChromaSubsampling::Cs420.chroma_dimensions(self.width, self.height);
         let (cw, ch) = (cw as usize, ch as usize);
@@ -329,11 +334,11 @@ impl FrameBuffers {
         let y = crop(&self.y, self.y_stride(), w, h);
         let u = crop(&self.u, self.c_stride(), cw, ch);
         let v = crop(&self.v, self.c_stride(), cw, ch);
-        Dimensions::new(self.width, self.height)
-            .and_then(|dims| {
-                Planar8::from_planes_subsampled(dims, ChromaSubsampling::Cs420, [y, u, v])
-            })
-            .expect("a VP8 frame is non-empty and its cropped planes match its dimensions")
+        Planar8::from_planes_subsampled(
+            Dimensions::new(self.width, self.height)?,
+            ChromaSubsampling::Cs420,
+            [y, u, v],
+        )
     }
 }
 
@@ -1876,7 +1881,7 @@ mod tests {
         );
 
         let decoded = decode_frame(&bits).expect("decode");
-        let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
+        let (enc, dec) = (recon.to_yuv420().unwrap(), decoded.to_yuv420().unwrap());
         assert_eq!(
             enc.planes()[0],
             dec.planes()[0],
@@ -1896,7 +1901,7 @@ mod tests {
             "detailed content should select B_PRED for some macroblocks"
         );
         let decoded = decode_frame(&bitstream).expect("decode");
-        let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
+        let (enc, dec) = (recon.to_yuv420().unwrap(), decoded.to_yuv420().unwrap());
         assert_eq!(enc.planes()[0], dec.planes()[0], "B_PRED luma mismatch");
         assert_eq!(enc.planes()[1], dec.planes()[1], "B_PRED u mismatch");
         assert_eq!(enc.planes()[2], dec.planes()[2], "B_PRED v mismatch");
@@ -1921,9 +1926,18 @@ mod tests {
             "flat content should skip macroblocks"
         );
         let dec = decode_frame(&bits).expect("decode");
-        assert_eq!(recon.to_yuv420().planes()[0], dec.to_yuv420().planes()[0]);
-        assert_eq!(recon.to_yuv420().planes()[1], dec.to_yuv420().planes()[1]);
-        assert_eq!(recon.to_yuv420().planes()[2], dec.to_yuv420().planes()[2]);
+        assert_eq!(
+            recon.to_yuv420().unwrap().planes()[0],
+            dec.to_yuv420().unwrap().planes()[0]
+        );
+        assert_eq!(
+            recon.to_yuv420().unwrap().planes()[1],
+            dec.to_yuv420().unwrap().planes()[1]
+        );
+        assert_eq!(
+            recon.to_yuv420().unwrap().planes()[2],
+            dec.to_yuv420().unwrap().planes()[2]
+        );
     }
 
     /// Tier-2: the encoder's reconstruction must equal the native decoder's output, bit-for-bit.
@@ -1932,8 +1946,8 @@ mod tests {
         let (bitstream, recon) =
             encode_frame(&yuv, q).expect("fixture fits the partition-size fields");
         let decoded = decode_frame(&bitstream).expect("decode");
-        let enc = recon.to_yuv420();
-        let dec = decoded.to_yuv420();
+        let enc = recon.to_yuv420().unwrap();
+        let dec = decoded.to_yuv420().unwrap();
         assert_eq!(
             enc.planes()[0],
             dec.planes()[0],
@@ -1989,7 +2003,7 @@ mod tests {
                 let (bits, recon) =
                     encode_frame_filtered(&yuv, q, opts).expect("fixture fits the size fields");
                 let decoded = decode_frame(&bits).expect("decode");
-                let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
+                let (enc, dec) = (recon.to_yuv420().unwrap(), decoded.to_yuv420().unwrap());
                 assert_eq!(
                     enc.planes()[0],
                     dec.planes()[0],
@@ -2066,7 +2080,7 @@ mod tests {
                 let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
                     .expect("fixture fits the partition-size fields");
                 let dec = decode_frame(&bits).expect("decode");
-                let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
+                let (enc, dec) = (recon.to_yuv420().unwrap(), dec.to_yuv420().unwrap());
                 assert_eq!(
                     enc.planes()[0],
                     dec.planes()[0],
@@ -2093,7 +2107,7 @@ mod tests {
             let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
                 .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
-            let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
+            let (enc, dec) = (recon.to_yuv420().unwrap(), dec.to_yuv420().unwrap());
             assert_eq!(enc.planes()[0], dec.planes()[0], "luma q{q}");
             assert_eq!(enc.planes()[1], dec.planes()[1], "u q{q}");
             assert_eq!(enc.planes()[2], dec.planes()[2], "v q{q}");
@@ -2115,7 +2129,7 @@ mod tests {
             let (bits, recon) = encode_frame_filtered(&yuv, 30, opts)
                 .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
-            let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
+            let (enc, dec) = (recon.to_yuv420().unwrap(), dec.to_yuv420().unwrap());
             assert_eq!(enc.planes()[0], dec.planes()[0], "luma p{partitions}");
             assert_eq!(enc.planes()[1], dec.planes()[1], "u p{partitions}");
             assert_eq!(enc.planes()[2], dec.planes()[2], "v p{partitions}");
@@ -2143,7 +2157,7 @@ mod tests {
                     let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
                         .expect("fixture fits the partition-size fields");
                     let dec = decode_frame(&bits).expect("decode");
-                    let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
+                    let (enc, dec) = (recon.to_yuv420().unwrap(), dec.to_yuv420().unwrap());
                     assert_eq!(
                         enc.planes()[0],
                         dec.planes()[0],
@@ -2373,7 +2387,10 @@ mod tests {
         let (bits, recon) = encode_frame_filtered(&yuv, 40, EncodeOptions::default())
             .expect("fixture fits the partition-size fields");
         let dec = decode_frame(&bits).expect("decode");
-        assert_eq!(recon.to_yuv420().planes()[0], dec.to_yuv420().planes()[0]);
+        assert_eq!(
+            recon.to_yuv420().unwrap().planes()[0],
+            dec.to_yuv420().unwrap().planes()[0]
+        );
     }
 
     #[test]

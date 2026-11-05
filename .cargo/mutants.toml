@@ -372,8 +372,8 @@ exclude_re = [
     #   encode_bpred_luma — the submode tie-break (`sad < best`) and the running prediction-cost
     #   accumulator (`total_sad +=`, used only for the B_PRED-vs-whole-block decision); both pick
     #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
-    '^crates/gamut-webp/src/vp8/frame\.rs:917:20: replace < with <= in encode_bpred_luma$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:923:19: replace \+= with \*= in encode_bpred_luma$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:922:20: replace < with <= in encode_bpred_luma$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:928:19: replace \+= with \*= in encode_bpred_luma$',
     #   (Line anchors on `SEGMENT_QUANT_DELTAS`' two signs and on `encode_frame_filtered`'s segment
     #   assignment, segment-map index and B_PRED threshold had drifted off their lines and matched
     #   nothing. #1054 re-surveyed those operators where they now stand — the deltas, the `/ 64`

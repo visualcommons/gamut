@@ -151,10 +151,11 @@ fn libwebp_decodes_a_file_carrying_a_c2pa_store_to_the_source_pixels() {
         .with_exif(b"exif payload")
         .encode_image(image(), &mut plain)
         .expect("gamut encode");
-    let (signed, report) = WebpEncoder::lossless()
+    let mut signed = Vec::new();
+    let report = WebpEncoder::lossless()
         .with_exif(b"exif payload")
         .with_c2pa(store)
-        .encode_with_report(image())
+        .encode_with_report(image(), &mut signed)
         .expect("gamut encode");
 
     let decoded = libwebp_decode_rgba(&signed);
@@ -171,6 +172,7 @@ fn libwebp_decodes_a_file_carrying_a_c2pa_store_to_the_source_pixels() {
 
     // The store is the only thing added, and it is where the report says it is.
     let span = report.c2pa.expect("a store was configured");
+    let span = span.start as usize..span.end as usize;
     assert_eq!(&signed[span.start..span.start + 4], b"C2PA");
     assert_eq!(&signed[span.start + 8..span.end], store);
     assert_eq!(
@@ -337,7 +339,10 @@ fn gamut_lossy_bpred_matches_libwebp_bit_exact() {
                 .expect("fixture fits the partition-size fields");
             let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
-            let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+            let gamut = decode_frame(&payload)
+                .expect("gamut decode")
+                .to_yuv420()
+                .expect("crop");
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
             assert_eq!(
                 gamut.planes()[0],
@@ -429,7 +434,10 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
                     .expect("fixture fits the partition-size fields");
                 let webp = write_simple_lossy(&payload).unwrap();
                 let lib = libwebp_decode_yuv(&webp);
-                let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+                let gamut = decode_frame(&payload)
+                    .expect("gamut decode")
+                    .to_yuv420()
+                    .expect("crop");
                 assert_eq!(
                     gamut.planes()[0],
                     lib.y.as_slice(),
@@ -473,7 +481,10 @@ fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
                 .expect("fixture fits the partition-size fields");
             let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
-            let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+            let gamut = decode_frame(&payload)
+                .expect("gamut decode")
+                .to_yuv420()
+                .expect("crop");
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
             assert_eq!(
                 gamut.planes()[0],
@@ -521,7 +532,10 @@ fn gamut_lossy_yuv_realistic_and_large_matches_libwebp() {
                 .expect("fixture fits the partition-size fields");
             let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
-            let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+            let gamut = decode_frame(&payload)
+                .expect("gamut decode")
+                .to_yuv420()
+                .expect("crop");
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
             assert_eq!(
                 gamut.planes()[0],
@@ -616,7 +630,10 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                     .expect("fixture fits the partition-size fields");
                 let webp = write_simple_lossy(&payload).unwrap();
                 let lib = libwebp_decode_yuv(&webp);
-                let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+                let gamut = decode_frame(&payload)
+                    .expect("gamut decode")
+                    .to_yuv420()
+                    .expect("crop");
                 assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
                 assert_eq!(
                     gamut.planes()[0],
@@ -656,7 +673,10 @@ fn gamut_decodes_patched_vp8_profiles_like_libwebp() {
             patched[0] = (patched[0] & !0b1110) | (version << 1);
             let webp = write_simple_lossy(&patched).unwrap();
             let lib = libwebp_decode_yuv(&webp);
-            let gamut = decode_frame(&patched).expect("gamut decode").to_yuv420();
+            let gamut = decode_frame(&patched)
+                .expect("gamut decode")
+                .to_yuv420()
+                .expect("crop");
             assert_eq!((lib.width, lib.height), (w, h), "dims v{version} {w}x{h}");
             assert_eq!(
                 gamut.planes()[0],
@@ -710,7 +730,8 @@ fn gamut_decodes_libwebp_lossy_bit_exact() {
             let webp = libwebp_encode_lossy_rgba(&rgba, w, h, q);
             let gamut = gamut_webp::vp8::frame::decode_frame(&vp8_payload(&webp))
                 .expect("gamut decode")
-                .to_yuv420();
+                .to_yuv420()
+                .expect("crop");
             let lib = libwebp_decode_yuv(&webp);
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
             assert_eq!(gamut.planes()[0], lib.y.as_slice(), "Y at {w}x{h} q{q}");
@@ -742,7 +763,8 @@ fn gamut_decodes_libwebp_lossy_realistic_and_large() {
             let webp = libwebp_encode_lossy_rgba(&rgba, w, h, q);
             let gamut = gamut_webp::vp8::frame::decode_frame(&vp8_payload(&webp))
                 .expect("gamut decode")
-                .to_yuv420();
+                .to_yuv420()
+                .expect("crop");
             let lib = libwebp_decode_yuv(&webp);
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
             assert_eq!(gamut.planes()[0], lib.y.as_slice(), "Y at {w}x{h} q{q}");
@@ -857,7 +879,8 @@ fn gamut_decodes_libwebp_lossy_forced_features_bit_exact() {
             let webp = libwebp_encode_lossy_rgba_config(&rgba, w, h, cfg);
             let gamut = gamut_webp::vp8::frame::decode_frame(&vp8_payload(&webp))
                 .expect("gamut decode")
-                .to_yuv420();
+                .to_yuv420()
+                .expect("crop");
             let lib = libwebp_decode_yuv(&webp);
             assert_eq!((lib.width, lib.height), (w, h), "dims {label} at {w}x{h}");
             assert_eq!(gamut.planes()[0], lib.y.as_slice(), "Y {label} at {w}x{h}");
@@ -1213,7 +1236,9 @@ fn gamut_reads_metadata_libwebp_embedded() {
         let plain = libwebp_encode_lossless_rgba(&rgba, w, h);
         let tagged = libwebp_mux_set_metadata(&plain, Some(&icc), Some(exif), Some(xmp));
 
-        let meta = gamut_webp::metadata(&tagged).expect("read libwebp-muxed metadata");
+        let meta = WebpDecoder::new()
+            .metadata(&tagged)
+            .expect("read libwebp-muxed metadata");
         assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()), "ICCP at {w}x{h}");
         assert_eq!(meta.exif.as_deref(), Some(exif), "EXIF at {w}x{h}");
         assert_eq!(meta.xmp.as_deref(), Some(xmp), "XMP at {w}x{h}");
@@ -1230,7 +1255,9 @@ fn gamut_reads_metadata_libwebp_embedded() {
 
         // Only the chunks libwebp was asked to attach are reported: a subset stays a subset.
         let icc_only = libwebp_mux_set_metadata(&plain, Some(&icc), None, None);
-        let meta = gamut_webp::metadata(&icc_only).expect("read ICCP-only file");
+        let meta = WebpDecoder::new()
+            .metadata(&icc_only)
+            .expect("read ICCP-only file");
         assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()));
         assert_eq!(meta.exif, None);
         assert_eq!(meta.xmp, None);
@@ -1268,7 +1295,10 @@ fn libwebp_decodes_every_effort_level_bit_exactly() {
                         .expect("fixture fits the partition-size fields");
                     let webp = write_simple_lossy(&payload).unwrap();
                     let lib = libwebp_decode_yuv(&webp);
-                    let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+                    let gamut = decode_frame(&payload)
+                        .expect("gamut decode")
+                        .to_yuv420()
+                        .expect("crop");
                     assert_eq!(
                         gamut.planes()[0],
                         lib.y.as_slice(),

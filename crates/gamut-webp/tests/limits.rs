@@ -1,6 +1,6 @@
-//! `WebpDecoder`'s caller-set resource limits (issue #1025): `with_max_dimensions` and
-//! `with_max_image_bytes`, checked against the bitstream header before any frame-sized allocation
-//! and before any backend is offered the job.
+//! `WebpDecoder`'s caller-set resource limits (issue #1025): the `DecodeLimits` set with
+//! `with_limits`, checked against the bitstream header before any frame-sized allocation and before
+//! any backend is offered the job.
 //!
 //! The over-budget fixtures are header-only: a frame the limits admit would be decoded in full, so a
 //! large one is admitted only behind a backend that accepts the job and fails at once — reaching that
@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use gamut_core::{
     DecodeImage, Dimensions, EncodeImage, Error, ErrorKind, ImageBuf, ImageRef, Result, Rgb8, Rgba8,
 };
-use gamut_webp::{CodestreamInfo, DecodedRaster, WebpCodestreamDecoder, WebpDecoder, WebpEncoder};
+use gamut_webp::{
+    DecodeLimits, DecodedWebp, WebpCodestreamDecoder, WebpDecoder, WebpEncoder, WebpStreamInfo,
+};
 
 const SIZE_LIMIT: &str = "WebP: image exceeds the size limit";
 const DIMENSION_LIMIT: &str = "WebP: image exceeds the dimension limit";
@@ -47,11 +49,11 @@ fn assert_refused<T>(result: Result<T>, message: &'static str) {
 struct Failing(Arc<AtomicUsize>);
 
 impl WebpCodestreamDecoder for Failing {
-    fn supports(&mut self, _: &CodestreamInfo) -> bool {
+    fn supports(&mut self, _: &WebpStreamInfo) -> bool {
         true
     }
 
-    fn decode(&mut self, _: &CodestreamInfo, _: &[u8]) -> Result<DecodedRaster> {
+    fn decode(&mut self, _: &WebpStreamInfo, _: &[u8]) -> Result<DecodedWebp> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Err(Error::invalid_input("limits-test", BACKEND_RAN))
     }
@@ -61,8 +63,7 @@ impl WebpCodestreamDecoder for Failing {
 /// backend was reached (the limits let the frame through) or the limit error it was refused with.
 fn reaches_backend(decoder: WebpDecoder, file: &[u8]) -> Result<bool> {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut decoder = decoder;
-    decoder.push_backend(Failing(Arc::clone(&calls)));
+    let decoder = decoder.with_backend(Failing(Arc::clone(&calls)));
     let result: Result<ImageBuf<Rgba8>> = decoder.decode_image(file);
     match result {
         Err(error) if error.static_message() == Some(BACKEND_RAN) => {
@@ -132,43 +133,61 @@ fn default_budget_is_exactly_a_4096_square_rgba_frame() {
 #[test]
 fn default_dimensions_admit_the_format_maximum() {
     // Without a byte budget in the way, the default dimension caps admit VP8L's largest frame.
-    let decoder = WebpDecoder::new().with_max_image_bytes(usize::MAX);
+    // The dimension check runs first, so the default refusing VP8L's largest frame for its *size*
+    // shows its sides admitted it; the exact default is pinned beside the decoder.
+    assert_refused(
+        reaches_backend(WebpDecoder::new(), &lossless_header(16384, 16384)),
+        SIZE_LIMIT,
+    );
+    // With the byte budget lifted, sides at the format bound admit the frame outright.
+    let decoder = WebpDecoder::new().with_limits(
+        DecodeLimits::new()
+            .with_max_width(16384)
+            .with_max_height(16384)
+            .with_max_image_bytes(usize::MAX),
+    );
     assert!(reaches_backend(decoder, &lossless_header(16384, 16384)).expect("admitted"));
+}
+
+/// A decoder whose only binding bound is `bytes` of decoded frame.
+fn bytes(bytes: usize) -> WebpDecoder {
+    WebpDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(bytes))
+}
+
+/// A decoder whose only binding bounds are the two sides.
+fn sides(width: u32, height: u32) -> WebpDecoder {
+    WebpDecoder::new().with_limits(
+        DecodeLimits::new()
+            .with_max_width(width)
+            .with_max_height(height),
+    )
 }
 
 #[test]
 fn max_image_bytes_charges_four_bytes_per_pixel() {
     // An opaque lossy 3×5 image is charged 3 × 5 × 4 = 60 bytes, though it decodes to 45 of RGB.
     let file = encoded(&WebpEncoder::lossy(90), 3, 5);
-    let at: Result<ImageBuf<Rgb8>> = WebpDecoder::new()
-        .with_max_image_bytes(60)
-        .decode_image(&file);
+    let at: Result<ImageBuf<Rgb8>> = bytes(60).decode_image(&file);
     assert!(at.is_ok());
-    let under: Result<ImageBuf<Rgb8>> = WebpDecoder::new()
-        .with_max_image_bytes(59)
-        .decode_image(&file);
+    let under: Result<ImageBuf<Rgb8>> = bytes(59).decode_image(&file);
     assert_refused(under, SIZE_LIMIT);
 }
 
 #[test]
 fn max_dimensions_bound_each_side_inclusively() {
     let file = encoded(&WebpEncoder::lossless(), 3, 5);
-    let at: Result<ImageBuf<Rgb8>> = WebpDecoder::new()
-        .with_max_dimensions(3, 5)
-        .decode_image(&file);
+    let at: Result<ImageBuf<Rgb8>> = sides(3, 5).decode_image(&file);
     assert!(at.is_ok());
-    let narrow: Result<ImageBuf<Rgb8>> = WebpDecoder::new()
-        .with_max_dimensions(2, 5)
-        .decode_image(&file);
+    let narrow: Result<ImageBuf<Rgb8>> = sides(2, 5).decode_image(&file);
     assert_refused(narrow, DIMENSION_LIMIT);
-    let short: Result<ImageBuf<Rgb8>> = WebpDecoder::new()
-        .with_max_dimensions(3, 4)
-        .decode_image(&file);
+    let short: Result<ImageBuf<Rgb8>> = sides(3, 4).decode_image(&file);
     assert_refused(short, DIMENSION_LIMIT);
 }
 
 #[test]
 fn limits_are_checked_before_any_backend_is_offered_the_job() {
-    let decoder = WebpDecoder::new().with_max_dimensions(4175, 4176);
-    assert_refused(reaches_backend(decoder, &reproducer()), DIMENSION_LIMIT);
+    assert_refused(
+        reaches_backend(sides(4175, 4176), &reproducer()),
+        DIMENSION_LIMIT,
+    );
 }

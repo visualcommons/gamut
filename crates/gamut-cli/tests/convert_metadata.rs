@@ -247,7 +247,9 @@ fn grey_content_under_an_rgb_profile_is_not_reduced_to_greyscale() {
 fn jpeg_to_webp_carries_exif_xmp_and_icc() {
     let (webp, _) = convert_to("jpeg-webp", &jpeg_with(&exif_with(&[])), "webp", &[]);
 
-    let meta = gamut::webp::metadata(&webp).expect("read back");
+    let meta = gamut::webp::WebpDecoder::new()
+        .metadata(&webp)
+        .expect("read back");
     assert_eq!(meta.xmp.as_deref(), Some(XMP));
     assert_eq!(meta.icc, Some(rgb_icc()));
     assert_eq!(
@@ -354,7 +356,10 @@ fn grey_jpeg() -> Vec<u8> {
 fn a_grey_profile_is_not_carried_onto_colour_samples() {
     let (webp, stderr) = convert_to("grey-icc", &grey_jpeg(), "webp", &[]);
 
-    assert_eq!(gamut::webp::metadata(&webp).unwrap().icc, None);
+    assert_eq!(
+        gamut::webp::WebpDecoder::new().metadata(&webp).unwrap().icc,
+        None
+    );
     assert!(
         stderr.contains("ICC profile") && stderr.contains("RGB samples"),
         "stderr did not report the profile: {stderr}"
@@ -367,7 +372,13 @@ fn a_grey_profile_is_not_carried_onto_colour_samples() {
 fn color_space_turns_uncalibrated_when_the_profile_is_left_behind() {
     let (webp, _) = convert_to("grey-colorspace", &grey_jpeg(), "webp", &[]);
 
-    let exif = parse_exif(gamut::webp::metadata(&webp).unwrap().exif.as_deref());
+    let exif = parse_exif(
+        gamut::webp::WebpDecoder::new()
+            .metadata(&webp)
+            .unwrap()
+            .exif
+            .as_deref(),
+    );
     assert_eq!(
         exif.get_tag(ExifTag::ColorSpace),
         Some(&Value::Short(vec![0xFFFF]))
@@ -538,7 +549,7 @@ fn strip_metadata_drops_it_between_formats() {
         &["--strip-metadata"],
     );
 
-    let meta = gamut::webp::metadata(&webp).unwrap();
+    let meta = gamut::webp::WebpDecoder::new().metadata(&webp).unwrap();
     assert_eq!((meta.exif, meta.xmp, meta.icc), (None, None, None));
 }
 
