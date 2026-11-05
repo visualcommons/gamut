@@ -23,7 +23,7 @@ while never re-checking the invariant.
 | Item | Shape | Openness |
 | ---- | ----- | -------- |
 | `Error` / `ErrorKind` / `Result` | one boxed pointer built by `invalid_input`/`unsupported`/`From<std::io::Error>`, enriched by `with_origin`/`with_byte_offset`/`with_detail`, read through `kind`/`origin`/`byte_offset`/`detail`/`static_message`/`source` | `Error` **opaque** (private representation, matched by `kind`); `ErrorKind` `#[non_exhaustive]` `repr(u32)` with append-only discriminants |
-| `Dimensions` | `{ width, height }` value type + `new`/`width`/`height`/`num_pixels`/`sample_count` | private fields; `new` rejects a zero side; `#[repr(C)]` |
+| `Dimensions` | `{ width, height }` value type + `new`/`from_nonzero`/`width`/`height`/`num_pixels`/`sample_count` | private fields; `new` rejects a zero side, `from_nonzero` takes `NonZeroU32` sides; `#[repr(C)]` |
 | `EncodeImage<P>` / `DecodeImage<P>` | one `impl` per supported layout `P`; object-safe | sealed via the `Pixel` bound |
 | `ImageRef<'a, P>` / `ImageBuf<P>` | borrowed / owned interleaved buffers | length-validated at construction |
 | `Pixel` / `Sample` / `ColorModel` | compile-time layout descriptors | `Pixel`/`Sample` **sealed**; `ColorModel` `#[non_exhaustive]` |
@@ -46,9 +46,10 @@ backward-compatible; removing or reshaping any of the above would not.
 - **Open where growth is additive, sealed where it must not be.** `ErrorKind` and `ColorModel` are
   `#[non_exhaustive]`; `Pixel`/`Sample` are sealed so the set of pixel layouts is closed and defined
   only here.
-- **`Dimensions` are never empty.** Its fields are private and `Dimensions::new`, the only
-  constructor, rejects a zero width or height; the length product is then enforced once, at buffer
-  construction, so codecs receive a known-good buffer and never re-check.
+- **`Dimensions` are never empty.** Its fields are private and it has exactly two constructors:
+  `Dimensions::new` rejects a zero width or height, and the infallible const
+  `Dimensions::from_nonzero` takes `NonZeroU32` sides that already carry the invariant; the length
+  product is then enforced once, at buffer construction, so codecs receive a known-good buffer and never re-check.
 - **One opaque error, matched by kind.** `Error`'s representation is private: callers match on
   `kind` and read `origin`, `byte_offset`, `detail`, `static_message` and `source`, with exactly one
   way to ask each question however the error was enriched on its way up. It is one pointer wide, so
