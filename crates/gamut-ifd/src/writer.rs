@@ -25,19 +25,15 @@ use gamut_core::{Error, Result};
 use crate::segment::{Claim, SegmentMap, SpanKind};
 use crate::{ByteOrder, Ifd, TiffFile, Value, Variant};
 
-/// A directive to land one field's out-of-line value at an exact absolute offset.
-///
-/// This is the **maker-note preservation primitive**: vendor blobs often encode internal
-/// offsets relative to the TIFF header, so relocating them on a rewrite makes those offsets
-/// stale. Pinning the value at its original offset keeps them valid. The tag must appear
-/// exactly once in the whole IFD tree and its value must be out-of-line (larger than the
-/// inline threshold).
+/// A directive to land one field's out-of-line value at an exact absolute offset, as
+/// [`WriteOptions::with_pin`] records it. Crate-private: `with_pin(tag, offset)` is the one way
+/// to build one, so the struct is not public surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PinnedSpan {
+struct PinnedSpan {
     /// The tag whose value is pinned.
-    pub tag: u16,
+    tag: u16,
     /// The absolute file offset the value must start at.
-    pub offset: u64,
+    offset: u64,
 }
 
 /// Options for [`write_with`].
@@ -47,45 +43,49 @@ pub struct PinnedSpan {
 /// without a breaking change.
 #[derive(Debug, Clone, Default)]
 pub struct WriteOptions {
-    /// Values to land at exact absolute offsets (see [`PinnedSpan`]). The normal value pool
-    /// flows around the pinned ranges; the resulting zero filler is declared as
-    /// [`SpanKind::Padding`] in the returned map.
+    /// Values to land at exact absolute offsets (see [`WriteOptions::with_pin`]).
     pinned: Vec<PinnedSpan>,
-    /// Bytes to emit immediately after the file header, before the first directory — a **vendor
-    /// preamble**.
-    ///
-    /// This is the position-preservation counterpart to [`PinnedSpan`]. Pinning keeps a *value*
-    /// where a vendor blob's internal offsets expect it; a preamble is not a value at all, so it
-    /// has no tag to pin by — it is identified only by sitting between the header and the first
-    /// structure. Real writers put signatures there: Apple's ProRAW files carry the ASCII
-    /// `APPLEDNG` immediately after the 8-byte TIFF header, and a rewrite that relocates those
-    /// bytes leaves a vendor tool looking at the wrong place.
-    ///
-    /// The directory region starts after the preamble (word-aligned), and the run is declared as
-    /// [`SpanKind::Preamble`] in the returned map. Empty — the default — reproduces the previous
-    /// layout byte for byte.
-    ///
-    /// An odd-length preamble is followed by one zero byte of word alignment, and the declared
-    /// span covers it: the declared preamble is always the whole gap between the header and the
-    /// first directory, `even(len)` bytes, because that is exactly what an independent audit of
-    /// the emitted bytes can see there.
+    /// Bytes to emit immediately after the file header, before the first directory (see
+    /// [`WriteOptions::with_preamble`]).
     preamble: Vec<u8>,
 }
 
 impl WriteOptions {
-    /// Adds a pinned span (see [`PinnedSpan`]), builder-style:
-    /// `WriteOptions::default().with_pin(37500, 0x1000)`. The normal value pool flows around the
-    /// pinned ranges; the resulting zero filler is declared as [`SpanKind::Padding`] in the map
-    /// [`write_with`] returns.
+    /// Lands the out-of-line value of `tag` at the absolute file `offset`, builder-style:
+    /// `WriteOptions::default().with_pin(37500, 0x1000)`.
+    ///
+    /// This is the **maker-note preservation primitive**: vendor blobs often encode internal
+    /// offsets relative to the TIFF header, so relocating them on a rewrite makes those offsets
+    /// stale. Pinning the value at its original offset keeps them valid. The tag must appear
+    /// exactly once in the whole IFD tree and its value must be out-of-line (larger than the
+    /// inline threshold); [`write_with`] refuses the pin otherwise.
+    ///
+    /// The normal value pool flows around the pinned ranges; the resulting zero filler is
+    /// declared as [`SpanKind::Padding`] in the map [`write_with`] returns.
     #[must_use]
     pub fn with_pin(mut self, tag: u16, offset: u64) -> Self {
         self.pinned.push(PinnedSpan { tag, offset });
         self
     }
 
-    /// Sets the vendor preamble emitted between the header and the first directory (see the
-    /// field's notes above on why it exists and how an odd length is aligned), builder-style:
-    /// `WriteOptions::default().with_preamble(*b"APPLEDNG\0\0")`.
+    /// Sets the **vendor preamble**: bytes emitted immediately after the file header, before the
+    /// first directory, builder-style: `WriteOptions::default().with_preamble(*b"APPLEDNG\0\0")`.
+    ///
+    /// This is the position-preservation counterpart to [`with_pin`](Self::with_pin). Pinning
+    /// keeps a *value* where a vendor blob's internal offsets expect it; a preamble is not a value
+    /// at all, so it has no tag to pin by — it is identified only by sitting between the header
+    /// and the first structure. Real writers put signatures there: Apple's ProRAW files carry the
+    /// ASCII `APPLEDNG` immediately after the 8-byte TIFF header, and a rewrite that relocates
+    /// those bytes leaves a vendor tool looking at the wrong place.
+    ///
+    /// The directory region starts after the preamble (word-aligned), and the run is declared as
+    /// [`SpanKind::Preamble`] in the map [`write_with`] returns. Empty — the default — reproduces
+    /// the layout without a preamble byte for byte.
+    ///
+    /// An odd-length preamble is followed by one zero byte of word alignment, and the declared
+    /// span covers it: the declared preamble is always the whole gap between the header and the
+    /// first directory, its length rounded up to even, because that is exactly what an
+    /// independent audit of the emitted bytes can see there.
     #[must_use]
     pub fn with_preamble(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         self.preamble = bytes.into();
@@ -221,8 +221,8 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
-/// same conditions as [`write()`], or if a
-/// [`PinnedSpan`] is unsatisfiable: its tag absent or duplicated, its value inline or
+/// same conditions as [`write()`], or if a pin
+/// ([`WriteOptions::with_pin`]) is unsatisfiable: its tag absent or duplicated, its value inline or
 /// unsizable, its offset colliding with the directory region or another pin.
 pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, SegmentMap)> {
     let order = file.order;

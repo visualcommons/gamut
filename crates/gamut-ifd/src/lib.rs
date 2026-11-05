@@ -128,4 +128,4 @@ pub use stream::{IfdChain, IfdReader, RawEntry, RawIfd};
 pub use track::{ReadLedger, Tracked};
 pub use types::FieldType;
 pub use value::{UnknownValue, Value};
-pub use writer::{PinnedSpan, WriteOptions, align_word, write, write_with};
+pub use writer::{WriteOptions, align_word, write, write_with};
