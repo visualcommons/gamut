@@ -4,7 +4,7 @@
 //! [`BoxReader`], counts are never trusted for allocation, the total resolved payload is capped at
 //! the input size (a file cannot expand), and out-of-scope features (a sequence-only file, external
 //! data references, `construction_method` 2, protected or `uri ` items) are rejected with a typed
-//! error rather than mis-parsed. Unlike [`crate::write`] — which always normalises to the smallest
+//! error rather than mis-parsed. Unlike [`IsoBmffImage::to_bytes`] — which always normalises to the smallest
 //! box versions — the reader also accepts what foreign encoders emit: `iloc` v0–v2 with
 //! `mdat`/`idat` placement, multi-extent payloads (concatenated), `pitm` v0/v1, `infe` v2/v3,
 //! `iref` v0/v1, and `ipma` v0/v1 with 8- or 16-bit indices. See `references/isobmff`.
@@ -27,7 +27,7 @@
 //! top-level `trak`) is skipped: it is neither parsed nor retained in
 //! [`IsoBmffImage::top_level_boxes`], and the `meta` still is read as usual. It is not retained
 //! because it cannot round-trip: a track's chunk offsets (`stco`/`co64`) address the source file's
-//! `mdat`, which [`crate::write`] lays out afresh, so a verbatim copy would point at the wrong bytes
+//! `mdat`, which [`IsoBmffImage::to_bytes`] lays out afresh, so a verbatim copy would point at the wrong bytes
 //! — the writer refuses one for the same reason. Its bytes are still accounted for:
 //! [`crate::walk_segments`] reports it as a [`SegmentKind::Box`](crate::SegmentKind::Box). A file
 //! carrying a track but no `meta` is a sequence with no still item and is
@@ -49,52 +49,57 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gamut_core::{Error, Result};
+use gamut_core::{Cicp, Error, Result};
 
 use crate::boxes::BoxReader;
 use crate::model::{
     CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, IsoBmffImage, Item,
-    ItemReference, MasteringDisplay, NclxColr, PixelAspectRatio, Property, PropertyKind,
-    TopLevelBox, TopLevelPosition,
+    ItemReference, MasteringDisplay, PixelAspectRatio, Property, PropertyKind, TopLevelBox,
+    TopLevelPosition,
 };
 
 /// Per-item property associations parsed from `ipma`: each entry is `(item_id, associations)`
 /// where an association is `(property_index, essential)`.
 type ItemAssociations = Vec<(u32, Vec<(u16, bool)>)>;
 
-/// Parses `data` into an [`IsoBmffImage`].
-///
-/// The result is normalised: each item's payload is resolved (multi-extent payloads concatenated,
-/// `idat`-stored data inlined), so writing it back yields an equivalent — not byte-identical —
-/// file. `read(&`[`write`](crate::write)`(&img)?) == img` holds for anything `write` accepts.
-/// Top-level boxes the model does not otherwise own are retained in
-/// [`IsoBmffImage::top_level_boxes`] in file order — every `AfterFtyp` box before every
-/// `Trailing` one, the grouping `write` requires (see [`IsoBmffImage::top_level_boxes`]) — except
-/// a sequence track (`moov`, or a stray top-level `trak`), which is skipped so the `meta` still
-/// beside it reads: its chunk offsets address this file's `mdat`, which [`write`](crate::write)
-/// lays out afresh, so it cannot round-trip. [`walk_segments`](crate::walk_segments) still
-/// accounts its bytes.
-///
-/// The top-level walk models only the primary still-image stream and tolerates an appended foreign
-/// "motion photo" stream: it stops at a second
-/// top-level `ftyp` (the first wins) and at a malformed trailing box once `ftyp`+`meta` are seen.
-///
-/// # Errors
-///
-/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a box is
-/// truncated or overruns, a required box (`ftyp`,
-/// `meta` in a file without a track, `hdlr`, `pitm`, `iinf`) is missing, an `iloc` extent
-/// overflows or points outside its source, the items' extents sum to more than the file size, an
-/// `ipma` property index is out of range, an `iref` names an unknown `from_item`, or a string is
-/// not UTF-8. A malformed top-level
-/// box is only an error *before* both `ftyp` and `meta` have been parsed; after that it is treated
-/// as the start of an appended vendor trailer and stops the walk cleanly.
-/// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for
-/// structurally valid but out-of-scope features: a
-/// sequence-only file (a top-level `moov`/`trak` and no `meta`, so no still item — a `moov` beside
-/// a `meta` is skipped), a non-`pict` handler, protected items, `uri ` items, external data
-/// references, `iloc` `construction_method` 2, and box versions beyond those listed above.
-pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
+impl IsoBmffImage {
+    /// Parses `data` into an [`IsoBmffImage`].
+    ///
+    /// The result is normalised: each item's payload is resolved (multi-extent payloads
+    /// concatenated, `idat`-stored data inlined), so writing it back yields an equivalent — not
+    /// byte-identical — file. `IsoBmffImage::parse(&img.to_bytes()?)? == img` holds for anything
+    /// [`to_bytes`](Self::to_bytes) accepts. Top-level boxes the model does not otherwise own are
+    /// retained in [`top_level_boxes`](Self::top_level_boxes) in file order — every `AfterFtyp`
+    /// box before every `Trailing` one, the grouping `to_bytes` requires — except a sequence track
+    /// (`moov`, or a stray top-level `trak`), which is skipped so the `meta` still beside it reads:
+    /// its chunk offsets address this file's `mdat`, which `to_bytes` lays out afresh, so it cannot
+    /// round-trip. [`walk_segments`](crate::walk_segments) still accounts its bytes.
+    ///
+    /// The top-level walk models only the primary still-image stream and tolerates an appended
+    /// foreign "motion photo" stream: it stops at a second top-level `ftyp` (the first wins) and
+    /// at a malformed trailing box once `ftyp`+`meta` are seen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a box
+    /// is truncated or overruns, a required box (`ftyp`, `meta` in a file without a track,
+    /// `hdlr`, `pitm`, `iinf`) is missing, an `iloc` extent overflows or points outside its
+    /// source, the items' extents sum to more than the file size, an `ipma` property index is out
+    /// of range, an `iref` names an unknown `from_item`, or a string is not UTF-8. A malformed
+    /// top-level box is only an error *before* both `ftyp` and `meta` have been parsed; after
+    /// that it is treated as the start of an appended vendor trailer and stops the walk cleanly.
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for
+    /// structurally valid but out-of-scope features: a sequence-only file (a top-level
+    /// `moov`/`trak` and no `meta`, so no still item — a `moov` beside a `meta` is skipped), a
+    /// non-`pict` handler, protected items, `uri ` items, external data references, `iloc`
+    /// `construction_method` 2, and box versions beyond those listed above.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        read(data)
+    }
+}
+
+/// The body of [`IsoBmffImage::parse`].
+fn read(data: &[u8]) -> Result<IsoBmffImage> {
     let mut top = BoxReader::new(data);
     let mut ftyp = None;
     let mut meta_body = None;
@@ -102,13 +107,13 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
     let mut seen_track = false;
     let mut top_level_boxes = Vec::new();
     loop {
-        let b = match top.next_box() {
-            Ok(Some(b)) => b,
-            Ok(None) => break, // clean end of the (primary) stream
+        let b = match top.next() {
+            Some(Ok(b)) => b,
+            None => break, // clean end of the (primary) stream
             // A malformed top-level box after both required boxes are seen is the start of an
             // appended non-ISOBMFF vendor trailer (motion photo) — stop cleanly; the consumer's
             // accounting layer surfaces it. Before that, the file itself is malformed: propagate.
-            Err(e) => {
+            Some(Err(e)) => {
                 if ftyp.is_some() && meta_body.is_some() {
                     break;
                 }
@@ -296,7 +301,7 @@ fn parse_meta(body: &[u8]) -> Result<Meta<'_>> {
     let mut iref = None;
     let mut idat = None;
     let mut groups = None;
-    while let Some(b) = r.next_box()? {
+    while let Some(b) = r.next().transpose()? {
         match &b.ty {
             b"hdlr" => {
                 parse_hdlr(b.body)?;
@@ -338,7 +343,7 @@ fn parse_meta(body: &[u8]) -> Result<Meta<'_>> {
 
 /// Resolves one item's payload: each extent addressed against the file (`construction_method` 0)
 /// or the `idat` body (1), concatenated in extent order. `budget` is the remaining total payload
-/// allowance (see [`read`]).
+/// allowance (see [`IsoBmffImage::parse`]).
 fn resolve_payload(
     entry: &IlocEntry,
     data: &[u8],
@@ -382,7 +387,7 @@ fn resolve_payload(
 /// Reads a `FullBox` header, returning `(version, flags)`.
 fn full_box_header(r: &mut BoxReader) -> Result<(u8, u32)> {
     let version = r.u8()?;
-    let f = r.take(3)?;
+    let f = r.bytes(3)?;
     Ok((version, u32::from_be_bytes([0, f[0], f[1], f[2]])))
 }
 
@@ -512,7 +517,7 @@ fn parse_iinf(body: &[u8]) -> Result<Vec<InfeEntry>> {
     };
     let mut entries = Vec::new();
     for _ in 0..entry_count {
-        let b = r.next_box()?.ok_or_else(|| {
+        let b = r.next().transpose()?.ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: iinf truncated")
         })?;
         if &b.ty != b"infe" {
@@ -607,7 +612,7 @@ fn parse_iref(body: &[u8]) -> Result<Vec<(u32, ItemReference)>> {
         ));
     }
     let mut references = Vec::new();
-    while let Some(b) = r.next_box()? {
+    while let Some(b) = r.next().transpose()? {
         let mut r = BoxReader::new(b.body);
         let from = if version == 0 {
             u32::from(r.u16()?)
@@ -638,7 +643,7 @@ fn parse_iref(body: &[u8]) -> Result<Vec<(u32, ItemReference)>> {
 fn parse_grpl(body: &[u8]) -> Result<Vec<EntityGroup>> {
     let mut r = BoxReader::new(body);
     let mut groups = Vec::new();
-    while let Some(b) = r.next_box()? {
+    while let Some(b) = r.next().transpose()? {
         let mut r = BoxReader::new(b.body);
         if full_box_header(&mut r)?.0 != 0 {
             return Err(Error::unsupported(
@@ -666,7 +671,7 @@ fn parse_iprp(body: &[u8]) -> Result<(Vec<PropertyKind>, ItemAssociations)> {
     let mut r = BoxReader::new(body);
     let mut ipco = None;
     let mut ipma = None;
-    while let Some(b) = r.next_box()? {
+    while let Some(b) = r.next().transpose()? {
         match &b.ty {
             b"ipco" => ipco = Some(parse_ipco(b.body)?),
             b"ipma" => ipma = Some(parse_ipma(b.body)?),
@@ -686,7 +691,7 @@ fn parse_iprp(body: &[u8]) -> Result<(Vec<PropertyKind>, ItemAssociations)> {
 fn parse_ipco(body: &[u8]) -> Result<Vec<PropertyKind>> {
     let mut r = BoxReader::new(body);
     let mut props = Vec::new();
-    while let Some(b) = r.next_box()? {
+    while let Some(b) = r.next().transpose()? {
         props.push(parse_property(b.ty, b.body)?);
     }
     Ok(props)
@@ -721,7 +726,7 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
                     let transfer_characteristics = r.u16()?;
                     let matrix_coefficients = r.u16()?;
                     let full_range = (r.u8()? >> 7) & 1 == 1;
-                    Ok(PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
+                    Ok(PropertyKind::Colour(ColourInformation::Nclx(Cicp {
                         colour_primaries,
                         transfer_characteristics,
                         matrix_coefficients,
@@ -729,10 +734,10 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
                     })))
                 }
                 b"rICC" => Ok(PropertyKind::Colour(ColourInformation::RestrictedIcc(
-                    r.take(r.remaining())?.to_vec(),
+                    r.bytes(r.remaining())?.to_vec(),
                 ))),
                 b"prof" => Ok(PropertyKind::Colour(ColourInformation::UnrestrictedIcc(
-                    r.take(r.remaining())?.to_vec(),
+                    r.bytes(r.remaining())?.to_vec(),
                 ))),
                 // Unknown colour types: preserve verbatim.
                 _ => Ok(PropertyKind::Other {
@@ -773,7 +778,7 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
             let mut r = BoxReader::new(body);
             full_box_header(&mut r)?;
             let aux_type = read_c_string(&mut r)?;
-            let aux_subtype = r.take(r.remaining())?.to_vec();
+            let aux_subtype = r.bytes(r.remaining())?.to_vec();
             Ok(PropertyKind::AuxiliaryType {
                 aux_type,
                 aux_subtype,

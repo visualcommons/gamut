@@ -6,10 +6,11 @@ still-image profile (ISO/IEC 23008-12) out as a shared primitive consumed by bot
 images). It models *structure only* — the box tree, item properties, item references, and the
 offset-driven read/write spine — never the coded bitstream, which is carried opaquely.
 
-**Keystone:** the **single-pass `iloc` back-patch** in the writer ([`write`](src/writer.rs)). Each
-item's `extent_offset` is an absolute file offset into `mdat` that is only known after `meta` is
-sized, so the writer reserves the slot while emitting `meta` and patches it once `mdat` is placed; a
-`read(&write(&img)?) == img` round-trip reproduces the model exactly.
+**Keystone:** the **single-pass `iloc` back-patch** in the writer
+([`IsoBmffImage::to_bytes`](src/writer.rs)). Each item's `extent_offset` is an absolute file offset
+into `mdat` that is only known after `meta` is sized, so the writer reserves the slot while emitting
+`meta` and patches it once `mdat` is placed; an `IsoBmffImage::parse(&img.to_bytes()?)? == img`
+round-trip reproduces the model exactly.
 
 ## Scope
 
@@ -21,7 +22,7 @@ container rows of every planned milestone (M0–M5), so future codec work is add
 
 **Asymmetric by design:** the writer *normalises* (always the smallest box versions — `pitm` v0,
 `iloc` v0 single-extent into `mdat`, `infe` v2, `iref` v0, 16-bit item ids — validated up front by
-the fallible [`write`]); the reader additionally accepts the foreign-encoder repertoire (`iloc`
+the fallible `to_bytes`); the reader additionally accepts the foreign-encoder repertoire (`iloc`
 v1/v2, `idat` placement, multi-extent payloads, 32-bit item ids, 16-bit `ipma` indices). Round-trip
 is therefore model-exact for files this crate writes, and *equivalent-but-normalised* for foreign
 files.
@@ -33,10 +34,10 @@ files.
 | P1 | 14496-12 §4.2 | Typed box-tree model (`IsoBmffImage`/`Item`/`ItemReference`/`EntityGroup`/`Property`/`PropertyKind`) + low-level `BoxBuilder`/`BoxReader` | ✅ done |
 | P2 | 14496-12; 23008-12 | Writer: `ftyp`, `meta` (`hdlr`/`pitm`/`iloc` v0/`iinf`+`infe` v2/`iref` v0/`iprp`/`grpl`), `mdat`; `ispe`/`pixi`/`colr` (`nclx`+ICC)/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli`/`mdcv` properties; opaque codec config; model validation (typed errors, no silent truncation) | ✅ done |
 | P3 | 14496-12 | **Keystone** — `iloc` extent back-patch + shared `ipco` dedup → per-item `ipma` (8/16-bit forms) | ✅ done |
-| P4 | 14496-12; 23008-12 | Reader: bounds-checked box walk including `largesize`, size-0, and UUID user types; foreign-file repertoire (`iloc` v0–v2, `mdat`/`idat`, base offsets, 0/4/8-byte fields, multi-extent, `pitm`/`ipma` v0–v1, `infe` v2–v3, `iref` v0–v1); motion-photo tolerance (stop at a second top-level `ftyp` / at a malformed trailing box once `ftyp`+`meta` are seen); `read(&write)` round-trip; unrecognised property boxes preserved verbatim | ✅ done |
+| P4 | 14496-12; 23008-12 | Reader: bounds-checked box walk including `largesize`, size-0, and UUID user types; foreign-file repertoire (`iloc` v0–v2, `mdat`/`idat`, base offsets, 0/4/8-byte fields, multi-extent, `pitm`/`ipma` v0–v1, `infe` v2–v3, `iref` v0–v1); motion-photo tolerance (stop at a second top-level `ftyp` / at a malformed trailing box once `ftyp`+`meta` are seen); `parse(&to_bytes)` round-trip; unrecognised property boxes preserved verbatim | ✅ done |
 | P5 | — | Robustness: truncation/overrun/size/index guards ✅; counts never trusted for allocation ✅; total payload capped at input size (anti amplification) ✅; spec fixtures independent of the writer ✅; fuzz corpus ☐ | ◑ partial |
 | P6 | — | Differential oracle: libavif/dav1d parses the container and reproduces pixels (via `gamut-avif/tests/decode_roundtrip.rs`); a libheif-written `mdcv` reads back as the typed property with the values libheif was given (`gamut-heic/tests/oracle_isobmff_mdcv.rs`) | ✅ via codec |
-| P7 | 14496-12 §4.2; C2PA 2.4 §A.5.3 | Top-level boxes the model does not otherwise own (`IsoBmffImage::top_level_boxes`, #443): retained on read with the position they were found at, written after `ftyp` (`AfterFtyp`) or after `mdat` (`Trailing`); `read`→`write` byte-identical for a file *this crate wrote* carrying them (foreign files stay equivalent-but-normalised); libavif decodes an AVIF carrying a C2PA `uuid` box unchanged (`gamut-avif/tests/remux_roundtrip.rs`) | ✅ done |
+| P7 | 14496-12 §4.2; C2PA 2.4 §A.5.3 | Top-level boxes the model does not otherwise own (`IsoBmffImage::top_level_boxes`, #443): retained on read with the position they were found at, written after `ftyp` (`AfterFtyp`) or after `mdat` (`Trailing`); `parse`→`to_bytes` byte-identical for a file *this crate wrote* carrying them (foreign files stay equivalent-but-normalised); libavif decodes an AVIF carrying a C2PA `uuid` box unchanged (`gamut-avif/tests/remux_roundtrip.rs`) | ✅ done |
 
 ## Demonstration surface
 
@@ -47,7 +48,7 @@ is opaque — by the `gamut isobmff` CLI (`inspect`/`remux`/`build`) and two ora
   libavif conformance corpus it reads every still image, including alternate-size boxes and the
   `meta` primary still of an `avis` sequence (its `moov` skipped, #646), while rejecting a
   sequence-only file and malformed input with a typed error.
-- **`remux`** re-serialises a container and re-parses it, verifying `read(&write) == model` on
+- **`remux`** re-serialises a container and re-parses it, verifying `parse(&to_bytes) == model` on
   foreign files; `gamut-avif/tests/remux_roundtrip.rs` additionally confirms libavif decodes the
   re-muxed container to **pixel-identical** output (the coded payload survives verbatim).
 - **`build`** constructs a synthetic container covering every modelled box, property, reference,
@@ -70,7 +71,7 @@ is opaque — by the `gamut isobmff` CLI (`inspect`/`remux`/`build`) and two ora
 
 `IsoBmffImage::top_level_boxes` (#443) holds, in file order, every top-level box of the primary
 stream that the model does not otherwise own — anything but `ftyp`, `meta`, `mdat` and the
-appended motion-photo stream `read` stops at. Each `TopLevelBox` carries the box type, the 16-byte
+appended motion-photo stream `parse` stops at. Each `TopLevelBox` carries the box type, the 16-byte
 user type when it is a `uuid` box (the `RawBox` split: `payload` omits the user type), the payload
 verbatim, and a `TopLevelPosition`:
 
@@ -79,8 +80,8 @@ verbatim, and a `TopLevelPosition`:
   `D8FEC3D6-1B0E-483C-9297-5828877EC481`, §A.5.1).
 - **`Trailing`** — written after `mdat`.
 
-`read` assigns the position from where it met the box: after `mdat` → `Trailing`, otherwise
-`AfterFtyp`. `write` always emits `ftyp`, the `AfterFtyp` boxes, `meta`, `mdat`, then the
+`parse` assigns the position from where it met the box: after `mdat` → `Trailing`, otherwise
+`AfterFtyp`. `to_bytes` always emits `ftyp`, the `AfterFtyp` boxes, `meta`, `mdat`, then the
 `Trailing` boxes, so a foreign file's box moves on round-trip wherever its layout differs: a box
 *between* `meta` and `mdat` is written back between `ftyp` and `meta` (for a C2PA box a move
 between two lawful positions: §A.5.3 requires only after `ftyp` and before the first `mdat` and
@@ -88,24 +89,24 @@ any `moov`, and both satisfy it); a box before `ftyp` is written back after `fty
 with `mdat` before `meta`, a box between `mdat` and `meta` is `Trailing` and is written back
 after `meta` and `mdat`. `TopLevelPosition` is `#[non_exhaustive]` so a finer
 position can be added later without a major bump. Files this crate writes round-trip
-byte-identically. `write` rejects a top-level box typed `ftyp`/`meta`/`mdat` (the model emits
+byte-identically. `to_bytes` rejects a top-level box typed `ftyp`/`meta`/`mdat` (the model emits
 those itself), `moov`/`trak` (image sequences, `Unsupported`: a track's chunk offsets address the
-source file's `mdat`, which `write` lays out afresh, so `read` skips one and `write` refuses one),
+source file's `mdat`, which `to_bytes` lays out afresh, so `parse` skips one and `to_bytes` refuses one),
 one whose `user_type`
 does not pair with the `uuid` type, one whose complete box (header included) does not fit the
 32-bit size field, or a list that interleaves positions (an `AfterFtyp` box after a `Trailing`
-one) — the file holds the groups in order, so `read` could not give the interleaved order back;
+one) — the file holds the groups in order, so `parse` could not give the interleaved order back;
 `IsoBmffImage::push_top_level_box` appends at the end of a box's position group so a parsed
 model that already carries trailing boxes never becomes interleaved.
 
 Two costs of retaining rather than dropping, accepted knowingly:
 
 - **A retained box is an owned copy.** A motion-photo `mpvd` box (Google) that carries a whole
-  video is copied into the model on `read`, where it was previously skipped; the copy is bounded
+  video is copied into the model on `parse`, where it was previously skipped; the copy is bounded
   by the input size, and `walk_segments` continues to surface the same bytes zero-copy for
   consumers that only account for them.
 - **An `iloc` extent may address bytes inside a retained box** (the reader resolves extents
-  against the whole file). Such bytes are then carried twice on `write` — once verbatim in the box,
+  against the whole file). Such bytes are then carried twice on `to_bytes` — once verbatim in the box,
   once as the item's payload in `mdat`. No known encoder does this; a file that does still
   decodes identically, it is merely larger.
 
@@ -155,12 +156,12 @@ mis-placed; no known writer emits that layout. A `jumb` `TBox` check would make 
 deferred (it narrows what is reported, on a clause the specification states only for JPEG XL) and
 is tracked by `gamut-heic`'s `STATUS.md` deferred row.
 
-Every range the lens reports (`C2paSlot::range`, `C2paSlot::store_range`) is a `C2paByteRange`
-(#780): a half-open byte range with `start`/`end`/`len`, `bytes_in`/`bytes_in_mut` for extraction
-and patching, a `[start, end)` `Display`, and deliberately no conversion back to a `Range<usize>`
-— the shape a byte-range hash's exclusion list takes, which is not how `c2pa.hash.bmff.v3` binds a
-BMFF asset (C2PA 2.4 §18.6, §A.5.6). `gamut-heic` and `gamut-avif` report their ranges in the same
-type. Changing `C2paSlot::range`'s type was a major bump.
+Every range the lens reports (`C2paSlot::range`, `C2paSlot::store_range`) is a half-open
+`Range<u64>` of absolute file offsets (#1069), the one shape every gamut container reports a C2PA
+region in; `gamut-heic` and `gamut-avif` report theirs the same way. It is still not an exclusion
+range — `c2pa.hash.bmff.v3` binds a BMFF asset by box path, not byte offset (C2PA 2.4 §18.6,
+§A.5.6) — and the field docs, not a dedicated type, now say so. This replaced the bespoke
+`C2paByteRange` (#780), a major bump.
 
 Out of scope here: where a box sits relative to `mdat`/`moov` (each consumer's `C2paBoxPosition`)
 and the non-validating report types (`C2paSummary` and kin, still one per consumer).
@@ -182,12 +183,12 @@ framing above: the framing is HEIF's, not either codec's. Additive (semver-minor
 
 Byte accounting itself is `walk_segments`/`walk_meta_children` (issue #436): every input byte maps
 to exactly one `Segment` — a top-level box, an appended foreign stream from a second `ftyp`, or a
-trailer — and `walk_meta_children` does the same one level down for boxes `read` does not consume.
-It stops on exactly `read`'s rules, so the accounting walk and the semantic parse cannot disagree
-about where the primary stream ends. It is deliberately not folded into `read`, which is strictly
+trailer — and `walk_meta_children` does the same one level down for boxes `parse` does not consume.
+It stops on exactly `parse`'s rules, so the accounting walk and the semantic parse cannot disagree
+about where the primary stream ends. It is deliberately not folded into `parse`, which is strictly
 stricter (it requires and parses `meta`, refusing a sequence-only file); the two are documented
 together in `src/segments.rs`. A sequence track's `moov` beside the still is the one top-level box
-`read` neither parses nor retains (#646), so this walk is the only place its bytes are accounted
+`parse` neither parses nor retains (#646), so this walk is the only place its bytes are accounted
 for, as a plain `Box` segment.
 
 `BoxReader` and `RawBox` remain re-exported from the crate root so a consumer can account for
@@ -195,8 +196,19 @@ something the shared walk does not model: `RawBox::offset` is the absolute heade
 the reader's slice, and `BoxReader::position`/`remaining` bracket the cursor.
 `RawBox::user_type` identifies UUID boxes while `RawBox::payload()` omits their 16-byte user-type
 prefix without changing the existing `body` view. The public surface is the walk only
-(`new`/`next_box`/`position`/`remaining` + `RawBox` fields/`payload`); scalar field readers and the
-writer's `BoxBuilder` stay crate-private. Additive (semver-minor).
+(`new`, the `Iterator<Item = Result<RawBox>>` impl, `position`/`remaining` + `RawBox`
+fields/`payload`); scalar field readers and the writer's `BoxBuilder` stay crate-private. The
+iterator replaced `next_box() -> Result<Option<RawBox>>` (#1069, a major bump, matching
+`gamut-riff`'s `RiffReader`); it ends after the first error, with the cursor at the slice end.
+`walk_segments` returns a named `SegmentWalk { segments, meta_body }` rather than a tuple (#1069).
+
+## Model surface (#1069)
+
+`IsoBmffImage::parse`/`to_bytes` replace the free `parse`/`to_bytes` functions. `Item`, `Property`,
+`ItemReference`, `EntityGroup` and `MasteringDisplay` are `#[non_exhaustive]` with `new(..)`
+constructors (and `with_*` builders on `Item`), `C2paUuidBox` is `#[non_exhaustive]`, an `nclx`
+`colr` carries the workspace's `gamut_core::Cicp` in place of the crate-local `NclxColr`, and
+`ImageOverlay::offsets` holds named `OverlayOffset { horizontal, vertical }` pairs. All major.
 
 ## Typed property values
 
@@ -222,7 +234,7 @@ with `clap.width_n`.
   not exactly 24 bytes, which it previously carried verbatim as `Other`.)
 - **Writer emission options** (`idat` placement, multi-extent, `iloc` v1/v2, 32-bit-id boxes).
   The writer intentionally normalises; if a consumer ever needs layout control it arrives as a
-  separate options-taking entry point (semver-minor), not a change to `write`.
+  separate options-taking entry point (semver-minor), not a change to `to_bytes`.
 - **Fuzz corpus** (P5). The reader is bounds-checked, allocation-capped, and fixture-tested; a
   libFuzzer/AFL corpus remains the missing hardening step.
 - **Streaming/`ReadAt` input.** `BoxReader` intentionally remains a zero-copy cursor over one byte
@@ -237,7 +249,7 @@ with `clap.width_n`.
   `meta` primary still reads, and `walk_segments` accounts the track as one opaque box — and
   only a sequence-only file (a track, no `meta`) is `Unsupported` ("sequence-only file … no still
   item"). The track is not kept in `top_level_boxes`: its `stco`/`co64` chunk offsets address the
-  source `mdat`, so a verbatim copy cannot round-trip through `write`. (A `moov` inside an appended
+  source `mdat`, so a verbatim copy cannot round-trip through `to_bytes`. (A `moov` inside an appended
   motion-photo stream — everything past a second top-level `ftyp` — is never reached, by design.)
 - **Item protection** — `ipro`/`sinf`, `infe` `item_protection_index != 0` (DRM machinery).
 - **External data references** — `dinf`/`dref`, `iloc` `data_reference_index != 0` (payloads in
@@ -251,7 +263,7 @@ with `clap.width_n`.
   fit `u32`.
 - **Non-`pict` handlers** — a `meta` that is not a HEIF image (e.g. ID3 metadata containers).
 
-Round-trip is guaranteed for files this crate's `write` produces (`read(&write(&img)?) == img`,
+Round-trip is guaranteed for files this crate's `to_bytes` produces (`IsoBmffImage::parse(&img.to_bytes()?)? == img`,
 checked by validation rather than assumed). Foreign files read into an equivalent normalised model;
 what they lose is placement/version detail (`idat` vs `mdat`, extent splits, box versions), never
 item data, properties, references, or groups.

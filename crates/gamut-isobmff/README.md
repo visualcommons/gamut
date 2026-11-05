@@ -17,50 +17,46 @@ Factoring the container out keeps the two from duplicating the box tree and the 
 security-sensitive `iloc` offset machinery. It is:
 
 - **Codec-agnostic.** The codec configuration is carried as opaque bytes
-  ([`PropertyKind::CodecConfiguration`]), so the same `write`/`read` serve `av01`/`av1C` and
+  ([`PropertyKind::CodecConfiguration`]), so the same `to_bytes`/`parse` serve `av01`/`av1C` and
   `hvc1`/`hvcC` with no container changes.
 - **Memory-safe on hostile input.** `#![forbid(unsafe_code)]` — ISOBMFF is offset-driven, a classic
   parser-exploit surface (truncation, overruns, out-of-range indices, amplification), so every read
   is bounds-checked and the total resolved payload is capped at the input size.
-- **Validating on output.** `write` returns a typed error for a model that cannot round-trip or
+- **Validating on output.** `to_bytes` returns a typed error for a model that cannot round-trip or
   does not fit the still-image box versions, instead of silently truncating fields.
 - **Dependency-light.** Builds only on [`gamut-core`](../gamut-core).
 
 ## Usage
 
-`write` serialises an [`IsoBmffImage`] (its `ftyp` brands, the `pitm` primary item, the image
-items, any entity groups, and any top-level boxes the model does not otherwise own) into a
-complete `ftyp` + `meta` + `mdat` file; `read` parses one back. Each [`Item`] carries its type,
-name, optional MIME info, hidden flag, typed `iref` references
+`IsoBmffImage::to_bytes` serialises an [`IsoBmffImage`] (its `ftyp` brands, the `pitm` primary
+item, the image items, any entity groups, and any top-level boxes the model does not otherwise own)
+into a complete `ftyp` + `meta` + `mdat` file; `IsoBmffImage::parse` parses one back. Each [`Item`]
+carries its type, name, optional MIME info, hidden flag, typed `iref` references
 (`auxl`/`cdsc`/`dimg`/`thmb`/`prem`, …), properties, and payload; the writer derives the `iloc`
 offsets and the shared `ipco`/`ipma` so the two are inverse for any file this crate writes.
-`IsoBmffImage` is `#[non_exhaustive]`: build it with `IsoBmffImage::new(..)` and the `with_*`
-builders.
+The model structs (`IsoBmffImage`, `Item`, `Property`, `ItemReference`, `EntityGroup`,
+`MasteringDisplay`, `TopLevelBox`) are `#[non_exhaustive]`: build them with their `new(..)`
+constructors and, where they have them, the `with_*` builders. An `nclx` colour property carries
+`gamut_core::Cicp`, the workspace's one CICP type.
 
 ```rust
-use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, read, write};
+use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind};
 
 let img = IsoBmffImage::new(
     *b"avif",
     vec![*b"avif", *b"mif1", *b"miaf"],
     1,
-    vec![Item {
-        id: 1,
-        item_type: *b"av01",
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: false,
-        references: vec![],
-        properties: vec![Property {
-            essential: false,
-            kind: PropertyKind::ImageSpatialExtents { width: 64, height: 64 },
-        }],
-        payload: vec![/* the coded bitstream, opaque to this crate */],
-    }],
+    vec![
+        Item::new(1, *b"av01")
+            .with_properties(vec![Property::new(
+                false,
+                PropertyKind::ImageSpatialExtents { width: 64, height: 64 },
+            )])
+            .with_payload(vec![/* the coded bitstream, opaque to this crate */]),
+    ],
 );
-let bytes = write(&img)?;
-assert_eq!(read(&bytes)?, img);
+let bytes = img.to_bytes()?;
+assert_eq!(IsoBmffImage::parse(&bytes)?, img);
 # Ok::<(), gamut_core::Error>(())
 ```
 
@@ -68,7 +64,7 @@ A top-level box the model does not otherwise own — the C2PA `ContentProvenance
 with user type `D8FEC3D6-1B0E-483C-9297-5828877EC481`, C2PA 2.4 §A.5.1), a `free`, a vendor box
 — lives in `top_level_boxes` as a [`TopLevelBox`] and is written at its [`TopLevelPosition`]:
 `AfterFtyp` boxes between `ftyp` and `meta` (so before the first `mdat`, the §A.5.3 placement),
-`Trailing` boxes after `mdat`. `read` keeps every such box with the position it found it at, so a
+`Trailing` boxes after `mdat`. `parse` keeps every such box with the position it found it at, so a
 file carrying one round-trips byte-identically:
 
 ```rust
@@ -88,7 +84,7 @@ The payload stays opaque here; locating and bounding the manifest store inside i
 [`gamut-heic`](../gamut-heic)'s `c2pa` module.
 
 See [`gamut-avif`](../gamut-avif) for the full encode path that drives this crate (it builds the
-`av1C` record and the AVIF brand set, then calls `write`).
+`av1C` record and the AVIF brand set, then calls `to_bytes`).
 
 ## Inspect and re-mux from the CLI
 
@@ -128,11 +124,11 @@ types). Image sequences/tracks (beyond skipping a `moov` beside the still), item
 external data references are out of scope —
 see [STATUS.md](STATUS.md) for the full deferred/out-of-scope ledger.
 
-`read` models only the *primary* still-image stream and tolerates real-world "motion photo" files
+`parse` models only the *primary* still-image stream and tolerates real-world "motion photo" files
 that append a second, foreign stream: the top-level walk stops cleanly at a second top-level `ftyp`
 (the first wins) and at a malformed trailing box once `ftyp`+`meta` are seen. Mapping every byte of
 the input to a box, an appended stream or a trailer is [`walk_segments`], here, which `gamut-heic`
-and `gamut-avif` share; the re-exported [`BoxReader`]/[`RawBox`] box-walk primitives serve a
+and `gamut-avif` share; the re-exported [`BoxReader`] (an iterator of [`RawBox`]es) serves a
 consumer that needs its own walk.
 
 Box byte layouts follow ISO/IEC 14496-12 (ISOBMFF) and ISO/IEC 23008-12 (HEIF) — paywalled, so

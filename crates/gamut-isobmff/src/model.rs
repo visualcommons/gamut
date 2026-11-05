@@ -6,21 +6,22 @@
 //! [`Item::payload`]). This is the codec-agnostic layer both AVIF (`av01`/`av1C`) and HEIC
 //! (`hvc1`/`hvcC`) build on.
 //!
-//! [`crate::write`] serialises an [`IsoBmffImage`]; [`crate::read`] parses one back. The model is
-//! normalised so the two are inverse for files this crate writes: it stores each item's resolved
-//! [`payload`](Item::payload) (not raw `iloc` offsets or `idat`/`mdat` placement), its per-item
-//! [`properties`](Item::properties) list (not raw `ipco` indices), and its outgoing
+//! [`IsoBmffImage::to_bytes`] serialises an [`IsoBmffImage`]; [`IsoBmffImage::parse`] parses one
+//! back. The model is normalised so the two are inverse for files this crate writes: it stores each
+//! item's resolved [`payload`](Item::payload) (not raw `iloc` offsets or `idat`/`mdat` placement),
+//! its per-item [`properties`](Item::properties) list (not raw `ipco` indices), and its outgoing
 //! [`references`](Item::references) (not the file-level `iref` table), so
-//! `read(&write(&img)?) == img`.
+//! `IsoBmffImage::parse(&img.to_bytes()?)? == img`.
 //!
 //! Top-level boxes the model does not otherwise own — a C2PA `uuid` box, a `free`, a vendor box —
 //! are kept in [`IsoBmffImage::top_level_boxes`] as [`TopLevelBox`]es, each tagged with the
 //! [`TopLevelPosition`] the writer places it at, so a file carrying one round-trips byte-identically
 //! rather than losing the box. The list is grouped by position (every `AfterFtyp` box before every
-//! `Trailing` one) — the order the file has and [`crate::read`] produces; [`crate::write`] refuses
-//! an interleaved list, and [`IsoBmffImage::push_top_level_box`] appends without interleaving.
+//! `Trailing` one) — the order the file has and [`IsoBmffImage::parse`] produces;
+//! [`IsoBmffImage::to_bytes`] refuses an interleaved list, and
+//! [`IsoBmffImage::push_top_level_box`] appends without interleaving.
 
-use gamut_core::{Error, Result};
+use gamut_core::{Cicp, Error, Result};
 
 /// A parsed or constructed ISOBMFF still-image file: its `ftyp` brands, the id of the primary
 /// (displayed) item, the image items, the entity groups, and any top-level boxes the model does not
@@ -38,7 +39,7 @@ pub struct IsoBmffImage {
     pub minor_version: u32,
     /// The `ftyp` compatible brands, in file order (e.g. `avif`/`mif1`/`miaf`/`MA1A`).
     pub compatible_brands: Vec<[u8; 4]>,
-    /// The `pitm` primary item id — the image a reader displays. [`crate::write`] requires it to
+    /// The `pitm` primary item id — the image a reader displays. [`IsoBmffImage::to_bytes`] requires it to
     /// name one of [`items`](Self::items).
     pub primary_item_id: u32,
     /// The image items, in `iinf` order: the coded image(s) plus any auxiliaries (alpha plane,
@@ -48,12 +49,12 @@ pub struct IsoBmffImage {
     /// list round-trips as an absent `grpl` box.
     pub groups: Vec<EntityGroup>,
     /// Top-level boxes the model does not otherwise own — anything but `ftyp`, `meta` and `mdat`
-    /// (and a sequence track's `moov`/`trak`, which [`crate::read`] skips, and an appended
+    /// (and a sequence track's `moov`/`trak`, which [`IsoBmffImage::parse`] skips, and an appended
     /// motion-photo stream, which it stops at) — in file order, each
     /// carrying the [`TopLevelPosition`] it is written at. File order means grouped by position:
     /// every [`AfterFtyp`](TopLevelPosition::AfterFtyp) box precedes every
-    /// [`Trailing`](TopLevelPosition::Trailing) one, which is how [`crate::read`] fills the list and
-    /// what [`crate::write`] requires (an interleaved list cannot round-trip, so it is rejected as
+    /// [`Trailing`](TopLevelPosition::Trailing) one, which is how [`IsoBmffImage::parse`] fills the list and
+    /// what [`IsoBmffImage::to_bytes`] requires (an interleaved list cannot round-trip, so it is rejected as
     /// `InvalidInput`); [`push_top_level_box`](Self::push_top_level_box) appends without breaking
     /// the grouping. This is where a C2PA `ContentProvenanceBox` (a `uuid` box with the C2PA user
     /// type) lives; usually empty.
@@ -107,7 +108,7 @@ impl IsoBmffImage {
 
     /// Sets the top-level boxes the model does not otherwise own (see
     /// [`top_level_boxes`](Self::top_level_boxes)). The list must be grouped by position for
-    /// [`crate::write`] to accept it; prefer [`push_top_level_box`](Self::push_top_level_box) when
+    /// [`IsoBmffImage::to_bytes`] to accept it; prefer [`push_top_level_box`](Self::push_top_level_box) when
     /// adding to an existing list.
     #[must_use]
     pub fn with_top_level_boxes(mut self, top_level_boxes: Vec<TopLevelBox>) -> Self {
@@ -119,7 +120,7 @@ impl IsoBmffImage {
     /// group — an [`AfterFtyp`](TopLevelPosition::AfterFtyp) box goes after the last `AfterFtyp`
     /// box and before the first [`Trailing`](TopLevelPosition::Trailing) one, a `Trailing` box goes
     /// last — so appending to a parsed model that already carries trailing boxes never builds the
-    /// interleaved list [`crate::write`] refuses. This is how a C2PA box is added to a file read
+    /// interleaved list [`IsoBmffImage::to_bytes`] refuses. This is how a C2PA box is added to a file read
     /// from disk.
     ///
     /// ```
@@ -151,10 +152,10 @@ impl IsoBmffImage {
 /// writer places it.
 ///
 /// The `uuid` split follows [`crate::RawBox`]: `user_type` is `Some` exactly when `ty` is `uuid`,
-/// and `payload` is the body *after* the user type. [`crate::write`] rejects a box that breaks
+/// and `payload` is the body *after* the user type. [`IsoBmffImage::to_bytes`] rejects a box that breaks
 /// that pairing, and a box typed `ftyp`/`meta`/`mdat` (the writer emits those from the model) or
 /// `moov`/`trak` (an image sequence's track, whose chunk offsets address the source file's `mdat`
-/// and so cannot be carried verbatim; [`crate::read`] skips one rather than retaining it here).
+/// and so cannot be carried verbatim; [`IsoBmffImage::parse`] skips one rather than retaining it here).
 ///
 /// The C2PA `ContentProvenanceBox` (C2PA 2.4 §A.5.1) is a `uuid` box with user type
 /// `D8FEC3D6-1B0E-483C-9297-5828877EC481`; its payload — the `FullBox` version/flags, the
@@ -171,7 +172,7 @@ pub struct TopLevelBox {
     pub user_type: Option<[u8; 16]>,
     /// The box body after the size/type header and, for a `uuid` box, after the user type.
     pub payload: Vec<u8>,
-    /// Where [`crate::write`] places the box.
+    /// Where [`IsoBmffImage::to_bytes`] places the box.
     pub position: TopLevelPosition,
 }
 
@@ -207,11 +208,11 @@ impl TopLevelBox {
     }
 }
 
-/// Where [`crate::write`] places a [`TopLevelBox`] within the `ftyp` + `meta` + `mdat` layout.
+/// Where [`IsoBmffImage::to_bytes`] places a [`TopLevelBox`] within the `ftyp` + `meta` + `mdat` layout.
 ///
-/// [`crate::read`] assigns the position from where it found the box: before `mdat` (whether
+/// [`IsoBmffImage::parse`] assigns the position from where it found the box: before `mdat` (whether
 /// before or after `meta`) is [`AfterFtyp`](Self::AfterFtyp), after `mdat` is
-/// [`Trailing`](Self::Trailing). Because [`crate::write`] always emits `ftyp`, then the
+/// [`Trailing`](Self::Trailing). Because [`IsoBmffImage::to_bytes`] always emits `ftyp`, then the
 /// `AfterFtyp` boxes, `meta`, `mdat`, then the `Trailing` boxes, a foreign file's box moves on
 /// round-trip wherever its layout differs:
 ///
@@ -239,10 +240,25 @@ pub enum TopLevelPosition {
 
 /// One image item: its `infe` identity, the properties associated with it, its outgoing item
 /// references, and its payload bytes.
+///
+/// Non-exhaustive: construct it with [`Item::new`] and the `with_*` builders (or assign the
+/// public fields), not a struct literal, so a field added in a future minor release does not
+/// break callers.
+///
+/// ```
+/// use gamut_isobmff::{Item, ItemReference};
+///
+/// let exif = Item::new(2, *b"Exif")
+///     .with_references(vec![ItemReference::new(*b"cdsc", vec![1])])
+///     .with_payload(b"\0\0\0\0II*\0".to_vec());
+/// assert_eq!(exif.exif_tiff_stream().unwrap(), b"II*\0");
+/// assert!(exif.name.is_empty() && !exif.hidden && exif.properties.is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Item {
     /// The item id, unique within the file and referenced by `pitm`/`iloc`/`iinf`/`ipma`/`iref`.
-    /// [`crate::read`] accepts the full 32-bit range (`infe` v3 / `iloc` v2); [`crate::write`]
+    /// [`IsoBmffImage::parse`] accepts the full 32-bit range (`infe` v3 / `iloc` v2); [`IsoBmffImage::to_bytes`]
     /// normalises to the 16-bit box versions and rejects ids above `u16::MAX` — a still image
     /// never approaches that.
     pub id: u32,
@@ -270,13 +286,80 @@ pub struct Item {
     pub properties: Vec<Property>,
     /// The item's payload with `iloc` placement resolved: the coded bitstream for an image item
     /// (e.g. the AV1 temporal unit), the [`ImageGrid`](crate::ImageGrid) struct for a `grid` item,
-    /// the Exif block for an `Exif` item. Opaque to this crate. [`crate::read`] concatenates multi-extent payloads
-    /// and resolves `idat`-stored data; [`crate::write`] always places payloads in `mdat` as a
+    /// the Exif block for an `Exif` item. Opaque to this crate. [`IsoBmffImage::parse`] concatenates multi-extent payloads
+    /// and resolves `idat`-stored data; [`IsoBmffImage::to_bytes`] always places payloads in `mdat` as a
     /// single extent.
     pub payload: Vec<u8>,
 }
 
 impl Item {
+    /// An item with the given id and type and nothing else: an empty name, no content type or
+    /// encoding, not hidden, and no references, properties or payload. Fill the rest with the
+    /// `with_*` builders or by assigning the public fields.
+    #[must_use]
+    pub fn new(id: u32, item_type: [u8; 4]) -> Self {
+        Self {
+            id,
+            item_type,
+            name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            references: Vec::new(),
+            properties: Vec::new(),
+            payload: Vec::new(),
+        }
+    }
+
+    /// Sets the `infe` item name.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Sets the `infe` MIME content type (required for, and only for, a `mime` item).
+    #[must_use]
+    pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.content_type = Some(content_type.into());
+        self
+    }
+
+    /// Sets the `infe` MIME content encoding (e.g. `deflate`).
+    #[must_use]
+    pub fn with_content_encoding(mut self, content_encoding: impl Into<String>) -> Self {
+        self.content_encoding = Some(content_encoding.into());
+        self
+    }
+
+    /// Sets the `infe` hidden flag.
+    #[must_use]
+    pub fn with_hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
+    }
+
+    /// Sets the item's outgoing `iref` references.
+    #[must_use]
+    pub fn with_references(mut self, references: Vec<ItemReference>) -> Self {
+        self.references = references;
+        self
+    }
+
+    /// Sets the item's properties, in `ipma` association order.
+    #[must_use]
+    pub fn with_properties(mut self, properties: Vec<Property>) -> Self {
+        self.properties = properties;
+        self
+    }
+
+    /// Sets the item's payload bytes.
+    #[must_use]
+    pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
+        self.payload = payload;
+        self
+    }
+
     /// For an `Exif` item, the TIFF stream (starting `II`/`MM`) behind the payload's 4-byte
     /// big-endian `exif_tiff_header_offset` — the `ExifDataBlock` of ISO/IEC 23008-12 §A.2.1,
     /// whose offset counts bytes from the end of the field to the TIFF header. This is the form
@@ -318,7 +401,10 @@ impl Item {
 
 /// One `iref` entry: a typed reference from the owning [`Item`] to other items
 /// (ISO/IEC 14496-12 `SingleItemTypeReferenceBox`).
+///
+/// Non-exhaustive: construct it with [`ItemReference::new`], not a struct literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ItemReference {
     /// The reference type four-character code (`auxl`, `cdsc`, `dimg`, `thmb`, `prem`, …).
     pub reference_type: [u8; 4],
@@ -327,8 +413,22 @@ pub struct ItemReference {
     pub to_item_ids: Vec<u32>,
 }
 
+impl ItemReference {
+    /// A reference of type `reference_type` from the owning item to `to_item_ids`, in order.
+    #[must_use]
+    pub fn new(reference_type: [u8; 4], to_item_ids: Vec<u32>) -> Self {
+        Self {
+            reference_type,
+            to_item_ids,
+        }
+    }
+}
+
 /// One `grpl` entity group (ISO/IEC 14496-12 `EntityToGroupBox`), e.g. `altr` alternatives.
+///
+/// Non-exhaustive: construct it with [`EntityGroup::new`], not a struct literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntityGroup {
     /// The grouping type four-character code (e.g. `*b"altr"`).
     pub group_type: [u8; 4],
@@ -338,15 +438,38 @@ pub struct EntityGroup {
     pub entity_ids: Vec<u32>,
 }
 
+impl EntityGroup {
+    /// A group of type `group_type` with id `group_id` over `entity_ids`, in order.
+    #[must_use]
+    pub fn new(group_type: [u8; 4], group_id: u32, entity_ids: Vec<u32>) -> Self {
+        Self {
+            group_type,
+            group_id,
+            entity_ids,
+        }
+    }
+}
+
 /// An item property together with whether a reader must understand it to render the item
 /// (`essential`, MIAF §7.3.6 / ISO/IEC 23008-12 §9.3.1). Transformative properties and the codec
 /// configuration are essential; descriptive ones (`ispe`/`pixi`/`colr`) are not.
+///
+/// Non-exhaustive: construct it with [`Property::new`], not a struct literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Property {
     /// Whether the property is marked essential in `ipma` (the high bit of the association entry).
     pub essential: bool,
     /// The property itself.
     pub kind: PropertyKind,
+}
+
+impl Property {
+    /// The property `kind`, marked essential in `ipma` when `essential` is `true`.
+    #[must_use]
+    pub fn new(essential: bool, kind: PropertyKind) -> Self {
+        Self { essential, kind }
+    }
 }
 
 /// An item property box (`ipco` child). The HEIF still-image properties are modelled structurally;
@@ -424,27 +547,15 @@ pub enum PropertyKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ColourInformation {
-    /// `nclx` on-screen colour: CICP code points plus the full-range flag.
-    Nclx(NclxColr),
+    /// `nclx` on-screen colour: the CICP code points plus the full-range flag, as the workspace's
+    /// one [`Cicp`] type. For an AV1 image `matrix_coefficients` and `full_range` must match the
+    /// sequence header.
+    Nclx(Cicp),
     /// `rICC` — a restricted ICC profile (input or display class, ISO 15076-1), carried opaquely;
     /// parse it with `gamut-icc`.
     RestrictedIcc(Vec<u8>),
     /// `prof` — an unrestricted ICC profile, carried opaquely; parse it with `gamut-icc`.
     UnrestrictedIcc(Vec<u8>),
-}
-
-/// The `nclx` colour information written into a `colr` box (CICP code points, ITU-T H.273). For an
-/// AV1 image `matrix_coefficients` and `full_range` must match the sequence header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NclxColr {
-    /// CICP colour primaries.
-    pub colour_primaries: u16,
-    /// CICP transfer characteristics.
-    pub transfer_characteristics: u16,
-    /// CICP matrix coefficients.
-    pub matrix_coefficients: u16,
-    /// Full-range (vs limited-range) flag.
-    pub full_range: bool,
 }
 
 /// The `clap` clean-aperture crop as fractional width/height and centre offsets (ISO/IEC 14496-12
@@ -501,7 +612,10 @@ pub struct ContentLightLevel {
 /// file and written to another is bit-exact. Neither the reader nor the writer range-checks them:
 /// the box does not, and a reader rejecting out-of-range SEI values would refuse files the world
 /// holds.
+///
+/// Non-exhaustive: construct it with [`MasteringDisplay::new`], not a struct literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MasteringDisplay {
     /// The three display primaries as `[x, y]` CIE 1931 chromaticity pairs in units of 0.00002,
     /// in stored order. The HEVC convention orders them green, blue, red; the box does not
@@ -515,6 +629,26 @@ pub struct MasteringDisplay {
     pub min_display_mastering_luminance: u32,
 }
 
+impl MasteringDisplay {
+    /// The stored `mdcv` code points: the three `[x, y]` display primaries in stored order, the
+    /// `[x, y]` white point (both in units of 0.00002), and the maximum and minimum mastering
+    /// luminance (in units of 0.0001 cd/m²).
+    #[must_use]
+    pub fn new(
+        display_primaries: [[u16; 2]; 3],
+        white_point: [u16; 2],
+        max_display_mastering_luminance: u32,
+        min_display_mastering_luminance: u32,
+    ) -> Self {
+        Self {
+            display_primaries,
+            white_point,
+            max_display_mastering_luminance,
+            min_display_mastering_luminance,
+        }
+    }
+}
+
 /// The `exif_tiff_header_offset` arithmetic of [`Item::exif_tiff_stream`] (ISO/IEC 23008-12
 /// §A.2.1), moved here from `gamut-heic` and `gamut-avif`, which both delegate to it.
 #[cfg(test)]
@@ -525,17 +659,70 @@ mod tests {
 
     /// A bare item of `item_type` carrying `payload`.
     fn item(item_type: [u8; 4], payload: &[u8]) -> Item {
-        Item {
-            id: 1,
-            item_type,
-            name: String::new(),
-            content_type: None,
-            content_encoding: None,
-            hidden: false,
-            references: vec![],
-            properties: vec![],
-            payload: payload.to_vec(),
-        }
+        Item::new(1, item_type).with_payload(payload.to_vec())
+    }
+
+    #[test]
+    fn item_new_is_empty_and_each_builder_sets_only_its_field() {
+        let bare = Item::new(7, *b"mime");
+        assert_eq!(
+            bare,
+            Item {
+                id: 7,
+                item_type: *b"mime",
+                name: String::new(),
+                content_type: None,
+                content_encoding: None,
+                hidden: false,
+                references: vec![],
+                properties: vec![],
+                payload: vec![],
+            }
+        );
+        let reference = ItemReference::new(*b"cdsc", vec![1]);
+        let property = Property::new(true, PropertyKind::Rotation(1));
+        let built = bare
+            .clone()
+            .with_name("xmp")
+            .with_content_type("application/rdf+xml")
+            .with_content_encoding("deflate")
+            .with_hidden(true)
+            .with_references(vec![reference.clone()])
+            .with_properties(vec![property.clone()])
+            .with_payload(vec![9]);
+        assert_eq!(
+            built,
+            Item {
+                name: "xmp".into(),
+                content_type: Some("application/rdf+xml".into()),
+                content_encoding: Some("deflate".into()),
+                hidden: true,
+                references: vec![reference],
+                properties: vec![property],
+                payload: vec![9],
+                ..bare
+            }
+        );
+    }
+
+    #[test]
+    fn the_leaf_constructors_place_each_argument_in_its_field() {
+        let reference = ItemReference::new(*b"dimg", vec![2, 3]);
+        assert_eq!(reference.reference_type, *b"dimg");
+        assert_eq!(reference.to_item_ids, [2, 3]);
+        let group = EntityGroup::new(*b"altr", 9, vec![1, 2]);
+        assert_eq!(
+            (group.group_type, group.group_id, group.entity_ids),
+            (*b"altr", 9, vec![1, 2])
+        );
+        let property = Property::new(true, PropertyKind::Mirror(1));
+        assert!(property.essential);
+        assert_eq!(property.kind, PropertyKind::Mirror(1));
+        let mdcv = MasteringDisplay::new([[1, 2], [3, 4], [5, 6]], [7, 8], 9, 10);
+        assert_eq!(mdcv.display_primaries, [[1, 2], [3, 4], [5, 6]]);
+        assert_eq!(mdcv.white_point, [7, 8]);
+        assert_eq!(mdcv.max_display_mastering_luminance, 9);
+        assert_eq!(mdcv.min_display_mastering_luminance, 10);
     }
 
     #[test]

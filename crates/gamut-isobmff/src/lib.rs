@@ -4,10 +4,11 @@
 //! This crate owns the *container*, not the codec: it models the box tree of a single-image ISOBMFF
 //! file (`ftyp` + a `meta` box of image items + `mdat`) and leaves the coded bitstream opaque
 //! ([`PropertyKind::CodecConfiguration`] for the `av1C`/`hvcC` record, [`Item::payload`] for the
-//! samples). [`write()`] serialises an [`IsoBmffImage`]; [`read`] parses one back. The two are
-//! inverse for any file this crate writes (`read(&write(&img)?) == img`) — which is why [`write()`]
-//! validates the model first and refuses what could not come back, a `top_level_boxes` list that
-//! interleaves positions among it.
+//! samples). [`IsoBmffImage::to_bytes`] serialises an [`IsoBmffImage`]; [`IsoBmffImage::parse`]
+//! parses one back. The two are inverse for any file this crate writes
+//! (`IsoBmffImage::parse(&img.to_bytes()?)? == img`) — which is why `to_bytes` validates the model
+//! first and refuses what could not come back, a `top_level_boxes` list that interleaves positions
+//! among it.
 //!
 //! It is image-first: the modelled surface is the HEIF still-image set — `ftyp`, `meta` with
 //! `hdlr`/`pitm`/`iloc`/`iinf`/`iref`/`iprp`/`idat`/`grpl`, the
@@ -24,11 +25,12 @@
 //! smallest box versions (`iloc` v0, single extent into `mdat`); the reader additionally accepts
 //! the foreign-encoder repertoire (`iloc` v1/v2, `idat` placement, multi-extent payloads, 32-bit
 //! item ids, 16-bit `ipma` indices). Image sequences/tracks and item protection are out of scope —
-//! [`read`] skips a sequence's `moov` so the `meta` primary still beside it reads, and refuses a
-//! sequence-only file — see this crate's `STATUS.md` for the deferred/out-of-scope ledger. Box byte layouts follow
-//! ISO/IEC 14496-12 (ISOBMFF) and ISO/IEC 23008-12 (HEIF); see `references/isobmff`.
+//! [`IsoBmffImage::parse`] skips a sequence's `moov` so the `meta` primary still beside it reads,
+//! and refuses a sequence-only file — see this crate's `STATUS.md` for the deferred/out-of-scope
+//! ledger. Box byte layouts follow ISO/IEC 14496-12 (ISOBMFF) and ISO/IEC 23008-12 (HEIF); see
+//! `references/isobmff`.
 //!
-//! [`read`] models only the *primary* still-image stream. It is tolerant of real-world "motion
+//! [`IsoBmffImage::parse`] models only the *primary* still-image stream. It is tolerant of real-world "motion
 //! photo" files that append a second, foreign stream (a Samsung MP4 starting with a second `ftyp`
 //! and its own `moov`, a Google `mpvd` box, or a trailing non-ISOBMFF vendor blob): the top-level
 //! walk stops cleanly at a second `ftyp` and at any malformed trailing box once `ftyp`+`meta` have
@@ -42,7 +44,7 @@
 //! ```
 //! use gamut_isobmff::{
 //!     C2PA_UUID, C2paBoxPurpose, IsoBmffImage, Item, Property, PropertyKind, TopLevelBox,
-//!     content_provenance_payload, read, write,
+//!     content_provenance_payload,
 //! };
 //!
 //! // A C2PA 2.4 §A.5.1 `ContentProvenanceBox`; the store in it is opaque here.
@@ -51,24 +53,18 @@
 //!     *b"avif",
 //!     vec![*b"avif", *b"mif1", *b"miaf"],
 //!     1,
-//!     vec![Item {
-//!         id: 1,
-//!         item_type: *b"av01",
-//!         name: String::new(),
-//!         content_type: None,
-//!         content_encoding: None,
-//!         hidden: false,
-//!         references: vec![],
-//!         properties: vec![Property {
-//!             essential: false,
-//!             kind: PropertyKind::ImageSpatialExtents { width: 64, height: 64 },
-//!         }],
-//!         payload: vec![1, 2, 3, 4], // the coded bitstream (opaque to this crate)
-//!     }],
+//!     vec![
+//!         Item::new(1, *b"av01")
+//!             .with_properties(vec![Property::new(
+//!                 false,
+//!                 PropertyKind::ImageSpatialExtents { width: 64, height: 64 },
+//!             )])
+//!             .with_payload(vec![1, 2, 3, 4]), // the coded bitstream (opaque to this crate)
+//!     ],
 //! )
 //! .with_top_level_boxes(vec![TopLevelBox::uuid(C2PA_UUID, provenance)]);
-//! let bytes = write(&img).unwrap();
-//! assert_eq!(read(&bytes).unwrap(), img);
+//! let bytes = img.to_bytes().unwrap();
+//! assert_eq!(IsoBmffImage::parse(&bytes).unwrap(), img);
 //! ```
 #![forbid(unsafe_code)]
 
@@ -88,18 +84,17 @@ mod writer;
 
 pub use boxes::{BoxReader, RawBox};
 pub use c2pa::{
-    C2PA_UUID, C2paBoxPurpose, C2paByteRange, C2paSlot, C2paUnreadReason, C2paUuidBox,
-    content_provenance_payload, content_provenance_reserved,
+    C2PA_UUID, C2paBoxPurpose, C2paSlot, C2paUnreadReason, C2paUuidBox, content_provenance_payload,
+    content_provenance_reserved,
 };
 pub use grid::ImageGrid;
 pub use model::{
     CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, IsoBmffImage, Item,
-    ItemReference, MasteringDisplay, NclxColr, PixelAspectRatio, Property, PropertyKind,
-    TopLevelBox, TopLevelPosition,
+    ItemReference, MasteringDisplay, PixelAspectRatio, Property, PropertyKind, TopLevelBox,
+    TopLevelPosition,
 };
-pub use overlay::ImageOverlay;
-pub use reader::read;
+pub use overlay::{ImageOverlay, OverlayOffset};
 pub use segments::{
-    Segment, SegmentKind, UnknownBox, UnknownBoxLocation, walk_meta_children, walk_segments,
+    Segment, SegmentKind, SegmentWalk, UnknownBox, UnknownBoxLocation, walk_meta_children,
+    walk_segments,
 };
-pub use writer::write;

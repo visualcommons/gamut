@@ -20,33 +20,40 @@ use crate::model::{
     ColourInformation, EntityGroup, IsoBmffImage, Item, PropertyKind, TopLevelBox, TopLevelPosition,
 };
 
-/// Serialises `image` into a complete ISOBMFF file (`ftyp` + `meta` + `mdat`, with the model's
-/// [`TopLevelBox`]es placed after `ftyp` or after `mdat` per their [`TopLevelPosition`]).
-///
-/// [`read`](crate::read)`(&write(&image)?)` reproduces `image` for any value this function
-/// accepts.
-///
-/// # Errors
-///
-/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a model
-/// that cannot round-trip: a `primary_item_id` naming
-/// no item, duplicate item ids, an interior NUL in a name/content-type/encoding/aux-type string,
-/// an empty `content_encoding`, a `content_type` on a non-`mime` item (or a `mime` item without
-/// one), an out-of-range `Rotation`/`Mirror` value, a top-level box whose type the writer
-/// emits from the model itself (`ftyp`/`meta`/`mdat`) or whose `user_type` does not pair with a
-/// `uuid` type, or a `top_level_boxes` list that interleaves positions (an `AfterFtyp` box after
-/// a `Trailing` one — the file cannot record that order, so `read` could not reproduce it; use
-/// [`IsoBmffImage::push_top_level_box`] to append). Returns an
-/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a model
-/// that does not fit the still-image box
-/// versions this crate writes: item ids above `u16::MAX`, `uri ` items, more than 255 properties or
-/// 65 535 reference targets per item, more than 32 767 distinct properties, more than 65 535
-/// items, a `moov`/`trak` top-level box (an image sequence: its chunk offsets address the source
-/// file's `mdat`, which this function lays out afresh, so a verbatim copy would point at the wrong
-/// bytes — [`read`](crate::read) skips one for the same reason), or a payload/box/file at 4 GiB or
-/// beyond.
-#[must_use = "the serialised file is returned, not written anywhere"]
-pub fn write(image: &IsoBmffImage) -> Result<Vec<u8>> {
+impl IsoBmffImage {
+    /// Serialises this image into a complete ISOBMFF file (`ftyp` + `meta` + `mdat`, with the
+    /// model's [`TopLevelBox`]es placed after `ftyp` or after `mdat` per their
+    /// [`TopLevelPosition`]).
+    ///
+    /// [`IsoBmffImage::parse`]`(&image.to_bytes()?)` reproduces `image` for any value this
+    /// method accepts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
+    /// model that cannot round-trip: a `primary_item_id` naming no item, duplicate item ids, an
+    /// interior NUL in a name/content-type/encoding/aux-type string, an empty `content_encoding`,
+    /// a `content_type` on a non-`mime` item (or a `mime` item without one), an out-of-range
+    /// `Rotation`/`Mirror` value, a top-level box whose type the writer emits from the model
+    /// itself (`ftyp`/`meta`/`mdat`) or whose `user_type` does not pair with a `uuid` type, or a
+    /// `top_level_boxes` list that interleaves positions (an `AfterFtyp` box after a `Trailing`
+    /// one — the file cannot record that order, so `parse` could not reproduce it; use
+    /// [`IsoBmffImage::push_top_level_box`] to append). Returns an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a model that does
+    /// not fit the still-image box versions this crate writes: item ids above `u16::MAX`, `uri `
+    /// items, more than 255 properties or 65 535 reference targets per item, more than 32 767
+    /// distinct properties, more than 65 535 items, a `moov`/`trak` top-level box (an image
+    /// sequence: its chunk offsets address the source file's `mdat`, which this method lays out
+    /// afresh, so a verbatim copy would point at the wrong bytes — [`IsoBmffImage::parse`] skips
+    /// one for the same reason), or a payload/box/file at 4 GiB or beyond.
+    #[must_use = "the serialised file is returned, not written anywhere"]
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        write(self)
+    }
+}
+
+/// The body of [`IsoBmffImage::to_bytes`].
+fn write(image: &IsoBmffImage) -> Result<Vec<u8>> {
     validate(image)?;
     let mut bb = BoxBuilder::new();
     write_ftyp(&mut bb, image);
@@ -72,7 +79,7 @@ pub fn write(image: &IsoBmffImage) -> Result<Vec<u8>> {
 }
 
 /// Rejects models that cannot round-trip or that do not fit the normalised still-image box
-/// versions [`write`] emits (see the [`write`] error docs for the full list).
+/// versions [`write`] emits (see the [`IsoBmffImage::to_bytes`] error docs for the full list).
 fn validate(image: &IsoBmffImage) -> Result<()> {
     if !image.items.iter().any(|i| i.id == image.primary_item_id) {
         return Err(Error::invalid_input(

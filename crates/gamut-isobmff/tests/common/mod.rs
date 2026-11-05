@@ -2,62 +2,50 @@
 //! can assert against spec-conformant bytes built *independently* of this crate's writer.
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
-use gamut_isobmff::{ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind};
+use gamut_core::Cicp;
+use gamut_isobmff::{ColourInformation, IsoBmffImage, Item, Property, PropertyKind};
 
 // ---- model fixtures ------------------------------------------------------------------------
 
 /// A bare item: no name, no mime info, no references, no properties.
 pub fn item(id: u32, item_type: [u8; 4], payload: Vec<u8>) -> Item {
-    Item {
-        id,
-        item_type,
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: false,
-        references: vec![],
-        properties: vec![],
-        payload,
-    }
+    Item::new(id, item_type).with_payload(payload)
 }
 
 /// A colour image item carrying the canonical AVIF property set (essential `av1C`, then
 /// `ispe`/`pixi`/`colr`).
 pub fn av01_item(id: u32, payload: Vec<u8>) -> Item {
-    Item {
-        properties: vec![
-            Property {
-                essential: true,
-                kind: PropertyKind::CodecConfiguration {
-                    kind: *b"av1C",
-                    data: vec![0x81, 0x20, 0x0c, 0x00],
-                },
+    item(id, *b"av01", payload).with_properties(vec![
+        Property::new(
+            true,
+            PropertyKind::CodecConfiguration {
+                kind: *b"av1C",
+                data: vec![0x81, 0x20, 0x0c, 0x00],
             },
-            Property {
-                essential: false,
-                kind: PropertyKind::ImageSpatialExtents {
-                    width: 48,
-                    height: 32,
-                },
+        ),
+        Property::new(
+            false,
+            PropertyKind::ImageSpatialExtents {
+                width: 48,
+                height: 32,
             },
-            Property {
-                essential: false,
-                kind: PropertyKind::PixelInformation {
-                    bits_per_channel: vec![8, 8, 8],
-                },
+        ),
+        Property::new(
+            false,
+            PropertyKind::PixelInformation {
+                bits_per_channel: vec![8, 8, 8],
             },
-            Property {
-                essential: false,
-                kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
-                    colour_primaries: 1,
-                    transfer_characteristics: 13,
-                    matrix_coefficients: 0,
-                    full_range: true,
-                })),
-            },
-        ],
-        ..item(id, *b"av01", payload)
-    }
+        ),
+        Property::new(
+            false,
+            PropertyKind::Colour(ColourInformation::Nclx(Cicp {
+                colour_primaries: 1,
+                transfer_characteristics: 13,
+                matrix_coefficients: 0,
+                full_range: true,
+            })),
+        ),
+    ])
 }
 
 /// Wraps items in a complete AVIF-style file whose primary item is the first one.

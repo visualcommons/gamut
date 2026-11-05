@@ -46,10 +46,21 @@ pub struct ImageOverlay {
     pub output_width: u32,
     /// Height of the composited canvas in pixels (`output_height`).
     pub output_height: u32,
-    /// Each composed input's `(horizontal_offset, vertical_offset)` top-left position on the canvas,
-    /// in `dimg` reference order. Offsets are signed: a negative value places the input off the top
-    /// or left edge (it is clipped to the canvas).
-    pub offsets: Vec<(i32, i32)>,
+    /// Each composed input's top-left position on the canvas, in `dimg` reference order.
+    pub offsets: Vec<OverlayOffset>,
+}
+
+/// One composed input's top-left position on an [`ImageOverlay`] canvas (the
+/// `horizontal_offset`/`vertical_offset` pair of ISO/IEC 23008-12 §6.6.2.4.2).
+///
+/// Offsets are signed: a negative value places the input off the left or top edge (it is clipped
+/// to the canvas).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OverlayOffset {
+    /// The input's left edge on the canvas (`horizontal_offset`).
+    pub horizontal: i32,
+    /// The input's top edge on the canvas (`vertical_offset`).
+    pub vertical: i32,
 }
 
 impl ImageOverlay {
@@ -86,9 +97,12 @@ impl ImageOverlay {
         // the bounded reads below still fail cleanly on a payload too short for it.
         let mut offsets = Vec::with_capacity(reference_count);
         for _ in 0..reference_count {
-            let horizontal_offset = read_signed(&mut r, wide)?;
-            let vertical_offset = read_signed(&mut r, wide)?;
-            offsets.push((horizontal_offset, vertical_offset));
+            let horizontal = read_signed(&mut r, wide)?;
+            let vertical = read_signed(&mut r, wide)?;
+            offsets.push(OverlayOffset {
+                horizontal,
+                vertical,
+            });
         }
         if r.remaining() != 0 {
             return Err(Error::invalid_input(
@@ -122,7 +136,7 @@ impl ImageOverlay {
         let offsets_fit = self
             .offsets
             .iter()
-            .all(|&(h, v)| i16::try_from(h).is_ok() && i16::try_from(v).is_ok());
+            .all(|o| i16::try_from(o.horizontal).is_ok() && i16::try_from(o.vertical).is_ok());
         let wide = !(dims_fit && offsets_fit);
 
         let mut b = BoxBuilder::new();
@@ -138,13 +152,17 @@ impl ImageOverlay {
             b.u16(self.output_width as u16);
             b.u16(self.output_height as u16);
         }
-        for &(horizontal_offset, vertical_offset) in &self.offsets {
+        for &OverlayOffset {
+            horizontal,
+            vertical,
+        } in &self.offsets
+        {
             if wide {
-                b.u32(horizontal_offset as u32);
-                b.u32(vertical_offset as u32);
+                b.u32(horizontal as u32);
+                b.u32(vertical as u32);
             } else {
-                b.u16(horizontal_offset as i16 as u16);
-                b.u16(vertical_offset as i16 as u16);
+                b.u16(horizontal as i16 as u16);
+                b.u16(vertical as i16 as u16);
             }
         }
         Ok(b.into_vec())

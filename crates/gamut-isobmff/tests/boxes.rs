@@ -13,7 +13,7 @@ const LARGESIZE_MDAT: [u8; 19] = [
 #[test]
 fn a_largesize_box_exposes_the_body_after_its_sixteen_byte_header() {
     let mut reader = BoxReader::new(&LARGESIZE_MDAT);
-    let b = reader.next_box().unwrap().unwrap();
+    let b = reader.next().unwrap().unwrap();
 
     assert_eq!(b.ty, *b"mdat");
     assert_eq!(b.offset, 0);
@@ -27,13 +27,13 @@ fn a_largesize_box_exposes_the_body_after_its_sixteen_byte_header() {
 #[test]
 fn a_largesize_box_advances_the_cursor_over_its_full_header() {
     let mut reader = BoxReader::new(&LARGESIZE_MDAT);
-    reader.next_box().unwrap().unwrap();
+    reader.next().unwrap().unwrap();
 
     // Distinct from the body claim above: the body can be sliced correctly while the cursor is
     // left short, and the walk would then resynchronise inside the box it just returned.
     assert_eq!(reader.position(), LARGESIZE_MDAT.len());
     assert_eq!(reader.remaining(), 0);
-    assert!(reader.next_box().unwrap().is_none());
+    assert!(reader.next().is_none());
 }
 
 #[test]
@@ -43,16 +43,16 @@ fn zero_size_box_consumes_the_reader_slice_tail() {
         0, 0, 0, 0, b'm', b'd', b'a', b't', 1, 2, 3, 4, // open-ended tail
     ];
     let mut reader = BoxReader::new(&data);
-    let first = reader.next_box().unwrap().unwrap();
+    let first = reader.next().unwrap().unwrap();
     assert_eq!(first.ty, *b"free");
     assert_eq!(reader.position(), 8);
 
-    let tail = reader.next_box().unwrap().unwrap();
+    let tail = reader.next().unwrap().unwrap();
     assert_eq!(tail.ty, *b"mdat");
     assert_eq!(tail.offset, 8);
     assert_eq!(tail.body, &[1, 2, 3, 4]);
     assert_eq!(reader.position(), data.len());
-    assert!(reader.next_box().unwrap().is_none());
+    assert!(reader.next().is_none());
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn uuid_separates_user_type_from_payload_without_changing_body() {
     data.extend_from_slice(&user_type);
     data.extend_from_slice(&[9, 8, 7]);
     let mut reader = BoxReader::new(&data);
-    let b = reader.next_box().unwrap().unwrap();
+    let b = reader.next().unwrap().unwrap();
 
     assert_eq!(b.user_type, Some(user_type));
     assert_eq!(&b.body[..16], &user_type);
@@ -82,7 +82,7 @@ fn largesize_uuid_keeps_user_type_outside_payload() {
     data.extend_from_slice(&user_type);
     data.extend_from_slice(&[0xCA, 0xFE]);
     let mut reader = BoxReader::new(&data);
-    let b = reader.next_box().unwrap().unwrap();
+    let b = reader.next().unwrap().unwrap();
 
     assert_eq!(b.user_type, Some(user_type));
     assert_eq!(b.body, &data[16..]);
@@ -96,7 +96,7 @@ fn uuid_accepts_exactly_the_user_type_with_an_empty_payload() {
     let mut data = vec![0, 0, 0, 24, b'u', b'u', b'i', b'd'];
     data.extend_from_slice(&user_type);
     let mut reader = BoxReader::new(&data);
-    let b = reader.next_box().unwrap().unwrap();
+    let b = reader.next().unwrap().unwrap();
 
     assert_eq!(b.user_type, Some(user_type));
     assert_eq!(b.body, user_type);
@@ -114,11 +114,11 @@ fn mixed_headers_leave_cursor_at_each_authoritative_end() {
     ];
     let mut reader = BoxReader::new(&data);
 
-    assert_eq!(reader.next_box().unwrap().unwrap().body, &[1]);
+    assert_eq!(reader.next().unwrap().unwrap().body, &[1]);
     assert_eq!(reader.position(), 9);
-    assert_eq!(reader.next_box().unwrap().unwrap().body, &[2, 3]);
+    assert_eq!(reader.next().unwrap().unwrap().body, &[2, 3]);
     assert_eq!(reader.position(), 27);
-    assert_eq!(reader.next_box().unwrap().unwrap().body, &[4, 5]);
+    assert_eq!(reader.next().unwrap().unwrap().body, &[4, 5]);
     assert_eq!(reader.position(), 37);
 }
 
@@ -138,8 +138,24 @@ fn malformed_sizes_and_uuid_prefixes_are_rejected() {
 
     for data in cases {
         assert!(
-            BoxReader::new(data).next_box().is_err(),
+            matches!(BoxReader::new(data).next(), Some(Err(_))),
             "accepted {data:?}"
         );
     }
+}
+
+#[test]
+fn an_error_ends_the_iteration_at_the_slice_end() {
+    // A 32-bit size of 7 is smaller than the 8-byte header it sits in, followed by bytes that
+    // would frame a well-formed box if the walk resumed at the next header position.
+    let data = [
+        0, 0, 0, 7, b'f', b'r', b'e', b'e', // size < header
+        0, 0, 0, 8, b's', b'k', b'i', b'p', // would parse if the reader carried on
+    ];
+    let mut reader = BoxReader::new(&data);
+
+    assert!(matches!(reader.next(), Some(Err(_))));
+    assert_eq!(reader.position(), data.len());
+    assert_eq!(reader.remaining(), 0);
+    assert!(reader.next().is_none());
 }

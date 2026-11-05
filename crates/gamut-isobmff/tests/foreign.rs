@@ -7,7 +7,7 @@
 mod common;
 
 use common::{bx, cat, ftyp, full, hdlr, iinf_v0, infe_v2, meta, pitm_v0};
-use gamut_isobmff::{PropertyKind, read, write};
+use gamut_isobmff::{IsoBmffImage, PropertyKind};
 
 /// An `ispe` property box.
 fn ispe(width: u32, height: u32) -> Vec<u8> {
@@ -70,7 +70,7 @@ fn iloc_v1_idat_multi_extent_with_base_offset() {
         idat,
         iprp_one_ispe_v0(1),
     ]);
-    let img = read(&cat(&[ftyp(), m])).unwrap();
+    let img = IsoBmffImage::parse(&cat(&[ftyp(), m])).unwrap();
 
     assert_eq!(img.primary_item_id, 1);
     assert_eq!(img.items.len(), 1);
@@ -166,7 +166,7 @@ fn v2_boxes_with_32bit_ids_and_wide_ipma() {
         iref_v1,
         bx(b"iprp", &cat(&[ipco, ipma_v1_wide])),
     ]);
-    let img = read(&cat(&[ftyp(), m])).unwrap();
+    let img = IsoBmffImage::parse(&cat(&[ftyp(), m])).unwrap();
 
     assert_eq!(img.primary_item_id, primary);
     assert_eq!(img.items[0].id, primary);
@@ -187,5 +187,5 @@ fn v2_boxes_with_32bit_ids_and_wide_ipma() {
     assert_eq!(img.items[1].references[0].to_item_ids, vec![primary]);
 
     // The parsed model exceeds the writer's normalised 16-bit id range.
-    assert!(write(&img).is_err());
+    assert!(img.to_bytes().is_err());
 }

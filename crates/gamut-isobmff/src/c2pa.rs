@@ -43,10 +43,10 @@
 //! Every range here is for patching, extraction and byte accounting. A BMFF asset's hard binding
 //! is `c2pa.hash.bmff.v3`, which excludes content by **box path**, not by byte offset (§18.6,
 //! §A.5.6), so hashing "everything but this range" is not how a BMFF manifest is bound. Every
-//! range is therefore a [`C2paByteRange`] rather than a bare `Range<usize>`, the type a hash's
-//! exclusion list takes (#780).
+//! range is a half-open `Range<u64>` of absolute file offsets — the one shape every gamut container
+//! reports a C2PA region in — and its name and documentation, not its type, say what it is for.
 
-use core::fmt;
+use core::ops::Range;
 
 use gamut_core::{Error, Result};
 
@@ -58,99 +58,6 @@ use crate::writer::TOP_LEVEL_HEADER_MAX;
 pub const C2PA_UUID: [u8; 16] = [
     0xD8, 0xFE, 0xC3, 0xD6, 0x1B, 0x0E, 0x48, 0x3C, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7E, 0xC4, 0x81,
 ];
-
-/// Where a C2PA region sits in a file: a half-open byte range `[start, end)` reported for
-/// **patching, extraction and byte accounting**, and deliberately not a `Range<usize>`.
-///
-/// A BMFF asset's hard binding is `c2pa.hash.bmff.v3`, which excludes content by **box path**,
-/// not by byte offset (C2PA 2.4 §18.6, §A.5.6). Hashing "every byte but this range" is therefore
-/// not how a BMFF manifest is bound, and a bare `Range<usize>` is exactly the shape a byte-range
-/// hasher's exclusion list takes. This type reads as a position and nothing else: it offers
-/// [`start`](Self::start), [`end`](Self::end) and [`len`](Self::len), extracts or patches its bytes
-/// in a file ([`bytes_in`](Self::bytes_in), [`bytes_in_mut`](Self::bytes_in_mut)), renders as
-/// `[start, end)`, and has **no conversion back to
-/// a `Range`** or to any exclusion set, so feeding it to a hash takes a caller spelling the range
-/// out by hand.
-///
-/// Every C2PA range `gamut-isobmff` reports ([`C2paSlot::range`], [`C2paSlot::store_range`]) is
-/// one, and so is every range `gamut-heic` and `gamut-avif` report, so the three crates name one
-/// type (#780).
-///
-/// ```
-/// use gamut_isobmff::C2paByteRange;
-///
-/// let range = C2paByteRange::new(1037, 1042).expect("start <= end");
-/// assert_eq!((range.start(), range.end(), range.len()), (1037, 1042, 5));
-/// assert_eq!(range.to_string(), "[1037, 1042)");
-/// // An end before the start places nothing.
-/// assert_eq!(C2paByteRange::new(5, 4), None);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct C2paByteRange {
-    /// The first byte's file offset. Never above `end`.
-    start: usize,
-    /// The file offset one past the last byte.
-    end: usize,
-}
-
-impl C2paByteRange {
-    /// The half-open range `[start, end)`, or `None` when `end` is before `start`. An empty range
-    /// (`start == end`) is a range: an empty slot sits somewhere.
-    #[must_use]
-    pub const fn new(start: usize, end: usize) -> Option<Self> {
-        if end < start {
-            None
-        } else {
-            Some(Self { start, end })
-        }
-    }
-
-    /// The file offset of the range's first byte.
-    #[must_use]
-    pub const fn start(self) -> usize {
-        self.start
-    }
-
-    /// The file offset one past the range's last byte.
-    #[must_use]
-    pub const fn end(self) -> usize {
-        self.end
-    }
-
-    /// The number of bytes the range spans: `end - start`.
-    #[must_use]
-    pub const fn len(self) -> usize {
-        self.end - self.start
-    }
-
-    /// Whether the range spans no bytes.
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.len() == 0
-    }
-
-    /// The bytes this range covers in `file` — the extraction a report's range exists for — or
-    /// `None` when `file` is too short to hold them (the range came from a different file).
-    #[must_use]
-    pub fn bytes_in(self, file: &[u8]) -> Option<&[u8]> {
-        file.get(self.start..self.end)
-    }
-
-    /// The bytes this range covers in `file`, mutably — the patch a signer makes when it writes a
-    /// finished store over a reserved slot of the same length — or `None` when `file` is too short
-    /// to hold them.
-    #[must_use]
-    pub fn bytes_in_mut(self, file: &mut [u8]) -> Option<&mut [u8]> {
-        file.get_mut(self.start..self.end)
-    }
-}
-
-impl fmt::Display for C2paByteRange {
-    /// The half-open interval notation every C2PA report line uses: `[start, end)`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}, {})", self.start, self.end)
-    }
-}
 
 /// The `FullBox` version (1 byte) and flags (3 bytes) that follow the user type: both zero
 /// (§A.5.1.2, `version = 0, 0`).
@@ -183,7 +90,7 @@ const JUMBF_HEADER_LEN: usize = 8;
 const MAX_PAYLOAD_LEN: usize = isize::MAX as usize;
 
 /// The longest `ContentProvenanceBox` payload (everything after the user type) whose complete box
-/// still fits a top-level box's 32-bit size field — the bound [`write`](crate::write) enforces on
+/// still fits a top-level box's 32-bit size field — the bound [`IsoBmffImage::to_bytes`](crate::IsoBmffImage::to_bytes) enforces on
 /// every top-level box, checked here so a reservation is refused before its zeros are allocated.
 const MAX_BOX_PAYLOAD_LEN: u64 = u32::MAX as u64 - TOP_LEVEL_HEADER_MAX as u64;
 
@@ -379,8 +286,8 @@ pub struct C2paSlot<'a> {
     /// JUMBF `LBox` (that is [`store`](Self::store)).
     pub slot_bytes: &'a [u8],
     /// The half-open byte range [`slot_bytes`](Self::slot_bytes) occupies within the file, so
-    /// `range.len() == slot_bytes.len()`.
-    pub range: C2paByteRange,
+    /// `range.end - range.start == slot_bytes.len()`.
+    pub range: Range<u64>,
     /// The `box_purpose` of the `uuid` box that carries this slot.
     pub purpose: C2paBoxPurpose,
     /// The big-endian absolute file offset of the first `merkle` box that opens `data` (§A.5.3;
@@ -396,7 +303,7 @@ impl<'a> C2paSlot<'a> {
     /// or one overrunning the slot (*refuse rather than guess*, `references/c2pa/README.md`).
     ///
     /// The store begins where the slot does, so its file range is
-    /// `[range.start(), range.start() + store.len())` — what [`store_range`](Self::store_range)
+    /// `range.start..range.start + store.len()` — what [`store_range`](Self::store_range)
     /// reports.
     #[must_use]
     pub fn store(&self) -> Option<&'a [u8]> {
@@ -404,25 +311,23 @@ impl<'a> C2paSlot<'a> {
     }
 
     /// The half-open byte range [`store`](Self::store) occupies within the file, or `None` exactly
-    /// when that is `None`. The one place a consumer turns the trimmed store into a file range, so every
-    /// crate reporting "the store" reports the same bytes (#505).
+    /// when that is `None`. The one place a consumer turns the trimmed store into a file range, so
+    /// every crate reporting "the store" reports the same bytes (#505).
     #[must_use]
-    pub fn store_range(&self) -> Option<C2paByteRange> {
-        let len = self.store()?.len();
+    pub fn store_range(&self) -> Option<Range<u64>> {
+        let len = self.store()?.len() as u64;
         // The store is a prefix of the slot, so its end never passes the slot's.
-        Some(C2paByteRange {
-            start: self.range.start,
-            end: self.range.start + len,
-        })
+        Some(self.range.start..self.range.start + len)
     }
 }
 
 /// What one top-level box of the primary stream is, read as a possible C2PA `ContentProvenanceBox`.
 ///
-/// Exhaustive on purpose: a consumer must place every `uuid` box in exactly one of these, so a new
-/// kind is a breaking change that makes each consumer decide where it goes rather than one a
-/// wildcard arm would silently drop.
+/// Non-exhaustive: a later C2PA revision may define another `box_purpose`, and this crate may
+/// then classify it without a breaking change, so match with a wildcard arm — and give that arm
+/// the most conservative reading the consumer has (an unread C2PA box, not an absent one).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum C2paUuidBox<'a> {
     /// A manifest-store box (`box_purpose` `manifest`, `original` or `update`, §A.5.3) and its slot.
     Slot(C2paSlot<'a>),
@@ -474,10 +379,7 @@ impl<'a> C2paUuidBox<'a> {
         // The slot is the body's tail, and the body fits below `body_end`, so this cannot wrap.
         Some(Self::Slot(C2paSlot {
             slot_bytes,
-            range: C2paByteRange {
-                start: body_end - slot_bytes.len(),
-                end: body_end,
-            },
+            range: (body_end - slot_bytes.len()) as u64..body_end as u64,
             purpose,
             merkle_offset,
         }))
@@ -544,7 +446,7 @@ fn content_provenance_framing(purpose: C2paBoxPurpose, capacity: usize) -> Vec<u
 ///
 /// Infallible where [`content_provenance_reserved`] is not: `slot` is a materialised slice, so its
 /// length is one the machine already holds, and no minimum applies to it. A box this long that the
-/// 32-bit size field cannot hold is refused by [`write`](crate::write).
+/// 32-bit size field cannot hold is refused by [`IsoBmffImage::to_bytes`](crate::IsoBmffImage::to_bytes).
 #[must_use]
 pub fn content_provenance_payload(purpose: C2paBoxPurpose, slot: &[u8]) -> Vec<u8> {
     let mut payload = content_provenance_framing(purpose, framing_len(purpose));
@@ -567,7 +469,7 @@ pub fn content_provenance_payload(purpose: C2paBoxPurpose, slot: &[u8]) -> Vec<u
 ///   the framing addition (a well-formed file whose C2PA box no lens can find) or panics in `Vec`.
 /// - An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the complete box
 ///   would reach 4 GiB — the bound
-///   [`write`](crate::write) applies to every top-level box. `Unsupported` rather than
+///   [`IsoBmffImage::to_bytes`](crate::IsoBmffImage::to_bytes) applies to every top-level box. `Unsupported` rather than
 ///   `InvalidInput` (issue #576) because a box that long is well-formed ISOBMFF through a 64-bit
 ///   `largesize`; only this crate's writer, which emits 32-bit sizes, cannot produce it.
 pub fn content_provenance_reserved(purpose: C2paBoxPurpose, len: usize) -> Result<Vec<u8>> {
@@ -615,55 +517,9 @@ mod tests {
         C2paBoxPurpose::Update,
     ];
 
-    /// `[start, end)`, which the caller states with `start <= end`.
-    fn range(start: usize, end: usize) -> C2paByteRange {
-        C2paByteRange::new(start, end).expect("start <= end")
-    }
-
-    #[test]
-    fn a_byte_range_refuses_only_an_end_before_its_start() {
-        assert_eq!(C2paByteRange::new(5, 4), None);
-        assert_eq!(
-            C2paByteRange::new(4, 4),
-            Some(C2paByteRange { start: 4, end: 4 })
-        );
-        assert_eq!(
-            C2paByteRange::new(4, 9),
-            Some(C2paByteRange { start: 4, end: 9 })
-        );
-    }
-
-    #[test]
-    fn a_byte_range_reports_its_bounds_and_length() {
-        // A non-zero start, so a length read as the end offset is visible.
-        let r = range(1037, 1042);
-        assert_eq!((r.start(), r.end(), r.len()), (1037, 1042, 5));
-        assert!(!r.is_empty());
-        assert!(range(537, 537).is_empty());
-    }
-
-    #[test]
-    fn a_byte_range_extracts_exactly_its_bytes_or_nothing() {
-        let file = [0, 1, 2, 3, 4, 5];
-        assert_eq!(range(2, 5).bytes_in(&file), Some(&file[2..5]));
-        assert_eq!(range(6, 6).bytes_in(&file), Some(&[] as &[u8]));
-        assert_eq!(range(4, 7).bytes_in(&file), None);
-    }
-
-    #[test]
-    fn a_byte_range_patches_exactly_its_bytes_or_nothing() {
-        let mut file = [0u8; 6];
-        range(2, 5)
-            .bytes_in_mut(&mut file)
-            .expect("inside the file")
-            .copy_from_slice(&[7, 8, 9]);
-        assert_eq!(file, [0, 0, 7, 8, 9, 0]);
-        assert_eq!(range(4, 7).bytes_in_mut(&mut file), None);
-    }
-
-    #[test]
-    fn a_byte_range_renders_as_a_half_open_interval() {
-        assert_eq!(range(61, 90).to_string(), "[61, 90)");
+    /// The file range `start..end`, from the in-memory offsets a test computes.
+    fn range(start: usize, end: usize) -> Range<u64> {
+        start as u64..end as u64
     }
 
     /// A body per §A.5.1.2: user type, version/flags, `purpose` NUL-terminated, then `data`.
@@ -971,7 +827,7 @@ mod tests {
         assert_eq!(found.slot_bytes, &s[..]);
         assert_eq!(found.merkle_offset, None);
         // 8 + 16 + 4 + 7 (`update\0`) + 0.
-        assert_eq!(found.range.start(), 35);
+        assert_eq!(found.range.start, 35);
         assert_eq!(found.store(), Some(&s[..]));
         // Neither offset bounds a store: the reference layout stands, and there is no store.
         let neither = body(

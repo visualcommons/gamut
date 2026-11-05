@@ -30,19 +30,19 @@
 //! oracle" column, because **no file can fail them**:
 //!
 //! - **the box cursor strictly advances.** The defect this names is a box whose declared size does
-//!   not move the cursor — and `next_box` cannot express it: it reads the 4-byte size and the
+//!   not move the cursor — and `BoxReader::next` cannot express it: it reads the 4-byte size and the
 //!   4-byte type through `take` *before* any success return, so `position()` has already grown by
 //!   8 by the time a `RawBox` exists. Measured, not reasoned: with the `size < header_size` guard
 //!   removed and the body length taken as `size.saturating_sub(header_size)` — the exact defect
 //!   the assertion advertises — the committed seed reports nothing, and neither does a bounded
 //!   search. The control fires immediately: rewinding `self.pos` to the box offset before the
-//!   `Ok(Some(..))` return reports *"BoxReader did not advance past 0"*. So what the assertion
+//!   `Some(Ok(..))` return reports *"BoxReader did not advance past 0"*. So what the assertion
 //!   really pins is that unconditional 8-byte header read staying where it is.
 //! - **no segment is empty.** `walk_segments` pushes exactly three shapes, and each is non-empty
 //!   for the same reason: a `Box` segment is `b.offset..reader.position()`, which the 8-byte header
 //!   read above has already widened; an `AppendedStream` is `b.offset..data.len()` for a box that
 //!   was read, so `data.len() > b.offset`; and a `Trailer` is `box_start..data.len()` on an `Err`,
-//!   which `next_box` only returns when at least one byte remained.
+//!   which `BoxReader::next` only returns when at least one byte remained.
 //!
 //! Both cost one comparison inside a loop the target walks anyway.
 //!
@@ -51,16 +51,16 @@
 
 #![no_main]
 
-use gamut_isobmff::{BoxReader, read, walk_meta_children, walk_segments};
+use gamut_isobmff::{BoxReader, IsoBmffImage, walk_meta_children, walk_segments};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // The raw box layer is driven separately from `walk_segments` because it is the lower layer
     // and a caller may use it directly. The two assertions in this loop are structure pins on
-    // `next_box`'s unconditional 8-byte header read, not checks (see the module docs).
+    // `next`'s unconditional 8-byte header read, not checks (see the module docs).
     let mut reader = BoxReader::new(data);
     let mut position = reader.position();
-    while let Ok(Some(_)) = reader.next_box() {
+    while let Some(Ok(_)) = reader.next() {
         let next = reader.position();
         assert!(
             next > position,
@@ -74,9 +74,9 @@ fuzz_target!(|data: &[u8]| {
     // The segment walk: byte-accounting totality. Walking a cursor states the whole claim once —
     // start at 0, contiguous, non-overlapping, ending at end of file — and it is the form that
     // stays correct for a zero-length input, where an empty segment list already tiles `0..0`.
-    if let Ok((segments, meta_body)) = walk_segments(data) {
+    if let Ok(walk) = walk_segments(data) {
         let mut cursor = 0usize;
-        for segment in &segments {
+        for segment in &walk.segments {
             assert_eq!(
                 segment.range.start, cursor,
                 "segment {:?} leaves a gap or overlaps at {cursor}",
@@ -92,12 +92,12 @@ fuzz_target!(|data: &[u8]| {
             cursor = segment.range.end;
         }
         assert_eq!(cursor, data.len(), "coverage does not run to end of file");
-        if let Some(body) = meta_body {
+        if let Some(body) = walk.meta_body {
             let _ = walk_meta_children(body);
         }
     }
 
     // The model reader, the entry point the table names. It validates items and properties on top
     // of the walk, so it reaches offsets the walk alone never resolves.
-    let _ = read(data);
+    let _ = IsoBmffImage::parse(data);
 });
