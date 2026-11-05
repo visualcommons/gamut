@@ -477,7 +477,7 @@ fn encoder_output_carries_a_parseable_av1c_and_a_valid_still_payload() {
         .encode_image(image, &mut file)
         .unwrap();
 
-    let parsed = gamut_isobmff::read(&file).unwrap();
+    let parsed = gamut_isobmff::IsoBmffImage::parse(&file).unwrap();
     let item = &parsed.items[0];
     let av1c = item
         .properties

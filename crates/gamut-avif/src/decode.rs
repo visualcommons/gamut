@@ -1051,7 +1051,8 @@ impl AvifImage {
         for px in canvas.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&fill);
         }
-        for (&input_id, &(dx, dy)) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
+        for (&input_id, offset) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
+            let (dx, dy) = (offset.horizontal, offset.vertical);
             let (src, dims) = self.decode_rgba_inner::<T>(input_id, decoder, walk, options)?;
             composite_over(
                 &mut canvas,
@@ -1901,8 +1902,8 @@ mod tests {
     /// over arbitrary bytes.
     mod limits_law {
         use gamut_isobmff::{
-            ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, Property, PropertyKind,
-            write,
+            ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, OverlayOffset, Property,
+            PropertyKind,
         };
         use proptest::collection;
         use proptest::prelude::{Strategy, prop_assert_eq, prop_oneof, proptest};
@@ -1932,63 +1933,42 @@ mod tests {
         }
 
         fn item(id: u32, item_type: [u8; 4], hidden: bool) -> Item {
-            Item {
-                id,
-                item_type,
-                name: String::new(),
-                content_type: None,
-                content_encoding: None,
-                hidden,
-                references: vec![],
-                properties: vec![],
-                payload: vec![],
-            }
+            Item::new(id, item_type).with_hidden(hidden)
         }
 
         /// A coded item the stub decodes to `(1 + w % 16) × (1 + h % 16)`, optionally declaring
         /// `ispe`.
         fn coded(id: u32, (w, h): (u8, u8), ispe: Option<(u32, u32)>, hidden: bool) -> Item {
-            let mut properties = vec![Property {
-                essential: true,
-                kind: PropertyKind::CodecConfiguration {
+            let mut properties = vec![Property::new(
+                true,
+                PropertyKind::CodecConfiguration {
                     kind: *b"av1C",
                     data: AV1C.to_vec(),
                 },
-            }];
+            )];
             if let Some((width, height)) = ispe {
-                properties.push(Property {
-                    essential: false,
-                    kind: PropertyKind::ImageSpatialExtents { width, height },
-                });
+                properties.push(Property::new(
+                    false,
+                    PropertyKind::ImageSpatialExtents { width, height },
+                ));
             }
             let mut payload = SEQUENCE_HEADER.to_vec();
             payload.extend_from_slice(&[0x32, 0x03, 0xAA, w, h]);
-            Item {
-                properties,
-                payload,
-                ..item(id, *b"av01", hidden)
-            }
+            item(id, *b"av01", hidden)
+                .with_properties(properties)
+                .with_payload(payload)
         }
 
         fn derived(id: u32, item_type: [u8; 4], payload: Vec<u8>, sources: &[u32]) -> Item {
-            Item {
-                references: vec![ItemReference {
-                    reference_type: *b"dimg",
-                    to_item_ids: sources.to_vec(),
-                }],
-                payload,
-                ..item(id, item_type, false)
-            }
+            item(id, item_type, false)
+                .with_references(vec![ItemReference::new(*b"dimg", sources.to_vec())])
+                .with_payload(payload)
         }
 
         fn file(items: Vec<Item>) -> Vec<u8> {
-            write(&IsoBmffImage::new(
-                *b"avif",
-                vec![*b"avif", *b"mif1", *b"miaf"],
-                1,
-                items,
-            ))
-            .expect("the generated model is writable")
+            IsoBmffImage::new(*b"avif", vec![*b"avif", *b"mif1", *b"miaf"], 1, items)
+                .to_bytes()
+                .expect("the generated model is writable")
         }
 
         fn frame_bytes() -> impl Strategy<Value = (u8, u8)> {
@@ -2027,7 +2007,13 @@ mod tests {
                     canvas_fill_value: [1000, 2000, 3000, 65535],
                     output_width: ow,
                     output_height: oh,
-                    offsets: inputs.iter().map(|&(_, dx, dy)| (dx, dy)).collect(),
+                    offsets: inputs
+                        .iter()
+                        .map(|&(_, horizontal, vertical)| OverlayOffset {
+                            horizontal,
+                            vertical,
+                        })
+                        .collect(),
                 }
                 .to_bytes()
                 .expect("a generated overlay is encodable");
@@ -2074,7 +2060,10 @@ mod tests {
                 canvas_fill_value: [0; 4],
                 output_width: 9,
                 output_height: 2,
-                offsets: vec![(0, 0)],
+                offsets: vec![OverlayOffset {
+                    horizontal: 0,
+                    vertical: 0,
+                }],
             };
             assert_eq!(
                 sizes(file(vec![

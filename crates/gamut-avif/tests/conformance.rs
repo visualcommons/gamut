@@ -792,12 +792,12 @@ fn no_ispe_file_still_parses_and_decodes() {
 /// `bytes` with every `colr` property removed from every item: per AVIF v1.2.0 §2.2.1 each item's
 /// colour now comes from its AV1 sequence header.
 fn strip_colr(bytes: &[u8]) -> Vec<u8> {
-    let mut model = gamut_isobmff::read(bytes).unwrap();
+    let mut model = gamut_isobmff::IsoBmffImage::parse(bytes).unwrap();
     for item in &mut model.items {
         item.properties
             .retain(|p| !matches!(p.kind, PropertyKind::Colour(_)));
     }
-    gamut_isobmff::write(&model).unwrap()
+    model.to_bytes().unwrap()
 }
 
 /// The coded item whose sequence header governs the primary's colour: the primary itself, or a

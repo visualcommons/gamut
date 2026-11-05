@@ -13,13 +13,12 @@ use gamut_color::{
 };
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy, convert, premultiply_alpha};
 use gamut_core::{
-    Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, Pixel, Result, Rgb8, Rgb16, Rgba8,
-    Rgba16, Sample,
+    Cicp, Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, Pixel, Result, Rgb8, Rgb16,
+    Rgba8, Rgba16, Sample,
 };
 use gamut_isobmff::{
-    C2PA_UUID, C2paBoxPurpose, C2paByteRange, ColourInformation, IsoBmffImage, Item, ItemReference,
-    NclxColr, Property, PropertyKind, TopLevelBox, content_provenance_payload,
-    content_provenance_reserved, write,
+    C2PA_UUID, C2paBoxPurpose, ColourInformation, IsoBmffImage, Item, ItemReference, Property,
+    PropertyKind, TopLevelBox, content_provenance_payload, content_provenance_reserved,
 };
 
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
@@ -67,9 +66,8 @@ pub struct AvifEncodeReport {
     /// moves when it is overwritten with a payload of the same length, so the offset reported here
     /// is the offset the signer patches at. It is **not** a hash exclusion range — a BMFF asset's
     /// hard binding excludes by box path, not byte offset (C2PA 2.4 §18.6, §A.5.6); see
-    /// [`C2paSlot`](crate::C2paSlot) — which is why it is a [`C2paByteRange`] rather than the
-    /// `Range<usize>` a byte-range hasher's exclusion list takes.
-    pub c2pa: Option<C2paByteRange>,
+    /// [`C2paSlot`](crate::C2paSlot).
+    pub c2pa: Option<core::ops::Range<u64>>,
     /// The length in bytes of the **colour** image's AV1 codestream — the primary item's payload,
     /// which is the sum of its `iloc` extent lengths (ISO/IEC 14496-12 §8.11.3).
     pub color_bytes: usize,
@@ -1137,7 +1135,7 @@ impl AvifEncoder {
     ///
     /// On **64-bit** targets a **third** refusal sits between them: a top-level box carries a
     /// 32-bit size field, so a `ContentProvenanceBox` at or beyond 4 GiB cannot be written. This
-    /// crate applies the bound [`gamut_isobmff::write`] enforces on every top-level box, *before*
+    /// crate applies the bound [`IsoBmffImage::to_bytes`] enforces on every top-level box, *before*
     /// the slot is allocated, and refuses with an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error — the kind the container writer
     /// would give. It is the encoder's effective ceiling: on this framing the largest `len` that
@@ -1202,7 +1200,7 @@ impl AvifEncoder {
     ///
     /// The container's own bound still applies: a `store` large enough to push the
     /// `ContentProvenanceBox` to or past 4 GiB is refused at encode time by
-    /// [`gamut_isobmff::write`], as an
+    /// [`IsoBmffImage::to_bytes`], as an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
     ///
     /// The box is labelled `box_purpose = manifest`, the only purpose this encoder writes; see
@@ -1443,85 +1441,73 @@ impl AvifEncoder {
         let c = &still.config;
         // av1C is essential; ispe/pixi/colr are descriptive. Order fixes the ipco/ipma indices.
         let mut properties = vec![
-            Property {
-                essential: true,
-                kind: PropertyKind::CodecConfiguration {
+            Property::new(
+                true,
+                PropertyKind::CodecConfiguration {
                     kind: *b"av1C",
                     data: av1c_record(c).to_vec(),
                 },
-            },
-            Property {
-                essential: false,
-                kind: PropertyKind::ImageSpatialExtents {
+            ),
+            Property::new(
+                false,
+                PropertyKind::ImageSpatialExtents {
                     width: dims.width(),
                     height: dims.height(),
                 },
-            },
-            Property {
-                essential: false,
-                kind: PropertyKind::PixelInformation {
+            ),
+            Property::new(
+                false,
+                PropertyKind::PixelInformation {
                     bits_per_channel: pixi_channels(c),
                 },
-            },
-            Property {
-                essential: false,
-                kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
+            ),
+            Property::new(
+                false,
+                PropertyKind::Colour(ColourInformation::Nclx(Cicp {
                     colour_primaries: c.color_primaries,
                     transfer_characteristics: c.transfer_characteristics,
                     matrix_coefficients: c.matrix_coefficients,
                     full_range: c.full_range,
                 })),
-            },
+            ),
         ];
         // The ICC profile is a *second* `colr`, of a different `colour_type` — ISO/IEC 14496-12 §12.1.5
         // allows one of each. It is appended after the four properties the v1 surface always writes, so
         // an encoder with no profile keeps exactly the `ipco`/`ipma` indices it always had.
         if let Some(icc) = &self.icc {
-            properties.push(Property {
-                essential: false,
-                kind: PropertyKind::Colour(ColourInformation::UnrestrictedIcc(icc.clone())),
-            });
+            properties.push(Property::new(
+                false,
+                PropertyKind::Colour(ColourInformation::UnrestrictedIcc(icc.clone())),
+            ));
         }
         // The HDR properties are descriptive (AVIF v1.2.0 §9.1.2 lists both), so non-essential, and
         // sit with the other descriptive properties ahead of the transformative ones. Appended after
         // the `colr`s for the same reason the ICC one is: an encoder without them keeps its
         // `ipco`/`ipma` indices.
         if let Some(level) = self.content_light_level {
-            properties.push(Property {
-                essential: false,
-                kind: PropertyKind::ContentLightLevel(level),
-            });
+            properties.push(Property::new(false, PropertyKind::ContentLightLevel(level)));
         }
         if let Some(display) = self.mastering_display {
-            properties.push(Property {
-                essential: false,
-                kind: PropertyKind::MasteringDisplayColourVolume(display),
-            });
+            properties.push(Property::new(
+                false,
+                PropertyKind::MasteringDisplayColourVolume(display),
+            ));
         }
         // Transformative properties are essential (MIAF §7.3.6.7); applied irot-then-imir.
         if self.transform.rotation_ccw != 0 {
-            properties.push(Property {
-                essential: true,
-                kind: PropertyKind::Rotation(self.transform.rotation_ccw),
-            });
+            properties.push(Property::new(
+                true,
+                PropertyKind::Rotation(self.transform.rotation_ccw),
+            ));
         }
         if let Some(axis) = self.transform.mirror_axis {
-            properties.push(Property {
-                essential: true,
-                kind: PropertyKind::Mirror(axis),
-            });
+            properties.push(Property::new(true, PropertyKind::Mirror(axis)));
         }
-        let mut items = vec![Item {
-            id: PRIMARY_ITEM_ID,
-            item_type: *b"av01",
-            name: String::new(),
-            content_type: None,
-            content_encoding: None,
-            hidden: false,
-            references: vec![],
-            properties,
-            payload: still.obus.clone(),
-        }];
+        let mut items = vec![
+            Item::new(PRIMARY_ITEM_ID, *b"av01")
+                .with_properties(properties)
+                .with_payload(still.obus.clone()),
+        ];
         // The alpha auxiliary precedes the metadata items, so a file with alpha *and* Exif reads
         // 1 = colour, 2 = alpha, 3 = Exif — and a file without alpha keeps exactly the ids it
         // always had.
@@ -1531,10 +1517,9 @@ impl AvifEncoder {
             // `prem` runs colour image → alpha auxiliary, so the reference lives on the *colour*
             // item — the opposite direction to the `auxl` the auxiliary owns.
             if self.declares_premultiplied() {
-                items[0].references.push(ItemReference {
-                    reference_type: *b"prem",
-                    to_item_ids: vec![id],
-                });
+                items[0]
+                    .references
+                    .push(ItemReference::new(*b"prem", vec![id]));
             }
         }
         // Metadata items follow, taking the next free id in a fixed order. Ids come
@@ -1576,7 +1561,7 @@ impl AvifEncoder {
             };
             image.push_top_level_box(TopLevelBox::uuid(C2PA_UUID, payload));
         }
-        write(&image)
+        image.to_bytes()
     }
 
     /// Encodes the **colour** planes, offering the job to the registered backends in push order
@@ -1799,48 +1784,39 @@ fn compatible_brands(items: &[Item]) -> Vec<[u8; 4]> {
 /// auxiliary → master. No `colr` is stamped: §4.1 says it should be omitted on an alpha item, whose
 /// samples are opacity rather than colour.
 fn alpha_item(id: u32, alpha: &EncodedStill, dims: Dimensions) -> Item {
-    Item {
-        id,
-        item_type: *b"av01",
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: true,
-        references: vec![ItemReference {
-            reference_type: *b"auxl",
-            to_item_ids: vec![PRIMARY_ITEM_ID],
-        }],
-        properties: vec![
-            Property {
-                essential: true,
-                kind: PropertyKind::CodecConfiguration {
+    Item::new(id, *b"av01")
+        .with_hidden(true)
+        .with_references(vec![ItemReference::new(*b"auxl", vec![PRIMARY_ITEM_ID])])
+        .with_properties(vec![
+            Property::new(
+                true,
+                PropertyKind::CodecConfiguration {
                     kind: *b"av1C",
                     data: av1c_record(&alpha.config).to_vec(),
                 },
-            },
-            Property {
-                essential: false,
-                kind: PropertyKind::ImageSpatialExtents {
+            ),
+            Property::new(
+                false,
+                PropertyKind::ImageSpatialExtents {
                     width: dims.width(),
                     height: dims.height(),
                 },
-            },
-            Property {
-                essential: false,
-                kind: PropertyKind::PixelInformation {
+            ),
+            Property::new(
+                false,
+                PropertyKind::PixelInformation {
                     bits_per_channel: pixi_channels(&alpha.config),
                 },
-            },
-            Property {
-                essential: true,
-                kind: PropertyKind::AuxiliaryType {
+            ),
+            Property::new(
+                true,
+                PropertyKind::AuxiliaryType {
                     aux_type: ALPHA_AUX_URN.to_owned(),
                     aux_subtype: Vec::new(),
                 },
-            },
-        ],
-        payload: alpha.obus.clone(),
-    }
+            ),
+        ])
+        .with_payload(alpha.obus.clone())
 }
 
 /// The 4-byte `AV1CodecConfigurationRecord` body (empty `configOBUs`) stamped into the `av1C`
@@ -1885,20 +1861,11 @@ fn metadata_item(
     content_type: Option<String>,
     payload: Vec<u8>,
 ) -> Item {
-    Item {
-        id,
-        item_type,
-        name: String::new(),
-        content_type,
-        content_encoding: None,
-        hidden: false,
-        references: vec![ItemReference {
-            reference_type: *b"cdsc",
-            to_item_ids: vec![PRIMARY_ITEM_ID],
-        }],
-        properties: vec![],
-        payload,
-    }
+    let mut item = Item::new(id, item_type)
+        .with_references(vec![ItemReference::new(*b"cdsc", vec![PRIMARY_ITEM_ID])])
+        .with_payload(payload);
+    item.content_type = content_type;
+    item
 }
 
 /// Maps a `0..=100` quality to an AV1 `base_q_idx` (`1..=255`); higher quality → lower index (less
@@ -2192,38 +2159,28 @@ mod tests {
     /// A coded `av01` item declaring `seq_profile` / `seq_level_idx[0]` through its `av1C`, which
     /// is the only thing [`compatible_brands`] reads.
     fn coded_item(seq_profile: u8, seq_level_idx_0: u8) -> Item {
-        Item {
-            id: PRIMARY_ITEM_ID,
-            item_type: *b"av01",
-            name: String::new(),
-            content_type: None,
-            content_encoding: None,
-            hidden: false,
-            references: vec![],
-            properties: vec![Property {
-                essential: true,
-                kind: PropertyKind::CodecConfiguration {
-                    kind: *b"av1C",
-                    data: av1c_record(&Av1StillConfig {
-                        seq_profile,
-                        seq_level_idx_0,
-                        seq_tier_0: 0,
-                        high_bitdepth: false,
-                        twelve_bit: false,
-                        monochrome: false,
-                        chroma_subsampling_x: 0,
-                        chroma_subsampling_y: 0,
-                        chroma_sample_position: 0,
-                        color_primaries: 1,
-                        transfer_characteristics: 13,
-                        matrix_coefficients: 1,
-                        full_range: true,
-                    })
-                    .to_vec(),
-                },
-            }],
-            payload: vec![],
-        }
+        Item::new(PRIMARY_ITEM_ID, *b"av01").with_properties(vec![Property::new(
+            true,
+            PropertyKind::CodecConfiguration {
+                kind: *b"av1C",
+                data: av1c_record(&Av1StillConfig {
+                    seq_profile,
+                    seq_level_idx_0,
+                    seq_tier_0: 0,
+                    high_bitdepth: false,
+                    twelve_bit: false,
+                    monochrome: false,
+                    chroma_subsampling_x: 0,
+                    chroma_subsampling_y: 0,
+                    chroma_sample_position: 0,
+                    color_primaries: 1,
+                    transfer_characteristics: 13,
+                    matrix_coefficients: 1,
+                    full_range: true,
+                })
+                .to_vec(),
+            },
+        )])
     }
 
     fn general() -> Vec<[u8; 4]> {
@@ -2608,7 +2565,7 @@ mod tests {
 
     #[test]
     fn container_carries_av1_config_and_layout() {
-        use gamut_isobmff::{ColourInformation, PropertyKind, read};
+        use gamut_isobmff::{ColourInformation, PropertyKind};
         // Both modes wrap the AV1 unit in the same well-formed container; only the mdat payload
         // differs. Parsing it back (gamut-isobmff round-trips its own output) pins the brands, the
         // primary `av01` item, and the av1C-derived `ispe`/`pixi`/`colr` the encoder stamps — none
@@ -2709,7 +2666,7 @@ mod tests {
             want_profile_brand,
         ) in cases
         {
-            let img = read(&encode_with(enc, 34, 18)).expect("emitted AVIF parses");
+            let img = IsoBmffImage::parse(&encode_with(enc, 34, 18)).expect("emitted AVIF parses");
             assert_eq!(img.major_brand, *b"avif");
             for brand in [*b"avif", *b"mif1", *b"miaf"] {
                 assert!(
@@ -2769,10 +2726,10 @@ mod tests {
 
     #[test]
     fn icc_profile_is_a_second_colr_of_type_prof() {
-        use gamut_isobmff::{ColourInformation, PropertyKind, read};
+        use gamut_isobmff::{ColourInformation, PropertyKind};
         let icc = payload(0x11, 300);
         let bytes = encode_with(AvifEncoder::new().with_icc_profile(&icc), 34, 18);
-        let img = read(&bytes).expect("emitted AVIF parses");
+        let img = IsoBmffImage::parse(&bytes).expect("emitted AVIF parses");
         let colrs: Vec<&ColourInformation> = img.items[0]
             .properties
             .iter()
@@ -2804,8 +2761,8 @@ mod tests {
 
     #[test]
     fn last_icc_profile_wins() {
-        use gamut_isobmff::{ColourInformation, PropertyKind, read};
-        let img = read(&encode_with(
+        use gamut_isobmff::{ColourInformation, PropertyKind};
+        let img = IsoBmffImage::parse(&encode_with(
             AvifEncoder::new()
                 .with_icc_profile(&payload(0x11, 64))
                 .with_icc_profile(&payload(0x22, 96)),
@@ -2822,11 +2779,10 @@ mod tests {
 
     #[test]
     fn metadata_items_describe_the_primary_with_cdsc() {
-        use gamut_isobmff::read;
         let exif = payload(0x33, 120);
         let xmp = payload(0x44, 80);
         let bytes = encode_with(AvifEncoder::new().with_exif(&exif).with_xmp(&xmp), 34, 18);
-        let img = read(&bytes).expect("emitted AVIF parses");
+        let img = IsoBmffImage::parse(&bytes).expect("emitted AVIF parses");
         // The primary keeps id 1 at index 0 and stays what `pitm` names, whatever is attached.
         assert_eq!(img.primary_item_id, 1);
         assert_eq!(img.items[0].id, 1);
@@ -2883,10 +2839,9 @@ mod tests {
 
     #[test]
     fn metadata_item_ids_follow_the_items_actually_present() {
-        use gamut_isobmff::read;
         // Ids are positional among the items present, not fixed per kind: with no Exif, XMP takes
         // id 2 rather than leaving a hole at 2 and claiming 3.
-        let img = read(&encode_with(
+        let img = IsoBmffImage::parse(&encode_with(
             AvifEncoder::new().with_xmp(&payload(0x44, 40)),
             4,
             4,
@@ -2958,12 +2913,12 @@ mod tests {
 
     #[test]
     fn with_c2pa_reserved_emits_one_content_provenance_box_after_ftyp() {
-        use gamut_isobmff::{TopLevelPosition, read};
+        use gamut_isobmff::TopLevelPosition;
         // The slot is a *top-level* box, never an item: the item list and the primary's
         // properties are exactly what an unconfigured encoder writes, and `top_level_boxes` gains
         // one `uuid` box with the §A.5.1 user type, placed `AfterFtyp` (§A.5.3), whose payload is
         // the §A.5.1.2 framing around `len` zero bytes.
-        let img = read(&encode_with(
+        let img = IsoBmffImage::parse(&encode_with(
             AvifEncoder::new().with_c2pa_reserved(96),
             34,
             18,
@@ -2982,13 +2937,14 @@ mod tests {
         );
         // `with_c2pa` writes the store where the zeros would be, under the same framing.
         let store = payload(0x66, 96);
-        let img = read(&encode_with(AvifEncoder::new().with_c2pa(&store), 34, 18)).expect("parses");
+        let img = IsoBmffImage::parse(&encode_with(AvifEncoder::new().with_c2pa(&store), 34, 18))
+            .expect("parses");
         assert_eq!(
             img.top_level_boxes[0].payload,
             content_provenance_payload(C2paBoxPurpose::Manifest, &store)
         );
         // Neither knob set: no top-level box at all (the byte-identity guarantee).
-        let img = read(&encode_with(AvifEncoder::new(), 34, 18)).expect("parses");
+        let img = IsoBmffImage::parse(&encode_with(AvifEncoder::new(), 34, 18)).expect("parses");
         assert!(img.top_level_boxes.is_empty());
     }
 
@@ -3014,10 +2970,9 @@ mod tests {
 
     #[test]
     fn an_unconfigured_encoder_adds_no_items_or_properties() {
-        use gamut_isobmff::read;
         // The guard behind the crate's byte-identity promise: every knob added here is inert until
         // it is set, so the default file keeps its item count *and* its `ipco`/`ipma` indices.
-        let img = read(&encode_with(AvifEncoder::new(), 34, 18)).expect("parses");
+        let img = IsoBmffImage::parse(&encode_with(AvifEncoder::new(), 34, 18)).expect("parses");
         assert_eq!(img.items.len(), 1, "the primary alone");
         assert_eq!(
             img.items[0].properties.len(),

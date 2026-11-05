@@ -102,7 +102,7 @@ impl AvifImage {
     /// AV1 configuration. The image-*sequence* brand (`avis`) alone does not make a still, but a
     /// file carrying it is not rejected either: an `avis` file that also declares an image brand
     /// for its primary item (which AVIF v1.2.0 §6.3's NOTE permits but does not require) is an
-    /// AV1 still by `avif` or by `mif1` plus `av1C`, and the track beside `meta` is skipped ([`gamut_isobmff::read`] refuses only a
+    /// AV1 still by `avif` or by `mif1` plus `av1C`, and the track beside `meta` is skipped ([`IsoBmffImage::parse`](gamut_isobmff::IsoBmffImage::parse) refuses only a
     /// sequence-only file; [`AvifContainer::has_image_sequence`](crate::AvifContainer::has_image_sequence)
     /// reports the track).
     #[must_use]
@@ -733,20 +733,9 @@ mod tests {
 
     /// An item of `item_type` carrying `payload`, describing item 1 through `cdsc`.
     fn item(id: u32, item_type: [u8; 4], payload: &[u8]) -> Item {
-        Item {
-            id,
-            item_type,
-            name: String::new(),
-            content_type: None,
-            content_encoding: None,
-            hidden: false,
-            references: vec![ItemReference {
-                reference_type: *b"cdsc",
-                to_item_ids: vec![1],
-            }],
-            properties: Vec::new(),
-            payload: payload.to_vec(),
-        }
+        Item::new(id, item_type)
+            .with_references(vec![ItemReference::new(*b"cdsc", vec![1])])
+            .with_payload(payload.to_vec())
     }
 
     mod typed {

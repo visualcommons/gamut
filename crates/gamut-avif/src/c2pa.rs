@@ -40,11 +40,13 @@
 //! extraction and byte accounting. A BMFF asset's hard binding is `c2pa.hash.bmff.v3`, which
 //! excludes content by **box path**, not by byte offset (§18.6, §A.5.6). Hashing "everything but
 //! this range" is therefore not how a BMFF manifest is bound, and no type here is named
-//! "exclusion" so that no caller is invited to try. Every one is a [`C2paByteRange`], which has
-//! no conversion back to the `Range<usize>` a byte-range hasher's exclusion list takes (#780).
+//! "exclusion" so that no caller is invited to try. Every one is a half-open `Range<u64>` of
+//! absolute file offsets, the shape every gamut container reports a C2PA region in.
+
+use core::ops::Range;
 
 use gamut_isobmff::{
-    C2paBoxPurpose, C2paByteRange, C2paSlot, C2paUnreadReason, C2paUuidBox, Segment, SegmentKind,
+    C2paBoxPurpose, C2paSlot, C2paUnreadReason, C2paUuidBox, Segment, SegmentKind,
 };
 
 use crate::container::AvifContainer;
@@ -73,7 +75,7 @@ impl<'a> AvifContainer<'a> {
     /// sit, never that one is valid — nothing inside the slot is parsed.
     ///
     /// Only *top-level* `uuid` boxes are considered — where §A.5.3 puts the box, and the set
-    /// [`gamut_isobmff::read`] stores in
+    /// [`IsoBmffImage::parse`](gamut_isobmff::IsoBmffImage::parse) stores in
     /// [`IsoBmffImage::top_level_boxes`](gamut_isobmff::IsoBmffImage::top_level_boxes). A `uuid`
     /// box nested inside `meta` is not a manifest store and is surfaced, as it always was, through
     /// [`unknown_meta_boxes`](Self::unknown_meta_boxes). Where the box actually sits is reported as
@@ -120,7 +122,7 @@ pub(crate) fn slots<'a, 's>(
 ) -> impl Iterator<Item = C2paSlot<'a>> + 's {
     top_level_uuid_boxes(segments).filter_map(|(_, _, classified)| match classified {
         C2paUuidBox::Slot(slot) => Some(slot),
-        C2paUuidBox::Merkle | C2paUuidBox::Unread(_) | C2paUuidBox::OtherExtendedType => None,
+        _ => None,
     })
 }
 
@@ -133,7 +135,7 @@ pub(crate) fn slots<'a, 's>(
 /// already been passed when this box is reached.
 fn top_level_uuid_boxes<'a, 's>(
     segments: &'s [Segment<'a>],
-) -> impl Iterator<Item = (C2paByteRange, C2paBoxPosition, C2paUuidBox<'a>)> + 's {
+) -> impl Iterator<Item = (Range<u64>, C2paBoxPosition, C2paUuidBox<'a>)> + 's {
     let mut position = C2paBoxPosition::BeforeMediaData;
     segments
         .iter()
@@ -142,11 +144,11 @@ fn top_level_uuid_boxes<'a, 's>(
                 position = C2paBoxPosition::AfterMediaData;
                 None
             }
-            // `classify` is `None` for every segment that is not a top-level `uuid` box. The walk
-            // never yields a segment ending before it starts, so the range is always placed.
-            _ => C2paUuidBox::classify(segment)
-                .zip(C2paByteRange::new(segment.range.start, segment.range.end))
-                .map(|(classified, range)| (range, position, classified)),
+            // `classify` is `None` for every segment that is not a top-level `uuid` box.
+            _ => C2paUuidBox::classify(segment).map(|classified| {
+                let range = segment.range.start as u64..segment.range.end as u64;
+                (range, position, classified)
+            }),
         })
 }
 
@@ -214,21 +216,21 @@ impl C2paBoxPosition {
 pub struct C2paStoreSummary {
     /// The half-open byte range of the store, trimmed to its JUMBF `LBox` — the range
     /// [`C2paSlot::store_range`] reports, and *not* a BMFF exclusion range.
-    pub range: C2paByteRange,
+    pub range: Range<u64>,
     /// The `box_purpose` of the `uuid` box that carried the store.
     pub purpose: C2paBoxPurpose,
     /// Where the `uuid` box that carried the store sits relative to the file's media data.
     pub position: C2paBoxPosition,
     /// The half-open byte range of the slot the store sits at the front of — the store and any
     /// §A.5.3 padding after it, box-bounded: the range [`C2paSlot::range`] reports.
-    pub slot: C2paByteRange,
+    pub slot: Range<u64>,
 }
 
 impl C2paStoreSummary {
     /// The store's size in bytes.
     #[must_use]
-    pub fn size(&self) -> usize {
-        self.range.len()
+    pub fn size(&self) -> u64 {
+        self.range.end - self.range.start
     }
 }
 
@@ -240,7 +242,7 @@ impl C2paStoreSummary {
 #[non_exhaustive]
 pub struct C2paUnreadBox {
     /// The half-open byte range of the whole `uuid` box, header included.
-    pub range: C2paByteRange,
+    pub range: Range<u64>,
     /// Why no slot was read from it.
     pub reason: C2paUnreadReason,
     /// Where the box sits relative to the file's media data.
@@ -255,7 +257,7 @@ pub struct C2paUnreadBox {
 #[non_exhaustive]
 pub struct C2paMerkleBox {
     /// The half-open byte range of the whole `uuid` box.
-    pub range: C2paByteRange,
+    pub range: Range<u64>,
     /// Where the box sits relative to the file's media data.
     pub position: C2paBoxPosition,
 }
@@ -407,35 +409,39 @@ enum DetailEntry<'a> {
 
 impl DetailEntry<'_> {
     /// Where this entry's bytes begin in the file: the key the list is ordered by.
-    fn start(&self) -> usize {
+    fn start(&self) -> u64 {
         match self {
-            Self::Store(store) => store.range.start(),
-            Self::Unread(unread) => unread.range.start(),
-            Self::Merkle(merkle) => merkle.range.start(),
+            Self::Store(store) => store.range.start,
+            Self::Unread(unread) => unread.range.start,
+            Self::Merkle(merkle) => merkle.range.start,
         }
     }
 
-    /// This entry's report line.
+    /// This entry's report line. Ranges render in the half-open `[start, end)` notation every
+    /// C2PA report line uses.
     fn line(&self) -> String {
         match self {
             Self::Store(store) => format!(
-                "  box_purpose \"{purpose}\": {size} bytes at {range} — located, not \
+                "  box_purpose \"{purpose}\": {size} bytes at [{start}, {end}) — located, not \
                  validated{note}",
                 purpose = store.purpose.as_str(),
                 size = store.size(),
-                range = store.range,
+                start = store.range.start,
+                end = store.range.end,
                 note = position_note(store.position),
             ),
             Self::Unread(unread) => format!(
-                "  unread C2PA box at {range}: {reason}{note}",
-                range = unread.range,
+                "  unread C2PA box at [{start}, {end}): {reason}{note}",
+                start = unread.range.start,
+                end = unread.range.end,
                 reason = unread.reason.describe(),
                 note = position_note(unread.position),
             ),
             Self::Merkle(merkle) => format!(
-                "  auxiliary merkle box at {range}: Merkle-tree hashes (C2PA 2.4 \
+                "  auxiliary merkle box at [{start}, {end}): Merkle-tree hashes (C2PA 2.4 \
                  §A.5.4.1.4), not a manifest store{note}",
-                range = merkle.range,
+                start = merkle.range.start,
+                end = merkle.range.end,
                 note = position_note(merkle.position),
             ),
         }
@@ -477,6 +483,14 @@ fn summary(segments: &[Segment<'_>]) -> C2paSummary {
                 position,
             }),
             C2paUuidBox::OtherExtendedType => summary.other_uuid_boxes += 1,
+            // A kind a later `gamut-isobmff` adds carries the C2PA extended type (only
+            // `OtherExtendedType` does not), so it is listed as a C2PA box this crate could not
+            // read — never dropped, never counted as foreign.
+            _ => summary.unread.push(C2paUnreadBox {
+                range,
+                reason: C2paUnreadReason::UnknownPurpose,
+                position,
+            }),
         }
     }
     summary
@@ -504,8 +518,8 @@ mod tests {
     use super::*;
 
     /// `[start, end)`, which the caller states with `start <= end`.
-    fn range(start: usize, end: usize) -> C2paByteRange {
-        C2paByteRange::new(start, end).expect("start <= end")
+    fn range(start: usize, end: usize) -> Range<u64> {
+        start as u64..end as u64
     }
 
     /// A body per §A.5.1.2: user type, version/flags, `purpose` NUL-terminated, then `data`.
@@ -836,10 +850,7 @@ mod tests {
         let summary = AvifContainer::parse(&file).expect("parse").c2pa_summary();
         assert_eq!(summary.stores.len(), 1);
         assert_eq!(summary.stores[0].slot, slot);
-        assert_eq!(
-            summary.stores[0].range,
-            range(slot.start(), slot.start() + 12)
-        );
+        assert_eq!(summary.stores[0].range, slot.start..slot.start + 12);
         assert!(summary.unread.is_empty() && summary.merkle.is_empty());
 
         let (file, report) = crate::AvifEncoder::new()
@@ -852,7 +863,7 @@ mod tests {
         assert_eq!(summary.unread[0].reason, C2paUnreadReason::NoStoreBound);
         // The unread entry names the whole box, which holds the reserved slot.
         let slot = report.c2pa.expect("a slot was reserved");
-        assert!(summary.unread[0].range.start() < slot.start());
-        assert_eq!(summary.unread[0].range.end(), slot.end());
+        assert!(summary.unread[0].range.start < slot.start);
+        assert_eq!(summary.unread[0].range.end, slot.end);
     }
 }
