@@ -1,27 +1,39 @@
-//! Lossless JPEG (ITU-T T.81 process 14, SOF3) — the standard DNG raw compression (`Compression =
-//! 7`).
+//! Lossless JPEG: the T.81 lossless process (Annex H, SOF3, Huffman-coded) — the raw compression
+//! DNG names `Compression = 7`, and the reason this module exists.
 //!
 //! This is the Huffman-coded, prediction-based *lossless* JPEG (not the lossy DCT codec): each
-//! sample's prediction error is Huffman-coded by magnitude category plus mantissa bits, exactly
-//! as a JPEG DC coefficient. The mosaic / linear planes map to JPEG components (one per
-//! `SamplesPerPixel`), interleaved in a single scan. Differences are reduced modulo 2^16 so they
-//! always fit a category `0..=16`, and reconstruction wraps to match the reference decoder.
+//! sample's prediction error (§H.1.2) is Huffman-coded by magnitude category plus mantissa bits,
+//! exactly as a DCT DC difference is (§F.1.2.1), so the coder shares this crate's entropy machinery:
+//! the magnitude category and additional bits, the byte-stuffing entropy-coded-segment writer, the
+//! marker and DHT writers, and `EXTEND`. Image planes map to JPEG components (up to four),
+//! interleaved in a single scan. Differences are reduced modulo 2^16 so they always fit a category
+//! `0..=16`, and reconstruction wraps to match the reference decoder.
 //!
-//! **Decode** covers the full process-14 envelope a conformant DNG reader needs — any predictor
+//! **Decode** covers the full process-14 envelope a conformant reader needs — any predictor
 //! `Ss = 1..=7` (T.81 Table H.1), the point transform (`Al`), per-component Huffman tables
 //! (multi-table `DHT` segments, up to four destinations), and restart markers (`DRI`/`RSTn`) —
 //! and is differentially tested against the Adobe DNG SDK's codec. Non-interleaved multi-scan
-//! files, subsampled components, and DNL-deferred heights are rejected as unsupported.
+//! files, subsampled components, and DNL-deferred heights are rejected as unsupported. Its marker
+//! walk, bit reader and decode table are its own rather than the DCT decoder's: it skips stray
+//! bytes between segments, and it accepts an over-subscribed `BITS` list by leaving the excess
+//! codes unreachable, where the DCT decoder rejects such a table — sharing the DCT decoder's would
+//! narrow what this reader accepts.
 //!
 //! **Encode** deliberately stays a valid subset — predictor 1, one Huffman table, no point
 //! transform, no restarts — which every reader must accept; the wider decode surface exists for
 //! files other writers produce. The one table is fitted to each call's own data: the optimal
 //! 16-bit length-limited code of T.81 Annex K.2 (§K.2) over the frame's magnitude-category
 //! histogram, built by [`gamut_bitstream::build_optimal_table`] and written in the frame's `DHT`.
-//! Every DNG tile or strip is its own call, so each chunk carries its own table.
+//! A DNG writer calls it once per tile or strip, so each chunk carries its own table.
 
-use gamut_bitstream::{CanonicalCodes, Code, build_optimal_table};
+use gamut_bitstream::build_optimal_table;
 use gamut_core::{Error, Result};
+
+use crate::bitwriter::BitWriter;
+use crate::encoder::{additional_bits, magnitude_category};
+use crate::huffman::{self, EncTable};
+use crate::marker::code::{DHT, DRI, EOI, RST0, SOF3, SOI, SOS};
+use crate::marker::{self, pack_nibbles};
 
 /// A decoded lossless-JPEG frame.
 #[non_exhaustive]
@@ -40,73 +52,8 @@ pub struct LosslessJpeg {
     pub samples: Vec<u16>,
 }
 
-// JPEG markers.
+/// The byte every marker opens with, and the one byte-stuffing escapes (§B.1.1.2, §B.1.1.5).
 const MARKER: u8 = 0xFF;
-const SOI: u8 = 0xD8;
-const EOI: u8 = 0xD9;
-const SOF3: u8 = 0xC3;
-const DHT: u8 = 0xC4;
-const SOS: u8 = 0xDA;
-const DRI: u8 = 0xDD;
-const RST0: u8 = 0xD0;
-
-/// MSB-first bit writer with JPEG `FF` → `FF 00` byte stuffing.
-struct BitWriter {
-    out: Vec<u8>,
-    acc: u32,
-    nbits: u32,
-}
-
-impl BitWriter {
-    fn new() -> Self {
-        Self {
-            out: Vec::new(),
-            acc: 0,
-            nbits: 0,
-        }
-    }
-
-    fn put(&mut self, value: u32, count: u8) {
-        if count == 0 {
-            return;
-        }
-        self.acc |= (value & ((1u32 << count) - 1)) << (32 - self.nbits - u32::from(count));
-        self.nbits += u32::from(count);
-        while self.nbits >= 8 {
-            let byte = (self.acc >> 24) as u8;
-            self.out.push(byte);
-            if byte == MARKER {
-                self.out.push(0x00); // stuff
-            }
-            self.acc <<= 8;
-            self.nbits -= 8;
-        }
-    }
-
-    fn finish(mut self) -> Vec<u8> {
-        // `put` drains whole bytes, so `nbits` is always in `0..8` here.
-        if self.nbits > 0 {
-            // Pad the final partial byte with 1-bits (JPEG convention).
-            self.put(0xFF, 8 - self.nbits as u8);
-        }
-        self.out
-    }
-}
-
-/// The magnitude category (`SSSS`) of a difference and its mantissa bits.
-fn magnitude(diff: i32) -> (u8, u32) {
-    if diff == 0 {
-        return (0, 0);
-    }
-    if diff == -32768 {
-        return (16, 0); // T.81 special case: category 16 carries no mantissa.
-    }
-    let magnitude = diff.unsigned_abs();
-    let ssss = (32 - magnitude.leading_zeros()) as u8;
-    // Mantissa: diff for non-negative, diff - 1 (i.e. one's-complement low bits) for negative.
-    let mantissa = if diff >= 0 { diff } else { diff - 1 } as u32;
-    (ssss, mantissa & ((1u32 << ssss) - 1))
-}
 
 /// Reduces a raw prediction error to the canonical `[-32768, 32767]` range (mod 2^16).
 fn reduce(diff: i32) -> i32 {
@@ -188,25 +135,25 @@ pub fn encode(
     if !(2..=16).contains(&precision) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless-JPEG precision must be 2..=16",
+            "JPEG: lossless-JPEG precision must be 2..=16",
         ));
     }
     if !(1..=4).contains(&components) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless JPEG carries 1..=4 interleaved components",
+            "JPEG: lossless JPEG carries 1..=4 interleaved components",
         ));
     }
     if width == 0 || height == 0 || width > 65535 || height > 65535 {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless-JPEG dimensions must be 1..=65535",
+            "JPEG: lossless-JPEG dimensions must be 1..=65535",
         ));
     }
     if samples.len() != width * height * components {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless-JPEG sample count must be width * height * components",
+            "JPEG: lossless-JPEG sample count must be width * height * components",
         ));
     }
     let diffs = differences(samples, width, height, components, precision);
@@ -215,58 +162,45 @@ pub fn encode(
         bits,
         values: huffval,
     } = build_optimal_table(&category_histogram(&diffs));
-    let codes = CanonicalCodes::from_bits_values(&bits, &huffval);
+    let codes = EncTable::from_bits_values(&bits, &huffval);
     let mut out = Vec::new();
-    out.extend_from_slice(&[MARKER, SOI]);
+    marker::write_marker(&mut out, SOI);
 
-    // SOF3: lossless frame.
-    out.extend_from_slice(&[MARKER, SOF3]);
-    let sof_len = 8 + 3 * components;
-    out.extend_from_slice(&(sof_len as u16).to_be_bytes());
+    // SOF3 (§B.2.2): P, Y, X, Nf, then per component its id, H=1/V=1, and Tq=0 (unused).
+    marker::write_segment_header(&mut out, SOF3, 8 + 3 * components);
     out.push(precision as u8);
     out.extend_from_slice(&(height as u16).to_be_bytes());
     out.extend_from_slice(&(width as u16).to_be_bytes());
     out.push(components as u8);
     for c in 0..components {
-        out.push((c + 1) as u8); // component id
-        out.push(0x11); // H=1, V=1
-        out.push(0x00); // quantization table (unused in lossless)
+        out.extend_from_slice(&[(c + 1) as u8, pack_nibbles(1, 1), 0]);
     }
 
-    // DHT: one DC table (class 0, id 0), fitted to this frame's categories.
-    out.extend_from_slice(&[MARKER, DHT]);
-    let dht_len = 2 + 1 + 16 + huffval.len();
-    out.extend_from_slice(&(dht_len as u16).to_be_bytes());
-    out.push(0x00); // Tc=0 (DC/lossless), Th=0
-    out.extend_from_slice(&bits);
-    out.extend_from_slice(&huffval);
+    // DHT: one DC-class table (Tc = 0, Th = 0), fitted to this frame's categories.
+    huffman::emit_dht_dynamic(&mut out, &[(0, 0, &bits, &huffval)]);
 
-    // SOS: all components, predictor selector 1.
-    out.extend_from_slice(&[MARKER, SOS]);
-    let sos_len = 6 + 2 * components;
-    out.extend_from_slice(&(sos_len as u16).to_be_bytes());
+    // SOS (§B.2.3): every component on table 0, predictor selector Ss = 1, Se = 0, Ah = Al = 0.
+    marker::write_segment_header(&mut out, SOS, 6 + 2 * components);
     out.push(components as u8);
     for c in 0..components {
-        out.push((c + 1) as u8); // component selector
-        out.push(0x00); // Td=0, Ta=0
+        out.extend_from_slice(&[(c + 1) as u8, 0]);
     }
-    out.push(1); // Ss = predictor 1
-    out.push(0); // Se
-    out.push(0); // Ah=0, Al (point transform) = 0
+    out.extend_from_slice(&[1, 0, 0]);
 
-    let mut writer = BitWriter::new();
+    let mut writer = BitWriter::new(&mut out);
     for &diff in &diffs {
-        let (ssss, mantissa) = magnitude(i32::from(diff));
+        let diff = i32::from(diff);
+        let ssss = magnitude_category(diff);
         // The table codes every category the histogram counted, and `diffs` is what it counted.
-        let Code { code, len } = codes.lookup(ssss).unwrap_or(Code { code: 0, len: 0 });
-        writer.put(u32::from(code), len);
-        // Categories 0 and 16 carry no mantissa; only `1..16` has magnitude bits.
-        if ssss != 0 && ssss < 16 {
-            writer.put(mantissa, ssss);
+        let (code, len) = codes.lookup(ssss).unwrap_or((0, 0));
+        writer.write_bits(code, len);
+        // Categories 0 and 16 carry no mantissa (§H.1.2.2, Table H.2); `1..16` do.
+        if ssss < 16 {
+            writer.write_bits(additional_bits(diff, ssss), ssss);
         }
     }
-    out.extend_from_slice(&writer.finish());
-    out.extend_from_slice(&[MARKER, EOI]);
+    writer.flush();
+    marker::write_marker(&mut out, EOI);
     Ok(out)
 }
 
@@ -306,7 +240,7 @@ fn differences(
 fn category_histogram(diffs: &[i16]) -> [u32; 17] {
     let mut freq = [0u32; 17];
     for &diff in diffs {
-        let count = &mut freq[usize::from(magnitude(i32::from(diff)).0)];
+        let count = &mut freq[usize::from(magnitude_category(i32::from(diff)))];
         *count = count.saturating_add(1);
     }
     freq
@@ -405,7 +339,7 @@ impl<'a> BitReader<'a> {
         } else {
             Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "DNG: lossless JPEG missing or out-of-sequence restart marker",
+                "JPEG: lossless JPEG missing or out-of-sequence restart marker",
             )
             .with_byte_offset(self.pos as u64))
         }
@@ -487,7 +421,7 @@ fn decode_symbol(reader: &mut BitReader, table: &HuffmanTable) -> Result<u8> {
     }
     Err(Error::invalid_input(
         env!("CARGO_PKG_NAME"),
-        "DNG: invalid lossless-JPEG Huffman code",
+        "JPEG: invalid lossless-JPEG Huffman code",
     )
     .with_byte_offset(reader.pos as u64))
 }
@@ -500,12 +434,8 @@ fn extend(reader: &mut BitReader, ssss: u8) -> i32 {
     if ssss == 16 {
         return -32768;
     }
-    let t = reader.receive(ssss) as i32;
-    if t < (1 << (ssss - 1)) {
-        t - (1 << ssss) + 1
-    } else {
-        t
-    }
+    // `EXTEND` (Figure F.12), shared with the DCT decoder's DC differences.
+    huffman::extend(reader.receive(ssss), ssss)
 }
 
 /// Reads a big-endian `u16` at `pos`.
@@ -516,7 +446,7 @@ fn be16(data: &[u8], pos: usize) -> Result<usize> {
         .ok_or_else(|| {
             Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "DNG: truncated lossless-JPEG marker",
+                "JPEG: truncated lossless-JPEG marker",
             )
             .with_byte_offset(pos as u64)
         })?;
@@ -547,12 +477,12 @@ fn parse_sof3(data: &[u8], pos: usize) -> Result<Frame> {
     let precision = u16::from(
         *data
             .get(pos + 2)
-            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOF3"))?,
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated SOF3"))?,
     );
     if !(2..=16).contains(&precision) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless-JPEG precision must be 2..=16",
+            "JPEG: lossless-JPEG precision must be 2..=16",
         ));
     }
     let height = be16(data, pos + 3)?;
@@ -561,29 +491,29 @@ fn parse_sof3(data: &[u8], pos: usize) -> Result<Frame> {
         // A zero height defers the line count to a DNL marker after the scan (§B.2.5).
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless JPEG with DNL-deferred height is not supported",
+            "JPEG: lossless JPEG with DNL-deferred height is not supported",
         ));
     }
     let count = usize::from(
         *data
             .get(pos + 7)
-            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOF3"))?,
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated SOF3"))?,
     );
     if !(1..=4).contains(&count) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless JPEG carries 1..=4 components",
+            "JPEG: lossless JPEG carries 1..=4 components",
         ));
     }
     let mut component_ids = Vec::with_capacity(count);
     for c in 0..count {
         let spec = data.get(pos + 8 + 3 * c..pos + 11 + 3 * c).ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOF3 components")
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated SOF3 components")
         })?;
         if spec[1] != 0x11 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "DNG: subsampled lossless-JPEG components are not supported",
+                "JPEG: subsampled lossless-JPEG components are not supported",
             ));
         }
         component_ids.push(spec[0]);
@@ -609,7 +539,7 @@ fn parse_dht(
     len: usize,
     tables: &mut [Option<HuffmanTable>; 4],
 ) -> Result<()> {
-    let truncated = || Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT");
+    let truncated = || Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated DHT");
     let end = pos
         .checked_add(len)
         .filter(|e| *e <= data.len())
@@ -620,24 +550,24 @@ fn parse_dht(
         if class != 0 {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "DNG: lossless JPEG uses DC-class (Tc=0) Huffman tables",
+                "JPEG: lossless JPEG uses DC-class (Tc=0) Huffman tables",
             ));
         }
         if dest > 3 {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "DNG: Huffman table destination must be 0..=3",
+                "JPEG: Huffman table destination must be 0..=3",
             ));
         }
         let (bits, tail) = tail.split_first_chunk::<16>().ok_or_else(truncated)?;
         let nvals: usize = bits.iter().map(|&b| usize::from(b)).sum();
         let (huffval, tail) = tail.split_at_checked(nvals).ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT values")
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated DHT values")
         })?;
         if huffval.iter().any(|&v| v > 16) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "DNG: lossless-JPEG Huffman symbols are magnitude categories 0..=16",
+                "JPEG: lossless-JPEG Huffman symbols are magnitude categories 0..=16",
             ));
         }
         tables[dest] = Some(HuffmanTable::new(bits, huffval));
@@ -651,30 +581,30 @@ fn parse_sos(data: &[u8], pos: usize, frame: &Frame) -> Result<Scan> {
     let ns = usize::from(
         *data
             .get(pos + 2)
-            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOS"))?,
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated SOS"))?,
     );
     if ns != frame.component_ids.len() {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
-            "DNG: only single-scan (fully interleaved) lossless JPEG is supported",
+            "JPEG: only single-scan (fully interleaved) lossless JPEG is supported",
         ));
     }
     let mut table_ids = Vec::with_capacity(ns);
     for c in 0..ns {
         let spec = data.get(pos + 3 + 2 * c..pos + 5 + 2 * c).ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOS components")
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated SOS components")
         })?;
         if spec[0] != frame.component_ids[c] {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "DNG: lossless-JPEG scan components must follow the frame order",
+                "JPEG: lossless-JPEG scan components must follow the frame order",
             ));
         }
         table_ids.push(usize::from(spec[1] >> 4)); // Td; Ta is unused in lossless
     }
     let tail = data
         .get(pos + 3 + 2 * ns..pos + 6 + 2 * ns)
-        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOS"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated SOS"))?;
     let (ss, se, ah, al) = (
         tail[0],
         tail[1],
@@ -684,19 +614,19 @@ fn parse_sos(data: &[u8], pos: usize, frame: &Frame) -> Result<Scan> {
     if !(1..=7).contains(&ss) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless-JPEG predictor (Ss) must be 1..=7",
+            "JPEG: lossless-JPEG predictor (Ss) must be 1..=7",
         ));
     }
     if se != 0 || ah != 0 {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless-JPEG scan header must have Se = 0 and Ah = 0",
+            "JPEG: lossless-JPEG scan header must have Se = 0 and Ah = 0",
         ));
     }
     if al >= frame.precision {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless-JPEG point transform must be below the precision",
+            "JPEG: lossless-JPEG point transform must be below the precision",
         ));
     }
     Ok(Scan {
@@ -722,7 +652,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
     if data.len() < 2 || data[0] != MARKER || data[1] != SOI {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: not a JPEG (missing SOI)",
+            "JPEG: missing SOI marker",
         ));
     }
     let mut pos = 2;
@@ -754,7 +684,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
             .enumerate()
             .find(|&(_, &b)| b != MARKER)
             .ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated lossless JPEG")
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated lossless JPEG")
             })?;
         pos += off + fill + 1;
         match marker {
@@ -762,7 +692,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
                 if frame.is_some() {
                     return Err(Error::invalid_input(
                         env!("CARGO_PKG_NAME"),
-                        "DNG: duplicate SOF3 frame header",
+                        "JPEG: duplicate SOF3 frame header",
                     ));
                 }
                 let len = be16(data, pos)?;
@@ -774,7 +704,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
             0xC0..=0xC2 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF | 0xCC => {
                 return Err(Error::unsupported(
                     env!("CARGO_PKG_NAME"),
-                    "DNG: only the SOF3 (lossless Huffman) JPEG process is supported",
+                    "JPEG: only the SOF3 (lossless Huffman) JPEG process is supported",
                 ));
             }
             DHT => {
@@ -787,7 +717,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
                 if len != 4 {
                     return Err(Error::invalid_input(
                         env!("CARGO_PKG_NAME"),
-                        "DNG: DRI segment must be 4 bytes",
+                        "JPEG: DRI segment must be 4 bytes",
                     ));
                 }
                 restart_interval = be16(data, pos + 2)?;
@@ -795,7 +725,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
             }
             SOS => {
                 let f = frame.as_ref().ok_or_else(|| {
-                    Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: SOS before SOF3")
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: SOS before SOF3")
                 })?;
                 let len = be16(data, pos)?;
                 scan = Some(parse_sos(data, pos, f)?);
@@ -805,7 +735,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
             EOI => {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
-                    "DNG: lossless JPEG ended before SOS",
+                    "JPEG: lossless JPEG ended before SOS",
                 ));
             }
             _ => {
@@ -817,16 +747,16 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
     }
 
     let scan = scan.ok_or_else(|| {
-        Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOS")
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: lossless JPEG missing SOS")
     })?;
     let frame = frame.ok_or_else(|| {
-        Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOF3")
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: lossless JPEG missing SOF3")
     })?;
     let (width, height, components) = (frame.width, frame.height, frame.component_ids.len());
     if width == 0 {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless JPEG has zero dimensions",
+            "JPEG: lossless JPEG has zero dimensions",
         ));
     }
     // One resolved table reference per component (missing destinations are an error up front).
@@ -835,7 +765,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
         codes.push(tables[id].as_ref().ok_or_else(|| {
             Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "DNG: scan references an undefined Huffman table",
+                "JPEG: scan references an undefined Huffman table",
             )
         })?);
     }
@@ -846,7 +776,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
         .ok_or_else(|| {
             Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "DNG: lossless JPEG dimensions overflow",
+                "JPEG: lossless JPEG dimensions overflow",
             )
         })?;
     // The SOF3 header is a few bytes asking for up to 65535 × 65535 × 4 samples, so the output is
@@ -861,7 +791,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
     if count.div_ceil(8) > scan_data.len() {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "DNG: lossless-JPEG scan holds fewer bits than its frame has samples",
+            "JPEG: lossless-JPEG scan holds fewer bits than its frame has samples",
         )
         .with_byte_offset(pos as u64));
     }
@@ -886,7 +816,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
                 if ssss > 16 {
                     return Err(Error::invalid_input(
                         env!("CARGO_PKG_NAME"),
-                        "DNG: lossless-JPEG category out of range",
+                        "JPEG: lossless-JPEG category out of range",
                     ));
                 }
                 let diff = extend(&mut reader, ssss);
@@ -1113,18 +1043,23 @@ mod tests {
         assert_eq!(reduce(-40000), -40000 + 65536);
     }
 
+    /// The shared DCT category and mantissa helpers cover the whole lossless range (Table H.2):
+    /// the reduced difference `-32768` is category 16, which `encode` writes with no mantissa.
     #[test]
-    fn magnitude_categories_are_exact() {
+    fn shared_magnitude_helpers_cover_the_lossless_range() {
+        let magnitude = |diff: i32| {
+            let ssss = magnitude_category(diff);
+            (ssss, additional_bits(diff, ssss))
+        };
         assert_eq!(magnitude(0), (0, 0));
-        // The T.81 special case: -32768 is category 16 with no mantissa. Deleting the unary `-`
-        // would make this `diff == 32768` (never reached) and fall through to (16, 0x7fff).
-        assert_eq!(magnitude(-32768), (16, 0));
+        assert_eq!(magnitude_category(-32768), 16);
         // Positive: mantissa == diff; negative: one's-complement low bits (diff - 1).
         assert_eq!(magnitude(1), (1, 1));
         assert_eq!(magnitude(-1), (1, 0));
         assert_eq!(magnitude(2), (2, 0b10));
         assert_eq!(magnitude(-2), (2, 0b01));
         assert_eq!(magnitude(32767), (15, 0x7fff));
+        assert_eq!(magnitude(-32767), (15, 0));
     }
 
     #[test]
@@ -1136,21 +1071,6 @@ mod tests {
         // ssss == 0 yields 0 with no bits consumed.
         let mut reader = BitReader::new(&[]);
         assert_eq!(extend(&mut reader, 0), 0);
-    }
-
-    #[test]
-    fn bit_writer_pads_only_a_partial_final_byte() {
-        // Exactly one full byte: finish must NOT append a padding byte (kills `nbits > 0`
-        // -> `nbits >= 0`, which would `put(0xff, 8)` and grow the output).
-        let mut w = BitWriter::new();
-        w.put(0b1010_1010, 8);
-        assert_eq!(w.finish(), vec![0b1010_1010]);
-        // A partial byte (3 bits) is padded with 1-bits up to one byte.
-        let mut w = BitWriter::new();
-        w.put(0b101, 3);
-        assert_eq!(w.finish(), vec![0b1011_1111]);
-        // Empty writer produces no bytes.
-        assert_eq!(BitWriter::new().finish(), Vec::<u8>::new());
     }
 
     #[test]
@@ -1411,7 +1331,7 @@ mod tests {
         .expect_err("unassigned code");
         assert_eq!(
             error.static_message(),
-            Some("DNG: invalid lossless-JPEG Huffman code")
+            Some("JPEG: invalid lossless-JPEG Huffman code")
         );
     }
 
@@ -1426,7 +1346,7 @@ mod tests {
         assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
         assert_eq!(
             error.static_message(),
-            Some("DNG: lossless-JPEG scan holds fewer bits than its frame has samples")
+            Some("JPEG: lossless-JPEG scan holds fewer bits than its frame has samples")
         );
     }
 
@@ -1446,7 +1366,7 @@ mod tests {
         let error = decode(&[MARKER, SOI, MARKER, 0xE0, 0xFF, 0xFF]).expect_err("APP0 past end");
         assert_eq!(
             error.static_message(),
-            Some("DNG: lossless JPEG missing SOS")
+            Some("JPEG: lossless JPEG missing SOS")
         );
         // The same overrun through the SOF3 arm: its 13-byte segment, otherwise well formed,
         // with the length field (bytes 4..6, after SOI and the marker) raised to 0xFFFF.
@@ -1456,7 +1376,7 @@ mod tests {
         let error = decode(&s).expect_err("SOF3 past end");
         assert_eq!(
             error.static_message(),
-            Some("DNG: lossless JPEG missing SOS")
+            Some("JPEG: lossless JPEG missing SOS")
         );
     }
 
@@ -1595,12 +1515,12 @@ mod tests {
 
             // Entropy-code the point-transformed samples with the module's own prediction.
             let shifted: Vec<u16> = samples.iter().map(|&s| s >> self.pt).collect();
-            let codes: Vec<CanonicalCodes> = self
+            let codes: Vec<EncTable> = self
                 .table_ids
                 .iter()
                 .map(|td| {
                     let huffval = &self.tables.iter().find(|(d, _)| d == td).expect("table").1;
-                    CanonicalCodes::from_bits_values(&self.bits, huffval)
+                    EncTable::from_bits_values(&self.bits, huffval)
                 })
                 .collect();
             let mut bits = TestBits::new();
@@ -1630,12 +1550,11 @@ mod tests {
                             origin,
                         );
                         let diff = reduce(actual - pred);
-                        let (ssss, mantissa) = magnitude(diff);
-                        let Code { code, len } =
-                            codes[c].lookup(ssss).expect("table codes category");
+                        let ssss = magnitude_category(diff);
+                        let (code, len) = codes[c].lookup(ssss).expect("table codes category");
                         bits.put(u32::from(code), len);
                         if ssss != 0 && ssss < 16 {
-                            bits.put(mantissa, ssss);
+                            bits.put(u32::from(additional_bits(diff, ssss)), ssss);
                         }
                     }
                     mcus += 1;
@@ -1782,7 +1701,7 @@ mod tests {
                 .expect_err("unread byte before RST0");
             assert_eq!(
                 error.static_message(),
-                Some("DNG: lossless JPEG missing or out-of-sequence restart marker")
+                Some("JPEG: lossless JPEG missing or out-of-sequence restart marker")
             );
         }
     }
@@ -2039,82 +1958,6 @@ mod tests {
             builder.bits = BITS_EVERY_LENGTH;
             let stream = builder.build(&row, row.len(), 1);
             assert_sdk_agrees(&stream, &row, "codes of every length");
-        }
-
-        /// End to end: a DNG whose raw strip is a *predictor-4* SOF3 stream — a shape gamut's
-        /// own encoder never writes — decodes to identical samples through gamut's DNG decoder
-        /// and the Adobe SDK's negative reader.
-        #[test]
-        fn predictor4_strip_dng_decodes_identically_to_adobe() {
-            use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
-
-            use crate::tags;
-
-            let (w, h) = (8usize, 6usize);
-            let samples = test_samples(w, h, 1, 12);
-            let strip = StreamBuilder::simple(12, 4, 1).build(&samples, w, h);
-
-            let mut ifd = Ifd::new();
-            ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![0]));
-            ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![w as u16]));
-            ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![h as u16]));
-            ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![12]));
-            ifd.set(tags::COMPRESSION, Value::Short(vec![7])); // lossless JPEG
-            ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
-            ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
-            ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![h as u16]));
-            ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
-            ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
-            ifd.set(tags::CFA_PLANE_COLOR, Value::Byte(vec![0, 1, 2]));
-            ifd.set(tags::DNG_VERSION, Value::Byte(vec![1, 4, 0, 0]));
-            ifd.set(
-                tags::UNIQUE_CAMERA_MODEL,
-                Value::Ascii("gamut TestCam".to_owned()),
-            );
-            ifd.set(
-                tags::COLOR_MATRIX1,
-                Value::SRational(vec![
-                    (1, 1),
-                    (0, 1),
-                    (0, 1),
-                    (0, 1),
-                    (1, 1),
-                    (0, 1),
-                    (0, 1),
-                    (0, 1),
-                    (1, 1),
-                ]),
-            );
-            ifd.set(tags::CALIBRATION_ILLUMINANT1, Value::Short(vec![21])); // D65
-            ifd.set(
-                tags::AS_SHOT_NEUTRAL,
-                Value::Rational(vec![(1, 1), (1, 1), (1, 1)]),
-            );
-            ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
-            ifd.set(
-                tags::STRIP_BYTE_COUNTS,
-                Value::Long(vec![strip.len() as u32]),
-            );
-
-            // Two-pass layout: size the container, then point the strip just past it.
-            let single = |ifd: Ifd| TiffFile {
-                order: ByteOrder::LittleEndian,
-                variant: Variant::Classic,
-                ifds: vec![ifd],
-            };
-            let mut dng = write(&single(ifd.clone())).expect("write");
-            let strip_at = dng.len() as u32;
-            let mut placed = ifd;
-            placed.set(tags::STRIP_OFFSETS, Value::Long(vec![strip_at]));
-            dng = write(&single(placed)).expect("rewrite");
-            dng.extend_from_slice(&strip);
-
-            let ours = crate::decoder::DngDecoder::new()
-                .decode(&dng)
-                .expect("gamut decode");
-            assert_eq!(ours.raw.samples(), samples.as_slice());
-            let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe decode");
-            assert_eq!(adobe.samples, samples);
         }
     }
 }

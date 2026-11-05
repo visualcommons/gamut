@@ -205,7 +205,8 @@ pub(crate) fn read_metadata(bytes: &[u8]) -> InputMetadata {
             .unwrap_or_default();
     }
     if is_jpeg(bytes) {
-        return gamut::jpeg::metadata(bytes)
+        return JpegDecoder::new()
+            .metadata(bytes)
             .map(|m| InputMetadata::from_typed(&m))
             .unwrap_or_default();
     }
@@ -320,8 +321,8 @@ pub(crate) fn decode_native(path: &Path, bytes: &[u8]) -> Result<NativeImage, Cl
     }
 
     if is_jpeg(bytes) {
-        let decoder = JpegDecoder::new().convert_policy(lossy);
-        let image = if gamut::jpeg::info(bytes)?.components == 1 {
+        let decoder = JpegDecoder::new().with_convert_policy(lossy);
+        let image = if decoder.info(bytes)?.components == 1 {
             NativeImage::Gray8(decoder.decode_image(bytes)?)
         } else {
             NativeImage::Rgb8(decoder.decode_image(bytes)?)
@@ -441,7 +442,7 @@ pub(crate) fn decode_bytes(
         // colour it does carry, then let the same conversion engine add the opaque alpha channel
         // rather than padding it by hand here.
         let img: ImageBuf<Rgb8> = JpegDecoder::new()
-            .convert_policy(lossy)
+            .with_convert_policy(lossy)
             .decode_image(bytes)?;
         if !want_alpha {
             let dims = img.dimensions();

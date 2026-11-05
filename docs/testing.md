@@ -46,7 +46,7 @@ Placement is mechanical. Two questions, in order:
 
 A **dev-dependency oracle is not a reason to move up**: dev-dependencies link into the lib's own
 test build. `gamut-deflate/src/adler32.rs` calls `zlib_oracle::adler32` and
-`gamut-dng/src/lossless_jpeg.rs` calls `gamut_dng_oracle`, both from inline `#[cfg(test)]` modules.
+`gamut-jpeg/src/lossless.rs` calls `gamut_dng_oracle`, both from inline `#[cfg(test)]` modules.
 
 A test **may reach a sibling module** when that module is a fixture source, or when the claim is a
 mutual-inverse or consistency law over the pair — an encoder and its decoder are siblings, and
@@ -261,7 +261,7 @@ carry no function bodies.
 | gamut-cmm | Little-CMS | differential | — |
 | gamut-deflate | zlib | differential | `inflate_zlib` (`inflate` feature) ☐ |
 | gamut-png | libpng (both directions) | differential + conformance + size contract | `PngDecoder` ☑ |
-| gamut-jpeg | libjpeg-turbo; jpegli (XYB mode) with Little-CMS applying the profile | differential + exact-byte | `JpegDecoder` ☑ |
+| gamut-jpeg | libjpeg-turbo; jpegli (XYB mode) with Little-CMS applying the profile; the Adobe DNG SDK's lossless-JPEG codec (`lossless`, SOF3) | differential + exact-byte | `JpegDecoder` ☑ |
 | gamut-tiff | libtiff | differential | `TiffDecoder` ☑ |
 | gamut-dng | Adobe DNG SDK; libtiff (container) | conformance + differential | `DngDecoder` ☑ |
 | gamut-isobmff | ISO/IEC 14496-12 + 23008-12; libavif/dav1d via gamut-avif | exact-byte + law | `IsoBmffImage::parse` ☑ |

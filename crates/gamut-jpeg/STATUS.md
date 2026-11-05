@@ -56,26 +56,30 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Restart markers (DRI/RSTn).
 - Colour-space handling: JFIF (APP0) and Adobe (APP14) transform flags; CMYK / YCCK **decode**.
 - APP-segment metadata (P7): APP1 EXIF + XMP and multi-segment APP2 `ICC_PROFILE`, **read**
-  (`metadata()`) and **write** (`with_exif`/`with_xmp`/`with_icc_profile`), raw-bytes payloads that
-  feed `gamut-metadata`'s `MetadataBlock` directly (the default dependency edge stays jpeg ← core,
-  color, dsp).
+  (`JpegDecoder::metadata`, into the workspace's shared `gamut_core::RawMetadata`) and **write**
+  (`with_exif`/`with_xmp`/`with_icc_profile`), raw-bytes payloads that feed `gamut-metadata`'s
+  `MetadataBlock` directly (the default dependency edge stays jpeg ← core, color, dsp).
 - Typed metadata (P14, issue #420) behind the opt-in **`metadata`** feature (a normal, optional
-  dependency on `gamut-metadata`): `JpegMetadata` implements the facade's `TypedMetadata` trait
-  (#628) — `blocks` (EXIF = the TIFF stream, `Exif\0\0` stripped; XMP = the `xpacket`; ICC = the
-  reassembled profile; never `Err`, but fallible by the trait's shared signature) and `metadata`
-  (`Metadata::parse_blocks`), both returning `gamut_metadata::MetadataError`;
-  `JpegEncoder::with_metadata(&Metadata)` (default `MetadataEmbedder`) and
-  `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies), routing each carrier to the
-  raw setter above. IPTC-IIM and C2PA blocks are typed `Unsupported` on the encoder (no APP13 /
-  APP11 carriage — both under *Deferred / out of scope* below), and a C2PA store is never copied
-  forward (facade policy).
-- Pluggable codestream backends (P8, issue #277): the `backend` module's `JpegStreamDecoder` /
-  `JpegStreamEncoder` traits, `JpegDecoder::push_backend` / `JpegEncoder::push_backend`, and the
-  `gamut-codec-abi` adapters in both directions.
+  dependency on `gamut-metadata`): the `RawMetadata` `JpegDecoder::metadata` returns is read
+  through the facade's own `TypedMetadata` impl (EXIF = the TIFF stream, `Exif\0\0` stripped;
+  XMP = the `xpacket`; ICC = the reassembled profile), and `JpegEncoder` is a `MetadataSink`
+  (issue #1083) over its three raw setters, so `with_metadata(&Metadata)` (default
+  `MetadataEmbedder`) and `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies) and
+  their precedence are the facade's. IPTC-IIM and C2PA blocks are typed `Unsupported` on the
+  encoder (no APP13 / APP11 carriage — both under *Deferred / out of scope* below), and a C2PA
+  store is never copied forward (facade policy).
+- Pluggable codestream backends (P8, issue #277; reshaped by issue #1083): the
+  `JpegCodestreamDecoder` / `JpegCodestreamEncoder` traits, `JpegDecoder::with_backend` /
+  `JpegEncoder::with_backend` (by value, `Send` bound at insertion) over `gamut-codec-abi`'s one
+  `Registry`, and the `AbiJpegDecoder` / `AbiJpegEncoder` adapters (`get_ref` / `get_mut` /
+  `into_inner`) in both directions. `supports() == false` is the only fall-through: a backend that
+  accepts and then fails — a codec-abi backend's late `UNSUPPORTED` status included — returns its
+  error unchanged.
 - Decoder resource guards (P9, issue #306; default-on since issue #1024): `JpegDecoder::new()`
   caps dimensions at 65535 × 65535 and the native raster at 64 MiB, and
-  `JpegDecoder::with_max_dimensions` / `with_max_image_bytes` override them, enforced before built-in frame allocations and backend selection, while
-  bounding sequential DNL-deferred sample-plane growth until the exact height arrives.
+  `JpegDecoder::with_limits(DecodeLimits)` overrides them (the workspace's shared limits type,
+  issue #1083), enforced before built-in frame allocations and backend selection, while bounding
+  sequential DNL-deferred sample-plane growth until the exact height arrives.
 - XYB colour mode (P13, issue #334): `with_color_mode(JpegColorMode::Xyb)` — jpegli-style
   scaled-XYB samples (via `gamut_color::xyb`; stored channels X, Y, B−Y), a no-JFIF-APP0 / Adobe
   APP14 `transform = 0` prologue with component ids `R`,`G`,`B` (either signal alone keeps a
@@ -83,7 +87,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   any ICC-aware consumer reproduces sRGB. The profile is regenerated and byte-pinned from
   `gamut-icc`+`gamut-color` by an umbrella-layer test (`crates/gamut/tests/xyb_icc.rs`) and
   validated end-to-end against the lcms2 oracle — so the encoder needs no ICC crate at run time.
-  `ChromaSubsampling` subsamples B alone (issue #1015), defaulting to jpegli's X 2×2 / Y 2×2 /
+  `ChromaSubsampling` (gamut-color's shared enum since issue #1083) subsamples B alone (issue #1015), defaulting to jpegli's X 2×2 / Y 2×2 /
   B 1×1, pinned against jpegli's own sampling by `tooling/jpegli-oracle`, whose decoder (plus
   lcms2) reproduces sRGB from gamut's XYB streams; grayscale and caller ICC profiles rejected;
   backends vetoed; progressive/restarts/optimized-tables/custom-tables/RD compose.
@@ -95,7 +99,8 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   lcms2 pipeline. It applies RGB-data profiles only: a GRAY profile on a grayscale stream and a
   CMYK one on a four-component stream are typed `Unsupported`, not yet wired.
 - Opt-in mozjpeg progressive scan script (P15, issue #1021):
-  `with_progressive_script(ProgressiveScript::Mozjpeg)` beside the frozen libjpeg default; see
+  `with_process(Process::Progressive(ProgressiveScript::Mozjpeg))` beside the frozen libjpeg
+  default; see
   *Progressive scan script (mozjpeg, opt-in)* below.
 - Rate–distortion optimized coefficient selection (P12, issue #333): `with_rd_optimization` —
   per-block AC trellis over the exact §F.1.2.2 run/size cost of the typical Annex K.5/K.6 tables
@@ -119,8 +124,21 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   the XYB stream is unchanged (X and Y share destination 0), and other modes ignore it.
   Custom tables pin the encode to the built-in path (a `JpegEncodeRequest` cannot carry them, so
   backends are not consulted — the host-side-veto convention).
-- Opt-in optimized baseline Huffman tables (P10, issue #331): `JpegEncoder::with_optimized_tables`,
-  the Annex K.2 construction the progressive encoder already uses, reached from the sequential path.
+- Opt-in optimized baseline Huffman tables (P10, issue #331): `Process::Optimized`, the Annex K.2
+  construction the progressive encoder already uses, reached from the sequential path. One
+  `JpegEncoder::with_process(Process)` knob selects baseline, optimized baseline or progressive
+  (with its scan script), replacing three bool-and-enum setters (issue #1083).
+- Lossless process (P18, issue #1083): the `lossless` module, T.81 Annex H (SOF3), moved here from
+  `gamut-dng`, whose `Compression = 7` it codes. Decode covers the full process-14 reader envelope
+  (predictors 1–7, point transform, per-component tables, restarts) over 2- to 16-bit samples;
+  encode writes predictor 1 with one Annex K.2 table fitted per call. The encoder shares the DCT
+  path's magnitude category and additional bits, entropy-coded-segment writer, marker writers and
+  DHT emission, and the decoder its `EXTEND`; the decoder keeps its own marker walk, bit reader
+  and decode table, because the DCT decoder's reject an over-subscribed `BITS` list and stray
+  bytes between segments that this reader accepts. The encoder's output was pinned byte-for-byte
+  (length + digest over six shapes) before the move, and the Adobe DNG SDK differential suite came
+  with it. It is not a `JpegDecoder` path: its samples are not the 8-bit pixels the DCT decoder
+  presents.
 
 **Deferred / out of scope** (documented, with reasons):
 
@@ -139,8 +157,9 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   additive later if demand appears.
 - **Arithmetic coding (SOF9/SOF10, DAC).** Patent-era, near-absent in the wild; Huffman covers all
   practical JPEG-1. Not planned.
-- **Lossless process (SOF3).** The predictive lossless mode is unrelated to the DCT pipeline;
-  `gamut-dng` covers the only in-workspace consumer (lossless-JPEG inside DNG). Not planned here.
+- **Lossless process (SOF3) through `JpegDecoder` / `JpegEncoder`.** The lossless coder ships as
+  the separate `lossless` module (P18); `JpegInfo` / `JpegStreamInfo` still report an SOF3 frame
+  as `Unsupported`, and no backend is offered one. Not planned.
 - **Hierarchical mode (SOF5–7, DHP, EXP).** No real-world still-image corpus. Not planned.
 - **SPIFF and other T.84 extensions; T.872 printing conventions.** Niche container/printing layers
   atop the codec, tracked in `references/jpeg` but not implemented.
@@ -150,11 +169,11 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   separate mini-protocol with near-zero write-side demand — real packets are ~2 KB (the spec's own
   observation); additive later if demand appears.
 - **APP13 IPTC-IIM (Photoshop 3.0 PSIR).** The legacy IPTC carrier; modern IPTC rides inside XMP
-  (which `gamut-metadata` models as the single home). `JpegMetadata` is `#[non_exhaustive]` so the
-  carrier can be added without a breaking change.
+  (which `gamut-metadata` models as the single home). The shared `RawMetadata` has no IPTC-IIM
+  field; adding the carrier is an addition there.
 - **APP11 C2PA manifest-store carriage (C2PA 2.4 §A.3.1; epic #239, decided in #441).** Deferred
   for want of a normative source, in both directions: the encoder rejects a C2PA block as
-  `Unsupported`, and the reader does not locate APP11, so `JpegMetadata` never yields a
+  `Unsupported`, and the reader does not locate APP11, so `JpegDecoder::metadata` never yields a
   `MetadataBlock::C2pa`. §A.3.1 places the store in APP11 marker segments "as defined in JPEG XT,
   ISO/IEC 18477-3" and has multiple segments "constructed as per the JPEG 1 standard and ISO
   19566-5:2023, D.2". The vendored C2PA text fixes the `FFEB` marker, the `Lp` length inside the
@@ -209,10 +228,11 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   ignored. The dimension and byte caps derive an MCU-row ceiling before this dynamic decode,
   then the exact resolved height is checked when DNL arrives. The encoder never emits `Y = 0` (it
   always knows its height and writes it in SOF0).
-- **Resource-budget accounting.** `with_max_image_bytes` budgets the native 8-bit interleaved
+- **Resource-budget accounting.** `DecodeLimits::max_image_bytes` budgets the native 8-bit interleaved
   raster (`width × height × frame components`), independent of chroma subsampling or requested
   `Gray8`/`Rgb8`/`Cmyk8` presentation. The default budget is 64 MiB (issue #1024, matching
-  `gamut-png`); a trusted image beyond it needs `with_max_image_bytes(usize::MAX)`. SOF limits
+  `gamut-png`); a trusted image beyond it needs `with_max_image_bytes(usize::MAX)` on the
+  `DecodeLimits` handed to `with_limits`. SOF limits
   run before built-in frame-sized allocation or backend selection; accepted backend output is
   checked again, although the host cannot cap memory internal to an accepted foreign backend.
 - **Progressive + `Y = 0` (deferred height) is rejected as `Unsupported`.** The progressive
@@ -243,7 +263,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **Trailing bytes after EOI** are ignored (the libjpeg convention).
 - **CMYK is presented verbatim** (no Adobe inversion); **YCCK** applies the inverse YCbCr transform to
   the first three channels with `K` passed through (Adobe TN #5116).
-- **`metadata()` stops at the first SOS** (or EOI). The APP1/APP2 metadata conventions place their
+- **`JpegDecoder::metadata` stops at the first SOS** (or EOI). The APP1/APP2 metadata conventions place their
   segments before the scan data (XMP Part 3 §1.1.3 requires placement before the first SOF, with
   reader tolerance up to SOS), so no entropy decoding ever runs; segments after the scan are
   unreachable by design.
@@ -260,7 +280,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 
 **Encoder-specific notes:**
 
-- **Progressive scan script (frozen).** The progressive encoder ([`JpegEncoder::with_progressive`])
+- **Progressive scan script (frozen).** The progressive encoder (`Process::Progressive`)
   emits libjpeg's `jpeg_simple_progression` script verbatim (transcribed from libjpeg-turbo's
   `jcparam.c`), SemVer-frozen: **grayscale** is 6 scans — DC `Al=1`; luma AC `1–5` `Al=2`; luma AC
   `6–63` `Al=2`; AC refine `Ah=2 Al=1`; DC refine `Ah=1 Al=0`; AC refine `Ah=1 Al=0` — and **YCbCr**
@@ -275,7 +295,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   **opt-in** beside this frozen script (P15 below), not a replacement. jpegli's default script
   loses on small colour images, because each of its 13–15 scans carries its own optimized table
   here.
-- **Progressive scan script (mozjpeg, opt-in).** `with_progressive_script(ProgressiveScript::Mozjpeg)`
+- **Progressive scan script (mozjpeg, opt-in).** `Process::Progressive(ProgressiveScript::Mozjpeg)`
   emits mozjpeg 4.1.5's `jpeg_simple_progression` under `JCP_MAX_COMPRESSION` with
   `dc_scan_opt_mode = 0`, transcribed from its `jcparam.c` (cited, with its file hash, in
   `references/jpeg/README.md`). mozjpeg chooses between two scripts and so does gamut: **YCbCr**
@@ -286,8 +306,8 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   AC refine `Ah=1 Al=0` (5 scans for grayscale, 13 for XYB, which is not YCbCr). The frozen libjpeg
   script, by contrast, keys on the component count alone and gives XYB its YCbCr layout; that is
   unchanged. Not shipped: mozjpeg's `optimize_scans` search, of which this fixed script is the
-  starting point, and the other `dc_scan_opt_mode` values. While set, backends are vetoed (a
-  `JpegEncodeRequest` cannot carry the script), even for a baseline stream.
+  starting point, and the other `dc_scan_opt_mode` values. While set, backends are vetoed: a
+  `JpegEncodeRequest` offered to a backend only ever carries the frozen script.
 - **Optimized per-scan Huffman tables (Annex K.2).** The standard Annex K AC tables cannot code a
   progressive AC scan (the `EOBn` run/size bytes are absent), so — like libjpeg, which forces
   `optimize_coding` for progressive — each scan builds its own table(s) from its symbol frequencies
@@ -296,7 +316,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   free choice; a DC-refinement scan carries no table); this changes only compression density, never
   the decoded coefficients, which are identical to the baseline encoding of the same input.
   **Baseline** takes the same construction only when asked
-  ([`JpegEncoder::with_optimized_tables`], P10) — its default output stays the Annex K.3–K.6 typical
+  (`Process::Optimized`, P10) — its default output stays the Annex K.3–K.6 typical
   tables, byte-identical to before. Unlike progressive it keeps the two luma/chroma destinations the
   SOS already references, so up to four tables are built and emitted in the one DHT segment the
   fixed path writes; a destination the scan never used (chroma in a grayscale frame) is omitted
@@ -324,7 +344,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P5 | T.81 §G, §K.2 | Progressive SOF2 **encode**: `JpegEncoder::with_progressive(bool)` — the frozen `jpeg_simple_progression` scan script (6-scan gray / 10-scan YCbCr), coefficients materialized once via the shared gather→FDCT→quantize path, two-pass optimized per-scan Huffman tables (Annex K.2, all-ones-reserved, 16-bit length-limited), DC/AC first-pass + successive-approximation refinement with EOBRUN accumulation and the §G.1.2.3 deferred correction-bit protocol, restarts | ✅ done |
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14 (landed with P2), CLI `gamut convert → .jpg` (`--quality`/`--jpeg-subsampling`/`--jpeg-restart-interval`/`--jpeg-progressive`), umbrella `jpeg` feature audit, facade mutants scoping, full-workspace gate re-run | ✅ done |
 | P7 | Exif 3.0 §4.7.2; XMP Part 3 §1.1.3; ICC.1:2001-04 Annex B.4 | APP-segment metadata (rawshift requirements, issue #28 follow-up): `metadata()` header-only read of APP1 EXIF/XMP and index-reassembled multi-segment APP2 ICC; `with_exif`/`with_xmp`/`with_icc_profile` encoder builders with pre-write size validation; bidirectional libjpeg-turbo interop (`jpeg_read_icc_profile`/`jpeg_write_icc_profile`/marker capture) and a dev-only `gamut-metadata` `MetadataBlock` round-trip; `decode_image_into` destination reuse | ✅ done |
-| P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegStreamDecoder`/`JpegStreamEncoder` traits over the **whole SOI..EOI interchange stream**, `push_backend` push-order registries (`Arc<Mutex<..>>`, so `Clone` shares backends), the `backend_declined` late-decline sentinel, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
+| P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegCodestreamDecoder`/`JpegCodestreamEncoder` traits over the **whole SOI..EOI interchange stream**, `push_backend` push-order registries (`Arc<Mutex<..>>`, so `Clone` shares backends), the `backend_declined` late-decline sentinel, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
 | P9 | issue #306, #1024 | **Decoder resource limits:** dimension and native-raster byte builders over bounded defaults (65535 × 65535, 64 MiB); checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
 | P10 | T.81 §K.2; issue #331 | **Optimized baseline Huffman tables:** `JpegEncoder::with_optimized_tables(bool)` — the baseline scan is walked twice through one shared coder (`BaselineCoder::gather`/`::emit`), per-destination symbol histograms drive the §K.2 construction, and the resulting luma/chroma DC+AC tables replace the Annex K.3–K.6 typical ones in the same single DHT segment. Default off, so every previously-encodable configuration stays byte-identical | ✅ done |
 | P11 | T.81 §A.3.4, §B.2.4.1; issue #332 | **Caller-supplied quantization tables:** the public `QuantTables` pair — natural order, every entry `1..=255` **by construction** (`new` rejects zero, so the encoder never divides by zero and never emits a DQT its own decoder refuses) — used verbatim via `JpegEncoder::with_quant_tables`, with `annex_k()`/`scaled()` recovering the frozen IJG mapping over arbitrary bases. Quality becomes inert while set; the frozen quality contract still governs the default path; backends are vetoed (a `JpegEncodeRequest` cannot carry tables). Alternate built-in base tables deferred (citation obligation) | ✅ done |
@@ -334,3 +354,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P15 | T.81 §G; mozjpeg 4.1.5 `jcparam.c`; issue #1021 | **Opt-in mozjpeg progressive scan script:** the fieldless `ProgressiveScript` selector (`Libjpeg = 0` frozen default, `Mozjpeg = 1`) via `JpegEncoder::with_progressive_script` — mozjpeg's `JCP_MAX_COMPRESSION` script with `dc_scan_opt_mode = 0`, its YCbCr/all-purpose choice transcribed (9-scan YCbCr, 5-scan grey, 13-scan XYB). Walker-pinned scan lists, gamut-decoder and libjpeg-turbo `decode(progressive) == decode(baseline)` exactness, backends vetoed; default byte-identical | ✅ done |
 | P16 | T.81 §A.2 NOTE; libjpeg-turbo `jdsample.c`; issue #1016 | **Reference chroma upsampling:** the built-in decoder's default `ChromaUpsampling::Interpolated` is libjpeg-turbo's fancy upsampling (h2v1/h1v2/h2v2 triangle filters with the alternating rounding bias and the narrow-component replication fallback, from `gamut_dsp::upsample::libjpeg`); `with_chroma_upsampling(ChromaUpsampling::Nearest)` keeps replication. Oracle: byte-identical to libjpeg-turbo's default decode at 4:2:2/4:2:0/4:4:0 and to `djpeg -nosmooth` under `Nearest` (`tests/oracle.rs`) | ✅ done |
 | P17 | libjxl v0.11.2 `lib/jpegli/encode.cc` (`jpegli_set_colorspace`), `lib/extras/enc/jpegli.cc`; issue #1015 | **XYB parity with jpegli:** `with_subsampling` in XYB mode subsamples the stored B−Y plane alone (X/Y carry the ratio as sampling factors, B stays 1×1), so the default 4:2:0 is jpegli's X 2×2 / Y 2×2 / B 1×1 (a released-behaviour change: XYB output was 4:4:4-only); `JpegDecoder::decode_srgb` behind the opt-in `cmm` feature (embedded RGB profile → gamut-icc's built-in sRGB through gamut-cmm, relative colorimetric, no BPC; profile-less streams pass through). Oracle: `tooling/jpegli-oracle` (jpegli from libjxl v0.11.2 via `jpegxl-src` 0.11.4 — 0.12 no longer carries jpegli — encoding the way `cjpegli --xyb` does, libjxl's own XYB profile included); gamut XYB → jpegli + lcms2 and → `decode_srgb` both reproduce the source and each other, and `decode_srgb` reads jpegli's XYB streams. Kodak SSIMULACRA2/size measurements recorded on the delivering pull request (linked from #1015) | ✅ done |
+| P18 | T.81 Annex H; issue #1083 (pre-freeze, D11/D3/D7/D8/D10/D21) | **Workspace vocabulary and lossless JPEG:** `gamut_color::ChromaSubsampling` (`Cs440` included) replaces the crate's own enum, `with_process(Process)` replaces three setters, `with_limits(DecodeLimits)` the two limit setters, `JpegDecoder::info` / `metadata` (returning `RawMetadata`) the free functions and `JpegMetadata`, `with_convert_policy` / `with_backend` the bare and `&mut` setters; the backend seam runs on `gamut-codec-abi`'s `Registry` with `supports()` as the only fall-through (the late-decline sentinel is gone), behind `JpegCodestreamDecoder` / `JpegCodestreamEncoder` and the `AbiJpegDecoder` / `AbiJpegEncoder` adapters, all at the crate root; `JpegEncoder` is a `MetadataSink`; `JpegInfo::height` / `JpegStreamInfo::height` are `Option<u32>` (`None` = DNL-deferred). The `lossless` module (SOF3) moved in from `gamut-dng` on the shared entropy layer, output pinned byte-for-byte across the move and the Adobe DNG SDK differential suite with it | ✅ done |

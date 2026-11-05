@@ -9,7 +9,8 @@ use gamut_core::{
     DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, ImageBuf, ImageRef, Rgb8,
 };
 use gamut_jpeg::{
-    ChromaSubsampling, JpegColorMode, JpegEncoder, QuantTables, XYB_ICC_PROFILE, metadata,
+    ChromaSubsampling, JpegColorMode, JpegDecoder, JpegEncoder, Process, ProgressiveScript,
+    QuantTables, XYB_ICC_PROFILE,
 };
 
 /// A smooth RGB gradient (JPEG-friendly content, so tolerances reflect quantization).
@@ -125,7 +126,7 @@ fn xyb_stream_structure_is_the_jpegli_convention() {
     );
 
     // The embedded profile is byte-for-byte the vendored one, via the crate's own metadata reader.
-    let meta = metadata(&jpeg).unwrap();
+    let meta = JpegDecoder::new().metadata(&jpeg).unwrap();
     assert_eq!(meta.icc.as_deref(), Some(XYB_ICC_PROFILE));
 }
 
@@ -142,7 +143,11 @@ fn xyb_x_table_moves_x_alone_to_destination_2() {
         let jpeg = JpegEncoder::new()
             .with_color_mode(JpegColorMode::Xyb)
             .with_quant_tables(tables)
-            .with_progressive(progressive)
+            .with_process(if progressive {
+                Process::Progressive(ProgressiveScript::Libjpeg)
+            } else {
+                Process::Baseline
+            })
             .encode_to_vec(img)
             .unwrap();
         let segments = header_segments(&jpeg);
@@ -178,10 +183,10 @@ fn xyb_x_table_round_trips_through_libjpeg_and_through_gamut() {
     let base = QuantTables::annex_k();
     let tables = base.scaled(90).with_xyb_x(*base.scaled(60).luma()).unwrap();
     for (subsampling, progressive) in [
-        (ChromaSubsampling::Ycbcr444, false),
-        (ChromaSubsampling::Ycbcr444, true),
-        (ChromaSubsampling::Ycbcr420, false),
-        (ChromaSubsampling::Ycbcr420, true),
+        (ChromaSubsampling::Cs444, false),
+        (ChromaSubsampling::Cs444, true),
+        (ChromaSubsampling::Cs420, false),
+        (ChromaSubsampling::Cs420, true),
     ] {
         let (w, h) = (33u32, 31u32);
         let src = rgb_gradient(w, h);
@@ -190,7 +195,11 @@ fn xyb_x_table_round_trips_through_libjpeg_and_through_gamut() {
             .with_color_mode(JpegColorMode::Xyb)
             .with_subsampling(subsampling)
             .with_quant_tables(tables)
-            .with_progressive(progressive)
+            .with_process(if progressive {
+                Process::Progressive(ProgressiveScript::Libjpeg)
+            } else {
+                Process::Baseline
+            })
             .encode_to_vec(img)
             .unwrap();
         let reference = libjpeg_oracle::decode(&jpeg).expect("libjpeg-turbo decode");
@@ -256,7 +265,11 @@ fn xyb_round_trips_through_libjpeg_and_through_gamut() {
             .with_color_mode(JpegColorMode::Xyb)
             .with_subsampling(subsampling)
             .with_quality(90)
-            .with_progressive(progressive)
+            .with_process(if progressive {
+                Process::Progressive(ProgressiveScript::Libjpeg)
+            } else {
+                Process::Baseline
+            })
             .with_restart_interval(restart)
             .encode_to_vec(img)
             .unwrap();
@@ -324,7 +337,7 @@ fn xyb_mode_guards_reject_what_it_cannot_describe() {
         .with_exif(b"II*\x00\x08\x00\x00\x00\x00\x00")
         .encode_to_vec(rgb)
         .unwrap();
-    let meta = metadata(&jpeg).unwrap();
+    let meta = JpegDecoder::new().metadata(&jpeg).unwrap();
     assert!(meta.exif.is_some());
     assert_eq!(meta.icc.as_deref(), Some(XYB_ICC_PROFILE));
 }
@@ -358,7 +371,11 @@ fn gamut_xyb(
         .with_color_mode(JpegColorMode::Xyb)
         .with_quality(90)
         .with_subsampling(subsampling)
-        .with_progressive(progressive)
+        .with_process(if progressive {
+            Process::Progressive(ProgressiveScript::Libjpeg)
+        } else {
+            Process::Baseline
+        })
         .with_restart_interval(restart)
         .encode_to_vec(img)
         .unwrap()
@@ -369,7 +386,7 @@ fn gamut_xyb(
 fn xyb_battery() -> Vec<(u32, u32, ChromaSubsampling, bool, u16)> {
     let mut cells = Vec::new();
     for &(w, h) in &[(16u32, 16u32), (33, 31), (64, 48)] {
-        for subsampling in [ChromaSubsampling::Ycbcr420, ChromaSubsampling::Ycbcr444] {
+        for subsampling in [ChromaSubsampling::Cs420, ChromaSubsampling::Cs444] {
             for (progressive, restart) in [(false, 0u16), (true, 0), (false, 2)] {
                 cells.push((w, h, subsampling, progressive, restart));
             }
@@ -424,9 +441,9 @@ fn xyb_subsampling_ratio_moves_b_alone() {
     // Each ratio becomes X's and Y's sampling factors with B at 1×1, so only B loses resolution.
     let src = rgb_gradient(24, 17);
     for (subsampling, expected) in [
-        (ChromaSubsampling::Ycbcr444, [0x11, 0x11, 0x11]),
-        (ChromaSubsampling::Ycbcr422, [0x21, 0x21, 0x11]),
-        (ChromaSubsampling::Ycbcr420, [0x22, 0x22, 0x11]),
+        (ChromaSubsampling::Cs444, [0x11, 0x11, 0x11]),
+        (ChromaSubsampling::Cs422, [0x21, 0x21, 0x11]),
+        (ChromaSubsampling::Cs420, [0x22, 0x22, 0x11]),
     ] {
         for progressive in [false, true] {
             let jpeg = gamut_xyb(&src, 24, 17, subsampling, progressive, 0);
@@ -506,7 +523,7 @@ fn decode_srgb_agrees_with_jpegli_on_jpeglis_xyb_streams() {
         ] {
             let jpeg = jpegli_xyb(&src, w, h, sampling);
             assert_eq!(
-                metadata(&jpeg).unwrap().icc,
+                JpegDecoder::new().metadata(&jpeg).unwrap().icc,
                 Some(jpegli_oracle::xyb_icc_profile()),
                 "the stream carries libjxl's profile, not gamut's"
             );

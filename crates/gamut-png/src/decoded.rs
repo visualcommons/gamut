@@ -280,7 +280,7 @@ pub struct DecodedPng {
 /// [`DecodedPng`] exposes alongside its pixels, so the two entry points agree field for field on
 /// the same file.
 ///
-/// Unlike `gamut_jpeg::JpegMetadata` and `gamut_webp::WebpMetadata`, which carry only
+/// Unlike `gamut_jpeg`'s `RawMetadata` read-out and `gamut_webp::WebpMetadata`, which carry only
 /// EXIF/XMP/ICC, this also surfaces PNG's parsed colour chunks — `cICP`, `sRGB`, `gAMA`, `cHRM` —
 /// because those are uncompressed and answer "what colour space is this?" on their own, the
 /// C2PA manifest store (`caBX`), raw, and the remaining fixed-layout chunks a re-encode has to

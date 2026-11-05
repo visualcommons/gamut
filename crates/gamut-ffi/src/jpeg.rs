@@ -25,7 +25,9 @@ seam_handle! {
     host = gamut::jpeg::JpegDecoder,
     new = gamut::jpeg::JpegDecoder::new(),
     seam = decoder,
-    push = |host, backend| { host.push_backend(gamut::jpeg::AbiStreamDecoder::new(backend)); },
+    push = |host, backend| {
+        *host = core::mem::take(host).with_backend(gamut::jpeg::AbiJpegDecoder::new(backend));
+    },
     fns = (gamut_jpeg_decoder_new, gamut_jpeg_decoder_free, gamut_jpeg_decoder_push_backend),
     tests = jpeg_decoder_tests,
 }
@@ -35,7 +37,9 @@ seam_handle! {
     host = gamut::jpeg::JpegEncoder,
     new = gamut::jpeg::JpegEncoder::new(),
     seam = encoder,
-    push = |host, backend| { host.push_backend(gamut::jpeg::AbiStreamEncoder::new(backend)); },
+    push = |host, backend| {
+        *host = core::mem::take(host).with_backend(gamut::jpeg::AbiJpegEncoder::new(backend));
+    },
     fns = (gamut_jpeg_encoder_new, gamut_jpeg_encoder_free, gamut_jpeg_encoder_push_backend),
     tests = jpeg_encoder_tests,
 }

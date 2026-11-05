@@ -14,7 +14,7 @@
 //!
 //! [`metadata`] walks the chunk stream and returns a [`PngMetadata`] — the EXIF/ICC/XMP/text
 //! payloads plus the parsed colour chunks (`cICP`, `sRGB`, `gAMA`, `cHRM`) — skipping IDAT by
-//! length, so no pixel data is read or inflated. It is the counterpart of `gamut_jpeg::metadata`
+//! length, so no pixel data is read or inflated. It is the counterpart of `gamut_jpeg::JpegDecoder::metadata`
 //! and `gamut_webp::metadata`, and what a colour-space probe should call.
 //! [`PngDecoder::metadata`] is the same walk with a configurable inflation budget.
 //!

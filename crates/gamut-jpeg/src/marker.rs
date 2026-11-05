@@ -88,25 +88,18 @@ pub fn write_segment_header(out: &mut Vec<u8>, code: u8, len: usize) {
 }
 
 /// The physical-density unit of the JFIF APP0 segment (T.871 §10.1, `units` field).
+///
+/// `#[repr(u8)]` with each discriminant the `units` code T.871 assigns, so the value written is
+/// the discriminant itself. Not `#[non_exhaustive]`: T.871 §10.1 defines exactly these three codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DensityUnit {
     /// `units = 0`: no absolute unit; the densities express only the pixel aspect ratio.
-    AspectRatio,
+    AspectRatio = 0,
     /// `units = 1`: dots per inch.
-    Dpi,
+    Dpi = 1,
     /// `units = 2`: dots per centimetre.
-    Dpcm,
-}
-
-impl DensityUnit {
-    /// The `units` byte value written to the APP0 segment.
-    fn code(self) -> u8 {
-        match self {
-            DensityUnit::AspectRatio => 0,
-            DensityUnit::Dpi => 1,
-            DensityUnit::Dpcm => 2,
-        }
-    }
+    Dpcm = 2,
 }
 
 /// Appends the JFIF APP0 marker segment (T.871 §10.1), no thumbnail (`Lp = 16`). Version is 1.02
@@ -118,7 +111,7 @@ pub fn write_app0_jfif(out: &mut Vec<u8>, unit: DensityUnit, x_density: u16, y_d
     write_segment_header(out, code::APP0, 16);
     out.extend_from_slice(b"JFIF\0"); // identifier, zero-terminated (T.50/ISO 646)
     out.extend_from_slice(&[0x01, 0x02]); // version 1.02
-    out.push(unit.code());
+    out.push(unit as u8);
     out.extend_from_slice(&x_density.to_be_bytes());
     out.extend_from_slice(&y_density.to_be_bytes());
     out.push(0); // thumbnail width = 0

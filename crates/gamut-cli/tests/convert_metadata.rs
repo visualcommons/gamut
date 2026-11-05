@@ -559,7 +559,9 @@ fn a_jpeg_output_carries_exif_xmp_and_icc() {
 
     let (jpeg, _) = convert_to("webp-jpeg", &webp, "jpg", &[]);
 
-    let meta = gamut::jpeg::metadata(&jpeg).expect("read back");
+    let meta = gamut::jpeg::JpegDecoder::new()
+        .metadata(&jpeg)
+        .expect("read back");
     assert_eq!(meta.xmp.as_deref(), Some(XMP));
     assert_eq!(meta.icc, Some(rgb_icc()));
     assert_eq!(parse_exif(meta.exif.as_deref()).make(), Some("gamut"));

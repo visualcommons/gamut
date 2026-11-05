@@ -2,7 +2,7 @@
 //! frame headers rejected before a frame-sized allocation is possible.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_jpeg::{JpegDecoder, JpegEncoder};
+use gamut_jpeg::{DecodeLimits, JpegDecoder, JpegEncoder};
 
 fn gray_jpeg(width: u32, height: u32) -> Vec<u8> {
     let pixels = vec![127; (width * height) as usize];
@@ -34,17 +34,25 @@ fn gray_error(decoder: &JpegDecoder, jpeg: &[u8]) -> String {
 fn dimension_limits_are_exact_and_independent() {
     let jpeg = gray_jpeg(17, 13);
     let exact: ImageBuf<Gray8> = JpegDecoder::new()
-        .with_max_dimensions(17, 13)
+        .with_limits(DecodeLimits::new().with_max_width(17).with_max_height(13))
         .decode_image(&jpeg)
         .unwrap();
     assert_eq!(exact.dimensions(), Dimensions::new(17, 13).unwrap());
 
     assert_eq!(
-        gray_error(&JpegDecoder::new().with_max_dimensions(16, 13), &jpeg),
+        gray_error(
+            &JpegDecoder::new()
+                .with_limits(DecodeLimits::new().with_max_width(16).with_max_height(13)),
+            &jpeg
+        ),
         "JPEG: image exceeds the dimension limit"
     );
     assert_eq!(
-        gray_error(&JpegDecoder::new().with_max_dimensions(17, 12), &jpeg),
+        gray_error(
+            &JpegDecoder::new()
+                .with_limits(DecodeLimits::new().with_max_width(17).with_max_height(12)),
+            &jpeg
+        ),
         "JPEG: image exceeds the dimension limit"
     );
 }
@@ -53,11 +61,17 @@ fn dimension_limits_are_exact_and_independent() {
 fn byte_limit_uses_the_frame_component_count_at_an_exact_boundary() {
     let gray = gray_jpeg(8, 8);
     assert!(
-        DecodeImage::<Gray8>::decode_image(&JpegDecoder::new().with_max_image_bytes(8 * 8), &gray)
-            .is_ok()
+        DecodeImage::<Gray8>::decode_image(
+            &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 8)),
+            &gray
+        )
+        .is_ok()
     );
     assert_eq!(
-        gray_error(&JpegDecoder::new().with_max_image_bytes(8 * 8 - 1), &gray),
+        gray_error(
+            &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 8 - 1)),
+            &gray
+        ),
         "JPEG: image exceeds the size limit"
     );
 
@@ -65,14 +79,15 @@ fn byte_limit_uses_the_frame_component_count_at_an_exact_boundary() {
     let rgb = rgb_jpeg(8, 8);
     assert!(
         DecodeImage::<Rgb8>::decode_image(
-            &JpegDecoder::new().with_max_image_bytes(8 * 8 * 3),
+            &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 8 * 3)),
             &rgb
         )
         .is_ok()
     );
     assert_eq!(
         DecodeImage::<Rgb8>::decode_image(
-            &JpegDecoder::new().with_max_image_bytes(8 * 8 * 3 - 1),
+            &JpegDecoder::new()
+                .with_limits(DecodeLimits::new().with_max_image_bytes(8 * 8 * 3 - 1)),
             &rgb
         )
         .unwrap_err()
@@ -94,11 +109,21 @@ fn synthetic_pathological_sof_is_rejected_by_the_cap_first() {
         0xFF, 0xD9, // EOI
     ];
     assert_eq!(
-        gray_error(&JpegDecoder::new().with_max_dimensions(4096, 4096), &jpeg),
+        gray_error(
+            &JpegDecoder::new().with_limits(
+                DecodeLimits::new()
+                    .with_max_width(4096)
+                    .with_max_height(4096)
+            ),
+            &jpeg
+        ),
         "JPEG: image exceeds the dimension limit"
     );
     assert_eq!(
-        gray_error(&JpegDecoder::new().with_max_image_bytes(64 << 20), &jpeg),
+        gray_error(
+            &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(64 << 20)),
+            &jpeg
+        ),
         "JPEG: image exceeds the size limit"
     );
 }
@@ -131,7 +156,9 @@ fn default_budget_refuses_the_pathological_sof_and_usize_max_lifts_it() {
     );
     // Lifting the budget gets past the limit check, so the stream fails later for its missing scan.
     assert_ne!(
-        rgb_error(&JpegDecoder::new().with_max_image_bytes(usize::MAX)),
+        rgb_error(
+            &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(usize::MAX))
+        ),
         "JPEG: image exceeds the size limit"
     );
 }
@@ -165,7 +192,9 @@ fn limits_are_cloneable_and_defaults_admit_ordinary_images() {
     let default: ImageBuf<Gray8> = JpegDecoder::default().decode_image(&jpeg).unwrap();
     assert_eq!(default.dimensions(), Dimensions::new(8, 8).unwrap());
 
-    let limited = JpegDecoder::new().with_max_dimensions(7, 8).clone();
+    let limited = JpegDecoder::new()
+        .with_limits(DecodeLimits::new().with_max_width(7).with_max_height(8))
+        .clone();
     assert_eq!(
         gray_error(&limited, &jpeg),
         "JPEG: image exceeds the dimension limit"

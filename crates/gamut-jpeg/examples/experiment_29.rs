@@ -52,7 +52,7 @@ use gamut_color::transfer::srgb_oetf;
 use gamut_color::xyb::{unscale_xyb, xyb_to_linear_srgb};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_jpeg::{
-    CHROMINANCE, ChromaSubsampling, JpegColorMode, JpegEncoder, LUMINANCE, QuantTables,
+    CHROMINANCE, ChromaSubsampling, JpegColorMode, JpegEncoder, LUMINANCE, Process, QuantTables,
     RdOptimization,
 };
 
@@ -151,7 +151,7 @@ fn variants() -> Vec<Variant> {
         rd,
         tables,
     };
-    let (s420, s444) = (ChromaSubsampling::Ycbcr420, ChromaSubsampling::Ycbcr444);
+    let (s420, s444) = (ChromaSubsampling::Cs420, ChromaSubsampling::Cs444);
     let (none, trellis) = (RdOptimization::None, RdOptimization::Trellis);
     let custom = |l, c| Tables::Custom(l, c);
     let [csf32, csf64] = PIXELS_PER_DEGREE.map(csf_luma);
@@ -230,7 +230,7 @@ fn encode(variant: &Variant, quality: u8, rgb: &[u8], w: u32, h: u32) -> Vec<u8>
     let dims = Dimensions::new(w, h).expect("dimensions");
     let image = ImageRef::<Rgb8>::new(rgb, dims).expect("image");
     let mut enc = JpegEncoder::new()
-        .with_optimized_tables(true)
+        .with_process(Process::Optimized)
         .with_subsampling(variant.subsampling)
         .with_rd_optimization(variant.rd);
     if variant.xyb {

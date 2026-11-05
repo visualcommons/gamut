@@ -4,7 +4,14 @@
 //! embedding (round-trips, chunk framing at the 65519-byte boundaries, size caps, segment order).
 
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Rgb8};
-use gamut_jpeg::{JpegEncoder, JpegMetadata, metadata};
+use gamut_jpeg::{
+    JpegDecoder, JpegEncoder, Process, ProgressiveScript, RawMetadata as JpegMetadata,
+};
+
+/// The APP-segment payloads [`JpegDecoder::metadata`] reads from `data`.
+fn metadata(data: &[u8]) -> gamut_core::Result<JpegMetadata> {
+    JpegDecoder::new().metadata(data)
+}
 
 /// Encodes a minimal valid grayscale JPEG to splice APP segments into.
 fn base_jpeg() -> Vec<u8> {
@@ -244,7 +251,7 @@ fn progressive_streams_carry_the_same_metadata() {
     let pixels = vec![10u8; 64];
     let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
     let jpeg = JpegEncoder::new()
-        .with_progressive(true)
+        .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
         .with_exif(&tiff)
         .with_icc_profile(&icc)
         .encode_to_vec(image)

@@ -4,7 +4,7 @@
 //! marker serialization and entropy framing against mutation.
 
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8};
-use gamut_jpeg::{ChromaSubsampling, JpegEncoder};
+use gamut_jpeg::{ChromaSubsampling, JpegEncoder, Process};
 
 /// A parsed baseline JPEG: the header marker segments (in order), the SOF0/SOS fields, and the
 /// entropy region (raw bytes between the SOS header and EOI, plus the restart-marker sequence).
@@ -219,7 +219,7 @@ fn optimized_tables_replace_the_standard_dht_without_touching_the_layout() {
         .unwrap();
     let optimized = JpegEncoder::new()
         .with_quality(80)
-        .with_optimized_tables(true)
+        .with_process(Process::Optimized)
         .encode_to_vec(img)
         .unwrap();
     let (pf, po) = (parse(&fixed), parse(&optimized));
@@ -268,7 +268,7 @@ fn optimized_grayscale_emits_only_the_two_luma_tables() {
     let gray: Vec<u8> = (0..32 * 32).map(|i| ((i * 37 + 5) % 256) as u8).collect();
     let img = ImageRef::<Gray8>::new(&gray, Dimensions::new(32, 32).unwrap()).unwrap();
     let jpeg = JpegEncoder::new()
-        .with_optimized_tables(true)
+        .with_process(Process::Optimized)
         .encode_to_vec(img)
         .unwrap();
     let tables = dht_tables(parse(&jpeg).segment(m::DHT).unwrap());
@@ -287,7 +287,7 @@ fn optimized_tables_survive_restart_intervals_and_flat_content() {
         let rgb = vec![97u8; 40 * 24 * 3];
         let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(40, 24).unwrap()).unwrap();
         let jpeg = JpegEncoder::new()
-            .with_optimized_tables(true)
+            .with_process(Process::Optimized)
             .with_restart_interval(restart)
             .encode_to_vec(img)
             .unwrap();
@@ -303,10 +303,10 @@ fn optimized_tables_survive_restart_intervals_and_flat_content() {
 /// The luma `(Hmax, Vmax)` sampling of a subsampling mode — the MCU is `8·Hmax × 8·Vmax` pixels.
 fn luma_max(s: ChromaSubsampling) -> (u32, u32) {
     match s {
-        ChromaSubsampling::Ycbcr444 => (1, 1),
-        ChromaSubsampling::Ycbcr422 => (2, 1),
-        ChromaSubsampling::Ycbcr420 => (2, 2),
-        ChromaSubsampling::Ycbcr440 => (1, 2),
+        ChromaSubsampling::Cs444 => (1, 1),
+        ChromaSubsampling::Cs422 => (2, 1),
+        ChromaSubsampling::Cs420 => (2, 2),
+        ChromaSubsampling::Cs440 => (1, 2),
         _ => unreachable!(),
     }
 }
@@ -315,10 +315,10 @@ fn luma_max(s: ChromaSubsampling) -> (u32, u32) {
 fn dimension_and_subsampling_battery() {
     let dims = [(1, 1), (7, 7), (8, 8), (9, 9), (16, 16), (17, 9), (64, 48)];
     let subs = [
-        ChromaSubsampling::Ycbcr444,
-        ChromaSubsampling::Ycbcr422,
-        ChromaSubsampling::Ycbcr420,
-        ChromaSubsampling::Ycbcr440,
+        ChromaSubsampling::Cs444,
+        ChromaSubsampling::Cs422,
+        ChromaSubsampling::Cs420,
+        ChromaSubsampling::Cs440,
     ];
     for &(w, h) in &dims {
         for &restart in &[0u16, 1, 3] {

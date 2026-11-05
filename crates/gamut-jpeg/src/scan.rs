@@ -810,13 +810,14 @@ fn validate_progression(scan: &ScanHeader, comps: &mut [ProgComp]) -> Result<()>
 }
 
 /// A resolved scan component for the progressive entropy loop: its frame index, sampling factors,
-/// and whichever entropy table the scan's band requires (DC for `Ss = 0`, AC otherwise).
+/// and the one entropy table the scan's band codes with — its DC table for a DC band (`Ss = 0`),
+/// its AC table otherwise (§G.1.2). A band never needs both, so the table is resolved once, when
+/// the scan is set up, and the loop has no absent table to handle.
 struct ProgSc<'a> {
     frame_index: usize,
     h: usize,
     v: usize,
-    dc: Option<&'a DecTable>,
-    ac: Option<&'a DecTable>,
+    table: &'a DecTable,
 }
 
 /// Decodes one progressive scan's entropy data starting at byte `start`, accumulating coefficients
@@ -868,26 +869,20 @@ pub fn decode_progressive_scan(
     let mut scs: Vec<ProgSc> = Vec::with_capacity(scan.components.len());
     for sc in &scan.components {
         let fc = &frame.components[sc.frame_index];
-        let dc = if ss == 0 {
-            Some(tables.dc[usize::from(sc.td)].as_ref().ok_or_else(|| {
+        let table = if ss == 0 {
+            tables.dc[usize::from(sc.td)].as_ref().ok_or_else(|| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: scan uses undefined DC table")
-            })?)
+            })?
         } else {
-            None
-        };
-        let ac = if ss == 0 {
-            None
-        } else {
-            Some(tables.ac[usize::from(sc.ta)].as_ref().ok_or_else(|| {
+            tables.ac[usize::from(sc.ta)].as_ref().ok_or_else(|| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: scan uses undefined AC table")
-            })?)
+            })?
         };
         scs.push(ProgSc {
             frame_index: sc.frame_index,
             h: usize::from(fc.h),
             v: usize::from(fc.v),
-            dc,
-            ac,
+            table,
         });
     }
 
@@ -936,7 +931,7 @@ pub fn decode_progressive_scan(
                             // the entropy stream and DC predictor in sync) but not stored (§A.2.2).
                             let real = bcol < c.bw && brow < c.bh;
                             if ah == 0 {
-                                let (t, diff) = decode_coded(sc.dc.unwrap(), &mut reader)?;
+                                let (t, diff) = decode_coded(sc.table, &mut reader)?;
                                 if t > 11 {
                                     return Err(Error::invalid_input(
                                         env!("CARGO_PKG_NAME"),
@@ -963,25 +958,9 @@ pub fn decode_progressive_scan(
                     let c = &mut comps[sc.frame_index];
                     let block = c.block_mut(mx, my);
                     if ah == 0 {
-                        decode_ac_first(
-                            &mut reader,
-                            block,
-                            ss,
-                            se,
-                            al,
-                            sc.ac.unwrap(),
-                            &mut eobrun,
-                        )?;
+                        decode_ac_first(&mut reader, block, ss, se, al, sc.table, &mut eobrun)?;
                     } else {
-                        decode_ac_refine(
-                            &mut reader,
-                            block,
-                            ss,
-                            se,
-                            al,
-                            sc.ac.unwrap(),
-                            &mut eobrun,
-                        )?;
+                        decode_ac_refine(&mut reader, block, ss, se, al, sc.table, &mut eobrun)?;
                     }
                 }
             }

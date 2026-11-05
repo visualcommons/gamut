@@ -12,7 +12,7 @@ use gamut::color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
 use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut::exif::{Exif, ExifTag, ExifWriter, IfdKind, Value as ExifValue};
 use gamut::icc::{ColorSpace as IccColorSpace, ProfileHeader};
-use gamut::jpeg::{ChromaSubsampling as JpegChroma, JpegEncoder};
+use gamut::jpeg::{ChromaSubsampling as JpegChroma, JpegEncoder, Process, ProgressiveScript};
 use gamut::jxl::{
     ColorSpec as JxlColorSpec, Container as JxlContainer, Distance as JxlDistance,
     Effort as JxlEffort, JxlEncoder, ModularMode as JxlModularMode, Orientation as JxlOrientation,
@@ -326,10 +326,10 @@ impl JpegSubsampling {
     /// Maps the CLI choice onto the codec's [`JpegChroma`] enum.
     fn to_codec(self) -> JpegChroma {
         match self {
-            JpegSubsampling::S444 => JpegChroma::Ycbcr444,
-            JpegSubsampling::S422 => JpegChroma::Ycbcr422,
-            JpegSubsampling::S420 => JpegChroma::Ycbcr420,
-            JpegSubsampling::S440 => JpegChroma::Ycbcr440,
+            JpegSubsampling::S444 => JpegChroma::Cs444,
+            JpegSubsampling::S422 => JpegChroma::Cs422,
+            JpegSubsampling::S420 => JpegChroma::Cs420,
+            JpegSubsampling::S440 => JpegChroma::Cs440,
         }
     }
 }
@@ -963,7 +963,11 @@ fn encode(
             let mut encoder = JpegEncoder::new()
                 .with_quality(args.quality)
                 .with_subsampling(args.jpeg_subsampling.to_codec())
-                .with_progressive(args.jpeg_progressive);
+                .with_process(if args.jpeg_progressive {
+                    Process::Progressive(ProgressiveScript::Libjpeg)
+                } else {
+                    Process::Baseline
+                });
             if args.jpeg_restart_interval != 0 {
                 encoder = encoder.with_restart_interval(args.jpeg_restart_interval);
             }
@@ -1682,10 +1686,10 @@ mod tests {
                 .map(|cli| cli.args.jpeg_subsampling.to_codec())
         };
         for (flag, chroma) in [
-            ("444", JpegChroma::Ycbcr444),
-            ("422", JpegChroma::Ycbcr422),
-            ("420", JpegChroma::Ycbcr420),
-            ("440", JpegChroma::Ycbcr440),
+            ("444", JpegChroma::Cs444),
+            ("422", JpegChroma::Cs422),
+            ("420", JpegChroma::Cs420),
+            ("440", JpegChroma::Cs440),
         ] {
             assert_eq!(
                 parse_jpeg(flag).ok(),

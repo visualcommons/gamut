@@ -19,7 +19,10 @@
 //! LCG for the geometry-sensitive parity checks) so the numbers are stable across runs.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_jpeg::{ChromaSubsampling, ChromaUpsampling, JpegDecoder, JpegEncoder, JpegProcess};
+use gamut_jpeg::{
+    ChromaSubsampling, ChromaUpsampling, JpegDecoder, JpegEncoder, JpegProcess, Process,
+    ProgressiveScript,
+};
 use libjpeg_oracle::{EncodeParams, Subsampling};
 
 /// The dimension battery: block-aligned, odd, and larger-than-MCU cases so component-dimension
@@ -48,10 +51,10 @@ impl Mode {
 
     fn gamut_subsampling(self) -> ChromaSubsampling {
         match self {
-            Mode::Gray | Mode::C444 => ChromaSubsampling::Ycbcr444,
-            Mode::C422 => ChromaSubsampling::Ycbcr422,
-            Mode::C420 => ChromaSubsampling::Ycbcr420,
-            Mode::C440 => ChromaSubsampling::Ycbcr440,
+            Mode::Gray | Mode::C444 => ChromaSubsampling::Cs444,
+            Mode::C422 => ChromaSubsampling::Cs422,
+            Mode::C420 => ChromaSubsampling::Cs420,
+            Mode::C440 => ChromaSubsampling::Cs440,
         }
     }
 
@@ -176,7 +179,11 @@ fn gamut_encode_cfg(
     let enc = JpegEncoder::new()
         .with_quality(quality)
         .with_restart_interval(restart)
-        .with_progressive(progressive);
+        .with_process(if progressive {
+            Process::Progressive(ProgressiveScript::Libjpeg)
+        } else {
+            Process::Baseline
+        });
     gamut_encode_with(enc, mode, pixels, w, h)
 }
 
@@ -192,7 +199,7 @@ fn gamut_encode_optimized(
     let enc = JpegEncoder::new()
         .with_quality(quality)
         .with_restart_interval(restart)
-        .with_optimized_tables(true);
+        .with_process(Process::Optimized);
     gamut_encode_with(enc, mode, pixels, w, h)
 }
 
@@ -416,7 +423,10 @@ fn progressive_encode_libjpeg_decodes_identically_to_baseline() {
                     let progressive = gamut_encode_cfg(mode, &src, w, h, q, restart, true);
                     // gamut really emitted SOF2.
                     assert_eq!(
-                        gamut_jpeg::info(&progressive).unwrap().process,
+                        gamut_jpeg::JpegDecoder::new()
+                            .info(&progressive)
+                            .unwrap()
+                            .process,
                         JpegProcess::Progressive,
                         "gamut must emit SOF2 for {mode:?} {w}x{h}"
                     );
@@ -452,8 +462,7 @@ fn mozjpeg_script_libjpeg_decodes_identically_to_baseline() {
                     let enc = JpegEncoder::new()
                         .with_quality(q)
                         .with_restart_interval(restart)
-                        .with_progressive(true)
-                        .with_progressive_script(gamut_jpeg::ProgressiveScript::Mozjpeg);
+                        .with_process(Process::Progressive(ProgressiveScript::Mozjpeg));
                     let progressive = gamut_encode_with(enc, mode, &src, w, h);
                     let base_dec =
                         libjpeg_oracle::decode(&baseline).expect("oracle decode baseline");
@@ -488,7 +497,10 @@ fn optimized_baseline_libjpeg_decodes_identically_to_the_fixed_tables() {
                     let optimized = gamut_encode_optimized(mode, &src, w, h, q, restart);
                     // Still a baseline (SOF0) stream — the flag must not change the process.
                     assert_eq!(
-                        gamut_jpeg::info(&optimized).unwrap().process,
+                        gamut_jpeg::JpegDecoder::new()
+                            .info(&optimized)
+                            .unwrap()
+                            .process,
                         JpegProcess::Baseline,
                         "optimized tables must stay baseline for {mode:?} {w}x{h}"
                     );
@@ -611,7 +623,7 @@ fn decode_progressive_matches_libjpeg_turbo_own_decode() {
                     let jpeg = oracle_encode(mode, &src, w, h, q, restart, optimize, true);
                     // Confirm the oracle really produced a progressive frame (SOF2 present).
                     assert_eq!(
-                        gamut_jpeg::info(&jpeg).unwrap().process,
+                        gamut_jpeg::JpegDecoder::new().info(&jpeg).unwrap().process,
                         JpegProcess::Progressive,
                         "oracle must emit SOF2 for {mode:?} {w}x{h}"
                     );
@@ -724,7 +736,7 @@ fn progressive_byte_flip_sweep_never_panics() {
     let src = lcg_pixels(w, h, 3, 0x0BAD_F00D);
     let base = oracle_encode(Mode::C420, &src, w, h, 60, 3, true, true);
     assert_eq!(
-        gamut_jpeg::info(&base).unwrap().process,
+        gamut_jpeg::JpegDecoder::new().info(&base).unwrap().process,
         JpegProcess::Progressive
     );
     let dec = JpegDecoder::new();
@@ -1014,7 +1026,7 @@ fn trellis_composes_with_custom_tables_and_progressive() {
         let prog_enc = JpegEncoder::new()
             .with_quality(75)
             .with_rd_optimization(rd)
-            .with_progressive(true);
+            .with_process(Process::Progressive(ProgressiveScript::Libjpeg));
         let base = gamut_encode_with(base_enc, Mode::C444, &src, w, h);
         let prog = gamut_encode_with(prog_enc, Mode::C444, &src, w, h);
         let base_px = libjpeg_oracle::decode(&base)

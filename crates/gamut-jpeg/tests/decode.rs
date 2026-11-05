@@ -65,7 +65,7 @@ fn color_444_roundtrip_q100_is_tight() {
         let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
         let jpeg = JpegEncoder::new()
             .with_quality(100)
-            .with_subsampling(ChromaSubsampling::Ycbcr444)
+            .with_subsampling(ChromaSubsampling::Cs444)
             .encode_to_vec(img)
             .unwrap();
         let out: ImageBuf<Rgb8> = JpegDecoder::new().decode_image(&jpeg).unwrap();
@@ -92,9 +92,9 @@ fn color_q50_photographic_gradient_has_bounded_psnr() {
     }
     let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
     for sub in [
-        ChromaSubsampling::Ycbcr444,
-        ChromaSubsampling::Ycbcr422,
-        ChromaSubsampling::Ycbcr420,
+        ChromaSubsampling::Cs444,
+        ChromaSubsampling::Cs422,
+        ChromaSubsampling::Cs420,
     ] {
         let jpeg = JpegEncoder::new()
             .with_quality(50)
@@ -113,9 +113,9 @@ fn roundtrip_battery_decodes_without_error() {
     // right dimensions with a bounded PSNR. Distinct content makes any geometry mutant diverge.
     let dims = [(1u32, 1u32), (7, 5), (8, 8), (15, 17), (16, 16), (33, 20)];
     let subs = [
-        ChromaSubsampling::Ycbcr444,
-        ChromaSubsampling::Ycbcr422,
-        ChromaSubsampling::Ycbcr420,
+        ChromaSubsampling::Cs444,
+        ChromaSubsampling::Cs422,
+        ChromaSubsampling::Cs420,
     ];
     for &(w, h) in &dims {
         for &q in &[30u8, 75, 95] {
@@ -174,7 +174,7 @@ fn corrupted_restart_sequence_is_rejected() {
     let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(16, 16).unwrap()).unwrap();
     let good = JpegEncoder::new()
         .with_restart_interval(1)
-        .with_subsampling(ChromaSubsampling::Ycbcr444)
+        .with_subsampling(ChromaSubsampling::Cs444)
         .encode_to_vec(img)
         .unwrap();
     // Baseline decodes fine.
@@ -262,11 +262,11 @@ fn info_reports_frame_header() {
     let rgb = vec![10u8; 20 * 12 * 3];
     let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(20, 12).unwrap()).unwrap();
     let jpeg = JpegEncoder::new()
-        .with_subsampling(ChromaSubsampling::Ycbcr420)
+        .with_subsampling(ChromaSubsampling::Cs420)
         .encode_to_vec(img)
         .unwrap();
-    let info = gamut_jpeg::info(&jpeg).unwrap();
-    assert_eq!((info.width, info.height), (20, 12));
+    let info = gamut_jpeg::JpegDecoder::new().info(&jpeg).unwrap();
+    assert_eq!((info.width, info.height), (20, Some(12)));
     assert_eq!(info.components, 3);
     assert_eq!(info.precision, 8);
     assert_eq!(info.process, JpegProcess::Baseline);
@@ -275,10 +275,13 @@ fn info_reports_frame_header() {
     let g = JpegEncoder::new()
         .encode_to_vec(ImageRef::<Gray8>::new(&[0u8; 64], Dimensions::new(8, 8).unwrap()).unwrap())
         .unwrap();
-    assert_eq!(gamut_jpeg::info(&g).unwrap().components, 1);
+    assert_eq!(
+        gamut_jpeg::JpegDecoder::new().info(&g).unwrap().components,
+        1
+    );
 
     // info() on junk errors rather than panicking.
-    assert!(gamut_jpeg::info(&[0xFF, 0xD8]).is_err());
+    assert!(gamut_jpeg::JpegDecoder::new().info(&[0xFF, 0xD8]).is_err());
 }
 
 #[test]
@@ -304,7 +307,7 @@ fn decode_image_into_reuses_matching_buffers() {
     let rgb_src: Vec<u8> = (0..8 * 8 * 3).map(pattern).collect();
     let img = ImageRef::<Rgb8>::new(&rgb_src, Dimensions::new(8, 8).unwrap()).unwrap();
     let jpeg = JpegEncoder::new()
-        .with_subsampling(ChromaSubsampling::Ycbcr444)
+        .with_subsampling(ChromaSubsampling::Cs444)
         .encode_to_vec(img)
         .unwrap();
     let mut rgb: ImageBuf<Rgb8> = ImageBuf::zeroed(Dimensions::new(8, 8).unwrap()).unwrap();
@@ -371,11 +374,11 @@ fn convert_policy_reaches_the_typed_decode() {
     assert_eq!(refused.kind(), gamut_core::ErrorKind::Unsupported);
 
     let bt601: ImageBuf<Gray8> = JpegDecoder::new()
-        .convert_policy(ConvertPolicy::lossless().with_luma(LumaPolicy::Bt601))
+        .with_convert_policy(ConvertPolicy::lossless().with_luma(LumaPolicy::Bt601))
         .decode_image(&jpeg)
         .expect("bt601 decode");
     let bt709: ImageBuf<Gray8> = JpegDecoder::new()
-        .convert_policy(ConvertPolicy::lossless().with_luma(LumaPolicy::Bt709))
+        .with_convert_policy(ConvertPolicy::lossless().with_luma(LumaPolicy::Bt709))
         .decode_image(&jpeg)
         .expect("bt709 decode");
 
