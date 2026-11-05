@@ -18,7 +18,10 @@
 mod common;
 
 use common::{Dav1dDecoder, av01_item};
-use gamut_avif::{AvifContainer, AvifEncoder, C2PA_UUID, C2paBoxPurpose};
+use gamut_avif::{
+    AvifContainer, AvifEncoder, C2PA_NOT_VALIDATED, C2PA_UUID, C2paBoxPosition, C2paBoxPurpose,
+    SegmentKind,
+};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_isobmff::{IsoBmffImage, TopLevelBox, TopLevelPosition, write};
 
@@ -57,6 +60,18 @@ fn payload(seed: u8, len: usize) -> Vec<u8> {
     (0..len)
         .map(|i| seed.wrapping_add((i * 31) as u8))
         .collect()
+}
+
+/// The payload of a C2PA `ContentProvenanceBox` (§A.5.1.2/§A.5.3) transcribed by hand —
+/// version/flags, the NUL-terminated `box_purpose`, a zero merkle offset, then `store` — so the
+/// locator is checked against the clause and not against the encoder's own builder.
+fn c2pa_box(purpose: &[u8], store: &[u8]) -> Vec<u8> {
+    let mut p = vec![0u8; 4];
+    p.extend_from_slice(purpose);
+    p.push(0);
+    p.extend_from_slice(&[0u8; 8]);
+    p.extend_from_slice(store);
+    p
 }
 
 #[test]
@@ -205,14 +220,6 @@ fn a_file_mid_update_reports_its_original_and_update_stores_in_file_order() {
     // from §A.5.1.2/§A.5.3 by hand here — version/flags, `box_purpose` NUL, merkle offset, store
     // — independently of the encoder's builder, so the locator is checked against the clause and
     // not against its own writer.
-    fn c2pa_box(purpose: &[u8], store: &[u8]) -> Vec<u8> {
-        let mut p = vec![0u8; 4];
-        p.extend_from_slice(purpose);
-        p.push(0);
-        p.extend_from_slice(&[0u8; 8]);
-        p.extend_from_slice(store);
-        p
-    }
     let original = payload(0x33, 40);
     let update = payload(0x44, 24);
     let model = IsoBmffImage::new(
@@ -246,6 +253,83 @@ fn a_file_mid_update_reports_its_original_and_update_stores_in_file_order() {
     assert_eq!(
         container.c2pa_slot().map(|s| s.purpose),
         Some(C2paBoxPurpose::Original)
+    );
+}
+
+#[test]
+fn a_store_after_a_top_level_moov_and_before_mdat_reports_before_media_data() {
+    // A pin of today's behaviour, not of §A.5.3: that clause names `moov` as a boundary beside
+    // `mdat`, but the locator's walk treats only `mdat` as one. An `avis` file's `moov` does reach
+    // a parsed AVIF (`conformance.rs`, `animated_sequence_parses_its_still_and_accounts_the_track`),
+    // so a store between `moov` and `mdat` is reachable and reports `BeforeMediaData` with the
+    // plain located headline. A change to that is a decision, and flips this pin with it.
+    //
+    // `gamut_isobmff::write` refuses a `moov` top-level box, so the file is written with a `free`
+    // box of the same length in its place and the four type bytes are rewritten afterwards: every
+    // `iloc` offset into `mdat` stays valid.
+    let interior = payload(0x55, 24);
+    let mut store = u32::try_from(8 + interior.len())
+        .expect("small")
+        .to_be_bytes()
+        .to_vec();
+    store.extend_from_slice(b"jumb");
+    store.extend_from_slice(&interior);
+    let model = IsoBmffImage::new(
+        *b"avif",
+        vec![*b"avif", *b"mif1", *b"miaf"],
+        1,
+        vec![av01_item(
+            1,
+            vec![0x0A, 0x01, 0x18, 0x32, 0x03, 0xAA, 0xBB, 0xCC],
+        )],
+    )
+    .with_top_level_boxes(vec![
+        TopLevelBox::new(*b"free", vec![0u8; 16]),
+        TopLevelBox::uuid(C2PA_UUID, c2pa_box(b"manifest", &store)),
+    ]);
+    let mut bytes = write(&model).expect("writes");
+    let free = bytes
+        .windows(4)
+        .position(|w| w == b"free")
+        .expect("the free box is written");
+    bytes[free..free + 4].copy_from_slice(b"moov");
+
+    let container = AvifContainer::parse(&bytes).expect("parses beside a moov");
+    let boxes: Vec<[u8; 4]> = container
+        .segments()
+        .iter()
+        .filter_map(|s| match s.kind {
+            SegmentKind::Box { ty, .. } => Some(ty),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        boxes,
+        [*b"ftyp", *b"moov", *b"uuid", *b"meta", *b"mdat"],
+        "the file is ftyp, moov, the C2PA uuid box, then the still and its mdat"
+    );
+
+    let summary = container.c2pa_summary();
+    assert_eq!(summary.stores.len(), 1);
+    assert!(summary.unread.is_empty());
+    assert_eq!(summary.stores[0].range.bytes_in(&bytes), Some(&store[..]));
+    assert_eq!(summary.stores[0].position, C2paBoxPosition::BeforeMediaData);
+    assert_eq!(
+        summary.summary_lines(),
+        [format!(
+            "C2PA: 1 manifest store located, NOT VALIDATED — {C2PA_NOT_VALIDATED}"
+        )]
+    );
+}
+
+#[test]
+fn c2pa_not_validated_is_the_pinned_sentence() {
+    // The exact literal, never the constant interpolated: every headline test formats
+    // `C2PA_NOT_VALIDATED` into its expectation, so a reworded constant passes all of them.
+    assert_eq!(
+        C2PA_NOT_VALIDATED,
+        "gamut locates a C2PA manifest store and never validates it: it checks no signature, no \
+         hash binding and no trust list. Validate with c2pa-rs."
     );
 }
 

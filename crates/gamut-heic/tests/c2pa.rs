@@ -779,3 +779,14 @@ fn a_uuid_box_too_short_to_hold_an_extended_type_never_reaches_the_c2pa_lens() {
         );
     }
 }
+
+#[test]
+fn c2pa_not_validated_is_the_pinned_sentence() {
+    // The exact literal, never the constant interpolated: every headline test formats
+    // `C2PA_NOT_VALIDATED` into its expectation, so a reworded constant passes all of them.
+    assert_eq!(
+        gamut_heic::C2PA_NOT_VALIDATED,
+        "gamut locates a C2PA manifest store and never validates it: it checks no signature, no \
+         hash binding and no trust list. Validate with c2pa-rs."
+    );
+}
