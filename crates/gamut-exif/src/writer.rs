@@ -367,7 +367,7 @@ fn write_tree(order: ByteOrder, ifds: Vec<Ifd>, pin: Option<u64>) -> Result<Vec<
     if let Some(at) = pin
         && let Ok((bytes, _map)) = write_with(
             &file,
-            &WriteOptions::default().pin(ifd_tags::MAKER_NOTE, at),
+            &WriteOptions::default().with_pin(ifd_tags::MAKER_NOTE, at),
         )
     {
         return Ok(bytes);

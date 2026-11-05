@@ -1027,7 +1027,8 @@ fn white_level_value(values: &[f64]) -> Result<Value> {
 fn uncountable_store_len(variant: Variant, len: usize) -> bool {
     match variant {
         Variant::Classic => u32::try_from(len).is_err(),
-        Variant::Big => false,
+        // BigTIFF's 64-bit count (and any wider variant `gamut_ifd` adds) names every `usize`.
+        _ => false,
     }
 }
 

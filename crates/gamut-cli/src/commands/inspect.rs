@@ -231,11 +231,11 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
     // erroring on it.
     let (summary, c2pa) = match format {
         Format::Dng => (
-            summarize_dng(gamut::dng::deconstruct(&data)?),
+            summarize(gamut::dng::deconstruct(&data)?),
             gamut::dng::c2pa_summary(&data[..])?,
         ),
         Format::Tiff => (
-            summarize_tiff(gamut::tiff::deconstruct(&data)?),
+            summarize(gamut::tiff::deconstruct(&data)?),
             gamut::tiff::c2pa_summary(&data)?,
         ),
         Format::Png | Format::Heic | Format::Avif | Format::Webp => {
@@ -310,8 +310,9 @@ fn sniff(data: &[u8]) -> Format {
     Format::Tiff
 }
 
-/// Collapses a TIFF report into the printable [`Summary`].
-fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
+/// Collapses a deconstruct report into the printable [`Summary`]. TIFF and DNG report in one
+/// vocabulary — gamut-ifd's, which both re-export — so one rendering serves both.
+fn summarize(report: gamut::tiff::DeconstructReport) -> Summary {
     use gamut::tiff::Anomaly;
     let fully_classified = report.is_fully_classified();
     let fully_accounted = report.is_fully_accounted();
@@ -344,7 +345,7 @@ fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
                 detail,
                 severity,
                 ..
-            } => anomaly_structure(*page, detail, severity_level_tiff(*severity)),
+            } => anomaly_structure(*page, detail, severity_level(*severity)),
             Anomaly::DuplicateTag {
                 ifd,
                 tag,
@@ -356,69 +357,7 @@ fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
                 *ifd,
                 *tag,
                 *entries,
-                severity_level_tiff(*severity),
-            ),
-            // `Anomaly` is non-exhaustive; render future categories generically.
-            other => anomaly_other(format!("{other:?}")),
-        })
-        .collect();
-    Summary {
-        segments: report.segments,
-        unknown_fields,
-        unknown_tags,
-        anomalies,
-        fully_classified,
-        fully_accounted,
-    }
-}
-
-/// Collapses a DNG report into the printable [`Summary`].
-fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
-    use gamut::dng::Anomaly;
-    let fully_classified = report.is_fully_classified();
-    let fully_accounted = report.is_fully_accounted();
-    let unknown_fields = report
-        .unknown_fields
-        .iter()
-        .map(|u| unknown_field(u.page, u.tag, u.type_code, u.count))
-        .collect();
-    let unknown_tags = report
-        .unknown_tags
-        .iter()
-        .map(|u| unknown_tag(u.page, u.tag, u.field_type, u.count))
-        .collect();
-    let anomalies = report
-        .anomalies
-        .iter()
-        .map(|a| match a {
-            Anomaly::UnknownCode {
-                page,
-                tag,
-                code,
-                detail,
-                ..
-            } => anomaly_unknown_code(*page, *tag, *code, detail),
-            Anomaly::UnparsableTag {
-                page, tag, detail, ..
-            } => anomaly_unparsable_tag(*page, *tag, detail),
-            Anomaly::Structure {
-                page,
-                detail,
-                severity,
-                ..
-            } => anomaly_structure(*page, detail, severity_level_dng(*severity)),
-            Anomaly::DuplicateTag {
-                ifd,
-                tag,
-                entries,
-                severity,
-                ..
-            } => anomaly_duplicate_tag(
-                format!("{a:?}"),
-                *ifd,
-                *tag,
-                *entries,
-                severity_level_dng(*severity),
+                severity_level(*severity),
             ),
             // `Anomaly` is non-exhaustive; render future categories generically.
             other => anomaly_other(format!("{other:?}")),
@@ -465,21 +404,11 @@ impl Level {
     }
 }
 
-/// Classifies a TIFF anomaly severity.
-fn severity_level_tiff(severity: gamut::tiff::Severity) -> Level {
+/// Classifies an anomaly severity (TIFF and DNG share the type).
+fn severity_level(severity: gamut::tiff::Severity) -> Level {
     match severity {
         gamut::tiff::Severity::Warning => Level::Warning,
         gamut::tiff::Severity::Error => Level::Error,
-        // `Severity` is non-exhaustive.
-        _ => Level::Other,
-    }
-}
-
-/// Classifies a DNG anomaly severity.
-fn severity_level_dng(severity: gamut::dng::Severity) -> Level {
-    match severity {
-        gamut::dng::Severity::Warning => Level::Warning,
-        gamut::dng::Severity::Error => Level::Error,
         // `Severity` is non-exhaustive.
         _ => Level::Other,
     }

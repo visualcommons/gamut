@@ -119,7 +119,11 @@ impl UnknownValue {
 ///
 /// An entry whose field-type code is unrecognised decodes to [`Value::Unknown`], preserving the
 /// raw record so nothing is dropped on a read → write round-trip.
+///
+/// Non-exhaustive because the `bigtiff` feature adds variants, and Cargo feature unification would
+/// otherwise let another crate in the build break a dependent's exhaustive `match`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Value {
     /// `BYTE` — unsigned 8-bit integers.
     Byte(Vec<u8>),

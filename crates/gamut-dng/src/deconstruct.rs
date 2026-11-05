@@ -6,7 +6,7 @@
 //! drives [`gamut_ifd::audit`] over the entire IFD tree — IFD 0 and its chain, the `SubIFDs`
 //! image sub-IFDs (including the full-resolution raw), the Exif/GPS/Interoperability metadata
 //! sub-IFDs, and every strip/tile/free/embedded-JPEG extent — then layers DNG tag knowledge on
-//! top. The resulting [`DeconstructReport`] carries the byte-level [`SegmentReport`] (every byte
+//! top. The resulting [`DeconstructReport`] carries the byte-level [`SegmentReport`](gamut_ifd::SegmentReport) (every byte
 //! typed, or precisely what was not — including the dual-ledger parser cross-check) plus unknown
 //! field types, unknown/private tags, out-of-spec codes, and malformed colour matrices.
 //!
@@ -17,8 +17,11 @@
 use std::collections::BTreeMap;
 
 use gamut_core::{Error, Result};
+// The report vocabulary is gamut-ifd's, shared with gamut-tiff; re-exported so this module's
+// public paths still name it.
+pub use gamut_ifd::{Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag};
 use gamut_ifd::{
-    AuditFinding, Auditor, ByteOrder, Claim, DataLabel, Ifd, SegmentReport, SkipReason, SpanKind,
+    AuditFinding, Auditor, ByteOrder, Claim, DataLabel, Ifd, SkipReason, SpanKind,
     StandardAuditSpec, Value, Variant,
 };
 
@@ -29,155 +32,6 @@ use crate::values::{Compression, PhotometricInterpretation};
 /// The magic number of an embedded DNG camera-profile stream (the `.dcp` form): the two bytes
 /// after the byte-order mark, `0x4352` (`"RC"` little-endian) where a TIFF header carries `42`.
 const CAMERA_PROFILE_MAGIC: u16 = 0x4352;
-
-/// How serious a reported [`Anomaly`] is.
-///
-/// Non-exhaustive: further severities may be added without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Severity {
-    /// Out of spec but often benign.
-    Warning,
-    /// A structural defect (e.g. a strip mismatch, a malformed matrix, or a sub-IFD cycle).
-    Error,
-}
-
-/// A tag a valid DNG would not be expected to carry — recognised structurally but not part of the
-/// DNG 1.7.1 tag set (see [`tags::is_known_tag`]).
-///
-/// Non-exhaustive: fields may be added as the deconstruct grows more precise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct UnknownTag {
-    /// The page (top-level IFD index) the tag was found in.
-    pub page: usize,
-    /// The tag number.
-    pub tag: u16,
-    /// The tag's on-disk field-type code.
-    pub field_type: u16,
-    /// The tag's value count.
-    pub count: u64,
-}
-
-/// An IFD entry whose field-type code is unrecognised. The entry is **preserved verbatim** in
-/// the parse (as a [`gamut_ifd::Value::Unknown`]) — reported here because its out-of-line
-/// payload, if any, is unsizable and therefore unclassifiable.
-///
-/// Non-exhaustive: fields may be added as the deconstruct grows more precise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct UnknownFieldType {
-    /// The page (top-level IFD index) the entry was found in.
-    pub page: usize,
-    /// The entry's tag.
-    pub tag: u16,
-    /// The unrecognised on-disk field-type code.
-    pub type_code: u16,
-    /// The entry's declared value count (untrusted — the element size is unknown).
-    pub count: u64,
-}
-
-/// A recognised but out-of-spec or unparsable element a deconstruct flags.
-///
-/// Non-exhaustive (as are its variants): the diagnostic taxonomy grows with the deconstruct.
-/// The `detail` strings are human-readable diagnostics; their exact wording is not part of the
-/// API contract — match on the variant and its typed fields instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Anomaly {
-    /// A tag whose value uses a code this crate does not recognise (e.g. an unknown `Compression`).
-    #[non_exhaustive]
-    UnknownCode {
-        /// The page the tag was found in.
-        page: usize,
-        /// The tag carrying the code.
-        tag: u16,
-        /// The unrecognised code.
-        code: u32,
-        /// A human-readable description (wording not contractual).
-        detail: &'static str,
-    },
-    /// A known tag whose value could not be interpreted (wrong type, count, or range).
-    #[non_exhaustive]
-    UnparsableTag {
-        /// The page the tag was found in.
-        page: usize,
-        /// The tag.
-        tag: u16,
-        /// A human-readable description (wording not contractual).
-        detail: &'static str,
-    },
-    /// An out-of-spec or unexpected structural condition.
-    #[non_exhaustive]
-    Structure {
-        /// The page the condition relates to.
-        page: usize,
-        /// A human-readable description (wording not contractual).
-        detail: &'static str,
-        /// How serious the condition is.
-        severity: Severity,
-    },
-    /// A directory carrying more than one entry under the same tag.
-    ///
-    /// TIFF 6.0 §2 — which DNG 1.7.1 builds on — gives a directory one entry per tag. A repeated
-    /// tag is a directory no reader resolves without choosing, and readers choose differently:
-    /// the parse keeps the **last** occurrence, libtiff the first. Which entry survives is a
-    /// property of the reader, not of the file.
-    ///
-    /// Named by **offset** rather than by page, because the directory may be a metadata sub-IFD
-    /// or an embedded camera-profile directory rather than a page: the offset is the identity
-    /// [`SpanKind::IfdBody`] already uses.
-    #[non_exhaustive]
-    DuplicateTag {
-        /// The file offset of the directory holding the repeated tag.
-        ifd: u64,
-        /// The repeated tag.
-        tag: u16,
-        /// How many entries that directory carries under it.
-        entries: usize,
-        /// How serious the condition is — always [`Severity::Error`]: a field the writer set is
-        /// lost by at least one reader.
-        severity: Severity,
-    },
-}
-
-/// The result of a strict deconstruct: byte-level classification plus DNG-specific findings.
-///
-/// Non-exhaustive: report categories may be added without a breaking change.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct DeconstructReport {
-    /// The byte-level verdict: every byte of the file typed ([`SegmentReport::segments`]), or
-    /// precisely what was not — unclassified ranges, conflicts, out-of-bounds claims, and the
-    /// dual-ledger parser cross-check.
-    pub segments: SegmentReport,
-    /// IFD entries whose field-type code was unrecognised (preserved verbatim in the parse).
-    pub unknown_fields: Vec<UnknownFieldType>,
-    /// Tags not part of the recognised DNG tag set.
-    pub unknown_tags: Vec<UnknownTag>,
-    /// Recognised-but-out-of-spec codes, unparsable tags, and structural problems.
-    pub anomalies: Vec<Anomaly>,
-}
-
-impl DeconstructReport {
-    /// Whether every byte of the file maps to exactly one typed segment (delegates to
-    /// [`SegmentReport::is_fully_classified`] — zero tolerance, alignment padding included).
-    /// Independent of whether every tag/code was recognised.
-    #[must_use]
-    pub fn is_fully_classified(&self) -> bool {
-        self.segments.is_fully_classified()
-    }
-
-    /// Whether the file is pristine for archival: fully classified, with no unknown field
-    /// types, no unknown tags, and no anomalies.
-    #[must_use]
-    pub fn is_fully_accounted(&self) -> bool {
-        self.segments.is_fully_classified()
-            && self.unknown_fields.is_empty()
-            && self.unknown_tags.is_empty()
-            && self.anomalies.is_empty()
-    }
-}
 
 /// Walks `data` (a DNG file) and returns a [`DeconstructReport`] classifying every byte — without
 /// decoding the raw image.
@@ -204,12 +58,12 @@ pub fn deconstruct(data: &[u8]) -> Result<DeconstructReport> {
     }
     let (segments, audit_findings) = auditor.finish()?;
     findings.map_audit_findings(&audit_findings);
-    Ok(DeconstructReport {
+    Ok(DeconstructReport::new(
         segments,
-        unknown_fields: findings.unknown_fields,
-        unknown_tags: findings.unknown_tags,
-        anomalies: findings.anomalies,
-    })
+        findings.unknown_fields,
+        findings.unknown_tags,
+        findings.anomalies,
+    ))
 }
 
 /// Accumulates the DNG-level findings over the audited tree.
@@ -244,19 +98,19 @@ impl Findings {
     fn check_tags(&mut self, ifd: &Ifd, page: usize) {
         for field in ifd.fields() {
             if let Value::Unknown(u) = &field.value {
-                self.unknown_fields.push(UnknownFieldType {
+                self.unknown_fields.push(UnknownFieldType::new(
                     page,
-                    tag: field.tag,
-                    type_code: u.type_code(),
-                    count: u.count(),
-                });
+                    field.tag,
+                    u.type_code(),
+                    u.count(),
+                ));
             } else if !tags::is_known_tag(field.tag) {
-                self.unknown_tags.push(UnknownTag {
+                self.unknown_tags.push(UnknownTag::new(
                     page,
-                    tag: field.tag,
-                    field_type: field.value.type_code(),
-                    count: field.value.count(),
-                });
+                    field.tag,
+                    field.value.type_code(),
+                    field.value.count(),
+                ));
             }
         }
     }
@@ -270,12 +124,12 @@ impl Findings {
                 .and_then(Compression::from_code)
                 .is_none()
         {
-            self.anomalies.push(Anomaly::UnknownCode {
+            self.anomalies.push(Anomaly::unknown_code(
                 page,
-                tag: tags::COMPRESSION,
+                tags::COMPRESSION,
                 code,
-                detail: "DNG: unrecognised Compression code",
-            });
+                "DNG: unrecognised Compression code",
+            ));
         }
         if let Some(code) = ifd.get_u32(tags::PHOTOMETRIC_INTERPRETATION)
             && u16::try_from(code)
@@ -283,12 +137,12 @@ impl Findings {
                 .and_then(PhotometricInterpretation::from_code)
                 .is_none()
         {
-            self.anomalies.push(Anomaly::UnknownCode {
+            self.anomalies.push(Anomaly::unknown_code(
                 page,
-                tag: tags::PHOTOMETRIC_INTERPRETATION,
+                tags::PHOTOMETRIC_INTERPRETATION,
                 code,
-                detail: "DNG: unrecognised PhotometricInterpretation code",
-            });
+                "DNG: unrecognised PhotometricInterpretation code",
+            ));
         }
     }
 
@@ -301,11 +155,11 @@ impl Findings {
             let ok = matches!(value, Value::Rational(v) if v.len() == 9)
                 || matches!(value, Value::SRational(v) if v.len() == 9);
             if !ok {
-                self.anomalies.push(Anomaly::UnparsableTag {
+                self.anomalies.push(Anomaly::unparsable_tag(
                     page,
                     tag,
-                    detail: "DNG: 3x3 matrix tag is not nine rationals",
-                });
+                    "DNG: 3x3 matrix tag is not nine rationals",
+                ));
             }
         }
     }
@@ -333,11 +187,11 @@ impl Findings {
                 "DNG: image missing StripOffsets/StripByteCounts",
             );
         } else if ifd.get_u32(tags::IMAGE_WIDTH).is_some() {
-            self.anomalies.push(Anomaly::Structure {
+            self.anomalies.push(Anomaly::structure(
                 page,
-                detail: "DNG: image IFD has no strip or tile data",
-                severity: Severity::Warning,
-            });
+                "DNG: image IFD has no strip or tile data",
+                Severity::Warning,
+            ));
         }
     }
 
@@ -362,11 +216,11 @@ impl Findings {
                         self.check_matrices(profile, page);
                     }
                 }
-                Err(_) => self.anomalies.push(Anomaly::Structure {
+                Err(_) => self.anomalies.push(Anomaly::structure(
                     page,
-                    detail: "DNG: extra camera profile could not be parsed",
-                    severity: Severity::Error,
-                }),
+                    "DNG: extra camera profile could not be parsed",
+                    Severity::Error,
+                )),
             }
         }
     }
@@ -383,19 +237,13 @@ impl Findings {
     ) {
         let (Some(offsets), Some(counts)) = (ifd.get_u64_vec(off_tag), ifd.get_u64_vec(cnt_tag))
         else {
-            self.anomalies.push(Anomaly::Structure {
-                page,
-                detail: missing,
-                severity: Severity::Error,
-            });
+            self.anomalies
+                .push(Anomaly::structure(page, missing, Severity::Error));
             return;
         };
         if offsets.len() != counts.len() {
-            self.anomalies.push(Anomaly::Structure {
-                page,
-                detail: mismatch,
-                severity: Severity::Error,
-            });
+            self.anomalies
+                .push(Anomaly::structure(page, mismatch, Severity::Error));
         }
     }
 
@@ -409,23 +257,21 @@ impl Findings {
         for finding in findings {
             match *finding {
                 AuditFinding::SkippedSubIfd { page, reason, .. } => {
-                    self.anomalies.push(Anomaly::Structure {
-                        page,
-                        detail: match reason {
-                            SkipReason::Cycle => "DNG: sub-IFD offset revisited (possible cycle)",
-                            SkipReason::TooDeep => "DNG: sub-IFD nesting too deep",
-                            SkipReason::OverBudget => "DNG: sub-IFD budget exhausted",
-                            _ => "DNG: sub-IFD could not be parsed",
-                        },
-                        severity: Severity::Error,
-                    });
+                    let detail = match reason {
+                        SkipReason::Cycle => "DNG: sub-IFD offset revisited (possible cycle)",
+                        SkipReason::TooDeep => "DNG: sub-IFD nesting too deep",
+                        SkipReason::OverBudget => "DNG: sub-IFD budget exhausted",
+                        _ => "DNG: sub-IFD could not be parsed",
+                    };
+                    self.anomalies
+                        .push(Anomaly::structure(page, detail, Severity::Error));
                 }
                 AuditFinding::ChainedSubIfd { page, .. } => {
-                    self.anomalies.push(Anomaly::Structure {
+                    self.anomalies.push(Anomaly::structure(
                         page,
-                        detail: "DNG: sub-IFD carries a next-IFD chain",
-                        severity: Severity::Warning,
-                    });
+                        "DNG: sub-IFD carries a next-IFD chain",
+                        Severity::Warning,
+                    ));
                 }
                 AuditFinding::ShadowedEntry { ifd, tag, .. } => {
                     *shadowed.entry((ifd, tag)).or_default() += 1;
@@ -435,12 +281,8 @@ impl Findings {
             }
         }
         for ((ifd, tag), lost) in shadowed {
-            self.anomalies.push(Anomaly::DuplicateTag {
-                ifd,
-                tag,
-                entries: lost + 1,
-                severity: Severity::Error,
-            });
+            self.anomalies
+                .push(Anomaly::duplicate_tag(ifd, tag, lost + 1));
         }
     }
 }
@@ -515,11 +357,11 @@ mod tests {
         }]);
         assert_eq!(
             findings.anomalies,
-            [Anomaly::Structure {
-                page: 0,
-                detail: "DNG: sub-IFD budget exhausted",
-                severity: Severity::Error,
-            }]
+            [Anomaly::structure(
+                0,
+                "DNG: sub-IFD budget exhausted",
+                Severity::Error,
+            )]
         );
     }
 
@@ -534,12 +376,12 @@ mod tests {
             findings.check_codes(&ifd, 3);
             assert_eq!(
                 findings.anomalies,
-                [Anomaly::UnknownCode {
-                    page: 3,
-                    tag: tags::PHOTOMETRIC_INTERPRETATION,
+                [Anomaly::unknown_code(
+                    3,
+                    tags::PHOTOMETRIC_INTERPRETATION,
                     code,
-                    detail: "DNG: unrecognised PhotometricInterpretation code",
-                }]
+                    "DNG: unrecognised PhotometricInterpretation code",
+                )]
             );
         }
 
@@ -580,12 +422,7 @@ mod tests {
             .collect();
         assert_eq!(
             duplicates,
-            [&Anomaly::DuplicateTag {
-                ifd: 8,
-                tag: 256,
-                entries: 2,
-                severity: Severity::Error,
-            }],
+            [&Anomaly::duplicate_tag(8, 256, 2)],
             "{report:?}"
         );
     }

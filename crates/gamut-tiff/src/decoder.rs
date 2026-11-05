@@ -11,7 +11,7 @@ use gamut_core::{
     Cmyk8, DecodeImage, Dimensions, Error, Gray8, Gray16, ImageBuf, Pixel, PixelFormat, Result,
     Rgb8, Rgb16, Rgba8, Rgba16, Sample,
 };
-use gamut_ifd::{ByteOrder, Ifd, read};
+use gamut_ifd::{ByteOrder, Ifd, ZeroRowsPerStrip, extent_slices, read, rows_per_strip};
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor, SampleFormat};
@@ -684,14 +684,17 @@ fn decompress_simple(raw: &[u8], want: usize, compression: Compression) -> Resul
 
 /// Reassembles the stored row bytes from strips.
 fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
-    let rows_per_strip = match ifd.get_u32(tags::ROWS_PER_STRIP) {
-        Some(0) | None => l.height,
-        Some(r) => (r as usize).min(l.height),
-    };
-    let offsets = ifd.get_u32_vec(tags::STRIP_OFFSETS).ok_or_else(|| {
+    // A zero is read as one full-height strip, as libtiff reads it; gamut-dng refuses it.
+    let rows_per_strip = rows_per_strip(
+        ifd.get_u32(tags::ROWS_PER_STRIP),
+        l.height,
+        ZeroRowsPerStrip::WholeImage,
+        env!("CARGO_PKG_NAME"),
+    )?;
+    let offsets = ifd.get_u64_vec(tags::STRIP_OFFSETS).ok_or_else(|| {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing StripOffsets")
     })?;
-    let counts = ifd.get_u32_vec(tags::STRIP_BYTE_COUNTS).ok_or_else(|| {
+    let counts = ifd.get_u64_vec(tags::STRIP_BYTE_COUNTS).ok_or_else(|| {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing StripByteCounts")
     })?;
     let strips = l.height.div_ceil(rows_per_strip);
@@ -701,15 +704,11 @@ fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
             "TIFF: strip count mismatch",
         ));
     }
+    let raws = extent_slices(&offsets, &counts, data, env!("CARGO_PKG_NAME"))?;
     let mut packed = Vec::with_capacity(l.stored_row_bytes * l.height);
-    for (i, (&off, &cnt)) in offsets.iter().zip(&counts).enumerate() {
+    for (i, raw) in raws.into_iter().enumerate() {
         let rows = rows_per_strip.min(l.height - i * rows_per_strip);
         let want = rows * l.stored_row_bytes;
-        let raw = data
-            .get(off as usize..off as usize + cnt as usize)
-            .ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: strip out of bounds")
-            })?;
         match l.compression {
             Compression::CcittRle => {
                 packed.extend_from_slice(&ccitt::mh_decode_strip(raw, rows, l.width)?);
@@ -748,9 +747,9 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
         ));
     }
     let offsets = ifd
-        .get_u32_vec(tags::TILE_OFFSETS)
+        .get_u64_vec(tags::TILE_OFFSETS)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileOffsets"))?;
-    let counts = ifd.get_u32_vec(tags::TILE_BYTE_COUNTS).ok_or_else(|| {
+    let counts = ifd.get_u64_vec(tags::TILE_BYTE_COUNTS).ok_or_else(|| {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileByteCounts")
     })?;
     let across = l.width.div_ceil(tw);
@@ -768,14 +767,11 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
         .checked_mul(tile_row_bytes)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile too large"))?;
     within_size_limit(tile_size, "TIFF: tile exceeds the size limit")?;
+    let raws = extent_slices(&offsets, &counts, data, env!("CARGO_PKG_NAME"))?;
     let mut packed = vec![0u8; l.stored_row_bytes * l.height];
     for ty in 0..down {
         for tx in 0..across {
-            let idx = ty * across + tx;
-            let (off, cnt) = (offsets[idx] as usize, counts[idx] as usize);
-            let raw = data.get(off..off + cnt).ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile out of bounds")
-            })?;
+            let raw = raws[ty * across + tx];
             let mut tile = decompress_simple(raw, tile_size, l.compression)?;
             // Each tile is predicted independently, so the predictor is reversed here — before the
             // crop-and-blit, while the tile's own rows are still intact.
@@ -865,10 +861,11 @@ mod tests {
     }
 
     /// `RowsPerStrip` of 0 means the whole image is one strip, the same as an absent tag (TIFF 6.0
-    /// §8 defaults it to 2**32 - 1, i.e. "one strip"). Both alternatives of the `Some(0) | None`
-    /// pattern are asserted, since the mutation gate cannot delete one alone: without the
-    /// `Some(0)` alternative a zero would reach the clamp arm and divide the height by zero.
-    /// `gamut-dng` refuses the zero instead (`chunk_grid`); the difference is pinned on both sides.
+    /// §8 defaults it to 2**32 - 1, i.e. "one strip"). This pins the
+    /// [`ZeroRowsPerStrip::WholeImage`] policy `decode_strips` passes to
+    /// `gamut_ifd::rows_per_strip`, whose own tests pin each alternative of the zero-or-absent
+    /// reading. `gamut-dng` refuses the zero instead (`chunk_grid`); the difference is pinned on
+    /// both sides.
     #[test]
     fn decode_strips_reads_rows_per_strip_zero_or_absent_as_one_full_height_strip() {
         let data = [1, 2, 3, 4, 5, 6];
@@ -878,9 +875,10 @@ mod tests {
         }
     }
 
-    /// A `RowsPerStrip` beyond the image height decodes as one full-height strip. This does not
-    /// pin the `.min(l.height)` clamp on `rows_per_strip`: without it the strip count is still 1
-    /// and each strip's rows are clamped again in the loop, so the output is identical.
+    /// A `RowsPerStrip` beyond the image height decodes as one full-height strip: the strip count
+    /// is 1 and the loop clamps that strip's rows to the height. (The separate `.min(l.height)`
+    /// clamp this test once stood beside was unobservable for exactly that reason, and was dropped
+    /// when the value moved to `gamut_ifd::rows_per_strip`, #1071.)
     #[test]
     fn decode_strips_decodes_an_oversized_rows_per_strip_as_one_strip() {
         let data = [1, 2, 3, 4, 5, 6];
@@ -888,11 +886,11 @@ mod tests {
         assert_eq!(got.expect("decode"), data);
     }
 
-    /// Pins the current result of a strip whose `offset + count` passes `u32::MAX`: the extent is
-    /// summed unchecked in `usize`, which on a 64-bit target cannot overflow, so the slice lookup
-    /// reports it out of bounds. Recorded as-is ahead of the move into `gamut-ifd` (#1057); a
-    /// 32-bit target would overflow the sum instead, which is why the pin is width-gated.
-    #[cfg(target_pointer_width = "64")]
+    /// A strip whose `offset + count` passes `u32::MAX` is refused as out of bounds by
+    /// `gamut_ifd::extent_slices`, on every target width. Before the extents moved into
+    /// `gamut-ifd` (#1071) the sum was unchecked `usize` arithmetic, which a 32-bit target could
+    /// overflow, so this pin was width-gated; it now holds everywhere, and the error is the shared
+    /// helper's message under this crate's origin.
     #[test]
     fn decode_strips_reports_an_extent_past_u32_max_as_out_of_bounds() {
         let got = decode_strips(
@@ -900,12 +898,11 @@ mod tests {
             &[0; 6],
             &gray_layout(),
         );
-        assert_invalid_input(got, "TIFF: strip out of bounds");
+        assert_invalid_input(got, "image data out of bounds");
     }
 
     /// The tile twin of [`decode_strips_reports_an_extent_past_u32_max_as_out_of_bounds`]: the
-    /// same unchecked `offset + count`, the same current out-of-bounds result.
-    #[cfg(target_pointer_width = "64")]
+    /// same checked `offset + count`, the same out-of-bounds refusal.
     #[test]
     fn decode_tiles_reports_an_extent_past_u32_max_as_out_of_bounds() {
         let mut ifd = Ifd::new();
@@ -914,6 +911,6 @@ mod tests {
         ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0xFFFF_FFF0]));
         ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![0x20]));
         let got = decode_tiles(&ifd, &[0; 6], &gray_layout(), false);
-        assert_invalid_input(got, "TIFF: tile out of bounds");
+        assert_invalid_input(got, "image data out of bounds");
     }
 }

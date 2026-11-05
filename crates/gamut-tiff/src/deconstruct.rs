@@ -5,7 +5,7 @@
 //! issue #263) over the entire container — the header, every page IFD and image sub-IFD, every
 //! strip/tile/free/embedded-JPEG byte range, and the Exif/GPS metadata sub-IFDs — then layers
 //! TIFF tag knowledge on top. The resulting [`DeconstructReport`] carries the byte-level
-//! [`SegmentReport`] (every byte typed, or precisely what was not — including the dual-ledger
+//! [`SegmentReport`](gamut_ifd::SegmentReport) (every byte typed, or precisely what was not — including the dual-ledger
 //! parser cross-check) plus unknown field types, unknown/private tags, and out-of-spec codes.
 //!
 //! It is **collect-and-report, not fail-fast**: it errors only when the container itself is
@@ -16,170 +16,14 @@ use std::collections::BTreeMap;
 
 use gamut_core::{ImageBuf, Result, Rgb8};
 use gamut_ifd::{
-    AuditFinding, Ifd, SegmentReport, SkipReason, StandardAuditSpec, Value, audit as ifd_audit,
+    Anomaly, AuditFinding, DeconstructReport, Ifd, Severity, SkipReason, StandardAuditSpec,
+    UnknownFieldType, UnknownTag, Value, audit as ifd_audit,
 };
 
 use crate::compression::Compression;
 use crate::decoder::TiffDecoder;
 use crate::ifd::{PhotometricInterpretation, Predictor};
 use crate::tags;
-
-/// How serious a reported [`Anomaly`] is.
-///
-/// Non-exhaustive: further severities (e.g. an informational level) may be added without a
-/// breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Severity {
-    /// Out of spec but often benign (e.g. an image IFD carrying no pixel data).
-    Warning,
-    /// A structural defect (e.g. a strip-offset/byte-count mismatch or a sub-IFD cycle).
-    Error,
-}
-
-/// A tag a valid TIFF would not be expected to carry — recognised structurally but not part of the
-/// TIFF 6.0 tag set (see [`tags::is_known_tag`]).
-///
-/// Non-exhaustive: fields may be added as the deconstruct grows more precise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct UnknownTag {
-    /// The page (top-level IFD index) the tag was found in.
-    pub page: usize,
-    /// The tag number.
-    pub tag: u16,
-    /// The tag's on-disk field-type code. Kept as the raw `u16` (not [`FieldType`](crate::FieldType))
-    /// so that field types this crate does not recognise are still representable.
-    pub field_type: u16,
-    /// The tag's value count.
-    pub count: u64,
-}
-
-/// An IFD entry whose field-type code is unrecognised. The entry is **preserved verbatim** in
-/// the parse (as a [`gamut_ifd::Value::Unknown`]) — reported here because its out-of-line
-/// payload, if any, is unsizable and therefore unclassifiable.
-///
-/// Non-exhaustive: fields may be added as the deconstruct grows more precise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct UnknownFieldType {
-    /// The page (top-level IFD index) the entry was found in.
-    pub page: usize,
-    /// The entry's tag.
-    pub tag: u16,
-    /// The unrecognised on-disk field-type code.
-    pub type_code: u16,
-    /// The entry's declared value count (untrusted — the element size is unknown).
-    pub count: u64,
-}
-
-/// A recognised but out-of-spec or unparsable element a deconstruct flags.
-///
-/// Non-exhaustive (as are its variants): the diagnostic taxonomy grows with the deconstruct.
-/// The `detail` strings are human-readable diagnostics; their exact wording is not part of the
-/// API contract — match on the variant and its typed fields instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Anomaly {
-    /// A tag whose value uses a code this crate does not recognise (e.g. an unknown `Compression`).
-    #[non_exhaustive]
-    UnknownCode {
-        /// The page the tag was found in.
-        page: usize,
-        /// The tag carrying the code.
-        tag: u16,
-        /// The unrecognised code.
-        code: u32,
-        /// A human-readable description (wording not contractual).
-        detail: &'static str,
-    },
-    /// A known tag whose value could not be interpreted (wrong type, count, or range).
-    #[non_exhaustive]
-    UnparsableTag {
-        /// The page the tag was found in.
-        page: usize,
-        /// The tag.
-        tag: u16,
-        /// A human-readable description (wording not contractual).
-        detail: &'static str,
-    },
-    /// An out-of-spec or unexpected structural condition.
-    #[non_exhaustive]
-    Structure {
-        /// The page the condition relates to.
-        page: usize,
-        /// A human-readable description (wording not contractual).
-        detail: &'static str,
-        /// How serious the condition is.
-        severity: Severity,
-    },
-    /// A directory carrying more than one entry under the same tag.
-    ///
-    /// TIFF 6.0 §2 gives a directory one entry per tag, in ascending order. A repeated tag is
-    /// therefore a directory no reader can resolve without choosing — and readers choose
-    /// differently: this crate's model keeps the **last** occurrence, while libtiff marks every
-    /// occurrence after the **first** to be ignored (`tif_dirread.c`, "Mark duplicates of any tag
-    /// to be ignored") and warns that the directory is not sorted in ascending order. Which entry
-    /// survives is therefore a property of the reader, not of the file.
-    ///
-    /// Named by **offset** rather than by page, because the directory may be a metadata sub-IFD
-    /// several levels below one: the offset is the identity
-    /// [`SpanKind::IfdBody`](gamut_ifd::SpanKind::IfdBody) already uses.
-    #[non_exhaustive]
-    DuplicateTag {
-        /// The file offset of the directory holding the repeated tag.
-        ifd: u64,
-        /// The repeated tag.
-        tag: u16,
-        /// How many entries that directory carries under it.
-        entries: usize,
-        /// How serious the condition is — always [`Severity::Error`], as for every other
-        /// structural defect: TIFF 6.0 §2 gives a directory one entry per tag, so a field the
-        /// caller set is lost by at least one reader. Carried as a field rather than left
-        /// implicit so that a caller triaging a report reads severity the same way off every
-        /// variant that has one, and so that a later condition graded `Warning` needs no
-        /// breaking change to say so.
-        severity: Severity,
-    },
-}
-
-/// The result of a strict deconstruct: byte-level classification plus TIFF-specific findings.
-///
-/// Non-exhaustive: report categories may be added without a breaking change.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct DeconstructReport {
-    /// The byte-level verdict: every byte of the file typed ([`SegmentReport::segments`]), or
-    /// precisely what was not — unclassified ranges, conflicts, out-of-bounds claims, and the
-    /// dual-ledger parser cross-check.
-    pub segments: SegmentReport,
-    /// IFD entries whose field-type code was unrecognised (preserved verbatim in the parse).
-    pub unknown_fields: Vec<UnknownFieldType>,
-    /// Tags not part of the recognised TIFF tag set.
-    pub unknown_tags: Vec<UnknownTag>,
-    /// Recognised-but-out-of-spec codes, unparsable tags, and structural problems.
-    pub anomalies: Vec<Anomaly>,
-}
-
-impl DeconstructReport {
-    /// Whether every byte of the file maps to exactly one typed segment (delegates to
-    /// [`SegmentReport::is_fully_classified`] — zero tolerance, alignment padding included).
-    /// Independent of whether every tag/code was recognised.
-    #[must_use]
-    pub fn is_fully_classified(&self) -> bool {
-        self.segments.is_fully_classified()
-    }
-
-    /// Whether the file is pristine for archival: fully classified, with no unknown field
-    /// types, no unknown tags, and no anomalies.
-    #[must_use]
-    pub fn is_fully_accounted(&self) -> bool {
-        self.segments.is_fully_classified()
-            && self.unknown_fields.is_empty()
-            && self.unknown_tags.is_empty()
-            && self.anomalies.is_empty()
-    }
-}
 
 /// Walks `data` and returns a [`DeconstructReport`] classifying every byte.
 ///
@@ -200,12 +44,12 @@ pub fn deconstruct(data: &[u8]) -> Result<DeconstructReport> {
         findings.check_image_ifd(ifd, page);
     }
     findings.map_audit_findings(&audit.findings);
-    Ok(DeconstructReport {
-        segments: audit.report,
-        unknown_fields: findings.unknown_fields,
-        unknown_tags: findings.unknown_tags,
-        anomalies: findings.anomalies,
-    })
+    Ok(DeconstructReport::new(
+        audit.report,
+        findings.unknown_fields,
+        findings.unknown_tags,
+        findings.anomalies,
+    ))
 }
 
 /// Accumulates the TIFF-level findings over the audited tree.
@@ -239,19 +83,19 @@ impl Findings {
     fn check_tags(&mut self, ifd: &Ifd, page: usize) {
         for field in ifd.fields() {
             if let Value::Unknown(u) = &field.value {
-                self.unknown_fields.push(UnknownFieldType {
+                self.unknown_fields.push(UnknownFieldType::new(
                     page,
-                    tag: field.tag,
-                    type_code: u.type_code(),
-                    count: u.count(),
-                });
+                    field.tag,
+                    u.type_code(),
+                    u.count(),
+                ));
             } else if !tags::is_known_tag(field.tag) {
-                self.unknown_tags.push(UnknownTag {
+                self.unknown_tags.push(UnknownTag::new(
                     page,
-                    tag: field.tag,
-                    field_type: field.value.type_code(),
-                    count: field.value.count(),
-                });
+                    field.tag,
+                    field.value.type_code(),
+                    field.value.count(),
+                ));
             }
         }
     }
@@ -262,32 +106,32 @@ impl Findings {
         if let Some(code) = ifd.get_u32(tags::COMPRESSION)
             && Compression::try_from(code).is_err()
         {
-            self.anomalies.push(Anomaly::UnknownCode {
+            self.anomalies.push(Anomaly::unknown_code(
                 page,
-                tag: tags::COMPRESSION,
+                tags::COMPRESSION,
                 code,
-                detail: "TIFF: unrecognised Compression code",
-            });
+                "TIFF: unrecognised Compression code",
+            ));
         }
         if let Some(code) = ifd.get_u32(tags::PHOTOMETRIC_INTERPRETATION)
             && PhotometricInterpretation::try_from(code).is_err()
         {
-            self.anomalies.push(Anomaly::UnknownCode {
+            self.anomalies.push(Anomaly::unknown_code(
                 page,
-                tag: tags::PHOTOMETRIC_INTERPRETATION,
+                tags::PHOTOMETRIC_INTERPRETATION,
                 code,
-                detail: "TIFF: unrecognised PhotometricInterpretation code",
-            });
+                "TIFF: unrecognised PhotometricInterpretation code",
+            ));
         }
         if let Some(code) = ifd.get_u32(tags::PREDICTOR)
             && Predictor::try_from(code).is_err()
         {
-            self.anomalies.push(Anomaly::UnknownCode {
+            self.anomalies.push(Anomaly::unknown_code(
                 page,
-                tag: tags::PREDICTOR,
+                tags::PREDICTOR,
                 code,
-                detail: "TIFF: unrecognised Predictor code",
-            });
+                "TIFF: unrecognised Predictor code",
+            ));
         }
     }
 
@@ -314,11 +158,11 @@ impl Findings {
                 "TIFF: image missing StripOffsets/StripByteCounts",
             );
         } else if ifd.get_u32(tags::IMAGE_WIDTH).is_some() {
-            self.anomalies.push(Anomaly::Structure {
+            self.anomalies.push(Anomaly::structure(
                 page,
-                detail: "TIFF: image IFD has no strip or tile data",
-                severity: Severity::Warning,
-            });
+                "TIFF: image IFD has no strip or tile data",
+                Severity::Warning,
+            ));
         }
     }
 
@@ -334,19 +178,13 @@ impl Findings {
     ) {
         let (Some(offsets), Some(counts)) = (ifd.get_u64_vec(off_tag), ifd.get_u64_vec(cnt_tag))
         else {
-            self.anomalies.push(Anomaly::Structure {
-                page,
-                detail: missing,
-                severity: Severity::Error,
-            });
+            self.anomalies
+                .push(Anomaly::structure(page, missing, Severity::Error));
             return;
         };
         if offsets.len() != counts.len() {
-            self.anomalies.push(Anomaly::Structure {
-                page,
-                detail: mismatch,
-                severity: Severity::Error,
-            });
+            self.anomalies
+                .push(Anomaly::structure(page, mismatch, Severity::Error));
         }
     }
 
@@ -366,23 +204,21 @@ impl Findings {
         for finding in findings {
             match *finding {
                 AuditFinding::SkippedSubIfd { page, reason, .. } => {
-                    self.anomalies.push(Anomaly::Structure {
-                        page,
-                        detail: match reason {
-                            SkipReason::Cycle => "TIFF: sub-IFD offset revisited (possible cycle)",
-                            SkipReason::TooDeep => "TIFF: sub-IFD nesting too deep",
-                            SkipReason::OverBudget => "TIFF: sub-IFD budget exhausted",
-                            _ => "TIFF: sub-IFD could not be parsed",
-                        },
-                        severity: Severity::Error,
-                    });
+                    let detail = match reason {
+                        SkipReason::Cycle => "TIFF: sub-IFD offset revisited (possible cycle)",
+                        SkipReason::TooDeep => "TIFF: sub-IFD nesting too deep",
+                        SkipReason::OverBudget => "TIFF: sub-IFD budget exhausted",
+                        _ => "TIFF: sub-IFD could not be parsed",
+                    };
+                    self.anomalies
+                        .push(Anomaly::structure(page, detail, Severity::Error));
                 }
                 AuditFinding::ChainedSubIfd { page, .. } => {
-                    self.anomalies.push(Anomaly::Structure {
+                    self.anomalies.push(Anomaly::structure(
                         page,
-                        detail: "TIFF: sub-IFD carries a next-IFD chain",
-                        severity: Severity::Warning,
-                    });
+                        "TIFF: sub-IFD carries a next-IFD chain",
+                        Severity::Warning,
+                    ));
                 }
                 AuditFinding::ShadowedEntry { ifd, tag, .. } => {
                     *shadowed.entry((ifd, tag)).or_default() += 1;
@@ -392,12 +228,8 @@ impl Findings {
             }
         }
         for ((ifd, tag), lost) in shadowed {
-            self.anomalies.push(Anomaly::DuplicateTag {
-                ifd,
-                tag,
-                entries: lost + 1,
-                severity: Severity::Error,
-            });
+            self.anomalies
+                .push(Anomaly::duplicate_tag(ifd, tag, lost + 1));
         }
     }
 }
@@ -617,12 +449,12 @@ mod tests {
         findings.check_codes(&ifd, 3);
         assert_eq!(
             findings.anomalies,
-            [Anomaly::UnknownCode {
-                page: 3,
-                tag: tags::PREDICTOR,
-                code: 99,
-                detail: "TIFF: unrecognised Predictor code",
-            }]
+            [Anomaly::unknown_code(
+                3,
+                tags::PREDICTOR,
+                99,
+                "TIFF: unrecognised Predictor code",
+            )]
         );
 
         ifd.set(tags::PREDICTOR, Value::Short(vec![2]));
@@ -640,12 +472,12 @@ mod tests {
         findings.check_codes(&ifd, 3);
         assert_eq!(
             findings.anomalies,
-            [Anomaly::UnknownCode {
-                page: 3,
-                tag: tags::PHOTOMETRIC_INTERPRETATION,
-                code: 99,
-                detail: "TIFF: unrecognised PhotometricInterpretation code",
-            }]
+            [Anomaly::unknown_code(
+                3,
+                tags::PHOTOMETRIC_INTERPRETATION,
+                99,
+                "TIFF: unrecognised PhotometricInterpretation code",
+            )]
         );
 
         ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![1]));
@@ -791,11 +623,11 @@ mod tests {
         }]);
         assert_eq!(
             findings.anomalies,
-            [Anomaly::Structure {
-                page: 0,
-                detail: "TIFF: sub-IFD budget exhausted",
-                severity: Severity::Error,
-            }]
+            [Anomaly::structure(
+                0,
+                "TIFF: sub-IFD budget exhausted",
+                Severity::Error,
+            )]
         );
     }
 

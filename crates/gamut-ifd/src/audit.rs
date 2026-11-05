@@ -13,10 +13,15 @@
 //!
 //! Codecs supply tag knowledge through [`AuditSpec`]; the [`StandardAuditSpec`] covers the
 //! structural tags every TIFF-family file shares (strips, tiles, free ranges, embedded JPEG).
+//! A codec reports what its own tag knowledge finds on top of an audit in the shared
+//! [`DeconstructReport`] vocabulary.
+
+mod report;
 
 use std::collections::BTreeSet;
 
 use gamut_core::{ErrorKind, Result};
+pub use report::{Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag};
 
 use crate::reader::{SubIfdRefusal, admit_subifd, pointer_offsets};
 use crate::segment::{Claim, DataLabel, SegmentMap, SegmentReport, SpanKind};
