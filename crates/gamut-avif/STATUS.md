@@ -89,7 +89,7 @@ ceiling — the largest `len` that clears it is `4_294_967_250` and `4_294_967_2
 kind is `Unsupported` rather than `InvalidInput` by decision (#576): such a box is well-formed
 ISOBMFF through a 64-bit `largesize`, which the writer does not emit, so the limit is the writer's
 capability, not malformed input. On 32-bit targets (`wasm32`,
-built by `gamut-wasm`) a buffer holds under 2 GiB, so this crate's own `InvalidInput` is the
+compile-checked by `mise run check-cross wasm32-unknown-unknown`) a buffer holds under 2 GiB, so this crate's own `InvalidInput` is the
 effective ceiling and the 4 GiB refusal never fires.
 
 The **read** side demands nothing of a slot's length: it reports a degenerate slot it genuinely

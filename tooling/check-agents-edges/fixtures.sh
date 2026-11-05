@@ -76,7 +76,7 @@ check "a clause ends at a semicolon" 0 "" \
 # Edges.
 check "a missing edge is reported" 1 \
     "gamut-webp: cargo metadata has an edge to gamut-dsp (normal) that AGENTS.md does not list" \
-    sedx 's/← core, codec-abi, color, dsp, riff\./← core, codec-abi, color, riff./'
+    sedx 's/← core, codec-abi, color, dsp, riff, metadata/← core, codec-abi, color, riff, metadata/'
 check "a phantom edge is reported" 1 \
     "gamut-riff: AGENTS.md lists an edge to gamut-bitstream (normal) that cargo metadata does not have" \
     sedx 's/^\(- \*\*gamut-isobmff\*\* .*\) ← core\./\1 ← core, bitstream./'
@@ -98,7 +98,7 @@ check "the clause ends at the first full stop" 1 \
 
 # Grammar.
 check "a bullet with two clauses is rejected" 1 "exactly one" \
-    sedx 's/^- \*\*gamut-wasm\*\* (cdylib)\. ← gamut, `wasm-bindgen`\./& ← gamut./'
+    sedx 's/^- \*\*gamut-wasm\*\* (cdylib) — placeholder, outside the v1 freeze\. ← nothing\./& ← gamut./'
 check "nothing beside another item is rejected" 1 "\`nothing\` must be the only item" \
     sedx 's/^\(- \*\*gamut-dsp\*\* .*\) ← nothing\./\1 ← nothing, core./'
 check "an unrecognised item is rejected" 1 "unrecognised edge item" \
@@ -112,11 +112,11 @@ check "punctuation inside a code span does not end the item" 1 "unrecognised edg
 check "a member without a bullet is reported" 1 "gamut-wasm is a workspace member with no bullet" \
     sedx '/^- \*\*gamut-wasm\*\*/d'
 check "a phantom bullet is reported" 1 "gamut-phantom opens a bullet but is not a workspace member" \
-    sedx 's/^- \*\*gamut-wasm\*\* (cdylib)\. ← gamut, `wasm-bindgen`\./&\n- **gamut-phantom** — gone. ← core./'
+    sedx 's/^- \*\*gamut-wasm\*\* (cdylib) — placeholder, outside the v1 freeze\. ← nothing\./&\n- **gamut-phantom** — gone. ← core./'
 check "a crate stated twice is reported" 1 "gamut-wasm opens more than one bullet" \
-    sedx 's/^- \*\*gamut-wasm\*\* (cdylib)\. ← gamut, `wasm-bindgen`\./&\n&/'
+    sedx 's/^- \*\*gamut-wasm\*\* (cdylib) — placeholder, outside the v1 freeze\. ← nothing\./&\n&/'
 check "a bullet without a bold head is reported" 1 "does not open with a bold crate name" \
-    sedx 's/^- \*\*gamut-wasm\*\* (cdylib)\. ← gamut, `wasm-bindgen`\./&\n- gamut-loose. ← core./'
+    sedx 's/^- \*\*gamut-wasm\*\* (cdylib) — placeholder, outside the v1 freeze\. ← nothing\./&\n- gamut-loose. ← core./'
 
 echo "check-agents-edges fixtures: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]

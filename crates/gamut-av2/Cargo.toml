@@ -1,6 +1,6 @@
 [package]
 name = "gamut-av2"
-description = "AV2 image encoder and decoder (intra-frame still-image coding from AOMedia Video 2, AV1's successor)."
+description = "Placeholder: AV2 image encoder and decoder (intra-frame still-image coding from AOMedia Video 2, AV1's successor)."
 version = "0.1.4"
 edition.workspace = true
 rust-version.workspace = true
@@ -14,9 +14,3 @@ categories.workspace = true
 
 [lints]
 workspace = true
-
-[dependencies]
-gamut-core.workspace = true
-gamut-color.workspace = true
-gamut-dsp.workspace = true
-gamut-bitstream.workspace = true

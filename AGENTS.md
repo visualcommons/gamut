@@ -53,7 +53,9 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
   **dependency-free** (not even on `gamut-core`); `unsafe` confined to its `bridge` module.
   ← nothing.
 - **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core.
-- **gamut-av1** / **gamut-av2** / **gamut-vvc** — codecs. ← core, color, dsp, bitstream.
+- **gamut-av1** — AV1 codec. ← core, color, dsp, bitstream.
+- **gamut-av2** / **gamut-vvc** — placeholder codecs: module docs only, no items, outside the
+  v1 freeze. ← nothing.
 - **gamut-jxl** — JPEG XL, uniquely a **wrapper** over the format's reference implementations
   rather than clean-slate (maintainer-approved departure from the pure-Rust rule): encode
   wraps **libjxl 0.12.0** statically via `gamut-jxl-sys` (off wasm32), decode wraps the
@@ -137,7 +139,7 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
   PNG/JPEG/WebP/JXL input with gamut's own decoders (only PPM uses the third-party `image`
   crate) and encodes only with gamut crates, and exposes `primitives` re-exports as inspection
   subcommands. ← gamut, `clap`, `image`, `thiserror`, `tracing`, `tracing-subscriber`.
-- **gamut-wasm** (cdylib). ← gamut, `wasm-bindgen`.
+- **gamut-wasm** (cdylib) — placeholder, outside the v1 freeze. ← nothing.
 - **gamut-ffi** (cdylib/staticlib). ← gamut, codec-abi, color.
 
 ## Code correctness
