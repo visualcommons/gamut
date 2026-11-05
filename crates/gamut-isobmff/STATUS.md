@@ -204,7 +204,7 @@ iterator replaced `next_box() -> Result<Option<RawBox>>` (#1069, a major bump, m
 
 ## Model surface (#1069)
 
-`IsoBmffImage::parse`/`to_bytes` replace the free `parse`/`to_bytes` functions. `Item`, `Property`,
+`IsoBmffImage::parse`/`to_bytes` replace the free `read`/`write` functions. `Item`, `Property`,
 `ItemReference`, `EntityGroup` and `MasteringDisplay` are `#[non_exhaustive]` with `new(..)`
 constructors (and `with_*` builders on `Item`), `C2paUuidBox` is `#[non_exhaustive]`, an `nclx`
 `colr` carries the workspace's `gamut_core::Cicp` in place of the crate-local `NclxColr`, and

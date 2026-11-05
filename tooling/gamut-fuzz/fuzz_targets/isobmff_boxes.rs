@@ -1,8 +1,8 @@
 //! fuzz · robustness — `gamut_isobmff`'s box walk and model reader, on untrusted bytes.
 //!
-//! `docs/testing.md`'s per-crate table names `read` as this crate's untrusted-input surface. An
-//! ISOBMFF file is a tree of length-prefixed boxes whose every length the file chose, so the
-//! `#![forbid(unsafe_code)]` reader must end in a typed error rather than a panic, a hang or an
+//! `docs/testing.md`'s per-crate table names `IsoBmffImage::parse` as this crate's untrusted-input
+//! surface. An ISOBMFF file is a tree of length-prefixed boxes whose every length the file chose,
+//! so the `#![forbid(unsafe_code)]` reader must end in a typed error rather than a panic, a hang or an
 //! allocation sized from a declared count.
 //!
 //! ## The check beyond the crash oracle
@@ -31,7 +31,7 @@
 //!
 //! - **the box cursor strictly advances.** The defect this names is a box whose declared size does
 //!   not move the cursor — and `BoxReader::next` cannot express it: it reads the 4-byte size and the
-//!   4-byte type through `take` *before* any success return, so `position()` has already grown by
+//!   4-byte type through `bytes` *before* any success return, so `position()` has already grown by
 //!   8 by the time a `RawBox` exists. Measured, not reasoned: with the `size < header_size` guard
 //!   removed and the body length taken as `size.saturating_sub(header_size)` — the exact defect
 //!   the assertion advertises — the committed seed reports nothing, and neither does a bounded

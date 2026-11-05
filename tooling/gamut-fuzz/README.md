@@ -247,9 +247,9 @@ defect it advertised produced no report:
    copy its dimensions on to the caller's buffer. That reach is narrow but not empty, and the
    transposition above is a defect in exactly those lines that any non-square file reports. So it
    is the row's listed check, with the reach written into the row rather than implied.
-7. `isobmff_boxes` claimed the box cursor strictly advances. `BoxReader::next_box` reads its
-   4-byte size and 4-byte type through `take` before any success return, so no declared box size
-   can stall the cursor: with the `size < header_size` guard removed, 851 173 executions over
+7. `isobmff_boxes` claimed the box cursor strictly advances. `BoxReader`'s `Iterator::next` reads
+   its 4-byte size and 4-byte type through `bytes` before any success return, so no declared box
+   size can stall the cursor: with the `size < header_size` guard removed, 851 173 executions over
    61 seconds reported nothing, while a `self.pos` rewind reports on the first seed.
 8. `heic_container` checked that the segments tile `0..len`. `HeifContainer::parse` stores
    `gamut_isobmff::walk_segments(data)?` verbatim, so that is the same assertion over the same
@@ -279,7 +279,7 @@ as one at the site and none is listed in the table above.
 | the digest verdict matches the decoded field | `dng_decode` | both sides read `NewRawImageDigest` out of IFD 0 with the same expression; the call is made anyway for the crash oracle |
 | a page that decodes must also describe | `tiff_decode` | `decode_page_samples` calls the tag reader before it reads a pixel |
 | the sample count matches the declared geometry's product | `tiff_decode` | `ImageBuf` sizes its storage from its own dimensions, so this is the row's live check times `Rgb8::CHANNELS` |
-| the box cursor strictly advances, and never runs past the end | `isobmff_boxes` | `next_box` consumes its 8-byte header through `take` before any success return |
+| the box cursor strictly advances, and never runs past the end | `isobmff_boxes` | `BoxReader`'s `Iterator::next` consumes its 8-byte header through `bytes` before any success return |
 | no segment is empty | `isobmff_boxes` | every shape `walk_segments` pushes is widened by that same header read, or runs to end of file |
 
 The `gamut-ifd` wrapper pin (entry 1) lives in `crates/gamut-ifd/tests/robustness.rs` instead, over

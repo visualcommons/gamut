@@ -213,8 +213,8 @@ defect the check named and getting nothing back:
   result as `ImageBuf::<Q>::zeroed(src.dims)` — so the count *is* the dimensions' product, and
   comparing it against the declared geometry's product is the geometry comparison times a
   constant. A transposition passes it. In the same shape, "the box cursor strictly advances"
-  cannot fail for any declared box size, because `BoxReader::next_box` consumes its 8-byte header
-  before any success return.
+  cannot fail for any declared box size, because `BoxReader`'s `Iterator::next` consumes its
+  8-byte header before any success return.
 
 Anchor a check on a value the compared side does not produce, and keep the tautology — if it is
 worth keeping at all — as a **structure pin**: named as one at the site, and kept out of the
