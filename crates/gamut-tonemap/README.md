@@ -54,8 +54,8 @@ gamma.map_slice(&mut linear);
 ## Status
 
 The `ToneCurve` trait (with a blanket impl for any `Fn(f32) -> f32`) and eight built-in operators —
-`Linear`, `Clamp`, `Exposure`, `Reinhard`, `ReinhardExtended`, `Aces`, `Hable`, and `Drago` — all
-re-exported at the crate root. Each is implemented clean-slate from the primary source documented in
+`Linear`, `Clamp`, `Exposure`, `Reinhard`, `ReinhardExtended`, `Aces`, `Hable`, and `Drago` — plus
+their parameter-default constants, every item at the crate root, its one public path. Each is implemented clean-slate from the primary source documented in
 [`references/tonemap`](../../references/tonemap/README.md). Reachable through the umbrella crate's
 `tonemap` feature. The public surface is **frozen at v1** (issue #188); see [STATUS.md](STATUS.md)
 for the surface table and settled design decisions.

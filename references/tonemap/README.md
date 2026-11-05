@@ -40,7 +40,7 @@ provenance of the coefficients.
 ## Reinhard — global photographic operators (2002)
 
 Source: Reinhard et al. 2002, §3.1 "Initial luminance mapping" (verified 2026-06). Code:
-`gamut_tonemap::operators::{Reinhard, ReinhardExtended}`.
+`gamut_tonemap::{Reinhard, ReinhardExtended}`.
 
 **Simple operator, Eq (3):**
 
@@ -97,7 +97,7 @@ fixed point.
 ## Exposure — pre-scaling
 
 Source: standard photographic exposure convention (powers of two / "stops"; APEX system). Code:
-`gamut_tonemap::operators::Exposure`.
+`gamut_tonemap::Exposure`.
 
 ```
 map(x) = x · gain          gain = 2^stops      (one stop doubles exposure)
@@ -112,7 +112,7 @@ constant. Golden: `Exposure::new(2).map(3)=6`; `Exposure::from_stops(1).scale()=
 ## ACES filmic — Narkowicz approximation (2016)
 
 Source: Narkowicz 2016 (`aces-filmic-narkowicz.html`, verified 2026-06), license CC0/MIT. Code:
-`gamut_tonemap::operators::Aces`.
+`gamut_tonemap::Aces`.
 
 ```
 ACESFilm(x) = saturate( (x·(a·x + b)) / (x·(c·x + d) + e) )
@@ -139,7 +139,7 @@ clamp both quadratics overflow f32 for `x ≳ 2×10¹⁹`, yielding `inf/inf = N
 ## Hable / Uncharted 2 filmic (2010)
 
 Source: Hable 2010 (`uncharted2-hable-filmicworlds.html`, verified 2026-06). Code:
-`gamut_tonemap::operators::Hable`.
+`gamut_tonemap::Hable`.
 
 ```
 partial(x) = ((x·(A·x + C·B) + D·E) / (x·(A·x + B) + D·F)) − E/F
@@ -170,7 +170,7 @@ inside `partial` also covers the `partial(W)` normalizer for absurdly large whit
 
 ## Drago — adaptive logarithmic mapping (2003)
 
-Source: Drago et al. 2003, §3 (verified 2026-06). Code: `gamut_tonemap::operators::Drago`.
+Source: Drago et al. 2003, §3 (verified 2026-06). Code: `gamut_tonemap::Drago`.
 
 Bias power function, Eq (3) (Perlin & Hoffert):
 
@@ -217,7 +217,7 @@ non-negative at `L_w` exactly when
     L_w · (2 + w) · ln(2 + w)  ≥  (L_w + 1) · ln(L_w + 1) · k · w
 
 The tightest point of that on the domain is the top, `L_w = L_wmax`, where `w = 8`, giving the
-closed form `gamut_tonemap::operators::Drago::is_monotonic` evaluates:
+closed form `gamut_tonemap::Drago::is_monotonic` evaluates:
 
     L_wmax · 10 · ln(10)  ≥  8 · k · (L_wmax + 1) · ln(L_wmax + 1)
 

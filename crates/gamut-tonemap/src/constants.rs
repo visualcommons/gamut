@@ -5,19 +5,19 @@
 //! `references/tonemap/README.md` for the operators these defaults parameterize.
 
 /// Normalized SDR display white in linear units (`1.0`). Default upper bound for
-/// [`Clamp`](crate::operators::Clamp).
+/// [`Clamp`](crate::Clamp).
 pub const SDR_WHITE_NORMALIZED: f32 = 1.0;
 
-/// Default white point for [`ReinhardExtended`](crate::operators::ReinhardExtended) when none is
+/// Default white point for [`ReinhardExtended`](crate::ReinhardExtended) when none is
 /// given: the HDR-to-SDR reference-white ratio — BT.2408 HDR reference white (203 cd/m²) over the
 /// classic SDR diffuse white (100 cd/m²), i.e. `203 / 100 = 2.03`. See [`gamut_core::luminance`].
 pub const DEFAULT_REINHARD_WHITE: f32 = 2.03;
 
-/// Default linear white point for [`Hable`](crate::operators::Hable): the Uncharted 2 value `11.2`
+/// Default linear white point for [`Hable`](crate::Hable): the Uncharted 2 value `11.2`
 /// (John Hable, 2010). See `references/tonemap/README.md`.
 pub const DEFAULT_HABLE_WHITE: f32 = 11.2;
 
-/// Default bias for [`Drago`](crate::operators::Drago): `0.85`, within the paper's useful range
+/// Default bias for [`Drago`](crate::Drago): `0.85`, within the paper's useful range
 /// `[0.5, 1.0]` (Drago et al. 2003). See `references/tonemap/README.md`.
 pub const DEFAULT_DRAGO_BIAS: f32 = 0.85;
 

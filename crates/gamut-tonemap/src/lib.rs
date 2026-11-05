@@ -6,15 +6,18 @@
 //! extensible [`ToneCurve`] trait so consumers can supply their own — and deliberately stops
 //! there: it performs no colour-space conversion, gamut mapping, or pixel I/O.
 //!
-//! # Modules
+//! # Items
 //!
-//! - [`curve`] — the [`ToneCurve`] trait every operator implements, with an in-place slice helper
-//!   and a blanket impl so a plain `Fn(f32) -> f32` closure is itself a curve.
-//! - [`operators`] — the built-in curves: [`Reinhard`] / [`ReinhardExtended`], the filmic [`Aces`]
-//!   and [`Hable`], [`Drago`] logarithmic mapping, [`Exposure`] pre-scaling, the [`Linear`]
-//!   passthrough, and [`Clamp`]. All are re-exported at the crate root.
-//! - [`constants`] — per-operator parameter defaults. (Absolute reference luminances in nits live
-//!   in [`gamut_core::luminance`].)
+//! Every item lives at the crate root, its one public path.
+//!
+//! - [`ToneCurve`] — the trait every operator implements, with an in-place slice helper and a
+//!   blanket impl so a plain `Fn(f32) -> f32` closure is itself a curve.
+//! - The built-in curves: [`Reinhard`] / [`ReinhardExtended`], the filmic [`Aces`] and [`Hable`],
+//!   [`Drago`] logarithmic mapping, [`Exposure`] pre-scaling, the [`Linear`] passthrough, and
+//!   [`Clamp`].
+//! - Per-operator parameter defaults: [`SDR_WHITE_NORMALIZED`], [`DEFAULT_REINHARD_WHITE`],
+//!   [`DEFAULT_HABLE_WHITE`] and [`DEFAULT_DRAGO_BIAS`]. (Absolute reference luminances in nits
+//!   live in [`gamut_core::luminance`].)
 //!
 //! # Inputs and the HDR-to-SDR pipeline
 //!
@@ -51,9 +54,9 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
-pub mod constants;
-pub mod curve;
-pub mod operators;
+mod constants;
+mod curve;
+mod operators;
 
 // Executable laws for the `ToneCurve` contract, shared by this crate's property tests and the
 // out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
@@ -63,7 +66,8 @@ pub mod operators;
 #[doc(hidden)]
 pub mod invariants;
 
-#[doc(inline)]
+pub use constants::{
+    DEFAULT_DRAGO_BIAS, DEFAULT_HABLE_WHITE, DEFAULT_REINHARD_WHITE, SDR_WHITE_NORMALIZED,
+};
 pub use curve::ToneCurve;
-#[doc(inline)]
 pub use operators::{Aces, Clamp, Drago, Exposure, Hable, Linear, Reinhard, ReinhardExtended};

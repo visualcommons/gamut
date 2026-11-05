@@ -148,7 +148,7 @@ fn curve_output_scale(curve: &dyn ToneCurve, xs: &[f32]) -> f32 {
 ///
 /// `xs` must be sorted ascending and lie within the operator's documented monotonic domain —
 /// `Drago` promises this only on `[0, world_max]`, and only for the parameters
-/// [`Drago::is_monotonic`](crate::operators::Drago::is_monotonic) accepts, so a caller checking
+/// [`Drago::is_monotonic`](crate::Drago::is_monotonic) accepts, so a caller checking
 /// `Drago` supplies samples from that interval and asks that question first.
 ///
 /// The contract allows monotonicity to hold only "up to f32 rounding", and that has to be
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn hable_near_zero_noise_is_not_a_monotonicity_violation() {
         // The region the crash landed in, at three white points including the default.
-        for white in [1.0_f32, crate::constants::DEFAULT_HABLE_WHITE, 0.1] {
+        for white in [1.0_f32, crate::DEFAULT_HABLE_WHITE, 0.1] {
             let hable = Hable::new(white).expect("white > 0");
             let xs: Vec<f32> = (0..64).map(|i| 1e-10 + (i as f32) * 1e-8).collect();
 

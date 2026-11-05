@@ -2,7 +2,7 @@
 
 /// A tone-mapping operator: a map from a non-negative linear-light input to a tone-mapped output.
 ///
-/// Built-in operators live in [`operators`](crate::operators) and are re-exported at the crate
+/// Built-in operators ([`Reinhard`](crate::Reinhard), [`Aces`](crate::Aces), …) live at the crate
 /// root; implement this trait yourself to supply a custom curve, or rely on the blanket impl that
 /// makes any `Fn(f32) -> f32` a `ToneCurve` so a closure works directly.
 ///
@@ -13,11 +13,11 @@
 ///
 /// For a finite, non-negative input, every built-in operator returns a non-negative output and
 /// **never NaN**. The output is finite except where the operator's exact value exceeds the f32
-/// range — e.g. [`Exposure`](crate::operators::Exposure) with a huge gain — which saturates to
+/// range — e.g. [`Exposure`](crate::Exposure) with a huge gain — which saturates to
 /// `+∞`. Every built-in is monotonic non-decreasing in `x` up to f32 rounding, with one
-/// exception: [`Drago`](crate::operators::Drago) transcribes a published formula that is not
+/// exception: [`Drago`](crate::Drago) transcribes a published formula that is not
 /// monotonic for every parameter pair it accepts, even inside its own domain, so it promises
-/// this only when [`Drago::is_monotonic`](crate::operators::Drago::is_monotonic) says so.
+/// this only when [`Drago::is_monotonic`](crate::Drago::is_monotonic) says so.
 /// Behaviour on negative or NaN inputs is operator-defined and outside this contract — linearize
 /// and clamp upstream if a source can produce them.
 pub trait ToneCurve {
