@@ -1,0 +1,9 @@
+exit: Some(0)
+--- stdout ---
+inspecting <input> as DNG
+  classified:    136 / 136 bytes (100.0%) across 3 segment(s)
+  unclassified:  0 bytes
+  fully classified: yes
+  fully accounted:  yes
+  C2PA: no manifest store found in the main IFD chain — gamut locates a C2PA manifest store and never validates it: it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.
+--- stderr ---

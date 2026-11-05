@@ -1,0 +1,12 @@
+exit: Some(1)
+--- stdout ---
+inspecting <input> as DNG
+  classified:    124 / 124 bytes (100.0%) across 3 segment(s)
+  unclassified:  0 bytes
+  anomalies: 1
+    - [error] page 0: DNG: image missing StripOffsets/StripByteCounts
+  fully classified: yes
+  fully accounted:  no
+  C2PA: no manifest store found in the main IFD chain — gamut locates a C2PA manifest store and never validates it: it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.
+--- stderr ---
+error: <input>: not fully accounted — 0 unclassified byte(s), 0 unknown tag(s), 0 unknown field type(s), 1 anomaly/ies

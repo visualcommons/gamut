@@ -1,0 +1,4 @@
+exit: Some(0)
+--- stdout ---
+{"path":"<input>","format":"dng","format_source":"detected","accounting":{"file_len":136,"classified_bytes":136,"unclassified_bytes":0,"segment_count":3,"unclassified":[],"conflicts":[],"shared_values":0,"out_of_bounds":[],"unclaimed_reads":[],"unread_claims":[]},"unknown_field_types":[],"unknown_tags":[],"anomalies":[],"fully_classified":true,"fully_accounted":true,"c2pa":{"not_validated":"gamut locates a C2PA manifest store and never validates it: it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.","store":null,"unread":[]}}
+--- stderr ---
