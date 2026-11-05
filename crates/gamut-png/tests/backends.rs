@@ -670,6 +670,62 @@ fn cloning_shares_the_pushed_backends() {
     );
 }
 
+/// A clone copies the *list* of shared backends: a push to either side after the clone is taken
+/// is invisible to the other.
+#[test]
+fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
+    let rgb8 = rgb8_samples();
+    let image = ImageRef::<Rgb8>::new(&rgb8, dims()).expect("rgb8");
+    let log = log();
+    let mut encoder = PngEncoder::new();
+    encoder.push_backend(ScriptedDeflater::new("shared", false, Act::Work, &log));
+    let mut clone = encoder.clone();
+    encoder.push_backend(ScriptedDeflater::new(
+        "original-only",
+        false,
+        Act::Work,
+        &log,
+    ));
+    clone.push_backend(ScriptedDeflater::new("clone-only", false, Act::Work, &log));
+    encoder
+        .encode_image(image, &mut Vec::new())
+        .expect("encode");
+    clone.encode_image(image, &mut Vec::new()).expect("encode");
+    assert_eq!(
+        entries(&log),
+        vec![
+            "shared:supports",
+            "original-only:supports",
+            "shared:supports",
+            "clone-only:supports"
+        ]
+    );
+
+    let (png, _) = sample_png();
+    let log = self::log();
+    let mut decoder = PngDecoder::new();
+    decoder.push_backend(ScriptedInflater::new("shared", false, Act::Work, &log));
+    let mut clone = decoder.clone();
+    decoder.push_backend(ScriptedInflater::new(
+        "original-only",
+        false,
+        Act::Work,
+        &log,
+    ));
+    clone.push_backend(ScriptedInflater::new("clone-only", false, Act::Work, &log));
+    let _: ImageBuf<Rgb8> = DecodeImage::<Rgb8>::decode_image(&decoder, &png).expect("decode");
+    let _: ImageBuf<Rgb8> = DecodeImage::<Rgb8>::decode_image(&clone, &png).expect("decode");
+    assert_eq!(
+        entries(&log),
+        vec![
+            "shared:supports",
+            "original-only:supports",
+            "shared:supports",
+            "clone-only:supports"
+        ]
+    );
+}
+
 #[test]
 fn debug_and_default_still_work_with_a_registry() {
     let mut encoder = PngEncoder::default();

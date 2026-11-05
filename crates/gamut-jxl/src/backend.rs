@@ -871,6 +871,26 @@ mod tests {
         assert_eq!(reg.lock().len(), 2);
     }
 
+    /// A panic while the registry lock is held poisons the mutex; `Registry::lock` recovers the
+    /// list rather than erroring (contrast `gamut-jpeg`, whose registry reports a poisoned slot as
+    /// an error), so every later call still sees every backend and can still push.
+    #[test]
+    fn registry_recovers_a_poisoned_lock() {
+        let reg: Registry<dyn JxlCodestreamEncoder> = Registry::default();
+        reg.push(Box::new(Decliner));
+        let holder = reg.clone();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = holder.lock();
+            panic!("backend panicked while the registry was locked");
+        }));
+        assert!(panicked.is_err());
+        assert!(reg.0.is_poisoned(), "the panic poisoned the mutex");
+        assert_eq!(reg.lock().len(), 1);
+        reg.push(Box::new(Decliner));
+        assert!(!reg.is_empty());
+        assert_eq!(reg.lock().len(), 2);
+    }
+
     #[test]
     fn registry_debug_reports_the_backend_count() {
         let reg: Registry<dyn JxlCodestreamEncoder> = Registry::default();
