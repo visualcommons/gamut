@@ -188,13 +188,13 @@ exclude_re = [
     # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
     # `<` and `<=` disagree. `±0 == 0`, so the reconstruction is identical: equivalent.
     '^crates/gamut-av1/src/quant\.rs:58:22: replace < with <= in dequant$',
-    # gamut-av1 cdf::diagonal_count — `w + h - 1` is the anti-diagonal count; diagonals at index
+    # gamut-av1 cdf::scan::diagonal_count — `w + h - 1` is the anti-diagonal count; diagonals at index
     # `≥ w+h-1` are empty (`i_lo > i_hi`), so any bound that is larger or equal walks the same
     # non-empty diagonals and yields an identical scan. All three operator mutations only enlarge
     # (or keep) the bound, hence equivalent; a *smaller* bound (not generated here) would differ.
-    '^crates/gamut-av1/src/cdf\.rs:4755:7: replace \+ with \* in diagonal_count$',
-    '^crates/gamut-av1/src/cdf\.rs:4755:11: replace - with \+ in diagonal_count$',
-    '^crates/gamut-av1/src/cdf\.rs:4755:11: replace - with / in diagonal_count$',
+    '^crates/gamut-av1/src/cdf/scan\.rs:144:7: replace \+ with \* in diagonal_count$',
+    '^crates/gamut-av1/src/cdf/scan\.rs:144:11: replace - with \+ in diagonal_count$',
+    '^crates/gamut-av1/src/cdf/scan\.rs:144:11: replace - with / in diagonal_count$',
     # gamut-av1 filter — equivalents in the in-loop filters (the dav1d oracle pins everything else).
     # constrain: `sign = if diff < 0`, but the magnitude is 0 at `diff == 0` (the only value `<`/`<=`
     # disagree on), so `±0` makes the result identical (same shape as quant::dequant).
@@ -233,15 +233,15 @@ exclude_re = [
     # superres_err: see the doc comment — `err` reaches the offset only as `-err/2` and the `& 0x3fff`
     # discards the `2¹⁴`-multiple that `-`→`+` introduces. (The `*`/`<<`/`/` mutants are not masked.)
     '^crates/gamut-av1/src/filter\.rs:1093:18: replace - with \+ in superres_err$',
-    # gamut-av1 tile — equivalents in the entropy/segment helpers (the snapshot + round-trip tests pin
+    # gamut-av1 tile::{mode,coder} — equivalents in the segment/entropy helpers (the snapshot + round-trip tests pin
     # everything observable). last_ref: `max - 1` is the largest valid segment ref; a ref is always
     # `< max`, so widening the threshold is never reached and the general neg_interleave path maps
     # `r == max-1` identically.
-    '^crates/gamut-av1/src/tile\.rs:377:9: replace - with \+ in last_ref$',
-    '^crates/gamut-av1/src/tile\.rs:377:9: replace - with / in last_ref$',
+    '^crates/gamut-av1/src/tile/mode\.rs:51:9: replace - with \+ in last_ref$',
+    '^crates/gamut-av1/src/tile/mode\.rs:51:9: replace - with / in last_ref$',
     # recenter: `if v > 2*ref` — at `v == 2*ref` the else branch yields `2*(v-ref) == 2*ref`, exactly the
     # value the `>=` mutant would return from the `v` branch, so the boundary is a continuity point.
-    '^crates/gamut-av1/src/tile\.rs:4665:10: replace > with >= in recenter$',
+    '^crates/gamut-av1/src/tile/coder\.rs:148:10: replace > with >= in recenter$',
     # gamut-bitstream `ec_partition`: its only `-` is the constant shift `7 - EC_PROB_SHIFT` (= 1,
     # since EC_PROB_SHIFT = 6). The `- → /` mutation yields `7 / EC_PROB_SHIFT` = 1 — the identical
     # value — so it is unkillable. (`- → +`/`*` give 13/42 and are caught by the round-trip tests.)
