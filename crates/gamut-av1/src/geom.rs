@@ -43,7 +43,7 @@ impl PlaneGeom {
     /// Luma always has `ss_x = ss_y = 0`; the chroma planes take their shifts from `subsampling`.
     ///
     /// Monochrome ([`ChromaSubsampling::Cs400`]) has **no** chroma planes, so both chroma entries
-    /// are zero-extent. `subsampling()` reports `(1, 1)` there because that is the AV1 §5.5.2
+    /// are zero-extent. `factors()` reports `(2, 2)` there because that is the AV1 §5.5.2
     /// header inference, not a geometry — using it to size a plane would allocate half-sized
     /// chroma buffers for planes that are never coded. Zero extent instead makes every
     /// extent-bounded loop (deblocking, for one) a no-op without a plane-count test of its own.
@@ -73,8 +73,8 @@ impl PlaneGeom {
             };
             return [luma, none, none];
         }
-        let (sx, sy) = subsampling.subsampling();
-        let (sx, sy) = (u32::from(sx), u32::from(sy));
+        let (fx, fy) = subsampling.factors();
+        let (sx, sy) = (fx.trailing_zeros(), fy.trailing_zeros());
         let plane = |ss_x: u32, ss_y: u32| PlaneGeom {
             // Ceiling on the visible axes: a 5-sample-wide luma plane has 3 chroma samples.
             w: width.div_ceil(1 << ss_x),
@@ -220,7 +220,8 @@ pub(crate) fn has_chroma(
     if matches!(ss, ChromaSubsampling::Cs400) {
         return false; // NumPlanes == 1
     }
-    let (ss_x, ss_y) = ss.subsampling();
+    let (fx, fy) = ss.factors();
+    let (ss_x, ss_y) = (fx.trailing_zeros(), fy.trailing_zeros());
     // The spec writes this as two sequential tests that both yield 0; since neither branch has a
     // side effect, the disjunction below is equivalent and the evaluation order is immaterial. A
     // `bw`/`bh` of 4 is the spec's `bw4 == 1` / `bh4 == 1`: only a single-MI-cell extent can be
@@ -407,8 +408,8 @@ mod tests {
         // mutant that changed any of them would survive.
         //
         // Luma is the same geometry it has at 4:4:4: 17x13 ⇒ mi 6x4 ⇒ coded 24x16. The chroma
-        // entries are zero-extent, **not** the half-sized planes that `Cs400::subsampling()`'s
-        // header-inferred `(1, 1)` would otherwise produce — that pair is a §5.5.2 signalling
+        // entries are zero-extent, **not** the half-sized planes that `Cs400::factors()`'s
+        // header-inferred `(2, 2)` would otherwise produce — that pair is a §5.5.2 signalling
         // convention, not a geometry, and the `ss_x`/`ss_y` below record it without sizing anything.
         let (mc, mr) = mi(17, 13);
         let g = PlaneGeom::frame(17, 13, mc, mr, ChromaSubsampling::Cs400);

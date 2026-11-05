@@ -98,14 +98,15 @@ fn list() {
         println!("  {bd:?}: {} bits (max {})", bd.bits(), bd.max_value());
     }
 
-    println!("chroma subsampling (subsampling_x, subsampling_y):");
+    println!("chroma subsampling (horizontal, vertical factors):");
     for cs in [
         ChromaSubsampling::Cs444,
         ChromaSubsampling::Cs422,
         ChromaSubsampling::Cs420,
+        ChromaSubsampling::Cs440,
         ChromaSubsampling::Cs400,
     ] {
-        let (x, y) = cs.subsampling();
+        let (x, y) = cs.factors();
         println!("  {cs:?}: ({x}, {y})");
     }
 }

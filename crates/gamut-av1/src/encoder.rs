@@ -447,7 +447,9 @@ fn still_config(
             "AV1: only 8-, 10- and 12-bit samples are coded (§6.4.1)",
         ));
     }
-    let (sub_x, sub_y) = subsampling.subsampling();
+    // Each factor is 1 or 2, so `factor > 1` is its AV1 `subsampling_*` flag.
+    let (fx, fy) = subsampling.factors();
+    let (sub_x, sub_y) = (u8::from(fx > 1), u8::from(fy > 1));
     let config = Av1StillConfig {
         seq_profile: seq_profile_for(subsampling, bit_depth)?,
         seq_level_idx_0: headers::pick_level(width, height)?,
@@ -1100,6 +1102,17 @@ mod tests {
                 seq_profile_for(ss, depth).expect("a coded layout"),
                 want,
                 "{ss:?} at {depth:?}"
+            );
+        }
+        // 4:4:0 has no AV1 signalling (`subsampling_y = 1` needs `subsampling_x = 1`, §6.4.2),
+        // so it is refused at every depth — 12-bit included, which the depth rule would
+        // otherwise sweep into Professional.
+        for depth in [BitDepth::Eight, BitDepth::Twelve] {
+            assert_eq!(
+                seq_profile_for(ChromaSubsampling::Cs440, depth)
+                    .expect_err("4:4:0 is not an AV1 layout")
+                    .kind(),
+                gamut_core::ErrorKind::Unsupported
             );
         }
     }

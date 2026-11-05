@@ -374,8 +374,8 @@ impl Planar8 {
         }
         let (width, height) = (full.width as usize, full.height as usize);
         let (cw, ch) = subsampling.chroma_dimensions(full.width, full.height);
-        let (sx, sy) = subsampling.subsampling();
-        let (sx, sy) = (1usize << sx, 1usize << sy);
+        let (sx, sy) = subsampling.factors();
+        let (sx, sy) = (sx as usize, sy as usize);
         let [y, u, v] = full.planes;
         let chroma = |p: &[u8]| downsample_box(p, width, height, cw as usize, ch as usize, sx, sy);
         Ok(Self {
@@ -474,7 +474,8 @@ impl Planar8 {
             }
             return out;
         }
-        let (sx, sy) = self.subsampling.subsampling();
+        let (fx, fy) = self.subsampling.factors();
+        let (sx, sy) = (fx.trailing_zeros(), fy.trailing_zeros());
         let (cw, _) = self.subsampling.chroma_dimensions(self.width, self.height);
         let (w, cw) = (self.width as usize, cw as usize);
         for y in 0..self.height as usize {
