@@ -18,7 +18,12 @@
 #          with ...`, `delete match arm P`, `delete field F from ...`) finds OP / G / P / F
 #          starting at column C of that line -- columns count from 1, as cargo-mutants prints them;
 #        * a description ending `in FN` (and a whole-body `replace FN -> T with V`) sits inside
-#          `fn <last segment of FN>`: the nearest `fn` item at or above line L carries that name.
+#          `fn <last segment of FN>`: the nearest `fn` item at or above line L carries that name;
+#        * a whole-body description sits exactly where cargo-mutants names that mutant: L:C is the
+#          first token of the body, after the `{` that closes the signature and any comments
+#          (issue #1162). Not the signature line -- an entry anchored there satisfies the bullet
+#          above and matches nothing, so the hang or equivalence its comment argued for stayed in
+#          the survey (`DecTable::walk` was anchored that way).
 #   2. FUNCTION.  '^crates/<crate>/src/<path>\.rs:\d+:\d+: .* in FN$' -- a claim about every mutant
 #      in one function, which survives movement by construction. This verifies the file declares
 #      `fn <last segment of FN>`.
@@ -70,16 +75,50 @@ function load(path,    line, n) {
     loaded[path] = n
     return n
 }
-# The name of the nearest `fn` item at or above line l, or "" if there is none.
+# The name of the nearest `fn` item at or above line l, or "" if there is none. Sets fn_line and
+# fn_col to where its `fn` keyword starts.
 function enclosing_fn(path, l,    i, line, rest) {
     for (i = l; i >= 1; i--) {
         line = src[path, i]
         if (line ~ /^[[:space:]]*\/\//) continue
         if (match(line, /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
             rest = substr(line, RSTART, RLENGTH)
+            fn_line = i
+            fn_col = RSTART + index(rest, "fn") - 1
             sub(/^.*fn[[:space:]]+/, "", rest)
             return rest
         }
+    }
+    return ""
+}
+# "L:C" of the first token of the body of the `fn` whose keyword is at line l, column c -- where
+# cargo-mutants names a whole-body replacement -- or "" if there is none. The body opens at the
+# first `{` outside the parentheses and brackets of the signature; blank space and comments after it
+# are skipped, as they carry no token.
+function body_start(path, l, c,    n, line, ch, depth, open, j, in_block) {
+    n = loaded[path]
+    depth = 0
+    open = 0
+    for (; l <= n; l++) {
+        line = src[path, l]
+        for (j = c; j <= length(line); j++) {
+            ch = substr(line, j, 1)
+            if (in_block) {
+                if (substr(line, j, 2) == "*/") { in_block = 0; j++ }
+                continue
+            }
+            if (!open) {
+                if (ch == "(" || ch == "[") depth++
+                else if (ch == ")" || ch == "]") depth--
+                else if (ch == "{" && depth == 0) open = 1
+                continue
+            }
+            if (substr(line, j, 2) == "//") break
+            if (substr(line, j, 2) == "/*") { in_block = 1; j++; continue }
+            if (ch ~ /[[:space:]]/) continue
+            return ch == "}" ? "" : l ":" j
+        }
+        c = 1
     }
     return ""
 }
@@ -193,8 +232,13 @@ $1 == "DOUBLE" {
         }
         if (fn != "") {
             got = enclosing_fn(path, l)
-            if (got != last_segment(fn))
+            if (got != last_segment(fn)) {
                 fail(sprintf("%s:%d sits in fn %s, not %s", path, l, got == "" ? "(none)" : got, fn))
+                continue
+            }
+            if (body && (start = body_start(path, fn_line, fn_col)) != l ":" c)
+                fail(sprintf("%s:%d:%d is not where %s names its whole-body mutant: its body starts at %s", \
+                    path, l, c, fn, start == "" ? "(no token)" : start))
         }
     }
 }
