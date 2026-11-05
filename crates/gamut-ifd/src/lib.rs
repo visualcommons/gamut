@@ -83,6 +83,7 @@
 struct ReadmeDoctests;
 
 mod audit;
+mod blocks;
 mod byte_order;
 pub mod c2pa;
 mod entry;
@@ -109,6 +110,7 @@ pub use audit::{
     Anomaly, Audit, AuditFinding, AuditSpec, Auditor, DeconstructReport, Severity, SkipReason,
     StandardAuditSpec, UnknownFieldType, UnknownTag, audit, standard_data_extents,
 };
+pub use blocks::{BlockRun, PlacedRun, write_with_blocks};
 pub use byte_order::ByteOrder;
 pub use entry::{Field, Ifd, SubIfd, Variant};
 pub use extent::{ZeroRowsPerStrip, extent_slices, rows_per_strip};
