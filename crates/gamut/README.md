@@ -75,4 +75,4 @@ say; the [workspace README](../../README.md#crates) carries the per-crate status
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

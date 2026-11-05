@@ -27,10 +27,6 @@ encoding** that is:
   [`references/av1`](../../references/av1/README.md).
 - **Buildable anywhere `cargo` is.** No C, no nasm — cross-compiles cleanly (wasm32, aarch64, musl).
 
-It builds on [`gamut-color`](../gamut-color) (pixel formats / CICP), [`gamut-dsp`](../gamut-dsp)
-(the Walsh–Hadamard transform), and [`gamut-bitstream`](../gamut-bitstream) (bit writer + AV1 symbol
-coder).
-
 ## Usage
 
 ```rust,no_run
@@ -130,4 +126,4 @@ exercises tools this crate's encoder never emits.
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).
