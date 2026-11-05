@@ -14,55 +14,49 @@ use gamut_core::{Error, Result};
 /// codenames. The default is [`Effort::Squirrel`] (level 7), matching libjxl's default.
 ///
 /// libjxl's level 11 ("tectonic plate") is expert-gated behind `JxlEncoderAllowExpertOptions` and is
-/// deliberately out of scope, so this enum caps at level 10.
+/// deliberately out of scope, so this enum caps at level 10 today; it is `#[non_exhaustive]` so a
+/// level libjxl adds can be appended.
+///
+/// The discriminant of each variant is its libjxl level, permanent and append-only.
+#[repr(u8)]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Effort {
     /// Level 1 — the fastest, lowest-density setting.
-    Lightning,
+    Lightning = 1,
     /// Level 2.
-    Thunder,
+    Thunder = 2,
     /// Level 3.
-    Falcon,
+    Falcon = 3,
     /// Level 4.
-    Cheetah,
+    Cheetah = 4,
     /// Level 5.
-    Hare,
+    Hare = 5,
     /// Level 6.
-    Wombat,
+    Wombat = 6,
     /// Level 7 — libjxl's default, a balanced speed/density point.
     #[default]
-    Squirrel,
+    Squirrel = 7,
     /// Level 8.
-    Kitten,
+    Kitten = 8,
     /// Level 9.
-    Tortoise,
+    Tortoise = 9,
     /// Level 10 — the slowest, highest-density setting.
-    Glacier,
+    Glacier = 10,
 }
 
 impl Effort {
-    /// The libjxl effort level (`1..=10`) this variant selects.
+    /// The libjxl effort level (`1..=10`) this variant selects: its discriminant.
     #[must_use]
-    pub fn level(self) -> u8 {
-        match self {
-            Self::Lightning => 1,
-            Self::Thunder => 2,
-            Self::Falcon => 3,
-            Self::Cheetah => 4,
-            Self::Hare => 5,
-            Self::Wombat => 6,
-            Self::Squirrel => 7,
-            Self::Kitten => 8,
-            Self::Tortoise => 9,
-            Self::Glacier => 10,
-        }
+    pub const fn level(self) -> u8 {
+        self as u8
     }
 
     /// The [`Effort`] for a libjxl effort level, or `None` if `level` is outside `1..=10`.
     ///
     /// The inverse of [`Effort::level`]; handy for wiring up a numeric CLI flag.
     #[must_use]
-    pub fn from_level(level: u8) -> Option<Self> {
+    pub const fn from_level(level: u8) -> Option<Self> {
         Some(match level {
             1 => Self::Lightning,
             2 => Self::Thunder,
@@ -100,33 +94,34 @@ impl Effort {
 ///   [`Distance`] `0.5` the VarDCT path is the denser choice for photographic input. This knob
 ///   exists so a stream can be produced under a *deliberately chosen* coding tool — for
 ///   comparison, or for synthetic/screenshot-like material Modular suits — not as a quality dial.
+///
+/// The discriminants are permanent and append-only, like [`Toggle`]'s; they are not libjxl's
+/// option values — [`ModularMode::option_value`] is the mapping. JPEG XL has exactly these two
+/// coding tools, so the enum is exhaustive.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ModularMode {
     /// Let libjxl choose the coding tool (libjxl option value `-1`); the default.
     #[default]
-    Auto,
+    Auto = 0,
     /// Force the VarDCT path (libjxl option value `0`).
-    VarDct,
+    VarDct = 1,
     /// Force the Modular path (libjxl option value `1`).
-    Modular,
+    Modular = 2,
 }
 
 impl ModularMode {
     /// The libjxl `JXL_ENC_FRAME_SETTING_MODULAR` value (`-1`, `0` or `1`) this variant selects.
     #[must_use]
-    pub fn option_value(self) -> i32 {
-        match self {
-            Self::Auto => -1,
-            Self::VarDct => 0,
-            Self::Modular => 1,
-        }
+    pub const fn option_value(self) -> i32 {
+        self as i32 - 1
     }
 
     /// The [`ModularMode`] for a libjxl option value, or `None` if `value` is outside `-1..=1`.
     ///
     /// The inverse of [`ModularMode::option_value`]; handy for wiring up a numeric CLI flag.
     #[must_use]
-    pub fn from_option_value(value: i32) -> Option<Self> {
+    pub const fn from_option_value(value: i32) -> Option<Self> {
         Some(match value {
             -1 => Self::Auto,
             0 => Self::VarDct,
@@ -406,87 +401,17 @@ impl Default for Distance {
 /// - [`Container::IsoBmff`] — the ISO BMFF container (`.jxl` file format), starting with the 12-byte
 ///   box signature `00 00 00 0C 4A 58 4C 20 0D 0A 87 0A`. The framing needed to attach Exif/XMP/JUMBF
 ///   metadata boxes.
+///
+/// The discriminants are permanent. JPEG XL (ISO/IEC 18181-2) defines exactly these two framings,
+/// so the enum is exhaustive.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Container {
     /// A bare codestream (signature `0xFF 0x0A`); the default.
     #[default]
-    Codestream,
+    Codestream = 0,
     /// The ISO BMFF `.jxl` container (12-byte box signature).
-    IsoBmff,
-}
-
-/// The display orientation the encoder signals for the coded samples, matching the eight EXIF
-/// orientation values.
-///
-/// Orientation is metadata: the encoder stores the caller's samples exactly as given (in coded
-/// order) and decoders apply the transform on output. The four transposing variants
-/// ([`Orientation::Transpose`], [`Orientation::Rotate90Cw`], [`Orientation::AntiTranspose`],
-/// [`Orientation::Rotate90Ccw`]) swap the displayed width and height relative to the coded
-/// dimensions. The default is [`Orientation::Identity`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Orientation {
-    /// No transform (EXIF 1); the default.
-    #[default]
-    Identity,
-    /// Mirror horizontally (EXIF 2).
-    FlipHorizontal,
-    /// Rotate 180 degrees (EXIF 3).
-    Rotate180,
-    /// Mirror vertically (EXIF 4).
-    FlipVertical,
-    /// Transpose: mirror across the main diagonal (EXIF 5). Swaps displayed width/height.
-    Transpose,
-    /// Rotate 90 degrees clockwise (EXIF 6). Swaps displayed width/height.
-    Rotate90Cw,
-    /// Anti-transpose: mirror across the anti-diagonal (EXIF 7). Swaps displayed width/height.
-    AntiTranspose,
-    /// Rotate 90 degrees counter-clockwise (EXIF 8). Swaps displayed width/height.
-    Rotate90Ccw,
-}
-
-impl Orientation {
-    /// The EXIF orientation value (`1..=8`) this variant signals.
-    #[must_use]
-    pub fn exif_value(self) -> u8 {
-        match self {
-            Self::Identity => 1,
-            Self::FlipHorizontal => 2,
-            Self::Rotate180 => 3,
-            Self::FlipVertical => 4,
-            Self::Transpose => 5,
-            Self::Rotate90Cw => 6,
-            Self::AntiTranspose => 7,
-            Self::Rotate90Ccw => 8,
-        }
-    }
-
-    /// The [`Orientation`] for an EXIF orientation value, or `None` if `value` is outside `1..=8`.
-    ///
-    /// The inverse of [`Orientation::exif_value`]; handy for forwarding EXIF metadata.
-    #[must_use]
-    pub fn from_exif_value(value: u8) -> Option<Self> {
-        Some(match value {
-            1 => Self::Identity,
-            2 => Self::FlipHorizontal,
-            3 => Self::Rotate180,
-            4 => Self::FlipVertical,
-            5 => Self::Transpose,
-            6 => Self::Rotate90Cw,
-            7 => Self::AntiTranspose,
-            8 => Self::Rotate90Ccw,
-            _ => return None,
-        })
-    }
-
-    /// Whether this orientation swaps the displayed width and height relative to the coded
-    /// dimensions (the four diagonal/rotating transforms, EXIF `5..=8`).
-    #[must_use]
-    pub fn transposes(self) -> bool {
-        matches!(
-            self,
-            Self::Transpose | Self::Rotate90Cw | Self::AntiTranspose | Self::Rotate90Ccw
-        )
-    }
+    IsoBmff = 1,
 }
 
 /// The colour interpretation the encoder signals for the pixel samples.
@@ -503,22 +428,26 @@ impl Orientation {
 ///   HDR10-style encoding for absolute-luminance HDR samples (typically 16-bit).
 /// - [`ColorSpec::Hlg`] — Rec. ITU-R BT.2100 with the Hybrid Log-Gamma transfer function, the
 ///   scene-referred broadcast HDR encoding.
-/// - [`ColorSpec::Icc`] — an embedded ICC profile carried verbatim in the codestream. The profile's
-///   data colour space must match the image (`RGB ` for 3-channel, `GRAY` for 1-channel layouts);
-///   this is validated when encoding.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// An embedded ICC profile is not a [`ColorSpec`]: it is set with
+/// [`JxlEncoder::with_icc_profile`](crate::JxlEncoder::with_icc_profile), and while one is set it
+/// *is* the stream's colour encoding.
+///
+/// The discriminants are permanent and append-only; the enum is `#[non_exhaustive]` so a further
+/// structured encoding can be added.
+#[repr(u8)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ColorSpec {
     /// Standard (gamma-encoded) sRGB; the default.
     #[default]
-    Srgb,
+    Srgb = 0,
     /// sRGB primaries and white point with a linear transfer function.
-    LinearSrgb,
+    LinearSrgb = 1,
     /// Rec. BT.2100 primaries with the SMPTE ST 2084 (PQ) transfer function.
-    Pq,
+    Pq = 2,
     /// Rec. BT.2100 primaries with the Hybrid Log-Gamma (HLG) transfer function.
-    Hlg,
-    /// An embedded ICC profile, stored verbatim in the codestream.
-    Icc(Vec<u8>),
+    Hlg = 3,
 }
 
 /// Validates that an ICC profile is plausibly attachable to an image with the given colour family:
@@ -769,45 +698,19 @@ mod tests {
     }
 
     #[test]
-    fn orientation_exif_value_round_trips_over_full_range() {
-        let all = [
-            Orientation::Identity,
-            Orientation::FlipHorizontal,
-            Orientation::Rotate180,
-            Orientation::FlipVertical,
-            Orientation::Transpose,
-            Orientation::Rotate90Cw,
-            Orientation::AntiTranspose,
-            Orientation::Rotate90Ccw,
-        ];
-        for (i, o) in all.into_iter().enumerate() {
-            let value = (i + 1) as u8;
-            assert_eq!(o.exif_value(), value, "{o:?} exif value");
-            assert_eq!(Orientation::from_exif_value(value), Some(o));
-        }
-        for value in 1..=8u8 {
-            assert_eq!(
-                Orientation::from_exif_value(value).unwrap().exif_value(),
-                value
-            );
-        }
-    }
-
-    #[test]
-    fn orientation_from_exif_rejects_out_of_range() {
-        assert_eq!(Orientation::from_exif_value(0), None);
-        assert_eq!(Orientation::from_exif_value(9), None);
-        assert_eq!(Orientation::from_exif_value(255), None);
-    }
-
-    #[test]
-    fn orientation_default_is_identity_and_transposing_set_is_exact() {
-        assert_eq!(Orientation::default(), Orientation::Identity);
-        // Exactly EXIF 5..=8 transpose; 1..=4 do not.
-        for value in 1..=8u8 {
-            let o = Orientation::from_exif_value(value).unwrap();
-            assert_eq!(o.transposes(), value >= 5, "{o:?}");
-        }
+    fn config_enum_discriminants_are_permanent() {
+        // A C caller may name these as constants, so each is pinned.
+        assert_eq!(Effort::Lightning as u8, 1);
+        assert_eq!(Effort::Glacier as u8, 10);
+        assert_eq!(ModularMode::Auto as u8, 0);
+        assert_eq!(ModularMode::VarDct as u8, 1);
+        assert_eq!(ModularMode::Modular as u8, 2);
+        assert_eq!(Container::Codestream as u8, 0);
+        assert_eq!(Container::IsoBmff as u8, 1);
+        assert_eq!(ColorSpec::Srgb as u8, 0);
+        assert_eq!(ColorSpec::LinearSrgb as u8, 1);
+        assert_eq!(ColorSpec::Pq as u8, 2);
+        assert_eq!(ColorSpec::Hlg as u8, 3);
     }
 
     /// A minimal 128-byte "profile": all zeros except the data colour space signature.

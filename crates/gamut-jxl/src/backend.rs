@@ -18,27 +18,20 @@
 //! - with the `encode` feature (and an encoder-capable target), libjxl is the last encode backend;
 //! - with the `decode` feature, jxl-rs is the last decode backend.
 //!
-//! [`JxlEncoder::push_backend`](crate::JxlEncoder::push_backend) /
-//! [`JxlDecoder::push_backend`](crate::JxlDecoder::push_backend) insert a backend *ahead* of that
+//! [`JxlEncoder::with_backend`](crate::JxlEncoder::with_backend) /
+//! [`JxlDecoder::with_backend`](crate::JxlDecoder::with_backend) insert a backend *ahead* of that
 //! tail. A pushed encode backend is therefore also what **supplies encode on `wasm32`**, where the
 //! libjxl tail cannot be built at all. With no pushed backend and no built-in tail, the direction
 //! reports an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
 //!
 //! # Fallback contract
 //!
-//! Backends are tried in **push order**, the built-in tail last. Exactly two outcomes fall through
-//! to the next backend:
-//!
-//! 1. [`supports`](JxlCodestreamEncoder::supports) returning `false` — the backend declines before
-//!    doing any work;
-//! 2. an `Err` of kind [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) from
-//!    [`encode`](JxlCodestreamEncoder::encode) / [`decode`](JxlCodestreamDecoder::decode) — a *late*
-//!    decline, the typed mirror of the C [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED)
-//!    code the [`crate::abi`] adapters translate.
-//!
-//! **Any other error is terminal** and propagates to the caller unchanged: a backend that accepted a
-//! job and then failed may have produced a partial result, which must never be silently masked by
-//! retrying a later backend.
+//! Backends are tried in **push order** through the workspace's one
+//! [`Registry`](gamut_codec_abi::Registry), the built-in tail last.
+//! [`supports`](JxlCodestreamEncoder::supports) returning `false` is the **only** fall-through: the
+//! backend declines before doing any work. A backend that accepts a job and then fails — whatever
+//! the error's kind — propagates that error to the caller unchanged: it may have produced a partial
+//! result, which must never be silently masked by retrying a later backend.
 //!
 //! # Container-feature veto
 //!
@@ -50,12 +43,10 @@
 //! entirely. The seam is the bare codestream, so a backend has no way to express container framing;
 //! consulting it would either lose the request or invite a silently mis-framed stream.
 
-use core::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use gamut_codec_abi::{Registry, RegistryError};
+use gamut_core::{Dimensions, Error, Orientation, PixelFormat, Result};
 
-use gamut_core::{Dimensions, Error, PixelFormat, Result};
-
-use crate::config::{ColorSpec, Distance, Effort, FrameSettings, ModularMode, Orientation};
+use crate::config::{ColorSpec, Distance, Effort, FrameSettings, ModularMode};
 
 /// Borrowed interleaved samples handed to an encode backend, tagged with their storage width.
 ///
@@ -346,15 +337,15 @@ impl JxlDecoded {
 ///
 /// It carries exactly the knobs that shape the **codestream**: the lossless/lossy mode and its
 /// Butteraugli [`Distance`], the [`Effort`] dial, the [`ModularMode`] coding-tool selection, the
-/// [`FrameSettings`] progression and decoding-speed overrides, the coded bit depth, the
-/// [`ColorSpec`] signalling and the [`Orientation`] metadata. Container-level requests are
-/// deliberately absent — they never reach a backend (see the
-/// [module docs](self#container-feature-veto)).
+/// [`FrameSettings`] progression and decoding-speed overrides, the coded bit depth, the colour
+/// encoding (a [`ColorSpec`], or an embedded ICC profile borrowed from the encoder) and the
+/// [`Orientation`] metadata. Container-level requests are deliberately absent — they never reach a
+/// backend (see the [container-feature veto](crate#container-feature-veto)).
 ///
 /// Requests are produced by the host and handed to a backend by reference; there is no public
 /// constructor.
-#[derive(Debug, Clone, PartialEq)]
-pub struct JxlEncodeRequest {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JxlEncodeRequest<'a> {
     /// The lossy Butteraugli distance, or `None` for mathematically lossless.
     distance: Option<Distance>,
     /// The speed/density effort level.
@@ -365,14 +356,17 @@ pub struct JxlEncodeRequest {
     frame_settings: FrameSettings,
     /// The declared coded bit depth, in bits per sample.
     coded_bit_depth: u32,
-    /// The colour interpretation signalled for the samples.
+    /// The structured colour encoding, signalled when no ICC profile is set.
     color: ColorSpec,
+    /// The embedded ICC profile, which is the colour encoding when present.
+    icc_profile: Option<&'a [u8]>,
     /// The display orientation signalled for the coded samples.
     orientation: Orientation,
 }
 
-impl JxlEncodeRequest {
+impl<'a> JxlEncodeRequest<'a> {
     /// Builds a request from the host's resolved configuration.
+    #[expect(clippy::too_many_arguments, reason = "one argument per request field")]
     pub(crate) fn new(
         distance: Option<Distance>,
         effort: Effort,
@@ -380,6 +374,7 @@ impl JxlEncodeRequest {
         frame_settings: FrameSettings,
         coded_bit_depth: u32,
         color: ColorSpec,
+        icc_profile: Option<&'a [u8]>,
         orientation: Orientation,
     ) -> Self {
         Self {
@@ -389,6 +384,7 @@ impl JxlEncodeRequest {
             frame_settings,
             coded_bit_depth,
             color,
+            icc_profile,
             orientation,
         }
     }
@@ -441,10 +437,18 @@ impl JxlEncodeRequest {
         self.coded_bit_depth
     }
 
-    /// The [`ColorSpec`] to signal for the samples.
+    /// The structured [`ColorSpec`] to signal for the samples when
+    /// [`icc_profile`](Self::icc_profile) is `None`.
     #[must_use]
-    pub fn color(&self) -> &ColorSpec {
-        &self.color
+    pub fn color(&self) -> ColorSpec {
+        self.color
+    }
+
+    /// The ICC profile to embed as the stream's colour encoding, or `None` to signal
+    /// [`color`](Self::color) instead.
+    #[must_use]
+    pub fn icc_profile(&self) -> Option<&'a [u8]> {
+        self.icc_profile
     }
 
     /// The display [`Orientation`] to signal for the coded samples.
@@ -563,39 +567,38 @@ impl JxlStreamInfo {
 ///
 /// Implement this to put a platform or alternate encoder ahead of gamut-jxl's built-in libjxl tail —
 /// or, on `wasm32` where that tail cannot be built, to supply the encode direction at all. Register
-/// it with [`JxlEncoder::push_backend`](crate::JxlEncoder::push_backend).
+/// it with [`JxlEncoder::with_backend`](crate::JxlEncoder::with_backend).
 ///
-/// `Send` is a supertrait because a registry is shared behind an [`Arc`]; a backend that is not
-/// thread-safe should wrap its state accordingly.
-pub trait JxlCodestreamEncoder: Send {
-    /// Reports whether this backend can satisfy `req`. Returning `false` is a decline: the host
-    /// moves on to the next backend, and finally to the built-in tail.
+/// `Send` is not a supertrait: [`JxlEncoder::with_backend`](crate::JxlEncoder::with_backend) bounds
+/// it where the backend is inserted, which is what keeps the encoder `Send + Sync`.
+pub trait JxlCodestreamEncoder {
+    /// Reports whether this backend can satisfy `req`. Returning `false` is a decline — the only
+    /// one: the host moves on to the next backend, and finally to the built-in tail.
     ///
     /// Called before every encode, so the decision may depend on the distance, effort, coded bit
-    /// depth, colour signalling and orientation the request carries.
-    fn supports(&mut self, req: &JxlEncodeRequest) -> bool;
+    /// depth, colour encoding and orientation the request carries.
+    fn supports(&mut self, req: &JxlEncodeRequest<'_>) -> bool;
 
     /// Encodes `image` under `req`, returning a **bare JPEG XL codestream** (signature `FF 0A`).
     ///
     /// # Errors
     ///
-    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error is a *late decline*:
-    /// the host falls through to the next backend as if [`supports`](Self::supports) had returned
-    /// `false`. Every other error is terminal and
-    /// propagates to the caller unchanged.
-    fn encode(&mut self, req: &JxlEncodeRequest, image: &JxlImageRef<'_>) -> Result<Vec<u8>>;
+    /// Any error propagates to the caller unchanged; neither a later backend nor the built-in tail
+    /// is tried. Declining is [`supports`](Self::supports)' job alone.
+    fn encode(&mut self, req: &JxlEncodeRequest<'_>, image: &JxlImageRef<'_>) -> Result<Vec<u8>>;
 }
 
 /// A pluggable JPEG XL **codestream decoder**.
 ///
 /// Implement this to put a platform or alternate decoder ahead of gamut-jxl's built-in jxl-rs tail,
 /// or to supply the decode direction where that tail is not compiled in. Register it with
-/// [`JxlDecoder::push_backend`](crate::JxlDecoder::push_backend).
+/// [`JxlDecoder::with_backend`](crate::JxlDecoder::with_backend).
 ///
-/// `Send` is a supertrait for the same reason as on [`JxlCodestreamEncoder`].
-pub trait JxlCodestreamDecoder: Send {
+/// `Send` is not a supertrait, as on [`JxlCodestreamEncoder`].
+pub trait JxlCodestreamDecoder {
     /// Reports whether this backend can decode the stream described by `info`. Returning `false` is
-    /// a decline: the host moves on to the next backend, and finally to the built-in tail.
+    /// a decline — the only one: the host moves on to the next backend, and finally to the built-in
+    /// tail.
     fn supports(&mut self, info: &JxlStreamInfo) -> bool;
 
     /// Decodes `codestream` into the layout `info` requests.
@@ -605,59 +608,50 @@ pub trait JxlCodestreamDecoder: Send {
     ///
     /// # Errors
     ///
-    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error is a *late decline*
-    /// and falls through to the next backend; every other error is terminal and propagates
-    /// unchanged.
+    /// Any error propagates to the caller unchanged; neither a later backend nor the built-in tail
+    /// is tried. Declining is [`supports`](Self::supports)' job alone.
     fn decode(&mut self, info: &JxlStreamInfo, codestream: &[u8]) -> Result<JxlDecoded>;
 }
 
-/// A push-ordered registry of backends, shared by every clone of its owning encoder/decoder.
-///
-/// `Arc<Mutex<…>>` rather than a plain `Vec`: the [`gamut_core::EncodeImage`] /
-/// [`gamut_core::DecodeImage`] entry points take `&self`, while a backend's methods take `&mut self`
-/// (a backend may keep a session, a hardware handle, or a scratch buffer across calls).
-pub(crate) struct Registry<T: ?Sized>(Arc<Mutex<Vec<Box<T>>>>);
+/// The encode registry: pushed backends, each `Send` (bound at insertion).
+pub(crate) type EncoderRegistry = Registry<dyn JxlCodestreamEncoder + Send>;
 
-impl<T: ?Sized> Registry<T> {
-    /// Appends a backend to the end of the push order (still ahead of the built-in tail).
-    pub(crate) fn push(&self, backend: Box<T>) {
-        self.lock().push(backend);
-    }
+/// The decode registry: pushed backends, each `Send` (bound at insertion).
+pub(crate) type DecoderRegistry = Registry<dyn JxlCodestreamDecoder + Send>;
 
-    /// Whether no backend has been pushed — the fast path that keeps the default configuration's
-    /// behaviour byte-identical to the built-in one.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.lock().is_empty()
-    }
-
-    /// Locks the registry, recovering from a poisoned mutex rather than panicking: a backend that
-    /// panicked mid-encode leaves the *registry* (a plain `Vec` of boxes) structurally intact, so
-    /// the list is still safe to read.
-    pub(crate) fn lock(&self) -> MutexGuard<'_, Vec<Box<T>>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+/// Maps a registry run onto the codec's `Result<Option<_>>`: `None` when every backend declined
+/// (the caller then runs the built-in tail), the accepting backend's error unchanged, and an error
+/// when a backend panicked while holding its lock.
+fn registry_result<R>(run: core::result::Result<R, RegistryError<Error>>) -> Result<Option<R>> {
+    match run {
+        Ok(out) => Ok(Some(out)),
+        Err(RegistryError::Unsupported) => Ok(None),
+        Err(RegistryError::Backend(err)) => Err(err),
+        Err(RegistryError::Poisoned) => Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: a backend poisoned the registry lock",
+        )),
     }
 }
 
-impl<T: ?Sized> Default for Registry<T> {
-    fn default() -> Self {
-        Self(Arc::new(Mutex::new(Vec::new())))
-    }
+/// Runs the encode registry in push order, returning the first accepted codestream, or `None` when
+/// every backend declined (the caller then runs the built-in tail).
+pub(crate) fn encode_with_backends(
+    backends: &EncoderRegistry,
+    req: &JxlEncodeRequest<'_>,
+    image: &JxlImageRef<'_>,
+) -> Result<Option<Vec<u8>>> {
+    registry_result(backends.run(|b| b.supports(req), |b| b.encode(req, image)))
 }
 
-impl<T: ?Sized> Clone for Registry<T> {
-    /// Clones share the same backend list: pushing to a clone is visible through the original.
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
-    }
-}
-
-impl<T: ?Sized> fmt::Debug for Registry<T> {
-    /// Backends are opaque, so only their count is shown.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Registry")
-            .field("backends", &self.lock().len())
-            .finish()
-    }
+/// Runs the decode registry in push order, returning the first accepted raster, or `None` when
+/// every backend declined (the caller then runs the built-in tail).
+pub(crate) fn decode_with_backends(
+    backends: &DecoderRegistry,
+    info: &JxlStreamInfo,
+    codestream: &[u8],
+) -> Result<Option<JxlDecoded>> {
+    registry_result(backends.run(|b| b.supports(info), |b| b.decode(info, codestream)))
 }
 
 #[cfg(test)]
@@ -807,6 +801,7 @@ mod tests {
             FrameSettings::default().with_progressive_dc(ProgressiveDc::OneLevel),
             10,
             ColorSpec::Pq,
+            Some(&[1, 2, 3]),
             Orientation::Rotate90Cw,
         );
         assert!(!lossy.is_lossless());
@@ -818,7 +813,8 @@ mod tests {
             ProgressiveDc::OneLevel
         );
         assert_eq!(lossy.coded_bit_depth(), 10);
-        assert_eq!(lossy.color(), &ColorSpec::Pq);
+        assert_eq!(lossy.color(), ColorSpec::Pq);
+        assert_eq!(lossy.icc_profile(), Some(&[1u8, 2, 3][..]));
         assert_eq!(lossy.orientation(), Orientation::Rotate90Cw);
 
         let lossless = JxlEncodeRequest::new(
@@ -828,11 +824,13 @@ mod tests {
             FrameSettings::default(),
             8,
             ColorSpec::Srgb,
+            None,
             Orientation::Identity,
         );
         assert!(lossless.is_lossless());
         assert_eq!(lossless.distance(), None);
         assert_eq!(lossless.modular(), ModularMode::Auto);
+        assert_eq!(lossless.icc_profile(), None);
     }
 
     #[test]
@@ -849,57 +847,27 @@ mod tests {
         assert!(!unknown.codestream_bit_depth());
     }
 
-    /// A backend that records nothing and declines everything; enough to exercise the registry.
-    struct Decliner;
-
-    impl JxlCodestreamEncoder for Decliner {
-        fn supports(&mut self, _req: &JxlEncodeRequest) -> bool {
-            false
-        }
-
-        fn encode(&mut self, _req: &JxlEncodeRequest, _image: &JxlImageRef<'_>) -> Result<Vec<u8>> {
-            Err(Error::unsupported(env!("CARGO_PKG_NAME"), "test backend"))
-        }
-    }
-
     #[test]
-    fn registry_is_empty_until_pushed_and_shares_across_clones() {
-        let reg: Registry<dyn JxlCodestreamEncoder> = Registry::default();
-        assert!(reg.is_empty());
-        let clone = reg.clone();
-        reg.push(Box::new(Decliner));
-        // The clone observes the push: clones share one list.
-        assert!(!clone.is_empty());
-        assert_eq!(clone.lock().len(), 1);
-        clone.push(Box::new(Decliner));
-        assert_eq!(reg.lock().len(), 2);
-    }
-
-    /// A panic while the registry lock is held poisons the mutex; `Registry::lock` recovers the
-    /// list rather than erroring (contrast `gamut-jpeg`, whose registry reports a poisoned slot as
-    /// an error), so every later call still sees every backend and can still push.
-    #[test]
-    fn registry_recovers_a_poisoned_lock() {
-        let reg: Registry<dyn JxlCodestreamEncoder> = Registry::default();
-        reg.push(Box::new(Decliner));
-        let holder = reg.clone();
-        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = holder.lock();
-            panic!("backend panicked while the registry was locked");
-        }));
-        assert!(panicked.is_err());
-        assert!(reg.0.is_poisoned(), "the panic poisoned the mutex");
-        assert_eq!(reg.lock().len(), 1);
-        reg.push(Box::new(Decliner));
-        assert!(!reg.is_empty());
-        assert_eq!(reg.lock().len(), 2);
-    }
-
-    #[test]
-    fn registry_debug_reports_the_backend_count() {
-        let reg: Registry<dyn JxlCodestreamEncoder> = Registry::default();
-        assert_eq!(format!("{reg:?}"), "Registry { backends: 0 }");
-        reg.push(Box::new(Decliner));
-        assert_eq!(format!("{reg:?}"), "Registry { backends: 1 }");
+    fn registry_result_maps_each_outcome() {
+        assert_eq!(registry_result::<u8>(Ok(7)).unwrap(), Some(7));
+        // Every backend declined: the caller runs the built-in tail.
+        assert_eq!(
+            registry_result::<u8>(Err(RegistryError::Unsupported)).unwrap(),
+            None
+        );
+        // An accepting backend's error is the caller's, unchanged — even an `Unsupported` one.
+        let backend = Error::unsupported("backend", "late refusal");
+        assert_eq!(
+            registry_result::<u8>(Err(RegistryError::Backend(backend)))
+                .unwrap_err()
+                .static_message(),
+            Some("late refusal")
+        );
+        let poisoned = registry_result::<u8>(Err(RegistryError::Poisoned)).unwrap_err();
+        assert_eq!(poisoned.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            poisoned.static_message(),
+            Some("JXL: a backend poisoned the registry lock")
+        );
     }
 }

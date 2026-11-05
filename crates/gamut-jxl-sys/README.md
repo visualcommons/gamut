@@ -15,8 +15,9 @@ on top of the BSD-3-Clause [`jpegxl-src`](https://crates.io/crates/jpegxl-src) d
 
 The crate is **declarations only** — `#[repr(C)]` types, constants, and `unsafe extern "C"` function
 signatures, with no function bodies. All safe wrapper logic, error mapping, and RAII live in
-`gamut-jxl`. A small **decoder** subset is also declared: it is used only as gamut-jxl's
-differential-test *oracle* (the reference decoder its pure-Rust decoder is cross-checked against).
+`gamut-jxl`. A small **decoder** subset is also declared behind the non-default `oracle` feature: it
+is used only as gamut-jxl's differential-test *oracle* (the reference decoder its pure-Rust decoder
+is cross-checked against), which gamut-jxl's dev-dependency enables.
 The single static libjxl archive contains both halves, and the linker strips whatever is unused.
 
 Bindings are transcribed by hand from the pinned libjxl v0.12.0 headers and pruned to the used

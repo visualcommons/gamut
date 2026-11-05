@@ -10,14 +10,18 @@
 #![allow(non_snake_case)]
 
 use core::ffi::{c_int, c_void};
+use core::marker::{PhantomData, PhantomPinned};
 
 use crate::types::{JxlBasicInfo, JxlColorEncoding, JxlMemoryManager, JxlPixelFormat};
 
 /// Opaque decoder instance (`JxlDecoder`). Created by [`JxlDecoderCreate`]
 /// and destroyed by [`JxlDecoderDestroy`].
+///
+/// `!Send`, `!Sync` and `!Unpin` (the nomicon's opaque-type marker), since libjxl owns the pointee.
 #[repr(C)]
 pub struct JxlDecoder {
     _private: [u8; 0],
+    _marker: PhantomData<(*mut u8, PhantomPinned)>,
 }
 
 /// Result of [`JxlSignatureCheck`] (`JxlSignature`, `jxl/decode.h`).

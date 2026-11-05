@@ -6,6 +6,7 @@
 #![allow(non_snake_case)]
 
 use core::ffi::c_void;
+use core::marker::{PhantomData, PhantomPinned};
 
 use crate::types::{
     JxlBasicInfo, JxlBitDepth, JxlBool, JxlColorEncoding, JxlMemoryManager, JxlPixelFormat,
@@ -13,17 +14,23 @@ use crate::types::{
 
 /// Opaque encoder instance (`JxlEncoder`). Created by
 /// [`JxlEncoderCreate`] and destroyed by [`JxlEncoderDestroy`].
+///
+/// `!Send`, `!Sync` and `!Unpin` (the nomicon's opaque-type marker), since libjxl owns the pointee.
 #[repr(C)]
 pub struct JxlEncoder {
     _private: [u8; 0],
+    _marker: PhantomData<(*mut u8, PhantomPinned)>,
 }
 
 /// Opaque per-frame settings and metadata (`JxlEncoderFrameSettings`). Created by
 /// [`JxlEncoderFrameSettingsCreate`] and owned by the parent encoder (freed when the encoder is
 /// destroyed).
+///
+/// `!Send`, `!Sync` and `!Unpin`, as [`JxlEncoder`].
 #[repr(C)]
 pub struct JxlEncoderFrameSettings {
     _private: [u8; 0],
+    _marker: PhantomData<(*mut u8, PhantomPinned)>,
 }
 
 /// Return value for most encoder functions (`JxlEncoderStatus`, `jxl/encode.h`).

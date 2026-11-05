@@ -11,7 +11,7 @@
 #![cfg(feature = "decode")]
 
 use gamut_core::{DecodeImage, Rgba8};
-use gamut_jxl::{DecodePartialImage, JxlDecoder};
+use gamut_jxl::{DecodeLimits, JxlDecoder};
 
 // Only the stream-producing corpus needs the shared helpers (and the libjxl-backed encoder they use),
 // so the module is pulled in under the same gate. `mod common;` here resolves to `tests/common/mod.rs`.
@@ -35,8 +35,7 @@ fn decode_rgba8(data: &[u8]) -> gamut_core::Result<gamut_core::ImageBuf<Rgba8>> 
 /// the no-panic invariant asserted over hostile input. `Ok` is a legitimate outcome here: a partial
 /// decode of a corrupt stream may well produce a (possibly blank) image, and that is the point.
 fn decode_rgba8_partial(data: &[u8]) {
-    let _ =
-        <JxlDecoder as DecodePartialImage<Rgba8>>::decode_partial_image(&JxlDecoder::new(), data);
+    let _ = JxlDecoder::new().decode_partial::<Rgba8>(data);
 }
 
 /// A short deterministic "random-ish" junk generator: a linear congruential sweep, so the garbage is
@@ -92,7 +91,8 @@ const HEADER_ONLY_9717X8098: [u8; 5] = [0xFF, 0x0A, 0x0A, 0xFD, 0x1A];
 
 /// Decodes `data` best-effort as `Rgba8` through `decoder`, returning only the error.
 fn partial_error(decoder: &JxlDecoder, data: &[u8]) -> gamut_core::Error {
-    <JxlDecoder as DecodePartialImage<Rgba8>>::decode_partial_image(decoder, data)
+    decoder
+        .decode_partial::<Rgba8>(data)
         .map(|_| ())
         .expect_err("the caller's limit must refuse the stream")
 }
@@ -117,18 +117,26 @@ fn caller_limits_refuse_a_stream_truncated_after_its_headers() {
         error.static_message()
     };
     // Either side over its cap is refused on its own.
-    let narrow = JxlDecoder::new().with_max_dimensions(9716, 8098);
+    let narrow = JxlDecoder::new().with_limits(
+        DecodeLimits::new()
+            .with_max_width(9716)
+            .with_max_height(8098),
+    );
     assert_eq!(
         size("width", partial_error(&narrow, &HEADER_ONLY_9717X8098)),
         Some("JXL: image exceeds the dimension limit")
     );
-    let short = JxlDecoder::new().with_max_dimensions(9717, 8097);
+    let short = JxlDecoder::new().with_limits(
+        DecodeLimits::new()
+            .with_max_width(9717)
+            .with_max_height(8097),
+    );
     assert_eq!(
         size("height", partial_error(&short, &HEADER_ONLY_9717X8098)),
         Some("JXL: image exceeds the dimension limit")
     );
     // A byte budget well under the declared raster is refused too.
-    let budget = JxlDecoder::new().with_max_image_bytes(1 << 20);
+    let budget = JxlDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(1 << 20));
     assert_eq!(
         size("bytes", partial_error(&budget, &HEADER_ONLY_9717X8098)),
         Some("JXL: image exceeds the size limit")
@@ -155,7 +163,7 @@ mod with_streams {
         DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Pixel, Rgb8, Rgb16,
         Rgba8, Rgba16,
     };
-    use gamut_jxl::{Container, DecodePartialImage, Effort, JxlDecoder, JxlEncoder};
+    use gamut_jxl::{Container, DecodeLimits, Effort, JxlDecoder, JxlEncoder};
 
     use super::{decode_rgba8, decode_rgba8_partial};
     use crate::common::gen_u8;
@@ -219,7 +227,7 @@ mod with_streams {
         // Every 7th truncation length from 0 up to (but not including) the full stream must error:
         // jxl-rs signals the missing tail as "needs more input", which the decoder maps to a
         // truncation error. The full stream itself decodes cleanly. This pins the *default* path's
-        // contract, which the opt-in `DecodePartialImage` surface deliberately does not move; the
+        // contract, which the opt-in `decode_partial` surface deliberately does not move; the
         // best-effort behaviour is asserted separately, above and in `partial.rs`.
         for stream in [valid_codestream(), valid_container()] {
             let full = stream.len();
@@ -272,12 +280,14 @@ mod with_streams {
     #[test]
     fn dimension_caps_admit_their_exact_bound() {
         let stream = valid_codestream();
-        let at = JxlDecoder::new().with_max_dimensions(16, 16);
+        let at = JxlDecoder::new()
+            .with_limits(DecodeLimits::new().with_max_width(16).with_max_height(16));
         let image = <JxlDecoder as DecodeImage<Rgb8>>::decode_image(&at, &stream)
             .expect("an image exactly at the caps decodes");
         assert_eq!(image.dimensions(), Dimensions::new(16, 16).unwrap());
         for (w, h) in [(15, 16), (16, 15)] {
-            let under = JxlDecoder::new().with_max_dimensions(w, h);
+            let under = JxlDecoder::new()
+                .with_limits(DecodeLimits::new().with_max_width(w).with_max_height(h));
             let err = <JxlDecoder as DecodeImage<Rgb8>>::decode_image(&under, &stream)
                 .expect_err("one pixel over a cap is refused");
             assert_eq!(err.kind(), ErrorKind::Unsupported);
@@ -294,12 +304,14 @@ mod with_streams {
         JxlDecoder: DecodeImage<P>,
     {
         let decoder = JxlDecoder::new().with_convert_policy(policy);
-        let at = decoder.clone().with_max_image_bytes(budget);
+        let at = decoder
+            .clone()
+            .with_limits(DecodeLimits::new().with_max_image_bytes(budget));
         assert!(
             <JxlDecoder as DecodeImage<P>>::decode_image(&at, stream).is_ok(),
             "{budget} bytes admit the raster"
         );
-        let under = decoder.with_max_image_bytes(budget - 1);
+        let under = decoder.with_limits(DecodeLimits::new().with_max_image_bytes(budget - 1));
         let err = <JxlDecoder as DecodeImage<P>>::decode_image(&under, stream)
             .map(|_| ())
             .expect_err("one byte under the raster is refused");
@@ -360,9 +372,8 @@ mod with_streams {
             .unwrap();
 
         // The caller's caps only tighten: the most permissive settings leave the fixed ceiling.
-        let wide_open = JxlDecoder::new()
-            .with_max_dimensions(u32::MAX, u32::MAX)
-            .with_max_image_bytes(usize::MAX);
+        let wide_open =
+            JxlDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(usize::MAX));
         let err = <JxlDecoder as DecodeImage<Rgba8>>::decode_image(&wide_open, &bytes)
             .expect_err("the pixel limit is not raised by the caller's caps");
         assert_eq!(
@@ -379,11 +390,9 @@ mod with_streams {
         assert!(err.detail().is_some());
 
         // The best-effort path relaxes truncation, not the memory bound: the same typed refusal.
-        let err = <JxlDecoder as DecodePartialImage<Rgba8>>::decode_partial_image(
-            &JxlDecoder::new(),
-            &bytes,
-        )
-        .expect_err("the pixel limit is not relaxed by the best-effort policy");
+        let err = JxlDecoder::new()
+            .decode_partial::<Rgba8>(&bytes)
+            .expect_err("the pixel limit is not relaxed by the best-effort policy");
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert_eq!(
             err.static_message(),

@@ -514,7 +514,7 @@ exclude_re = [
     # mode is already lossless), so its body *is* `Self::default()` and the `-> Default::default()`
     # replacement is byte-identical — provably equivalent, unkillable. Same shape and justification
     # as the AvifEncoder::lossless / WebpEncoder::lossless entries above.
-    '^crates/gamut-jxl/src/encoder\.rs:169:9: replace JxlEncoder::lossless -> Self with Default::default\(\)$',
+    '^crates/gamut-jxl/src/encoder\.rs:177:9: replace JxlEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `vp8l::prefix::canonical_codes` writes `len > 0 && (len as usize) <=
     # MAX_CODE_LENGTH` twice -- once counting into `bl_count`, once assigning from `next_code` --
     # and relaxing either to `||` is equivalent. Neither is obvious, and both were checked by

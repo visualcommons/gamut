@@ -14,8 +14,8 @@ use gamut::exif::{Exif, ExifTag, ExifWriter, IfdKind, Value as ExifValue};
 use gamut::icc::{ColorSpace as IccColorSpace, ProfileHeader};
 use gamut::jpeg::{ChromaSubsampling as JpegChroma, JpegEncoder, Process, ProgressiveScript};
 use gamut::jxl::{
-    ColorSpec as JxlColorSpec, Container as JxlContainer, Distance as JxlDistance,
-    Effort as JxlEffort, JxlEncoder, ModularMode as JxlModularMode, Orientation as JxlOrientation,
+    Container as JxlContainer, Distance as JxlDistance, Effort as JxlEffort, JxlEncoder,
+    ModularMode as JxlModularMode, Orientation as JxlOrientation,
 };
 use gamut::metadata::{Carrier, EncodedMetadata};
 use gamut::png::{Effort as PngEffort, PngEncoder, PngMetadata};
@@ -911,7 +911,7 @@ fn encode(
             let bare = encoder.clone();
             let mut attached = false;
             if let Some(icc) = carried.icc {
-                encoder = encoder.with_color(JxlColorSpec::Icc(icc));
+                encoder = encoder.with_icc_profile(&icc);
                 attached = true;
             }
             if args.jxl_container {
@@ -920,7 +920,7 @@ fn encode(
                     attached = true;
                 }
                 if let Some(xmp) = carried.xmp.as_deref().and_then(utf8_xmp) {
-                    encoder = encoder.with_xmp(xmp);
+                    encoder = encoder.with_xmp(xmp.as_bytes());
                     attached = true;
                 }
             } else if carried.exif.is_some() || carried.xmp.is_some() {
@@ -1323,8 +1323,8 @@ fn png_only_chunks(png: &PngMetadata) -> Vec<&'static str> {
     .collect()
 }
 
-/// `xmp` as the `&str` the PNG and JPEG XL encoders take, or `None` — with a warning — when it is
-/// not UTF-8, which an XMP packet must be in those formats (PNG §11.3.3.4's `iTXt` is UTF-8).
+/// `xmp` as text, or `None` — with a warning — when it is not UTF-8, which an XMP packet must be in
+/// the PNG and JPEG XL outputs (PNG §11.3.3.4's `iTXt` is UTF-8; JPEG XL's `xml ` box holds text).
 fn utf8_xmp(xmp: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(xmp).ok();
     if text.is_none() {

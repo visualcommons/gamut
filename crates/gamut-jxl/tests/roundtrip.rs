@@ -15,7 +15,7 @@ use gamut_core::{
     DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
     ImageBuf, ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
 };
-use gamut_jxl::{Container, JxlDecoder, JxlEncoder};
+use gamut_jxl::{BitDepth, Container, JxlDecoder, JxlEncoder};
 
 /// The size grid: 1x1 up to a non-square textured image, including odd dimensions.
 const SIZES: [(u32, u32); 5] = [(1, 1), (3, 7), (16, 16), (17, 13), (64, 100)];
@@ -297,7 +297,7 @@ fn coded_bit_depth_roundtrips_sub16_code_values_exactly() {
     for ch in [1usize, 3] {
         let px: Vec<u16> = gen_u16(w, h, ch).iter().map(|&s| s & 0x0FFF).collect();
         let encode = |img: &[u16]| -> Vec<u8> {
-            let enc = JxlEncoder::lossless().with_bit_depth(12);
+            let enc = JxlEncoder::lossless().with_bit_depth(BitDepth::Twelve);
             if ch == 1 {
                 enc.encode_to_vec(ImageRef::<Gray16>::new(img, dims).unwrap())
                     .unwrap()
@@ -350,24 +350,24 @@ fn coded_bit_depth_roundtrips_sub16_code_values_exactly() {
     }
 }
 
-/// The coded-depth override is validated: zero or wider than the sample width is a typed error.
+/// The coded-depth override is validated: wider than the sample width is a typed error.
 #[test]
 fn with_bit_depth_rejects_incoherent_depths() {
     let dims = Dimensions::new(4, 4).unwrap();
     let px8 = gen_u8(4, 4, 1);
     let img = ImageRef::<Gray8>::new(&px8, dims).unwrap();
-    for bits in [0u8, 12, 17] {
-        // 12 > the 8-bit sample width; 0 and 17 are always incoherent.
+    for bits in [BitDepth::Ten, BitDepth::Twelve, BitDepth::Sixteen] {
+        // Each is wider than the 8-bit sample width.
         let err = JxlEncoder::lossless()
             .with_bit_depth(bits)
             .encode_to_vec(img)
             .expect_err("incoherent coded depth must be rejected");
-        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput, "{bits}");
+        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput, "{bits:?}");
     }
     // An 8-bit override on an 8-bit layout is coherent (identity).
     assert!(
         JxlEncoder::lossless()
-            .with_bit_depth(8)
+            .with_bit_depth(BitDepth::Eight)
             .encode_to_vec(img)
             .is_ok()
     );

@@ -4,8 +4,11 @@
 //! types and `extern "C"` signatures in this crate were transcribed from. If `jpegxl-src` is ever
 //! bumped, this fails until the declarations are re-checked against the new headers. It also
 //! exercises the encoder/decoder create+destroy paths and forces link-time resolution of every
-//! declared symbol, so the `links = "jxl"` link lines are proven to resolve in CI.
+//! declared symbol, so the `links = "jxl"` link lines are proven to resolve in CI. The decoder half
+//! is declared only with the `oracle` feature, so its checks are compiled only then (the workspace
+//! test run enables every feature).
 
+#[cfg(feature = "oracle")]
 use gamut_jxl_sys::decode::{JxlDecoderCreate, JxlDecoderDestroy, JxlDecoderVersion};
 use gamut_jxl_sys::encode::{JxlEncoderCreate, JxlEncoderDestroy, JxlEncoderVersion};
 
@@ -23,6 +26,7 @@ fn encoder_version_matches_pinned_libjxl() {
     );
 }
 
+#[cfg(feature = "oracle")]
 #[test]
 fn decoder_version_matches_pinned_libjxl() {
     // SAFETY: takes no arguments and dereferences no pointers.
@@ -44,6 +48,7 @@ fn encoder_create_and_destroy() {
     }
 }
 
+#[cfg(feature = "oracle")]
 #[test]
 fn decoder_create_and_destroy() {
     // SAFETY: a null memory manager selects the default allocator; the returned pointer is freed
@@ -63,8 +68,11 @@ fn decoder_create_and_destroy() {
 /// this table.
 #[test]
 fn every_declared_symbol_resolves() {
-    use gamut_jxl_sys::{decode, encode};
-    let symbols: &[(&str, *const ())] = &[
+    #[cfg(feature = "oracle")]
+    use gamut_jxl_sys::decode;
+    use gamut_jxl_sys::encode;
+    #[cfg_attr(not(feature = "oracle"), expect(unused_mut))]
+    let mut symbols: Vec<(&str, *const ())> = vec![
         // encode.rs (23)
         ("JxlEncoderVersion", encode::JxlEncoderVersion as *const ()),
         ("JxlEncoderCreate", encode::JxlEncoderCreate as *const ()),
@@ -143,6 +151,9 @@ fn every_declared_symbol_resolves() {
             "JxlColorEncodingSetToLinearSRGB",
             encode::JxlColorEncodingSetToLinearSRGB as *const (),
         ),
+    ];
+    #[cfg(feature = "oracle")]
+    symbols.extend_from_slice(&[
         // decode.rs (18)
         ("JxlDecoderVersion", decode::JxlDecoderVersion as *const ()),
         ("JxlSignatureCheck", decode::JxlSignatureCheck as *const ()),
@@ -201,7 +212,7 @@ fn every_declared_symbol_resolves() {
             "JxlDecoderGetColorAsICCProfile",
             decode::JxlDecoderGetColorAsICCProfile as *const (),
         ),
-    ];
+    ]);
     for (name, addr) in symbols {
         assert!(!addr.is_null(), "{name} resolved to a null address");
     }

@@ -2,8 +2,8 @@ crates/gamut-avif/src/encoder.rs pub fn push_backend(&mut self, backend: impl Av
 crates/gamut-heic/src/backend.rs pub fn push_backend(&mut self, backend: impl HevcDecoder + Send + 'static) -> &mut Self {
 crates/gamut-jpeg/src/decoder.rs pub fn with_backend(mut self, backend: impl JpegCodestreamDecoder + Send + 'static) -> Self {
 crates/gamut-jpeg/src/encoder.rs pub fn with_backend(mut self, backend: impl JpegCodestreamEncoder + Send + 'static) -> Self {
-crates/gamut-jxl/src/decoder.rs pub fn push_backend(&mut self, backend: impl JxlCodestreamDecoder + 'static) -> &mut Self {
-crates/gamut-jxl/src/encoder.rs pub fn push_backend(&mut self, backend: impl JxlCodestreamEncoder + 'static) -> &mut Self {
+crates/gamut-jxl/src/decoder.rs pub fn with_backend(mut self, backend: impl JxlCodestreamDecoder + Send + 'static) -> Self {
+crates/gamut-jxl/src/encoder.rs pub fn with_backend(mut self, backend: impl JxlCodestreamEncoder + Send + 'static) -> Self {
 crates/gamut-png/src/decoder.rs pub fn push_backend(&mut self, backend: impl ZlibInflater + Send + 'static) -> &mut Self {
 crates/gamut-png/src/encoder.rs pub fn push_backend(&mut self, backend: impl ZlibDeflater + Send + 'static) -> &mut Self {
 crates/gamut-webp/src/decoder.rs pub fn push_backend(&mut self, backend: impl WebpCodestreamDecoder + 'static) -> &mut Self {

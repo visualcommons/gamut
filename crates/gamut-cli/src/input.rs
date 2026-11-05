@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn native_jxl_carries_its_icc_only_when_pixels_decode_into_it() {
         use gamut::icc::{BuiltinProfile, Curve, IccProfile, KnownTag, TagData};
-        use gamut::jxl::{ColorSpec, Distance};
+        use gamut::jxl::Distance;
 
         // libjxl re-signals a profile it can express as a structured encoding (one with a `cicp`
         // tag, or a matrix/TRC profile with an analytic curve) instead of embedding it, so the
@@ -864,7 +864,7 @@ mod tests {
         let encode = |encoder: JxlEncoder| {
             let mut out = Vec::new();
             encoder
-                .with_color(ColorSpec::Icc(icc.clone()))
+                .with_icc_profile(&icc)
                 .encode_image(
                     ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap(),
                     &mut out,

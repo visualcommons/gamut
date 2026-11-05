@@ -1,7 +1,7 @@
 //! The `metadata` feature through the container: the facade's keystone equality
 //! (extract → embed → extract over EXIF / XMP / ICC) extended through a real `.jxl` stream, the
 //! routing of each `EncodedMetadata` carrier to its setter, and the typed refusals for carriers the
-//! container cannot write or a profile that conflicts with an explicit `ColorSpec`.
+//! container cannot write or a profile that conflicts with an explicit colour encoding.
 //!
 //! Needs both codec halves plus the facade; compiled only when all are available.
 #![cfg(all(
@@ -16,9 +16,10 @@ mod common;
 use common::gen_u8;
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
 use gamut_jxl::{
-    ColorSpec, Container, EncodedMetadata, JxlDecoder, JxlEncoder, Metadata, MetadataBlock,
+    ColorSpec, Container, EncodedMetadata, JxlDecoder, JxlEncoder, Metadata, MetadataSink,
     TypedMetadata,
 };
+use gamut_metadata::MetadataBlock;
 use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
 
@@ -121,7 +122,7 @@ fn unwritable_carriers_are_typed_errors() {
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(
         err.static_message(),
-        Some("JXL: IPTC-IIM has no container carrier")
+        Some("metadata: the encoder writes no IPTC-IIM carrier")
     );
 
     let mut c2pa = EncodedMetadata::default();
@@ -132,7 +133,7 @@ fn unwritable_carriers_are_typed_errors() {
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(
         err.static_message(),
-        Some("JXL: C2PA manifest store (jumb box) embedding is not supported")
+        Some("metadata: a C2PA manifest store is not embedded from metadata blocks")
     );
 
     let mut binary_xmp = EncodedMetadata::default();
@@ -155,7 +156,7 @@ fn a_typed_profile_refuses_to_replace_an_explicit_color_spec() {
     assert_eq!(err.kind(), ErrorKind::InvalidInput);
     assert_eq!(
         err.static_message(),
-        Some("JXL: metadata ICC profile conflicts with the explicit ColorSpec")
+        Some("JXL: metadata ICC profile conflicts with the explicit colour encoding")
     );
 }
 

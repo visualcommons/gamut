@@ -949,6 +949,7 @@ name = "gamut-jxl"
 version = "0.5.0"
 dependencies = [
  "gamut-codec-abi",
+ "gamut-color",
  "gamut-core",
  "gamut-jxl-sys",
  "gamut-metadata",

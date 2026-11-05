@@ -62,10 +62,10 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   rather than clean-slate (maintainer-approved departure from the pure-Rust rule): encode
   wraps **libjxl 0.12.0** statically via `gamut-jxl-sys` (off wasm32), decode wraps the
   pure-Rust external `jxl` crate. Both are pushable backend tails over `gamut-codec-abi`:
-  the seam is the bare `FF 0A` codestream, `push_backend` tries an alternate implementation
+  the seam is the bare `FF 0A` codestream, `with_backend` tries an alternate implementation
   first (and supplies encode on wasm32), and `encode`/`decode` features mean "include the
   built-in tail", not "enable the direction"; container features (ISOBMFF/Exif/XMP/jbrd)
-  stay pinned to the built-in path by a host-side veto. ← core, codec-abi, jxl-sys (optional,
+  stay pinned to the built-in path by a host-side veto. ← core, codec-abi, color, jxl-sys (optional,
   `encode` feature; off wasm32 except emscripten), `jxl` (optional, `decode` feature), metadata
   (optional, `metadata` feature).
 - **gamut-jxl-sys** — declarations-only `-sys` crate statically building/linking

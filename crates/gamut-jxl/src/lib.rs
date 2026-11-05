@@ -19,9 +19,10 @@
 //! validated [`Distance`] — tune it with the chainable builders ([`JxlEncoder::with_effort`],
 //! [`JxlEncoder::with_modular`] to pin the VarDCT/Modular coding tool,
 //! [`JxlEncoder::with_frame_settings`] for libjxl's progression and decoding-speed settings,
-//! [`JxlEncoder::with_container`], [`JxlEncoder::with_color`] for sRGB/linear/PQ/HLG/ICC
-//! signalling, [`JxlEncoder::with_orientation`], and [`JxlEncoder::with_exif`] /
-//! [`JxlEncoder::with_xmp`] for container metadata boxes), then encode any of the eight supported
+//! [`JxlEncoder::with_container`], [`JxlEncoder::with_color`] for sRGB/linear/PQ/HLG signalling or
+//! [`JxlEncoder::with_icc_profile`] for an embedded profile, [`JxlEncoder::with_orientation`], and
+//! [`JxlEncoder::with_exif`] / [`JxlEncoder::with_xmp`] for container metadata boxes), then encode
+//! any of the eight supported
 //! pixel layouts (8/16-bit grayscale, gray+alpha, RGB, RGBA) through the
 //! [`EncodeImage`](gamut_core::EncodeImage) trait. [`JxlEncoder::recompress_jpeg`] losslessly
 //! re-packs an existing JPEG so the original is reconstructible bit-for-bit (jbrd).
@@ -39,10 +40,14 @@
 //!
 //! A truncated stream is an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error
 //! on that path.
-//! [`DecodePartialImage`] is the opt-in alternative: it returns the best-effort image plus a
-//! [`JxlPartialReport`] carrying the completeness flag, for a partly-downloaded or damaged file.
-//! Read its documentation before relying on the pixels — "best effort" can legitimately mean a
-//! blank buffer.
+//! [`JxlDecoder::decode_partial`] is the opt-in alternative: it returns a [`JxlPartialImage`] — the
+//! best-effort image plus a [`JxlPartialReport`] carrying the completeness flag — for a
+//! partly-downloaded or damaged file. Read its documentation before relying on the pixels — "best
+//! effort" can legitimately mean a blank buffer.
+//!
+//! Hostile input is bounded by [`JxlDecoder::with_limits`]: by default an image over
+//! [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`] (64 MiB) of decoded samples is refused before any
+//! pixel buffer is allocated.
 //!
 //! # Example: lossless round-trip
 //!
@@ -72,11 +77,31 @@
 //! # Backends
 //!
 //! Both directions are **registries of codestream backends** (issue #276), not a fixed
-//! implementation. The seam is the bare JPEG XL codestream (signature `FF 0A`):
-//! [`JxlEncoder::push_backend`] and [`JxlDecoder::push_backend`] insert a platform or alternate
-//! implementation, tried in push order, and the crate's own wrappers are the implicit **tails**.
-//! [`crate::backend`] documents the fallback contract; [`crate::abi`] adapts a
-//! [`gamut_codec_abi`] backend (including a C one) onto the same door.
+//! implementation. The seam is the bare JPEG XL codestream (signature `FF 0A`): a
+//! [`JxlCodestreamEncoder`] receives a [`JxlImageRef`] and a plain-data [`JxlEncodeRequest`] and
+//! returns codestream bytes; a [`JxlCodestreamDecoder`] receives the stream and a
+//! [`JxlStreamInfo`] and returns a [`JxlDecoded`] raster. [`JxlEncoder::with_backend`] and
+//! [`JxlDecoder::with_backend`] insert a platform or alternate implementation, and the crate's own
+//! wrappers are the implicit **tails**. [`AbiJxlEncoder`] / [`AbiJxlDecoder`] adapt a
+//! [`gamut_codec_abi`] backend (including a C one) onto the same door, under [`JXL_CODEC_ID`].
+//!
+//! ## Fallback contract
+//!
+//! Backends are tried in **push order** through the workspace's one
+//! [`Registry`](gamut_codec_abi::Registry), the built-in tail last. `supports` returning `false` is
+//! the **only** fall-through. A backend that accepts a job and then fails — whatever the error's
+//! kind, and for an ABI backend whatever non-OK status, a late `UNSUPPORTED` included — propagates
+//! that error to the caller unchanged: it may have produced a partial result, which must never be
+//! silently masked by retrying a later backend. A backend lock poisoned by a panic is an error.
+//! `Send` is bound where a backend is inserted, not on the traits.
+//!
+//! ## Container-feature veto
+//!
+//! Container-dependent encoder features are pinned to the built-in path, and the veto is applied
+//! **host-side** — a backend is not even asked. When [`Container::IsoBmff`] output,
+//! [`JxlEncoder::with_exif`] / [`JxlEncoder::with_xmp`] embedding, or
+//! [`JxlEncoder::recompress_jpeg`] is requested, the registry is skipped entirely: the seam is the
+//! bare codestream, so a backend has no way to express container framing.
 //!
 //! ## What the `encode` / `decode` features mean
 //!
@@ -89,26 +114,25 @@
 //!   error.
 //! - `decode` (default) includes the jxl-rs decode tail, and additionally provides the header-only
 //!   accessors ([`JxlDecoder::info`], [`JxlDecoder::embedded_icc_profile`], [`JxlInfo`]), the
-//!   metadata read-back ([`JxlDecoder::metadata`] → [`JxlMetadata`]: the container's `Exif` /
+//!   metadata read-back ([`JxlDecoder::metadata`] → [`RawMetadata`]: the container's `Exif` /
 //!   `xml ` boxes, located by this crate's own box walk, plus the codestream ICC profile; or
 //!   [`JxlDecoder::metadata_boxes`] for the boxes alone, which survives a damaged codestream) and the
-//!   best-effort [`DecodePartialImage`] surface, all of which are always answered by the built-in
-//!   parser. Without it, [`JxlDecoder`] decodes through a pushed backend, or returns an
+//!   best-effort [`JxlDecoder::decode_partial`], all of which are always answered by the built-in
+//!   parser. Without it, [`JxlDecoder`] decodes through an added backend, or returns an
 //!   [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
 //!
 //! This is why the encode direction works on `wasm32-unknown-unknown` despite libjxl being
-//! unbuildable there: push a backend and the tail's absence stops mattering.
+//! unbuildable there: add a backend and the tail's absence stops mattering.
 //!
 //! ## The `metadata` feature
 //!
-//! Off by default. It adds the `gamut-metadata` facade's typed models over the raw surface above,
-//! through the facade's `TypedMetadata` trait: [`JxlMetadata::blocks`] hands the located payloads
-//! over as `MetadataBlock`s and [`JxlMetadata::metadata`] parses them into a unified `Metadata`,
-//! while
-//! [`JxlEncoder::with_metadata`] / [`JxlEncoder::with_encoded_metadata`] embed one, routing EXIF
-//! and XMP to the container boxes and the ICC profile to [`ColorSpec::Icc`] — refusing, rather
-//! than silently replacing, a different [`ColorSpec`] the caller chose explicitly through
-//! [`JxlEncoder::with_color`]. The dependency direction stays `gamut-jxl → gamut-metadata`.
+//! Off by default. It adds the `gamut-metadata` facade's typed models over the raw surface above:
+//! the facade's `TypedMetadata` impl on [`RawMetadata`] parses what [`JxlDecoder::metadata`] read
+//! into a unified `Metadata`, and [`JxlEncoder`] is a `MetadataSink`, whose `with_metadata` /
+//! `with_encoded_metadata` route EXIF and XMP to the container boxes and the ICC profile to the
+//! codestream's colour encoding — refusing, rather than silently replacing, a colour encoding the
+//! caller chose explicitly through [`JxlEncoder::with_color`] or [`JxlEncoder::with_icc_profile`].
+//! The dependency direction stays `gamut-jxl → gamut-metadata`.
 //!
 //! ## Deferred: container ownership
 //!
@@ -141,8 +165,8 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
-pub mod abi;
-pub mod backend;
+mod abi;
+mod backend;
 mod config;
 #[cfg(feature = "decode")]
 mod convert;
@@ -167,21 +191,24 @@ mod ffi;
 #[cfg(feature = "decode")]
 mod jxlrs;
 
-pub use abi::{AbiDecodeBackend, AbiEncodeBackend, JXL_CODEC_ID};
+pub use abi::{AbiJxlDecoder, AbiJxlEncoder, JXL_CODEC_ID};
 pub use backend::{
     JxlCodestreamDecoder, JxlCodestreamEncoder, JxlDecoded, JxlEncodeRequest, JxlFraming,
     JxlImageRef, JxlOwnedSamples, JxlSamples, JxlStreamInfo,
 };
 pub use config::{
-    ColorSpec, Container, DecodingSpeed, Distance, Effort, FrameSettings, ModularMode, Orientation,
+    ColorSpec, Container, DecodingSpeed, Distance, Effort, FrameSettings, ModularMode,
     ProgressiveDc, Toggle,
 };
+pub use decoder::JxlDecoder;
 #[cfg(feature = "decode")]
-pub use decoder::{DecodePartialImage, JxlInfo, JxlPartialReport, JxlRender};
-pub use decoder::{JxlDecoder, JxlMetadata};
+pub use decoder::{JxlInfo, JxlPartialImage, JxlPartialReport, JxlRender};
 pub use encoder::JxlEncoder;
-// The facade types named in the `metadata`-feature signatures, so a caller can spell
-// `JxlMetadata::metadata` / `JxlEncoder::with_metadata` without a direct dependency, and the
-// trait those accessors are methods of.
+// The shared core and colour types the public signatures name, so a caller needs no direct
+// dependency to spell them.
+pub use gamut_color::BitDepth;
+pub use gamut_core::{DecodeLimits, Orientation, RawMetadata};
+// The facade types named in the `metadata`-feature surface, so a caller can spell
+// `JxlEncoder::with_metadata` and read a `RawMetadata` as a `Metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataSink, TypedMetadata};

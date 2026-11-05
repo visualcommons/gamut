@@ -27,7 +27,9 @@ seam_handle! {
     host = gamut::jxl::JxlDecoder,
     new = gamut::jxl::JxlDecoder::new(),
     seam = decoder,
-    push = |host, backend| { host.push_backend(gamut::jxl::AbiDecodeBackend::new(backend)); },
+    push = |host, backend| {
+        *host = core::mem::take(host).with_backend(gamut::jxl::AbiJxlDecoder::new(backend));
+    },
     fns = (gamut_jxl_decoder_new, gamut_jxl_decoder_free, gamut_jxl_decoder_push_backend),
     tests = jxl_decoder_tests,
 }
@@ -37,7 +39,9 @@ seam_handle! {
     host = gamut::jxl::JxlEncoder,
     new = gamut::jxl::JxlEncoder::new(),
     seam = encoder,
-    push = |host, backend| { host.push_backend(gamut::jxl::AbiEncodeBackend::new(backend)); },
+    push = |host, backend| {
+        *host = core::mem::take(host).with_backend(gamut::jxl::AbiJxlEncoder::new(backend));
+    },
     fns = (gamut_jxl_encoder_new, gamut_jxl_encoder_free, gamut_jxl_encoder_push_backend),
     tests = jxl_encoder_tests,
 }

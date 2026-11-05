@@ -1,15 +1,20 @@
 //! The [`JxlDecoder`]: a typed front end over a stack of JPEG XL codestream decoders — any backend
-//! pushed with [`JxlDecoder::push_backend`], and, last, the built-in pure-Rust jxl-rs wrapper
+//! added with [`JxlDecoder::with_backend`], and, last, the built-in pure-Rust jxl-rs wrapper
 //! ([`crate::jxlrs`]).
 
+use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "decode")]
+use gamut_core::RawMetadata;
 use gamut_core::convert::ConvertPolicy;
 use gamut_core::{
-    DecodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Pixel, PixelFormat,
-    Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    DecodeImage, DecodeLimits, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Pixel,
+    PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
 use crate::backend::{
-    JxlCodestreamDecoder, JxlDecoded, JxlFraming, JxlOwnedSamples, JxlStreamInfo, Registry,
+    self, DecoderRegistry, JxlCodestreamDecoder, JxlDecoded, JxlFraming, JxlOwnedSamples,
+    JxlStreamInfo,
 };
 #[cfg(feature = "decode")]
 pub use crate::jxlrs::{JxlInfo, JxlPartialReport, JxlRender};
@@ -33,33 +38,6 @@ fn wrong_backend_layout() -> Error {
         env!("CARGO_PKG_NAME"),
         "JXL: backend returned a raster in the wrong pixel layout",
     )
-}
-
-/// Embedded metadata located in a JPEG XL stream by [`JxlDecoder::metadata`]: the container's
-/// `Exif` / `xml ` boxes and the codestream's ICC profile. [`JxlDecoder::metadata_boxes`] fills
-/// only the two box fields, leaving `icc` unconsulted.
-///
-/// Each payload is stored in the form the dedicated metadata crates parse (and the
-/// `gamut-metadata` facade's `MetadataBlock` borrows) directly; with the `metadata` feature, its
-/// [`TypedMetadata`](gamut_metadata::TypedMetadata) impl
-/// ([`blocks`](gamut_metadata::TypedMetadata::blocks) /
-/// [`metadata`](gamut_metadata::TypedMetadata::metadata)) does that hand-over. Marked
-/// `#[non_exhaustive]` so a later carrier (the `jumb` C2PA box) can be added without a breaking
-/// change.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct JxlMetadata {
-    /// The EXIF TIFF stream (starts `II`/`MM`): the `Exif` box payload with its leading 4-byte
-    /// big-endian `exif_tiff_header_offset` applied. The JPEG XL container reuses HEIF's
-    /// `ExifDataBlock` (ISO/IEC 23008-12 §A.2.1; `references/jxl/format_overview.md`), which is
-    /// also what [`JxlEncoder::with_exif`](crate::JxlEncoder::with_exif) writes (offset `0`).
-    pub exif: Option<Vec<u8>>,
-    /// The XMP packet: the `xml ` box payload, verbatim.
-    pub xmp: Option<Vec<u8>>,
-    /// The ICC profile embedded in the codestream's colour encoding — exactly what
-    /// [`JxlDecoder::embedded_icc_profile`] reports — or `None` for a structured encoding, or
-    /// because the codestream was not consulted ([`JxlDecoder::metadata_boxes`]).
-    pub icc: Option<Vec<u8>>,
 }
 
 /// Locates the `Exif` and `xml ` boxes of an ISO BMFF `.jxl` container: the TIFF stream behind
@@ -211,39 +189,6 @@ fn exif_box_tiff_stream(payload: &[u8]) -> Result<&[u8]> {
         })
 }
 
-/// The facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over the located payloads;
-/// [`metadata`](gamut_metadata::TypedMetadata::metadata) is the trait's default,
-/// [`Metadata::parse_blocks`](gamut_metadata::Metadata::parse_blocks) over
-/// [`blocks`](gamut_metadata::TypedMetadata::blocks).
-#[cfg(feature = "metadata")]
-impl gamut_metadata::TypedMetadata for JxlMetadata {
-    /// The located payloads as [`MetadataBlock`](gamut_metadata::MetadataBlock)s: the EXIF TIFF
-    /// stream, the XMP packet and the codestream ICC profile, each present only when the stream
-    /// carried it.
-    ///
-    /// JPEG XL has no IPTC-IIM carrier, and the `jumb` (C2PA) box is not located by this crate
-    /// (see `STATUS.md`), so no `IptcIim` / `C2pa` block is ever produced here.
-    ///
-    /// # Errors
-    ///
-    /// Never: every payload was already located as bytes when [`JxlDecoder::metadata`] built this
-    /// value. The signature is the trait's, shared with containers that resolve payloads lazily.
-    fn blocks(&self) -> gamut_metadata::Result<Vec<gamut_metadata::MetadataBlock<'_>>> {
-        use gamut_metadata::MetadataBlock;
-        let mut blocks = Vec::new();
-        if let Some(exif) = &self.exif {
-            blocks.push(MetadataBlock::Exif(exif));
-        }
-        if let Some(xmp) = &self.xmp {
-            blocks.push(MetadataBlock::Xmp(xmp));
-        }
-        if let Some(icc) = &self.icc {
-            blocks.push(MetadataBlock::Icc(icc));
-        }
-        Ok(blocks)
-    }
-}
-
 /// A JPEG XL decoder.
 ///
 /// Decodes both JPEG XL framings — a bare codestream and the ISO BMFF `.jxl` container — into any of
@@ -258,22 +203,23 @@ impl gamut_metadata::TypedMetadata for JxlMetadata {
 /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error a later version may relax.
 ///
 /// Construct it with [`JxlDecoder::new`] or [`Default`], then optionally set
-/// [`JxlDecoder::with_codestream_bit_depth`], [`JxlDecoder::with_convert_policy`], and the hostile-input
-/// caps [`JxlDecoder::with_max_dimensions`] and [`JxlDecoder::with_max_image_bytes`] (unbounded by
-/// default, beneath a fixed `1 << 28`-sample ceiling in the built-in tail).
+/// [`JxlDecoder::with_codestream_bit_depth`], [`JxlDecoder::with_convert_policy`], and the
+/// hostile-input [`DecodeLimits`] through [`JxlDecoder::with_limits`] (by default
+/// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`], 64 MiB, of decoded samples, beneath a fixed
+/// `1 << 28`-sample ceiling in the built-in tail).
 ///
 /// # Backends
 ///
 /// The codestream itself is decoded by a [`JxlCodestreamDecoder`]. With the `decode` feature the
 /// pure-Rust jxl-rs wrapper is the implicit **last** backend, so the default decoder needs no
-/// wiring. [`JxlDecoder::push_backend`] inserts a platform or alternate decoder *ahead* of it; with
-/// neither a pushed backend nor the built-in tail, decoding reports an
+/// wiring. [`JxlDecoder::with_backend`] inserts a platform or alternate decoder *ahead* of it; with
+/// neither an added backend nor the built-in tail, decoding reports an
 /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error. See
-/// [`crate::backend`] for the fallback contract.
+/// [the crate docs](crate#backends) for the fallback contract.
 ///
-/// The type is `Clone` but **not `Copy`** (it was `Copy` before backends existed): it owns a shared
-/// backend registry. Cloning shares that registry — a backend pushed onto a clone is visible through
-/// the original. `PartialEq`/`Eq` compare the **configuration** only, since backends are opaque.
+/// The type is `Clone` but **not `Copy`**: it owns a backend list. Cloning copies the list,
+/// sharing the backend instances themselves (see [`with_backend`](Self::with_backend)).
+/// `PartialEq`/`Eq` compare the **configuration** only, since backends are opaque.
 #[derive(Debug, Clone, Default)]
 pub struct JxlDecoder {
     /// Whether integer output carries the codestream's declared bit depth.
@@ -282,8 +228,8 @@ pub struct JxlDecoder {
     policy: ConvertPolicy,
     /// The caller's dimension and byte budget for a decoded raster.
     limits: DecodeLimits,
-    /// Pushed codestream backends, tried in push order ahead of the built-in jxl-rs tail.
-    backends: Registry<dyn JxlCodestreamDecoder>,
+    /// Added codestream backends, tried in push order ahead of the built-in jxl-rs tail.
+    backends: DecoderRegistry,
 }
 
 impl PartialEq for JxlDecoder {
@@ -298,54 +244,42 @@ impl PartialEq for JxlDecoder {
 
 impl Eq for JxlDecoder {}
 
-/// The caller-set bounds on a decoded raster ([`JxlDecoder::with_max_dimensions`],
-/// [`JxlDecoder::with_max_image_bytes`]), checked against the stream's parsed image header before
-/// any pixel buffer is sized.
-///
-/// The defaults are unbounded (`u32::MAX` per side, `usize::MAX` bytes), so an unconfigured decoder
-/// refuses exactly what it refused before these limits existed: the built-in tail's fixed jxl-rs
-/// pixel limit stays the ceiling under every setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DecodeLimits {
-    /// Widest accepted image, in pixels.
-    pub(crate) max_width: u32,
-    /// Tallest accepted image, in pixels.
-    pub(crate) max_height: u32,
-    /// Largest accepted decoded sample buffer, in bytes.
-    pub(crate) max_image_bytes: usize,
+/// Refuses a `width` × `height` raster of `bytes_per_pixel`-byte pixels that exceeds `limits`,
+/// checked against the stream's parsed image header before any pixel buffer is sized. A byte count
+/// that overflows `usize` exceeds every budget.
+pub(crate) fn check_limits(
+    limits: DecodeLimits,
+    width: u32,
+    height: u32,
+    bytes_per_pixel: usize,
+) -> Result<()> {
+    if width > limits.max_width() || height > limits.max_height() {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "JXL: image exceeds the dimension limit",
+        ));
+    }
+    let bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel));
+    if bytes.is_none_or(|bytes| bytes > limits.max_image_bytes()) {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "JXL: image exceeds the size limit",
+        ));
+    }
+    Ok(())
 }
 
-impl Default for DecodeLimits {
-    fn default() -> Self {
-        Self {
-            max_width: u32::MAX,
-            max_height: u32::MAX,
-            max_image_bytes: usize::MAX,
-        }
-    }
-}
-
-impl DecodeLimits {
-    /// Refuses a `width` × `height` raster of `bytes_per_pixel`-byte pixels that exceeds either
-    /// limit. A byte count that overflows `usize` exceeds every budget.
-    pub(crate) fn check(self, width: u32, height: u32, bytes_per_pixel: usize) -> Result<()> {
-        if width > self.max_width || height > self.max_height {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "JXL: image exceeds the dimension limit",
-            ));
-        }
-        let bytes = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel));
-        if bytes.is_none_or(|bytes| bytes > self.max_image_bytes) {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "JXL: image exceeds the size limit",
-            ));
-        }
-        Ok(())
-    }
+/// What [`JxlDecoder::decode_partial`] returns: the best-effort image and how far the decode got.
+#[cfg(feature = "decode")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JxlPartialImage<P: Pixel> {
+    /// The decoded image — complete, partly drawn, or blank; [`report`](Self::report) says which.
+    pub image: ImageBuf<P>,
+    /// How much of the image [`image`](Self::image) carries.
+    pub report: JxlPartialReport,
 }
 
 impl JxlDecoder {
@@ -355,48 +289,31 @@ impl JxlDecoder {
         Self::default()
     }
 
-    /// Caps the accepted image dimensions; a wider or taller image is refused with an
+    /// Sets the hostile-input [`DecodeLimits`]: an image wider, taller, or larger in decoded bytes
+    /// than they allow is refused with an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error once its header is
-    /// parsed, before any pixel buffer is allocated.
+    /// parsed, before any pixel buffer is allocated. Returns the updated decoder for chaining.
     ///
-    /// Unbounded by default. This only ever tightens what the decoder accepts: the built-in
-    /// tail's fixed jxl-rs pixel limit of `1 << 28` samples still applies on top. A raster a pushed
-    /// backend returns is held to the same caps. Returns the updated decoder for chaining.
+    /// The default is [`DecodeLimits::new`]: any width and height, and
+    /// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`] (64 MiB) of decoded samples. The budgeted
+    /// quantity is `width × height × bytes per pixel` of the wider of the stream's natural layout
+    /// and the requested one — the largest raster the decode materialises. It bounds the
+    /// zero-filled `JxlRender::HeaderOnly` buffer the best-effort `decode_partial` returns for a
+    /// stream cut short after its headers, too.
+    ///
+    /// The limits only ever tighten what the decoder accepts: the built-in tail's fixed jxl-rs
+    /// pixel limit of `1 << 28` samples still applies on top. A raster an added backend returns is
+    /// held to the same limits.
     #[must_use]
-    pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
-        self.limits.max_width = width;
-        self.limits.max_height = height;
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
         self
     }
 
-    /// The accepted `(width, height)` caps (see [`JxlDecoder::with_max_dimensions`]).
+    /// The configured [`DecodeLimits`] (see [`JxlDecoder::with_limits`]).
     #[must_use]
-    pub fn max_dimensions(&self) -> (u32, u32) {
-        (self.limits.max_width, self.limits.max_height)
-    }
-
-    /// Caps the decoded sample buffer in bytes; a larger image is refused with an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error once its header is
-    /// parsed, before any pixel buffer is allocated.
-    ///
-    /// The budgeted quantity is `width × height × bytes per pixel` of the wider of the stream's
-    /// natural layout and the requested one — the largest raster the decode materialises. It
-    /// bounds the zero-filled `JxlRender::HeaderOnly` buffer the best-effort `DecodePartialImage`
-    /// path returns for a stream cut short after its headers, too.
-    ///
-    /// Unbounded by default; as for [`with_max_dimensions`](Self::with_max_dimensions), the
-    /// built-in tail's fixed pixel limit still applies on top, and a pushed backend's raster is held
-    /// to the same budget. Returns the updated decoder for chaining.
-    #[must_use]
-    pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
-        self.limits.max_image_bytes = bytes;
-        self
-    }
-
-    /// The decoded sample buffer cap in bytes (see [`JxlDecoder::with_max_image_bytes`]).
-    #[must_use]
-    pub fn max_image_bytes(&self) -> usize {
-        self.limits.max_image_bytes
+    pub fn limits(&self) -> DecodeLimits {
+        self.limits
     }
 
     /// Selects whether integer output carries the **codestream's declared bit depth** instead of
@@ -438,26 +355,35 @@ impl JxlDecoder {
         self.policy
     }
 
-    /// Pushes a [`JxlCodestreamDecoder`] onto the end of this decoder's backend list, ahead of the
-    /// built-in jxl-rs tail. Returns `&mut self` for chaining.
+    /// Adds a [`JxlCodestreamDecoder`] to the end of this decoder's backend list, ahead of the
+    /// built-in jxl-rs tail. Returns the updated decoder for chaining.
     ///
     /// Backends are tried in push order; the first whose
     /// [`supports`](JxlCodestreamDecoder::supports) returns `true` produces the raster, and the
-    /// built-in wrapper (when compiled in) is tried last. A backend that accepts a stream and then
-    /// fails propagates its error rather than falling through — see [`crate::backend`] for the full
-    /// contract.
+    /// built-in wrapper (when compiled in) is tried last. `supports` is the only fall-through: a
+    /// backend that accepts a stream and then fails propagates its error — see
+    /// [the crate docs](crate#backends) for the full contract. `Send` is bound here, where the
+    /// backend is inserted, rather than on the trait, so the decoder stays `Send + Sync`.
     ///
     /// A backend must return **exactly** the layout
     /// [`JxlStreamInfo::format`](crate::JxlStreamInfo::format) asks for; the host does not reshape
     /// its output, and a mismatch is a typed error rather than a silent conversion.
-    pub fn push_backend(&mut self, backend: impl JxlCodestreamDecoder + 'static) -> &mut Self {
-        self.backends.push(Box::new(backend));
+    ///
+    /// # Cloning shares backends
+    ///
+    /// Backends are stored behind `Arc<Mutex<..>>`, so **cloning a `JxlDecoder` shares them with
+    /// the clone** rather than duplicating them: a stateful backend sees the decodes of every clone,
+    /// and its lock serializes concurrent ones. A backend added to one decoder after the clone is
+    /// not seen by the other.
+    #[must_use]
+    pub fn with_backend(mut self, backend: impl JxlCodestreamDecoder + Send + 'static) -> Self {
+        self.backends.push(Arc::new(Mutex::new(backend)));
         self
     }
 
     /// Parses the stream's headers and returns its basic properties without decoding any pixels.
     ///
-    /// Always uses the built-in jxl-rs header parser — a pushed backend is not consulted, so the
+    /// Always uses the built-in jxl-rs header parser — an added backend is not consulted, so the
     /// answer is the crate's own reading of the stream.
     ///
     /// # Errors
@@ -474,8 +400,9 @@ impl JxlDecoder {
     /// instead of carrying profile bytes.
     ///
     /// Only the stream's headers are parsed; no pixels are decoded. The returned bytes are exactly
-    /// the attached profile (what [`crate::ColorSpec::Icc`] set at encode time, when the stream was
-    /// produced by gamut). This is a metadata accessor: the pixel-decoding paths apply no ICC
+    /// the attached profile (what
+    /// [`JxlEncoder::with_icc_profile`](crate::JxlEncoder::with_icc_profile) set at encode time,
+    /// when the stream was produced by gamut). This is a metadata accessor: the pixel-decoding paths apply no ICC
     /// transform, so decoded samples are in this profile only when
     /// [`JxlInfo::uses_original_profile`] is `true`; an XYB-coded stream decodes to sRGB instead.
     ///
@@ -495,10 +422,14 @@ impl JxlDecoder {
     /// only the ICC field can be set for one.
     ///
     /// The boxes are located by this crate's own walk of the container's top-level box sequence —
-    /// the pure-Rust decode tail does not expose them — and a pushed backend is not consulted. The
-    /// `Exif` payload's 4-byte tiff-header offset is applied, so [`JxlMetadata::exif`] is the TIFF
-    /// stream itself; for a duplicated box the first wins. A Brotli-compressed (`brob`) `Exif` /
-    /// `xml ` box is refused rather than silently skipped.
+    /// the pure-Rust decode tail does not expose them — and an added backend is not consulted. The
+    /// `Exif` payload's 4-byte tiff-header offset is applied (the JPEG XL container reuses HEIF's
+    /// `ExifDataBlock`, ISO/IEC 23008-12 §A.2.1; `references/jxl/format_overview.md`), so
+    /// [`RawMetadata::exif`] is the TIFF stream itself; for a duplicated box the first wins. The
+    /// XMP packet is the `xml ` payload verbatim, and [`RawMetadata::icc`] is `None` for a
+    /// structured colour encoding. A Brotli-compressed (`brob`) `Exif` / `xml ` box is refused
+    /// rather than silently skipped. With the `metadata` feature the facade's `TypedMetadata`
+    /// impl on [`RawMetadata`] parses the result into a unified `Metadata`.
     ///
     /// # Errors
     ///
@@ -513,7 +444,7 @@ impl JxlDecoder {
     /// caller recovering what a damaged file still carries reads
     /// [`metadata_boxes`](Self::metadata_boxes) instead.
     #[cfg(feature = "decode")]
-    pub fn metadata(&self, data: &[u8]) -> Result<JxlMetadata> {
+    pub fn metadata(&self, data: &[u8]) -> Result<RawMetadata> {
         let mut metadata = self.metadata_boxes(data)?;
         metadata.icc = crate::jxlrs::embedded_icc_profile(data)?;
         Ok(metadata)
@@ -521,8 +452,8 @@ impl JxlDecoder {
 
     /// Reads only the container's `Exif` and `xml ` boxes, never parsing the codestream: the
     /// box-level half of [`metadata`](Self::metadata), with the same box walk and the same
-    /// refusals, and [`JxlMetadata::icc`] always `None` (not consulted, rather than "a structured
-    /// colour encoding"). A bare codestream has no boxes, so it yields an empty [`JxlMetadata`].
+    /// refusals, and [`RawMetadata::icc`] always `None` (not consulted, rather than "a structured
+    /// colour encoding"). A bare codestream has no boxes, so it yields an empty [`RawMetadata`].
     ///
     /// This is the reader for a file whose codestream is damaged, truncated, or uses a feature the
     /// built-in decoder refuses: the boxes it carries are still returned. To add the ICC profile
@@ -537,7 +468,7 @@ impl JxlDecoder {
     /// past its end); an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for
     /// a `brob`-wrapped `Exif` / `xml ` box.
     #[cfg(feature = "decode")]
-    pub fn metadata_boxes(&self, data: &[u8]) -> Result<JxlMetadata> {
+    pub fn metadata_boxes(&self, data: &[u8]) -> Result<RawMetadata> {
         let (exif, xmp) = match JxlFraming::detect(data) {
             JxlFraming::IsoBmff => container_metadata_boxes(data)?,
             JxlFraming::Codestream => (None, None),
@@ -548,17 +479,16 @@ impl JxlDecoder {
                 ));
             }
         };
-        Ok(JxlMetadata {
-            exif,
-            xmp,
-            icc: None,
-        })
+        let mut metadata = RawMetadata::default();
+        metadata.exif = exif;
+        metadata.xmp = xmp;
+        Ok(metadata)
     }
 
     /// The stream's dimensions when the built-in header parser can determine them, else `None`.
     ///
     /// Used only to populate [`JxlStreamInfo::dimensions`](crate::JxlStreamInfo::dimensions), and
-    /// only when a backend has actually been pushed, so the default decode path never pays for it.
+    /// only when a backend has actually been added, so the default decode path never pays for it.
     fn probe_dimensions(&self, data: &[u8]) -> Option<gamut_core::Dimensions> {
         #[cfg(feature = "decode")]
         {
@@ -571,7 +501,7 @@ impl JxlDecoder {
         }
     }
 
-    /// Runs the pushed backends over `data` in push order, returning the first accepted raster or
+    /// Runs the added backends over `data` in push order, returning the first accepted raster or
     /// `None` when every backend declined (so the caller falls through to the built-in tail).
     fn dispatch_backends(&self, data: &[u8], format: PixelFormat) -> Result<Option<JxlDecoded>> {
         if self.backends.is_empty() {
@@ -583,92 +513,92 @@ impl JxlDecoder {
             self.probe_dimensions(data),
             self.codestream_bit_depth,
         );
-        let mut backends = self.backends.lock();
-        for backend in backends.iter_mut() {
-            if !backend.supports(&info) {
-                continue;
-            }
-            match backend.decode(&info, data) {
-                Ok(decoded) => {
-                    if decoded.format() != format {
-                        return Err(wrong_backend_layout());
-                    }
-                    let dims = decoded.dimensions();
-                    self.limits
-                        .check(dims.width(), dims.height(), format.bytes_per_pixel())?;
-                    return Ok(Some(decoded));
-                }
-                // A late decline: fall through exactly as `supports() == false` would.
-                Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported => continue,
-                // Terminal: the backend accepted the stream and failed, so propagate.
-                Err(error) => return Err(error),
-            }
+        let Some(decoded) = backend::decode_with_backends(&self.backends, &info, data)? else {
+            return Ok(None);
+        };
+        if decoded.format() != format {
+            return Err(wrong_backend_layout());
         }
-        Ok(None)
+        let dims = decoded.dimensions();
+        check_limits(
+            self.limits,
+            dims.width(),
+            dims.height(),
+            format.bytes_per_pixel(),
+        )?;
+        Ok(Some(decoded))
     }
-}
 
-/// Decodes a possibly-incomplete JPEG XL codestream into layout `P`, returning the best-effort
-/// image alongside a [`JxlPartialReport`] saying how far the decode got.
-///
-/// The mirror of [`DecodeImage`] for input that may be cut short — a partly-downloaded file, a
-/// stream still in flight, a salvage attempt on a damaged one. [`DecodeImage::decode_image`] is
-/// unchanged and still rejects every truncation; this is the opt-in relaxation, and it relaxes
-/// **truncation only**: animation, premultiplied alpha, colour-as-grayscale, the pixel limit and
-/// the caller's [`JxlDecoder::with_max_dimensions`] / [`JxlDecoder::with_max_image_bytes`] caps
-/// stay the same typed refusals.
-///
-/// # What you actually get
-///
-/// Best effort means exactly that, and JPEG XL's coding structure sets the ceiling:
-///
-/// - Truncation **before the image headers** is still an
-///   [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error — without dimensions
-///   there is no buffer to hand back.
-/// - Truncation **before the frame header** yields a zero-filled buffer at the declared dimensions
-///   ([`JxlRender::HeaderOnly`]).
-/// - Truncation **mid-frame** yields whatever groups arrived ([`JxlRender::BestEffort`]): for a
-///   lossy (VarDCT) stream, groups with no detail pass are drawn from the upsampled DC image, so
-///   the result is a full-size coarse preview sharpening towards the front of the stream; for a
-///   lossless (Modular) stream, delivered groups are exact and the remainder stays zero.
-/// - An image small enough to be coded as a **single group** — roughly 256×256 or below — has no
-///   partially-decodable structure at all, and comes back blank.
-/// - Not every truncation is even recoverable: some cut points are indistinguishable from
-///   corruption to the decoder and still return an
-///   [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error.
-///
-/// So always consult [`JxlPartialReport::is_complete`]; never assume pixels are present.
-///
-/// # Backends
-///
-/// Unlike [`DecodeImage`], this is **always answered by the built-in jxl-rs tail** — a backend
-/// pushed with [`JxlDecoder::push_backend`] is not consulted, exactly as for [`JxlDecoder::info`]
-/// and [`JxlDecoder::embedded_icc_profile`]. The shared `gamut-codec-abi` seam has no notion of a
-/// partial result, so a backend could neither report one nor be asked for one; routing partial
-/// decode through the seam would mean extending that crate, and is additive if it ever happens.
-///
-/// There is deliberately no `_into` counterpart: reusing a destination allocation pays off across a
-/// decode loop, which a one-shot salvage is not. Adding one later is additive.
-#[cfg(feature = "decode")]
-pub trait DecodePartialImage<P: Pixel> {
-    /// Decodes `data` best-effort into a fresh [`ImageBuf`], tolerating a truncated stream.
+    /// Decodes a possibly-incomplete JPEG XL stream into layout `P`, returning the best-effort
+    /// image together with a [`JxlPartialReport`] saying how far the decode got.
+    ///
+    /// The mirror of [`DecodeImage::decode_image`] for input that may be cut short — a
+    /// partly-downloaded file, a stream still in flight, a salvage attempt on a damaged one.
+    /// [`DecodeImage::decode_image`] still rejects every truncation; this is the opt-in relaxation,
+    /// and it relaxes **truncation only**: animation, premultiplied alpha, colour-as-grayscale, the
+    /// pixel limit and the caller's [`DecodeLimits`] stay the same typed refusals. `P` is any of
+    /// the eight layouts [`DecodeImage`] decodes.
+    ///
+    /// # What you actually get
+    ///
+    /// Best effort means exactly that, and JPEG XL's coding structure sets the ceiling:
+    ///
+    /// - Truncation **before the image headers** is still an
+    ///   [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error — without
+    ///   dimensions there is no buffer to hand back.
+    /// - Truncation **before the frame header** yields a zero-filled buffer at the declared
+    ///   dimensions ([`JxlRender::HeaderOnly`]).
+    /// - Truncation **mid-frame** yields whatever groups arrived ([`JxlRender::BestEffort`]): for a
+    ///   lossy (VarDCT) stream, groups with no detail pass are drawn from the upsampled DC image, so
+    ///   the result is a full-size coarse preview sharpening towards the front of the stream; for a
+    ///   lossless (Modular) stream, delivered groups are exact and the remainder stays zero.
+    /// - An image small enough to be coded as a **single group** — roughly 256×256 or below — has
+    ///   no partially-decodable structure at all, and comes back blank.
+    /// - Not every truncation is even recoverable: some cut points are indistinguishable from
+    ///   corruption to the decoder and still return an
+    ///   [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error.
+    ///
+    /// So always consult [`JxlPartialReport::is_complete`]; never assume pixels are present.
+    ///
+    /// # Backends
+    ///
+    /// Unlike [`DecodeImage`], this is **always answered by the built-in jxl-rs tail** — a backend
+    /// added with [`JxlDecoder::with_backend`] is not consulted, exactly as for
+    /// [`JxlDecoder::info`] and [`JxlDecoder::embedded_icc_profile`]. The shared `gamut-codec-abi`
+    /// seam has no notion of a partial result, so a backend could neither report one nor be asked
+    /// for one; routing partial decode through the seam would mean extending that crate, and is
+    /// additive if it ever happens.
+    ///
+    /// There is deliberately no `_into` counterpart: reusing a destination allocation pays off
+    /// across a decode loop, which a one-shot salvage is not. Adding one later is additive.
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data`
     /// is malformed, or truncated before the image headers, or truncated at a point jxl-rs cannot
     /// tell from corruption; an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
-    /// error if the stream uses a feature that is not implemented or cannot be presented as `P`.
-    fn decode_partial_image(&self, data: &[u8]) -> Result<(ImageBuf<P>, JxlPartialReport)>;
+    /// error if the stream uses a feature that is not implemented, exceeds the limits, or cannot be
+    /// presented as `P`.
+    #[cfg(feature = "decode")]
+    pub fn decode_partial<P: Pixel>(&self, data: &[u8]) -> Result<JxlPartialImage<P>>
+    where
+        Self: DecodeImage<P>,
+    {
+        let (image, report) = crate::jxlrs::decode_partial_to_buf::<P>(
+            data,
+            self.codestream_bit_depth,
+            self.policy,
+            self.limits,
+        )?;
+        Ok(JxlPartialImage { image, report })
+    }
 }
 
-/// Implements [`DecodeImage`] for each supported layout: the pushed backends first, then the
+/// Implements [`DecodeImage`] for each supported layout: the added backends first, then the
 /// built-in jxl-rs tail (or a typed refusal where it is not compiled in). The macro names only the
 /// owned-sample variant a layout's storage width implies; every other layout fact comes from
-/// [`Pixel::FORMAT`] via the crate's single layout table.
-///
-/// It emits [`DecodePartialImage`] for the same layout in the same breath, so the eight coded
-/// layouts stay enumerated exactly once.
+/// [`Pixel::FORMAT`] via the crate's single layout table. These eight impls are also what bounds
+/// [`JxlDecoder::decode_partial`]'s layouts.
 macro_rules! impl_decode_image {
     ($($pixel:ty => $variant:ident;)*) => {$(
         impl DecodeImage<$pixel> for JxlDecoder {
@@ -731,22 +661,6 @@ macro_rules! impl_decode_image {
                 }
             }
         }
-
-        #[cfg(feature = "decode")]
-        impl DecodePartialImage<$pixel> for JxlDecoder {
-            fn decode_partial_image(
-                &self,
-                data: &[u8],
-            ) -> Result<(ImageBuf<$pixel>, JxlPartialReport)> {
-                // The registry is deliberately not consulted; see the trait's docs.
-                crate::jxlrs::decode_partial_to_buf::<$pixel>(
-                    data,
-                    self.codestream_bit_depth,
-                    self.policy,
-                    self.limits,
-                )
-            }
-        }
     )*};
 }
 
@@ -770,26 +684,6 @@ mod tests {
 
     use super::*;
 
-    #[cfg(feature = "metadata")]
-    #[test]
-    fn blocks_expose_each_located_payload_in_facade_form() {
-        use gamut_metadata::{MetadataBlock, TypedMetadata};
-        let meta = JxlMetadata {
-            exif: Some(b"II*\0".to_vec()),
-            xmp: Some(b"<x:xmpmeta/>".to_vec()),
-            icc: Some(vec![7u8; 4]),
-        };
-        assert_eq!(
-            meta.blocks().unwrap(),
-            vec![
-                MetadataBlock::Exif(b"II*\0"),
-                MetadataBlock::Xmp(b"<x:xmpmeta/>"),
-                MetadataBlock::Icc(&[7u8; 4]),
-            ]
-        );
-        assert!(JxlMetadata::default().blocks().unwrap().is_empty());
-    }
-
     #[test]
     fn new_and_default_are_equal_and_configuration_compares() {
         assert_eq!(JxlDecoder::new(), JxlDecoder::default());
@@ -806,17 +700,15 @@ mod tests {
     }
 
     #[test]
-    fn the_caps_default_unbounded_and_take_part_in_equality() {
+    fn the_limits_default_to_the_workspace_budget_and_take_part_in_equality() {
         let default = JxlDecoder::new();
-        assert_eq!(default.max_dimensions(), (u32::MAX, u32::MAX));
-        assert_eq!(default.max_image_bytes(), usize::MAX);
+        assert_eq!(default.limits(), DecodeLimits::new());
+        assert_eq!(default.limits().max_image_bytes(), 64 << 20);
 
-        let capped = JxlDecoder::new().with_max_dimensions(3, 5);
-        assert_eq!(capped.max_dimensions(), (3, 5));
+        let limits = DecodeLimits::new().with_max_width(3).with_max_height(5);
+        let capped = JxlDecoder::new().with_limits(limits);
+        assert_eq!(capped.limits(), limits);
         assert_ne!(capped, default);
-        let budgeted = JxlDecoder::new().with_max_image_bytes(7);
-        assert_eq!(budgeted.max_image_bytes(), 7);
-        assert_ne!(budgeted, default);
     }
 
     /// The error kind and message a limit refusal carries.
@@ -836,52 +728,47 @@ mod tests {
 
     #[test]
     fn decode_limits_admit_their_exact_bounds_and_refuse_one_past() {
-        let limits = DecodeLimits {
-            max_width: 4,
-            max_height: 3,
-            max_image_bytes: 4 * 3 * 2,
-        };
-        assert!(limits.check(4, 3, 2).is_ok());
-        assert_eq!(refusal(limits.check(5, 3, 1)), DIMENSION);
-        assert_eq!(refusal(limits.check(4, 4, 1)), DIMENSION);
+        let limits = DecodeLimits::new()
+            .with_max_width(4)
+            .with_max_height(3)
+            .with_max_image_bytes(4 * 3 * 2);
+        assert!(check_limits(limits, 4, 3, 2).is_ok());
+        assert_eq!(refusal(check_limits(limits, 5, 3, 1)), DIMENSION);
+        assert_eq!(refusal(check_limits(limits, 4, 4, 1)), DIMENSION);
         // Every factor of the byte count is weighed: one more of any exceeds the budget.
-        assert_eq!(refusal(limits.check(4, 3, 3)), SIZE);
-        let one_short = DecodeLimits {
-            max_image_bytes: 4 * 3 * 2 - 1,
-            ..limits
-        };
-        assert_eq!(refusal(one_short.check(4, 3, 2)), SIZE);
+        assert_eq!(refusal(check_limits(limits, 4, 3, 3)), SIZE);
+        let one_short = limits.with_max_image_bytes(4 * 3 * 2 - 1);
+        assert_eq!(refusal(check_limits(one_short, 4, 3, 2)), SIZE);
     }
 
     #[test]
     fn decode_limits_refuse_a_byte_count_that_overflows() {
         // Unbounded caps still cannot admit a raster whose size `usize` cannot even express.
-        let unbounded = DecodeLimits::default();
+        let unbounded = DecodeLimits::new().with_max_image_bytes(usize::MAX);
         assert_eq!(
-            refusal(unbounded.check(u32::MAX, u32::MAX, usize::MAX)),
+            refusal(check_limits(unbounded, u32::MAX, u32::MAX, usize::MAX)),
             SIZE
         );
     }
 
     #[test]
-    fn a_backend_raster_is_held_to_the_callers_caps() {
+    fn a_backend_raster_is_held_to_the_callers_limits() {
         // `FixedBackend::returning` answers with a 2×2 `Gray8` raster: 4 bytes.
-        let decode = |decoder: JxlDecoder| {
-            let mut decoder = decoder;
-            decoder.push_backend(FixedBackend::returning(1));
+        let decode = |limits: DecodeLimits| {
+            let decoder = JxlDecoder::new()
+                .with_limits(limits)
+                .with_backend(FixedBackend::returning(1));
             let result: Result<ImageBuf<Gray8>> = decoder.decode_image(&STREAM);
             result.map(|_| ())
         };
-        assert!(decode(JxlDecoder::new().with_max_dimensions(2, 2)).is_ok());
-        assert!(decode(JxlDecoder::new().with_max_image_bytes(4)).is_ok());
+        let base = DecodeLimits::new();
+        assert!(decode(base.with_max_width(2).with_max_height(2)).is_ok());
+        assert!(decode(base.with_max_image_bytes(4)).is_ok());
         assert_eq!(
-            refusal(decode(JxlDecoder::new().with_max_dimensions(1, 2))),
+            refusal(decode(base.with_max_width(1).with_max_height(2))),
             DIMENSION
         );
-        assert_eq!(
-            refusal(decode(JxlDecoder::new().with_max_image_bytes(3))),
-            SIZE
-        );
+        assert_eq!(refusal(decode(base.with_max_image_bytes(3))), SIZE);
     }
 
     #[test]
@@ -991,8 +878,7 @@ mod tests {
         let second = FixedBackend::returning(9);
         let (second_supports, second_decodes) = second.counters();
 
-        let mut dec = JxlDecoder::new();
-        dec.push_backend(first).push_backend(second);
+        let dec = JxlDecoder::new().with_backend(first).with_backend(second);
 
         let image: ImageBuf<Gray8> = dec.decode_image(&STREAM).expect("decode");
         assert_eq!(image.as_samples(), &[7, 7, 7, 7]);
@@ -1015,8 +901,7 @@ mod tests {
         let second = FixedBackend::returning(3);
         let (second_supports, second_decodes) = second.counters();
 
-        let mut dec = JxlDecoder::new();
-        dec.push_backend(first).push_backend(second);
+        let dec = JxlDecoder::new().with_backend(first).with_backend(second);
 
         let image: ImageBuf<Gray8> = dec.decode_image(&STREAM).expect("decode");
         assert_eq!(image.as_samples(), &[3, 3, 3, 3]);
@@ -1027,7 +912,9 @@ mod tests {
     }
 
     #[test]
-    fn a_late_unsupported_falls_through_to_the_next_backend() {
+    fn a_late_unsupported_is_terminal() {
+        // `supports` is the only fall-through: an accepting backend's `Unsupported` is the
+        // caller's error, and the next backend is never asked.
         let first = FixedBackend::with(
             true,
             Err(Error::unsupported(
@@ -1037,15 +924,17 @@ mod tests {
         );
         let (_, first_decodes) = first.counters();
         let second = FixedBackend::returning(5);
-        let (_, second_decodes) = second.counters();
+        let (second_supports, second_decodes) = second.counters();
 
-        let mut dec = JxlDecoder::new();
-        dec.push_backend(first).push_backend(second);
+        let dec = JxlDecoder::new().with_backend(first).with_backend(second);
 
-        let image: ImageBuf<Gray8> = dec.decode_image(&STREAM).expect("decode");
-        assert_eq!(image.as_samples(), &[5, 5, 5, 5]);
+        let result: Result<ImageBuf<Gray8>> = dec.decode_image(&STREAM);
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(error.static_message(), Some("changed its mind"));
         assert_eq!(first_decodes.load(Ordering::SeqCst), 1);
-        assert_eq!(second_decodes.load(Ordering::SeqCst), 1);
+        assert_eq!(second_supports.load(Ordering::SeqCst), 0);
+        assert_eq!(second_decodes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1060,8 +949,7 @@ mod tests {
         let second = FixedBackend::returning(6);
         let (second_supports, second_decodes) = second.counters();
 
-        let mut dec = JxlDecoder::new();
-        dec.push_backend(first).push_backend(second);
+        let dec = JxlDecoder::new().with_backend(first).with_backend(second);
 
         let result: Result<ImageBuf<Gray8>> = dec.decode_image(&STREAM);
         let error = result.unwrap_err();
@@ -1083,8 +971,7 @@ mod tests {
                 JxlOwnedSamples::U8(vec![1; 12]),
             ),
         );
-        let mut dec = JxlDecoder::new();
-        dec.push_backend(backend);
+        let dec = JxlDecoder::new().with_backend(backend);
         let result: Result<ImageBuf<Gray8>> = dec.decode_image(&STREAM);
         let error = result.unwrap_err();
         assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
@@ -1098,8 +985,9 @@ mod tests {
     fn the_backend_sees_the_requested_layout_framing_and_policy() {
         let backend = FixedBackend::returning(1);
         let seen = backend.seen();
-        let mut dec = JxlDecoder::new().with_codestream_bit_depth(true);
-        dec.push_backend(backend);
+        let dec = JxlDecoder::new()
+            .with_codestream_bit_depth(true)
+            .with_backend(backend);
 
         let _: Result<ImageBuf<Gray8>> = dec.decode_image(&STREAM);
         let info = seen
@@ -1128,8 +1016,7 @@ mod tests {
 
     #[test]
     fn decode_image_into_replaces_the_destination_from_a_backend() {
-        let mut dec = JxlDecoder::new();
-        dec.push_backend(FixedBackend::returning(8));
+        let dec = JxlDecoder::new().with_backend(FixedBackend::returning(8));
         let mut dst: ImageBuf<Gray8> =
             ImageBuf::new(vec![0u8; 9], Dimensions::new(3, 3).unwrap()).unwrap();
         dec.decode_image_into(&STREAM, &mut dst).expect("decode");
@@ -1139,8 +1026,7 @@ mod tests {
 
     #[test]
     fn sixteen_bit_backend_output_reaches_the_caller() {
-        let mut dec = JxlDecoder::new();
-        dec.push_backend(FixedBackend::with(
+        let dec = JxlDecoder::new().with_backend(FixedBackend::with(
             true,
             JxlDecoded::new(
                 PixelFormat::Gray16,
@@ -1182,17 +1068,17 @@ mod tests {
         );
         let (first_supports, _) = first.counters();
         let second = FixedBackend::with(
-            true,
-            Err(Error::unsupported(env!("CARGO_PKG_NAME"), "late decline")),
+            false,
+            Err(Error::unsupported(env!("CARGO_PKG_NAME"), "never called")),
         );
-        let (_, second_decodes) = second.counters();
+        let (second_supports, second_decodes) = second.counters();
 
-        let mut dec = JxlDecoder::new();
-        dec.push_backend(first).push_backend(second);
+        let dec = JxlDecoder::new().with_backend(first).with_backend(second);
 
         let result: Result<ImageBuf<Gray8>> = dec.decode_image(&STREAM);
         assert_eq!(first_supports.load(Ordering::SeqCst), 1);
-        assert_eq!(second_decodes.load(Ordering::SeqCst), 1);
+        assert_eq!(second_supports.load(Ordering::SeqCst), 1);
+        assert_eq!(second_decodes.load(Ordering::SeqCst), 0);
         // Reaching the tail with a two-byte signature errors, but as the tail's error.
         let error = result.expect_err("a bare signature is not an image");
         if cfg!(feature = "decode") {
@@ -1204,13 +1090,12 @@ mod tests {
 
     #[cfg(feature = "decode")]
     #[test]
-    fn the_partial_path_never_consults_a_pushed_backend() {
+    fn the_partial_path_never_consults_an_added_backend() {
         // A backend that would win the ordinary decode is not even asked about the partial one:
         // the codec-abi seam cannot express a partial result, so the built-in tail answers alone.
         let backend = FixedBackend::returning(4);
         let (supports, decodes) = backend.counters();
-        let mut dec = JxlDecoder::new();
-        dec.push_backend(backend);
+        let dec = JxlDecoder::new().with_backend(backend);
 
         // The ordinary path does go through it, so the counters below mean "vetoed", not "unused".
         let image: ImageBuf<Gray8> = dec.decode_image(&STREAM).expect("decode");
@@ -1220,18 +1105,20 @@ mod tests {
 
         // A bare signature is not a decodable image to the tail either, so this errors — but as
         // the tail's error, with the backend never consulted a second time.
-        let result: Result<(ImageBuf<Gray8>, JxlPartialReport)> = dec.decode_partial_image(&STREAM);
+        let result = dec.decode_partial::<Gray8>(&STREAM);
         assert!(result.is_err(), "a bare signature carries no image headers");
         assert_eq!(supports.load(Ordering::SeqCst), 1);
         assert_eq!(decodes.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn clones_share_one_registry() {
-        let mut dec = JxlDecoder::new();
+    fn a_clone_keeps_its_own_backend_list() {
+        let dec = JxlDecoder::new();
         let clone = dec.clone();
-        dec.push_backend(FixedBackend::returning(2));
-        assert!(!clone.backends.is_empty());
+        let dec = dec.with_backend(FixedBackend::returning(2));
+        // A backend added after the clone is not seen by it.
+        assert!(clone.backends.is_empty());
+        assert_eq!(dec.backends.len(), 1);
         // Equality still compares configuration only.
         assert_eq!(dec, clone);
         assert!(format!("{dec:?}").contains("backends: 1"));
@@ -1477,7 +1364,7 @@ mod box_tests {
     fn metadata_boxes_of_a_bare_codestream_is_empty_without_parsing_it() {
         // Truncated straight after the signature: only the framing is read.
         let boxes = JxlDecoder::new().metadata_boxes(b"\xFF\x0A").unwrap();
-        assert_eq!(boxes, JxlMetadata::default());
+        assert_eq!(boxes, RawMetadata::default());
     }
 
     #[test]

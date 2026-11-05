@@ -25,7 +25,7 @@ use gamut_jxl::{Container, JxlDecoder, JxlEncoder};
 /// box layer, which is what these tests pin).
 const EXIF: &[u8] = b"II\x2A\x00\x08\x00\x00\x00test-exif-payload";
 /// A minimal XMP packet.
-const XMP: &str = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">gamut-jxl test</x:xmpmeta>"#;
+const XMP: &[u8] = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/">gamut-jxl test</x:xmpmeta>"#;
 
 /// Encodes the deterministic 12x9 RGB8 pattern losslessly into the container with the given
 /// metadata configuration applied.
@@ -76,7 +76,7 @@ fn exif_box_carries_the_payload_behind_the_tiff_offset() {
 fn xmp_box_carries_the_packet_verbatim() {
     let jxl = encode_with(|enc| enc.with_xmp(XMP));
     let payload = find_box(&jxl, b"xml ").expect("stream must contain an xml box");
-    assert_eq!(payload, XMP.as_bytes(), "xml box payload mismatch");
+    assert_eq!(payload, XMP, "xml box payload mismatch");
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn empty_metadata_payload_is_rejected() {
     let mut out = Vec::new();
     let err = JxlEncoder::lossless()
         .with_container(Container::IsoBmff)
-        .with_xmp("")
+        .with_xmp(b"")
         .encode_image(image, &mut out)
         .expect_err("an empty metadata payload must be rejected");
     assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err:?}");
@@ -137,14 +137,14 @@ fn decoder_reads_the_exif_and_xmp_boxes_back() {
     let jxl = encode_with(|enc| enc.with_exif(EXIF).with_xmp(XMP));
     let meta = JxlDecoder::new().metadata(&jxl).expect("metadata");
     assert_eq!(meta.exif.as_deref(), Some(EXIF));
-    assert_eq!(meta.xmp.as_deref(), Some(XMP.as_bytes()));
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
     assert_eq!(meta.icc, None);
 
     // A container with no boxes, and a bare codestream, both report nothing.
     let empty = encode_with(|enc| enc);
     assert_eq!(
         JxlDecoder::new().metadata(&empty).expect("metadata"),
-        gamut_jxl::JxlMetadata::default()
+        gamut_jxl::RawMetadata::default()
     );
     let dims = Dimensions::new(12, 9).unwrap();
     let samples = gen_u8(12, 9, 3);
@@ -152,7 +152,7 @@ fn decoder_reads_the_exif_and_xmp_boxes_back() {
     let bare = JxlEncoder::lossless().encode_to_vec(image).unwrap();
     assert_eq!(
         JxlDecoder::new().metadata(&bare).expect("metadata"),
-        gamut_jxl::JxlMetadata::default()
+        gamut_jxl::RawMetadata::default()
     );
 }
 
@@ -161,12 +161,9 @@ fn metadata_reports_the_codestream_icc_profile() {
     // The ICC field is the codestream's embedded profile (the libjxl-synthesized sRGB one, as the
     // colour tests use), byte-for-byte, alongside the boxes.
     let srgb = common::icc_profile(&encode_with(|enc| enc)).expect("oracle synthesizes sRGB");
-    let jxl = encode_with(|enc| {
-        enc.with_color(gamut_jxl::ColorSpec::Icc(srgb.clone()))
-            .with_xmp(XMP)
-    });
+    let jxl = encode_with(|enc| enc.with_icc_profile(&srgb).with_xmp(XMP));
     let meta = JxlDecoder::new().metadata(&jxl).expect("metadata");
     assert_eq!(meta.icc.as_deref(), Some(srgb.as_slice()));
-    assert_eq!(meta.xmp.as_deref(), Some(XMP.as_bytes()));
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
     assert_eq!(meta.exif, None);
 }
