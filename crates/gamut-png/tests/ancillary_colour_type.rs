@@ -3,7 +3,7 @@
 //!
 //! Auto-reduce may write a different colour type from the input's — and since the palette and
 //! colour-key candidates are *raced* against the unreduced encoding, which one lands is decided by
-//! compressed size, not by anything the caller can predict when it calls `with_background_index`
+//! compressed size, not by anything the caller can predict when it calls `with_background`
 //! or `with_significant_bits`. A `bKGD`/`sBIT` payload shaped for the wrong colour type is a chunk
 //! libpng rejects (`pngrutil.c`, `png_handle_bKGD` / `png_handle_sBIT`: the length must match the
 //! colour type, an index must be inside the palette, every value must fit the bit depth) and

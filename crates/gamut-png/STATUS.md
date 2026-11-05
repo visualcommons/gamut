@@ -20,7 +20,7 @@ size is measured against libpng at zlib level 9 by `cargo bench -p gamut-png` an
 APNG's default image). Format-agnostic pixel conversion (grey↔RGB, alpha, 16↔8-bit) is
 [`gamut_core::convert`]'s (issue #268), not this crate's: the decoder resolves what only PNG knows —
 palette lookup, folding a tRNS key into a real alpha channel, §13.12 sub-byte scaling — and hands the
-layout change to the shared engine. A typed decode is lossless by default; `PngDecoder::convert_policy`
+layout change to the shared engine. A typed decode is lossless by default; `PngDecoder::with_convert_policy`
 opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce (#338), which demotes
 16→8 only when every sample is exactly `k·257` and drops alpha only when fully opaque.
 
