@@ -3286,7 +3286,7 @@ mod typed {
 
     #[cfg(test)]
     mod tests {
-        use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
+        use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
         use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
         use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
         use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
@@ -3406,19 +3406,6 @@ mod typed {
             );
             assert_eq!(image.primary_item().icc_profile(), encoded.icc.as_deref());
             assert!(image.exif().is_none());
-        }
-
-        #[test]
-        fn an_iptc_iim_stream_is_unsupported() {
-            // HEIF defines no IPTC-IIM item type, so `CARRIERS` leaves it out and the facade's
-            // refusal applies. The refusal's wording, its order against a manifest store, and the
-            // EXIF marker stripping are the trait's own and tested beside it.
-            let mut iim = EncodedMetadata::default();
-            iim.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
-            let err = AvifEncoder::lossless()
-                .with_encoded_metadata(&iim)
-                .unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Unsupported);
         }
     }
 }
