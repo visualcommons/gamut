@@ -263,7 +263,7 @@ carry no function bodies.
 | gamut-jpeg | libjpeg-turbo; jpegli (XYB mode) with Little-CMS applying the profile | differential + exact-byte | `JpegDecoder` ☑ |
 | gamut-tiff | libtiff | differential | `TiffDecoder` ☑ |
 | gamut-dng | Adobe DNG SDK; libtiff (container) | conformance + differential | `DngDecoder` ☑ |
-| gamut-isobmff | ISO/IEC 14496-12 + 23008-12; libavif/dav1d via gamut-avif | exact-byte + law | `read` ☑ |
+| gamut-isobmff | ISO/IEC 14496-12 + 23008-12; libavif/dav1d via gamut-avif | exact-byte + law | `IsoBmffImage::parse` ☑ |
 | gamut-riff | libwebp demux | differential + law | `RiffReader` ☑ |
 | gamut-webp | libwebp (both directions) | differential + size/effort contract | `WebpDecoder` ☑ |
 | gamut-avif | libavif; dav1d | differential + law | `decode` ☑ |
