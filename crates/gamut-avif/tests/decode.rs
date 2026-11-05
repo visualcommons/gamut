@@ -2304,6 +2304,128 @@ fn unspecified_matrix_falls_back_to_bt601() {
     assert_eq!(decode(2), decode(6));
 }
 
+// ---- colour: behaviour pinned before the shared HEIF layer (#1056) ---------------------------
+//
+// gamut-avif and gamut-heic each carry a copy of the planar-to-RGBA conversion and of the `colr`
+// selection, and the copies disagree. These pins record this crate's side of each disagreement as
+// it stands, so the shared layer that replaces both copies changes any of them on purpose: a pin
+// that has to flip is flipped in the change that reconciles it, never silently.
+
+/// Item 1's 8-bit RGBA samples on the default surface, decoded from a one-item file holding
+/// `item`.
+fn rgba8_of_item(item: Item) -> Result<Vec<u8>> {
+    let bytes = file(1, vec![item]);
+    let container = AvifContainer::parse(&bytes)?;
+    Ok(container
+        .decode_item_rgba8(1, &mut Mock::default())?
+        .into_samples())
+}
+
+/// Item 1's 16-bit RGBA samples on the default surface, decoded from a one-item file holding
+/// `item`.
+fn rgba16_of_item(item: Item) -> Result<Vec<u16>> {
+    let bytes = file(1, vec![item]);
+    let container = AvifContainer::parse(&bytes)?;
+    Ok(container
+        .decode_item_rgba16(1, &mut Mock::default())?
+        .into_samples())
+}
+
+/// An ICC `colr` (`rICC`) carrying `profile`.
+fn icc_colr(profile: &[u8]) -> Property {
+    Property {
+        essential: false,
+        kind: PropertyKind::Colour(gamut_isobmff::ColourInformation::UnrestrictedIcc(
+            profile.to_vec(),
+        )),
+    }
+}
+
+#[test]
+fn colr_matrix_2_presents_as_matrix_6_at_ten_bits() {
+    // Off the 8-bit libwebp path the unspecified matrix still resolves to BT.601 through the
+    // generic converter. gamut-heic refuses matrix 2 on both RGBA surfaces instead.
+    for full in [false, true] {
+        let of = |matrix| rgba16_of_item(coded_item(1, 1, 10, 200, 4, 4, vec![colr(matrix, full)]));
+        assert_eq!(of(2).unwrap(), of(6).unwrap(), "full={full}");
+    }
+}
+
+#[test]
+fn colr_matrix_5_presents_exactly_as_matrix_6_at_eight_bits() {
+    // BT.470 B,G (5) and BT.601 (6) share Kr/Kb, and both take the same 8-bit converter.
+    for full in [false, true] {
+        let of = |matrix| rgba8_of_item(coded_item(1, 1, 8, 70, 4, 4, vec![colr(matrix, full)]));
+        assert_eq!(of(5).unwrap(), of(6).unwrap(), "full={full}");
+    }
+}
+
+#[test]
+fn rgba_presentation_takes_the_first_colr_whatever_its_type() {
+    // This crate presents with the first `colr`, so an ICC box ahead of the nclx one refuses the
+    // RGBA surfaces, and an ICC box after it is ignored. gamut-heic prefers nclx in either order.
+    let nclx_only = rgba8_of_item(coded_item(1, 3, 8, 33, 3, 2, vec![colr(0, true)])).unwrap();
+    let nclx_first = rgba8_of_item(coded_item(
+        1,
+        3,
+        8,
+        33,
+        3,
+        2,
+        vec![colr(0, true), icc_colr(b"second")],
+    ))
+    .unwrap();
+    assert_eq!(nclx_first, nclx_only);
+    let icc_first = rgba8_of_item(coded_item(
+        1,
+        3,
+        8,
+        33,
+        3,
+        2,
+        vec![icc_colr(b"first"), colr(0, true)],
+    ));
+    assert!(matches!(icc_first, Err(error) if error.kind() == ErrorKind::Unsupported));
+}
+
+#[test]
+fn bt601_limited_420_presents_these_exact_samples() {
+    // A literal reference for the shared converter: the 4x4 4:2:0 gradient keyed by base 70 at
+    // 8-bit BT.601 limited range, on the default surface, which interpolates chroma (gamut-heic
+    // replicates it). Base 70 keeps every channel of every pixel off 0 and 255, so no sample is a
+    // clamp that hides the matrix.
+    let got = rgba8_of_item(coded_item(1, 1, 8, 70, 4, 4, vec![colr(6, false)])).unwrap();
+    assert_eq!(got, BT601_LIMITED_420_BASE70);
+}
+
+#[test]
+fn bt601_limited_444_presents_these_exact_samples() {
+    // A literal reference for the shared converter: the 3x2 4:4:4 gradient keyed by base 70 at
+    // 8-bit BT.601 limited range, again with no channel clamped.
+    let got = rgba8_of_item(coded_item(1, 3, 8, 70, 3, 2, vec![colr(6, false)])).unwrap();
+    assert_eq!(got, BT601_LIMITED_444_BASE70);
+}
+
+/// The RGBA samples `bt601_limited_420_presents_these_exact_samples` pins.
+///
+/// Only the four corner pixels, where the bilinear filter's clamped neighbours all equal the
+/// pixel's own chroma sample, match gamut-heic's nearest-neighbour pin of the same frame.
+#[rustfmt::skip]
+const BT601_LIMITED_420_BASE70: [u8; 64] = [
+    114, 44, 27, 255,   120, 45, 33, 255,   129, 45, 41, 255,   136, 47, 47, 255,
+    139, 60, 52, 255,   145, 62, 58, 255,   154, 61, 66, 255,   161, 63, 72, 255,
+    169, 72, 83, 255,   175, 74, 89, 255,   184, 74, 97, 255,   191, 75, 103, 255,
+    194, 88, 108, 255,  200, 90, 114, 255,  209, 90, 123, 255,  216, 91, 129, 255,
+];
+
+/// The RGBA samples `bt601_limited_444_presents_these_exact_samples` pins: the same bytes as
+/// gamut-heic's pin of the same frame, since 4:4:4 needs no upsampling.
+#[rustfmt::skip]
+const BT601_LIMITED_444_BASE70: [u8; 24] = [
+    114, 44, 27, 255,   129, 40, 40, 255,   143, 36, 54, 255,
+    155, 49, 69, 255,   169, 45, 82, 255,   184, 41, 96, 255,
+];
+
 // ---- the AV1 sequence header: typed per item, and the colour of a `colr`-less item (#651) -----
 
 /// BT.709 primaries, transfer and matrix at full range — a header that moves a presentation off
