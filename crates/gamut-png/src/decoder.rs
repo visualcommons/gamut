@@ -18,12 +18,12 @@
 //! exactly to 8 bits, 8-bit samples widen to 16 — and refuse lossy requests (dropping alpha or
 //! transparency, narrowing 16-bit samples) with an
 //! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error unless
-//! [`PngDecoder::convert_policy`] permits them.
+//! [`PngDecoder::with_convert_policy`] permits them.
 
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
 use gamut_core::{
-    Bilevel, DecodeImage, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf,
-    Indexed8, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Bilevel, DecodeImage, DecodeLimits, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
+    ImageBuf, Indexed8, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
 use crate::backend::{IdatInfo, Inflaters, ZlibInflater, run_inflaters};
@@ -35,16 +35,15 @@ use crate::ihdr::{self, Ihdr};
 use crate::palette::PngPalette;
 use crate::{adam7, inflate, pack};
 
-/// Default cap on the decoded sample buffer: 64 MiB, a 4096×4096 RGBA8 image.
+/// Default cap on the decoded sample buffer: the workspace's
+/// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`], 64 MiB, a 4096×4096 RGBA8 image.
 ///
 /// `pub(crate)` because [`crate::deconstruct`] reports against the same budget: a file this
 /// decoder decodes is one the report walk will inflate to count filters.
-pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
+pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = DecodeLimits::DEFAULT_MAX_IMAGE_BYTES;
 /// Default cumulative cap on metadata payloads — inflated iCCP/zTXt/iTXt plus the raw `caBX`
 /// manifest store: 16 MiB.
 const DEFAULT_MAX_METADATA_BYTES: usize = 16 << 20;
-/// The spec's own dimension bound (§11.2.1): width and height are 1 ..= 2³¹ − 1.
-const SPEC_MAX_DIMENSION: u32 = i32::MAX as u32;
 
 /// The one refusal message for typed decodes the layout cannot hold losslessly.
 fn lossy() -> Error {
@@ -56,15 +55,14 @@ fn lossy() -> Error {
 
 /// A reusable PNG decoder with hostile-input limits.
 ///
-/// The defaults accept anything the spec allows dimensionally but cap the decoded sample buffer
-/// at 64 MiB — the byte budget, not the dimension caps, is the real safety guard (it bounds both
-/// the inflated scanline stream and the sample buffer, so peak memory stays within roughly twice
-/// the budget plus the input). Tighten the dimension caps when the application knows its domain.
+/// The defaults ([`DecodeLimits::default`]) accept anything the spec allows dimensionally — IHDR
+/// itself bounds each side to 2³¹ − 1 (§11.2.1) — but cap the decoded sample buffer at 64 MiB.
+/// The byte budget, not the dimension caps, is the real safety guard (it bounds both the inflated
+/// scanline stream and the sample buffer, so peak memory stays within roughly twice the budget
+/// plus the input). Tighten the dimension caps when the application knows its domain.
 #[derive(Debug, Clone)]
 pub struct PngDecoder {
-    max_width: u32,
-    max_height: u32,
-    max_image_bytes: usize,
+    limits: DecodeLimits,
     max_metadata_bytes: usize,
     backends: Inflaters,
     policy: ConvertPolicy,
@@ -77,14 +75,12 @@ impl Default for PngDecoder {
 }
 
 impl PngDecoder {
-    /// Creates a decoder with the default limits (spec-maximum dimensions, 64 MiB of decoded
-    /// samples, 16 MiB of inflated metadata).
+    /// Creates a decoder with the default limits ([`DecodeLimits::default`]: spec-maximum
+    /// dimensions and 64 MiB of decoded samples; and 16 MiB of inflated metadata).
     #[must_use]
     pub fn new() -> Self {
         Self {
-            max_width: SPEC_MAX_DIMENSION,
-            max_height: SPEC_MAX_DIMENSION,
-            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            limits: DecodeLimits::new(),
             max_metadata_bytes: DEFAULT_MAX_METADATA_BYTES,
             backends: Inflaters::new(),
             policy: ConvertPolicy::lossless(),
@@ -100,7 +96,7 @@ impl PngDecoder {
     ///
     /// # The output cap stays with the host
     ///
-    /// The decoder's own budget (see [`with_max_image_bytes`](Self::with_max_image_bytes)) is
+    /// The decoder's own budget (the image-byte cap of [`with_limits`](Self::with_limits)) is
     /// passed to the backend as `max_out` *and* re-checked against the bytes it returns. A backend
     /// that overshoots is rejected with an
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error, never truncated, so
@@ -126,19 +122,13 @@ impl PngDecoder {
         self
     }
 
-    /// Caps the accepted image dimensions; a wider or taller image is refused before any
-    /// allocation.
+    /// Sets the image limits: the per-side dimension caps and the decoded-sample byte budget
+    /// ([`DecodeLimits::max_image_bytes`], default 64 MiB). An image past any of them is refused
+    /// with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before
+    /// anything is allocated for its pixels.
     #[must_use]
-    pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
-        self.max_width = width;
-        self.max_height = height;
-        self
-    }
-
-    /// Caps the decoded sample buffer in bytes (default 64 MiB).
-    #[must_use]
-    pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
-        self.max_image_bytes = bytes;
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -159,7 +149,7 @@ impl PngDecoder {
     /// permission. Pass [`ConvertPolicy::permissive`] to get pixels in a fixed layout regardless
     /// of what the file carries.
     #[must_use]
-    pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
+    pub fn with_convert_policy(mut self, policy: ConvertPolicy) -> Self {
         self.policy = policy;
         self
     }
@@ -377,7 +367,7 @@ impl PngDecoder {
     /// Enforces the dimension and byte-budget limits (all math checked) and returns the exact
     /// byte length of the filtered scanline stream the IDAT data must inflate to.
     fn check_limits(&self, header: &Ihdr) -> Result<usize> {
-        if header.width > self.max_width || header.height > self.max_height {
+        if header.width > self.limits.max_width() || header.height > self.limits.max_height() {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "PNG: image exceeds the dimension limit",
@@ -394,7 +384,7 @@ impl PngDecoder {
         .ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: image dimensions overflow")
         })?;
-        if native_bytes > self.max_image_bytes {
+        if native_bytes > self.limits.max_image_bytes() {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "PNG: image exceeds the size limit",
@@ -1259,7 +1249,7 @@ mod tests {
     use super::*;
     use crate::PngEncoder;
 
-    /// The policy set by `convert_policy` must reach the typed decode: a 16-bit file cannot fill
+    /// The policy set by `with_convert_policy` must reach the typed decode: a 16-bit file cannot fill
     /// an 8-bit layout under the default, and can under a permissive one. A decoder that dropped
     /// the setter on the floor would refuse both times.
     #[test]
@@ -1279,7 +1269,7 @@ mod tests {
             gamut_core::ErrorKind::Unsupported
         );
 
-        let lax = PngDecoder::new().convert_policy(ConvertPolicy::permissive());
+        let lax = PngDecoder::new().with_convert_policy(ConvertPolicy::permissive());
         let narrowed: ImageBuf<Gray8> = lax.decode_image(&png).expect("permissive decode");
         assert_eq!(narrowed.as_samples(), &[0, 255]);
     }
@@ -1758,23 +1748,32 @@ mod tests {
         assert_eq!(carried.alpha(1), Some(255));
     }
 
+    /// Default limits with the per-side caps set to `width` × `height`.
+    fn limits(width: u32, height: u32) -> DecodeLimits {
+        DecodeLimits::new()
+            .with_max_width(width)
+            .with_max_height(height)
+    }
+
     #[test]
     fn dimension_limit_is_exact() {
         let (png, _) = rgb_png(17, 13);
-        let decoder = PngDecoder::new().with_max_dimensions(17, 13);
+        let decoder = PngDecoder::new().with_limits(limits(17, 13));
         assert!(DecodeImage::<Rgb8>::decode_image(&decoder, &png).is_ok());
-        let narrow = PngDecoder::new().with_max_dimensions(16, 13);
+        let narrow = PngDecoder::new().with_limits(limits(16, 13));
         assert!(DecodeImage::<Rgb8>::decode_image(&narrow, &png).is_err());
-        let short = PngDecoder::new().with_max_dimensions(17, 12);
+        let short = PngDecoder::new().with_limits(limits(17, 12));
         assert!(DecodeImage::<Rgb8>::decode_image(&short, &png).is_err());
     }
 
     #[test]
     fn byte_budget_is_exact() {
         let (png, _) = rgb_png(8, 8);
-        let exact = PngDecoder::new().with_max_image_bytes(8 * 8 * 3);
+        let exact =
+            PngDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 8 * 3));
         assert!(DecodeImage::<Rgb8>::decode_image(&exact, &png).is_ok());
-        let tight = PngDecoder::new().with_max_image_bytes(8 * 8 * 3 - 1);
+        let tight =
+            PngDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 8 * 3 - 1));
         assert!(matches!(
             DecodeImage::<Rgb8>::decode_image(&tight, &png),
             Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported

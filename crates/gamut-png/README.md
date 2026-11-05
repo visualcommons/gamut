@@ -32,7 +32,7 @@ Graphics, W3C 3rd edition) images:
 
 ```rust
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
-use gamut_png::{PngDecoder, PngEncoder, Effort};
+use gamut_png::{DecodeLimits, Effort, PngDecoder, PngEncoder};
 
 # let (w, h) = (4, 3);
 # let rgb: Vec<u8> = (0..w * h * 3).map(|i| (i * 7) as u8).collect();
@@ -51,7 +51,8 @@ PngEncoder::new()
 let decoded: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&png)?;
 
 // Rich decode: native layout + palette/tRNS + raw metadata payloads.
-let rich = PngDecoder::new().with_max_dimensions(8192, 8192).decode(&png)?;
+let limits = DecodeLimits::new().with_max_width(8192).with_max_height(8192);
+let rich = PngDecoder::new().with_limits(limits).decode(&png)?;
 # assert_eq!(decoded.as_samples(), rgb.as_slice());
 # let _ = rich;
 # Ok::<(), gamut_core::Error>(())

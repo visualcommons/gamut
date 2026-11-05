@@ -122,6 +122,10 @@ pub use deconstruct::{
 };
 pub use encoder::{Effort, MetadataNotice, PngEncodeReport, PngEncoder};
 pub use filter::{FilterStrategy, FilterType};
+/// The workspace's shared decoder vocabulary, accepted by [`PngDecoder::with_limits`] and
+/// [`PngDecoder::with_convert_policy`], re-exported so a caller needs no direct `gamut-core`
+/// dependency to spell them.
+pub use gamut_core::{DecodeLimits, convert::ConvertPolicy};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
 pub use gamut_deflate::Level;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell

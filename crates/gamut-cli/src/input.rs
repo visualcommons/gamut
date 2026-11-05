@@ -300,7 +300,7 @@ pub(crate) fn decode_native(path: &Path, bytes: &[u8]) -> Result<NativeImage, Cl
     }
 
     if is_png(bytes) {
-        let decoder = PngDecoder::new().convert_policy(lossy);
+        let decoder = PngDecoder::new().with_convert_policy(lossy);
         let decoded = decoder.decode(bytes)?;
         let color = decoded.header.color_type;
         let alpha = matches!(
@@ -430,7 +430,7 @@ pub(crate) fn decode_bytes(
 
     if is_png(bytes) {
         return Ok(decode_with!(
-            PngDecoder::new().convert_policy(lossy),
+            PngDecoder::new().with_convert_policy(lossy),
             bytes,
             want_alpha
         ));

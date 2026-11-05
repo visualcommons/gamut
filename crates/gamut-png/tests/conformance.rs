@@ -8,7 +8,7 @@
 mod common;
 
 use common::{channels, gray8_scale, sample_bytes, tiny_exif, tiny_icc_profile};
-use gamut_core::{DecodeImage, GrayAlpha8, ImageBuf, Rgba8, Rgba16};
+use gamut_core::{DecodeImage, DecodeLimits, GrayAlpha8, ImageBuf, Rgba8, Rgba16};
 use gamut_png::{PngDecoder, PngImage};
 use libpng_oracle::{EncodeOpts, TextChunk, TextKind};
 
@@ -573,14 +573,14 @@ fn decode_limits_hold_for_oracle_fixtures() {
     let png = fixture(24, 15, libpng_oracle::COLOR_RGB, 8, true, 8);
     assert!(
         PngDecoder::new()
-            .with_max_dimensions(24, 15)
+            .with_limits(DecodeLimits::new().with_max_width(24).with_max_height(15))
             .decode(&png)
             .is_ok(),
         "at the limit"
     );
     assert!(
         PngDecoder::new()
-            .with_max_dimensions(23, 15)
+            .with_limits(DecodeLimits::new().with_max_width(23).with_max_height(15))
             .decode(&png)
             .is_err(),
         "one past the width limit"
