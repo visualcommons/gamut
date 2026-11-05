@@ -6,8 +6,7 @@
 
 use divan::Bencher;
 use divan::counter::ItemsCount;
-use gamut_tonemap::ToneCurve;
-use gamut_tonemap::operators::{Aces, Clamp, Drago, Exposure, Hable, Reinhard, ReinhardExtended};
+use gamut_tonemap::{Aces, Clamp, Drago, Exposure, Hable, Reinhard, ReinhardExtended, ToneCurve};
 
 fn main() {
     divan::main();

@@ -4,15 +4,15 @@
 //! operators ([`Linear`], [`Reinhard`], [`Aces`]) are zero-sized; parameterized operators
 //! ([`Clamp`], [`Exposure`], [`ReinhardExtended`], [`Hable`], [`Drago`]) validate their parameters
 //! at construction so an out-of-range value can never reach
-//! [`map`](crate::curve::ToneCurve::map). Each operator's exact formula and primary source are
+//! [`map`](crate::ToneCurve::map). Each operator's exact formula and primary source are
 //! recorded in `references/tonemap/README.md`.
 
 use gamut_core::{Error, Result};
 
-use crate::constants::{
+use crate::{
     DEFAULT_DRAGO_BIAS, DEFAULT_HABLE_WHITE, DEFAULT_REINHARD_WHITE, SDR_WHITE_NORMALIZED,
+    ToneCurve,
 };
-use crate::curve::ToneCurve;
 
 /// Identity passthrough: `map(x) == x`.
 ///

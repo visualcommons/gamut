@@ -20,9 +20,10 @@ constructible operator across the full f32 input range.
 | `ToneCurve` | `map(&self, f32) -> f32` + provided `map_slice(&mut [f32])`; dyn-compatible | open trait; blanket impl covers every `Fn(f32) -> f32` |
 | `Linear`, `Reinhard`, `Aces` | parameterless operators (zero-sized) | literal-constructible by design — never `#[non_exhaustive]` |
 | `Clamp`, `Exposure`, `ReinhardExtended`, `Hable`, `Drago` | validated constructors returning `gamut_core::Result`; by-value accessors | private fields — adding fields is non-breaking |
-| `constants::*` | `SDR_WHITE_NORMALIZED`, `DEFAULT_REINHARD_WHITE`, `DEFAULT_HABLE_WHITE`, `DEFAULT_DRAGO_BIAS` | documented literals backing the `Default` impls |
+| `SDR_WHITE_NORMALIZED`, `DEFAULT_REINHARD_WHITE`, `DEFAULT_HABLE_WHITE`, `DEFAULT_DRAGO_BIAS` | `f32` constants | documented literals backing the `Default` impls |
 
-All operators are `Debug + Clone + Copy + PartialEq` and re-exported at the crate root. Adding
+Every item is public only at the crate root (the modules are private), so each has exactly one
+path. All operators are `Debug + Clone + Copy + PartialEq`. Adding
 operators, trait impls, or provided trait methods stays backward-compatible; removing or reshaping
 any of the above would not.
 
@@ -63,9 +64,9 @@ any of the above would not.
 - **`Aces` names the Narkowicz fit.** The official colour-coupled ACES RRT+ODT — and the Hill
   fit — need 3×3 matrices and could never be a scalar `ToneCurve`, so there is no ambiguity to
   reserve the name against.
-- **`Default` impls are the API; `constants` holds the documented literals** (mirroring the
-  `gamut_core::luminance` precedent). No `Default` for `Exposure` or `Drago` — there is no
-  canonical exposure, and a scene maximum cannot be guessed.
+- **`Default` impls are the API; the root `DEFAULT_*`/`SDR_WHITE_NORMALIZED` constants hold the
+  documented literals** (mirroring the `gamut_core::luminance` precedent). No `Default` for
+  `Exposure` or `Drago` — there is no canonical exposure, and a scene maximum cannot be guessed.
 - **Composition stays a closure.** `|x| b.map(a.map(x))` composes curves today; a `then`
   combinator would be additive if ergonomics ever demand it.
 
