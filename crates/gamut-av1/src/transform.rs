@@ -105,6 +105,11 @@ enum Tx1d {
 /// `<column transform>_<row transform>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
+#[expect(
+    dead_code,
+    reason = "the FLIPADST and 1-D-identity types the encoder never chooses are spec vocabulary the \
+              sample decoder (#259) reconstructs"
+)]
 pub enum TxType {
     DctDct,
     AdstDct,
@@ -149,6 +154,10 @@ impl TxType {
 
     /// Whether reconstruction flips this block vertically (AV1 §7.12.3 `flipUD`).
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the sample decoder (#259)")
+    )]
     pub fn flip_ud(self) -> bool {
         use TxType::*;
         matches!(
@@ -159,6 +168,10 @@ impl TxType {
 
     /// Whether reconstruction flips this block horizontally (AV1 §7.12.3 `flipLR`).
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the sample decoder (#259)")
+    )]
     pub fn flip_lr(self) -> bool {
         use TxType::*;
         matches!(

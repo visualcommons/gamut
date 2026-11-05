@@ -8,7 +8,7 @@
 //! AVIF v1.2.0 §2.1 (`references/avif`). All `reserved` fields are **ignored** on read; they are
 //! masked away and never validated.
 
-use gamut_av1::SequenceHeader;
+use gamut_av1::{Av1StillConfig, SequenceHeader};
 use gamut_color::ChromaSubsampling;
 use gamut_core::{Error, Result};
 
@@ -106,6 +106,24 @@ pub struct Av1Config {
 }
 
 impl Av1Config {
+    /// The record mirroring an encoded still's sequence header (AV1-ISOBMFF v1.3.0 §2.3.4): every
+    /// field `c` declares, no `initial_presentation_delay`, and empty `configOBUs`.
+    pub(crate) fn for_still(c: &Av1StillConfig) -> Self {
+        Self {
+            seq_profile: c.seq_profile,
+            seq_level_idx_0: c.seq_level_idx_0,
+            seq_tier_0: c.seq_tier_0,
+            high_bitdepth: c.high_bitdepth,
+            twelve_bit: c.twelve_bit,
+            monochrome: c.monochrome,
+            chroma_subsampling_x: c.chroma_subsampling_x,
+            chroma_subsampling_y: c.chroma_subsampling_y,
+            chroma_sample_position: c.chroma_sample_position,
+            initial_presentation_delay_minus_one: None,
+            config_obus: Vec::new(),
+        }
+    }
+
     /// Parses an `av1C` AV1CodecConfigurationRecord from its raw body bytes (the `av1C` item
     /// property, AV1-ISOBMFF v1.3.0 §2.3.3).
     ///
@@ -417,8 +435,6 @@ pub(crate) fn first_sequence_header(stream: &[u8]) -> Result<Option<&[u8]>> {
 
 #[cfg(test)]
 mod tests {
-    use gamut_av1::Av1StillConfig;
-
     use super::*;
 
     #[test]
@@ -446,7 +462,7 @@ mod tests {
     fn parse_round_trips_the_encoders_record() {
         // Distinct, non-zero values in every field the writer packs (a 4:2:2 12-bit professional
         // profile), so a swapped shift or mask on either side breaks the round trip.
-        let c = Av1StillConfig {
+        let c = Av1Config {
             seq_profile: 2,
             seq_level_idx_0: 0x13,
             seq_tier_0: 1,
@@ -456,11 +472,8 @@ mod tests {
             chroma_subsampling_x: 1,
             chroma_subsampling_y: 0,
             chroma_sample_position: 0,
-            // colr fields are irrelevant to av1C but needed to build the config.
-            color_primaries: 1,
-            transfer_characteristics: 13,
-            matrix_coefficients: 0,
-            full_range: true,
+            initial_presentation_delay_minus_one: None,
+            config_obus: Vec::new(),
         };
         let parsed = Av1Config::parse(&av1c_record(&c)).unwrap();
         assert_eq!(parsed.seq_profile, c.seq_profile);

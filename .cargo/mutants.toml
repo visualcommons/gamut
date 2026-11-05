@@ -241,7 +241,7 @@ exclude_re = [
     '^crates/gamut-av1/src/tile\.rs:377:9: replace - with / in last_ref$',
     # recenter: `if v > 2*ref` — at `v == 2*ref` the else branch yields `2*(v-ref) == 2*ref`, exactly the
     # value the `>=` mutant would return from the `v` branch, so the boundary is a continuity point.
-    '^crates/gamut-av1/src/tile\.rs:4658:10: replace > with >= in recenter$',
+    '^crates/gamut-av1/src/tile\.rs:4665:10: replace > with >= in recenter$',
     # gamut-bitstream `ec_partition`: its only `-` is the constant shift `7 - EC_PROB_SHIFT` (= 1,
     # since EC_PROB_SHIFT = 6). The `- → /` mutation yields `7 / EC_PROB_SHIFT` = 1 — the identical
     # value — so it is unkillable. (`- → +`/`*` give 13/42 and are caught by the round-trip tests.)

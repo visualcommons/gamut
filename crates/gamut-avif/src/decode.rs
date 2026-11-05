@@ -150,10 +150,9 @@ pub(crate) const DERIVED_ITEM_LIMIT: &str =
 /// bounds a grid at 256 × 256. The derived default, 1024, is far above the two `grid`s libavif
 /// evaluates; what it stops accepting are files only this crate's wider derivation support reaches,
 /// such as a `grid` of more than 1023 `iden` tiles, which libavif refuses outright. This is a
-/// different type
-/// from `gamut_av1::DecodeLimits`: that one caps a single AV1 frame (and its tile count) inside
-/// the codec, this one caps the container's derived images, which may be larger than any one
-/// frame.
+/// different type from the `gamut_core::DecodeLimits` `gamut_av1::Av1Decoder` takes: that one caps
+/// a single AV1 frame (with the decoder's tile cap) inside the codec, this one caps the
+/// container's derived images, which may be larger than any one frame.
 ///
 /// Construct with [`DecodeLimits::new`] or start from [`DecodeLimits::default`] and assign a
 /// field; the struct is `#[non_exhaustive]` so a further cap can be added without a breaking
@@ -1278,7 +1277,7 @@ impl AvifImage {
         let (matrix, full_range) = match item.colour() {
             None => {
                 let colour = self.sample_sequence_header(item.id())?.color;
-                (u16::from(colour.matrix_coefficients), colour.full_range)
+                (colour.cicp.matrix_coefficients, colour.cicp.full_range)
             }
             Some(ColourInformation::Nclx(nclx)) => (nclx.matrix_coefficients, nclx.full_range),
             Some(_) => {

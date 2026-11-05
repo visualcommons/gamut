@@ -9,7 +9,7 @@
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1Colour, EncodeOptions, Tiling};
+use gamut_av1::{Av1Color, Av1EncodeConfig, Tiling};
 use gamut_avif::{Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
 use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr};
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Result, Rgb8, Rgba8, Rgba16};
@@ -117,17 +117,11 @@ fn the_fixture_codes_more_than_one_tile() {
     let image = ImageRef::<Rgb8>::new(&px, dims()).unwrap();
     let planes = Planar8::from_rgb8_identity_view(image);
     let at = |tiling| {
-        gamut_av1::encode_still_intra_with_options(
-            &planes,
-            Q50,
-            Av1Colour::default(),
-            EncodeOptions::default().with_tiling(tiling),
-        )
-        .unwrap()
-        .0
-        .obus
+        gamut_av1::encode_still(&planes, &Av1EncodeConfig::new(Q50).with_tiling(tiling))
+            .unwrap()
+            .obus
     };
-    assert_ne!(at(Tiling::default()), at(Tiling::SINGLE));
+    assert_ne!(at(Tiling::DEFAULT), at(Tiling::SINGLE));
 }
 
 #[test]
@@ -170,20 +164,21 @@ fn libavif_reconstructs_a_multithreaded_rgba_encode_to_the_av1_reconstruction() 
     let bt709 =
         RgbToYcbcr::new(MatrixCoefficients::Bt709, ColorRange::Full, BitDepth::Eight).unwrap();
     let colour_planes = Planar8::from_rgba8_matrix_view(image, bt709);
-    let colour = Av1Colour {
-        matrix: MatrixCoefficients::Bt709,
-        ..Av1Colour::default()
+    let colour = Av1Color::DEFAULT.with_matrix(MatrixCoefficients::Bt709);
+    let config = |colour| {
+        Av1EncodeConfig::new(Q50)
+            .with_color(colour)
+            .with_effort(AvifEncoder::lossy(50).effort())
     };
-    let speed = AvifEncoder::lossy(50).speed();
-    let (_, colour_recon) =
-        gamut_av1::encode_still_intra_with_speed(&colour_planes, Q50, colour, speed).unwrap();
-    let (_, alpha_recon) = gamut_av1::encode_still_intra_with_speed(
+    let colour_recon = gamut_av1::encode_still_with_recon(&colour_planes, &config(colour))
+        .unwrap()
+        .recon;
+    let alpha_recon = gamut_av1::encode_still_with_recon(
         &Planar8::from_rgba8_alpha_view(image),
-        Q50,
-        Av1Colour::monochrome(),
-        speed,
+        &config(Av1Color::monochrome()),
     )
-    .unwrap();
+    .unwrap()
+    .recon;
 
     let decoded = libavif_oracle::decode_avif(&avif).expect("libavif decodes the file");
     for (p, (got, want)) in decoded.planes.iter().zip(&colour_recon.planes).enumerate() {

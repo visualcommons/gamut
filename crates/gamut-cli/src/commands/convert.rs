@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::{Args, ValueEnum};
-use gamut::avif::{AvifEncodeReport, AvifEncoder, Speed as AvifSpeed};
+use gamut::avif::{AvifEncodeReport, AvifEncoder, Effort as AvifEffort};
 use gamut::capability::{Direction, Format as MetadataFormat, supports};
 use gamut::color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
 use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
@@ -64,7 +64,7 @@ pub(crate) struct ConvertArgs {
     /// formats.
     #[arg(long)]
     avif_lossy: bool,
-    /// AVIF encoder speed, 0 (the full search) to 3 (the fastest): `gamut-av1`'s presets
+    /// AVIF encoder speed, 0 (the full search) to 3 (the fastest): `gamut-av1`'s effort presets
     /// thorough, balanced (1, the default), fast and fastest. A time control, not a size one — a
     /// faster preset can come out smaller or larger. Only lossy AVIF is searched; lossless codes
     /// the same bytes at every speed. Ignored for other output formats.
@@ -1016,16 +1016,19 @@ fn avif_encoder(args: &ConvertArgs) -> AvifEncoder {
     } else {
         AvifEncoder::lossless()
     };
-    // The clap `0..=3` range is `Speed::ALL`'s index range, slowest first —
-    // `the_avif_speed_flag_offers_exactly_the_codec_presets` pins that they agree — so the
+    // `--avif-speed` counts down the search, slowest first, while `Effort::ALL` runs fastest first,
+    // so the clap `0..=3` range is the index range of that list reversed —
+    // `the_avif_speed_flag_offers_exactly_the_codec_presets` pins that they agree — and the
     // fallback is unreachable; it exists because this is a CLI and a panic is not an error report.
-    let speed = AvifSpeed::ALL
-        .get(usize::from(args.avif_speed))
+    let effort = AvifEffort::ALL
+        .iter()
+        .rev()
+        .nth(usize::from(args.avif_speed))
         .copied()
         .unwrap_or_default();
     // `0` is "every core", which the encoder spells `None`, exactly what `NonZeroUsize::new` gives.
     encoder = encoder
-        .with_speed(speed)
+        .with_effort(effort)
         .with_threads(NonZeroUsize::new(args.avif_threads))
         .with_clean_alpha(args.avif_clean_alpha);
     if let Some(quality) = args.avif_alpha_quality {
@@ -1352,7 +1355,7 @@ mod tests {
     use gamut::avif::AvifMode;
 
     use super::{
-        AvifEncoder, AvifSpeed, BitDepth, ChromaSubsampling, ConvertArgs, Dimensions,
+        AvifEffort, AvifEncoder, BitDepth, ChromaSubsampling, ConvertArgs, Dimensions,
         InputMetadata, Job, JpegChroma, MatrixCoefficients, OutputFormat, Plan, PngCodecPreset,
         Samples, avif_encoder, carry, plan, png_preset,
     };
@@ -1554,12 +1557,12 @@ mod tests {
         let encoder = avif_with(&[]);
         let default = AvifEncoder::lossless();
         assert_eq!(encoder.config(), default.config());
-        assert_eq!(encoder.speed(), default.speed());
+        assert_eq!(encoder.effort(), default.effort());
         assert_eq!(encoder.threads(), default.threads());
         let lossy = avif_with(&["--avif-lossy", "--quality", "40"]);
         assert_eq!(lossy.config(), AvifEncoder::lossy(40).config());
-        // Speed only moves lossy output, so that is where the flag's default must agree.
-        assert_eq!(lossy.speed(), AvifEncoder::lossy(40).speed());
+        // Effort only moves lossy output, so that is where the flag's default must agree.
+        assert_eq!(lossy.effort(), AvifEncoder::lossy(40).effort());
     }
 
     #[test]
@@ -1574,13 +1577,23 @@ mod tests {
 
     #[test]
     fn the_avif_speed_flag_offers_exactly_the_codec_presets() {
-        // `0..=3` is written into the flag's parser and `Speed::ALL` is the codec's own list, so
-        // a preset added to `gamut-av1` fails here instead of being unreachable from the CLI.
-        for (level, preset) in AvifSpeed::ALL.iter().enumerate() {
-            let level = level.to_string();
-            assert_eq!(avif_with(&["--avif-speed", &level]).speed(), *preset);
+        // `0..=3` is written into the flag's parser and `Effort::ALL` is the codec's own list, so
+        // a preset added to `gamut-av1` fails here instead of being unreachable from the CLI. The
+        // flag counts slowest first and the list runs fastest first, so the list is read reversed.
+        for (speed, preset) in AvifEffort::ALL.iter().rev().enumerate() {
+            let speed = speed.to_string();
+            assert_eq!(avif_with(&["--avif-speed", &speed]).effort(), *preset);
         }
-        let past_the_end = AvifSpeed::ALL.len().to_string();
+        // The flag's ends are the codec's: 0 is the full search and 3 the fastest preset.
+        assert_eq!(
+            avif_with(&["--avif-speed", "0"]).effort(),
+            AvifEffort::Thorough
+        );
+        assert_eq!(
+            avif_with(&["--avif-speed", "3"]).effort(),
+            AvifEffort::Fastest
+        );
+        let past_the_end = AvifEffort::ALL.len().to_string();
         assert!(parse_avif(&["--avif-speed", &past_the_end]).is_err());
     }
 
