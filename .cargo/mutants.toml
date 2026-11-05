@@ -344,7 +344,8 @@ exclude_re = [
     # and the segment `!=` terms ARE killed by the new boundary/round-trip tests.)
     '^crates/gamut-webp/src/vp8/header\.rs:247:28: replace < with <= in write_delta$',
     '^crates/gamut-webp/src/vp8/header\.rs:321:28: replace < with <= in write_segment_feature$',
-    # gamut-webp VP8 frame — behaviourally-equivalent.
+    # gamut-webp VP8 frame (`vp8/encoder.rs`, `vp8/decoder.rs`, `vp8/reconstruct.rs`; split out of
+    # `vp8/frame.rs` by #1093) — behaviourally-equivalent.
     # (frame_header's LoopFilterParams literal is fully explicit — no `..Default::default()` — so a
     # `sharpness: 0` field deletion is a missing-field compile error: an *unviable* mutant rather than
     # an un-excludable equivalent survivor. cargo-mutants cannot match field deletions via exclude_re,
@@ -360,20 +361,22 @@ exclude_re = [
     # specific choice would test an encoder heuristic (rate-distortion search is issue #32), not a spec
     # requirement. Each function below feeds only an encoder decision:
     #   mb_luma_mean — per-macroblock luma average, used only to choose a quantizer segment;
-    '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in mb_luma_mean$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:133:5: replace mb_luma_mean -> u32 with .*$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:\d+:\d+: .* in mb_luma_mean$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:109:5: replace mb_luma_mean -> u32 with .*$',
     #   block_sad — the prediction-cost proxy for mode selection;
-    '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in block_sad$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:\d+:\d+: .* in block_sad$',
     #   select_luma_mode / select_chroma_mode — lowest-SAD whole-block mode pickers (any mode is legal);
-    '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in select_luma_mode$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:701:5: replace select_luma_mode -> usize with .*$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in select_chroma_mode$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:727:5: replace select_chroma_mode -> usize with .*$',
+    #   (the two whole-body anchors had drifted onto signature lines, where cargo-mutants never
+    #   reports them; #1093 put them back on the body's first line, where it does)
+    '^crates/gamut-webp/src/vp8/encoder\.rs:\d+:\d+: .* in select_luma_mode$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:312:5: replace select_luma_mode -> usize with .*$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:\d+:\d+: .* in select_chroma_mode$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:338:5: replace select_chroma_mode -> usize with .*$',
     #   encode_bpred_luma — the submode tie-break (`sad < best`) and the running prediction-cost
     #   accumulator (`total_sad +=`, used only for the B_PRED-vs-whole-block decision); both pick
     #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
-    '^crates/gamut-webp/src/vp8/frame\.rs:922:20: replace < with <= in encode_bpred_luma$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:928:19: replace \+= with \*= in encode_bpred_luma$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:461:20: replace < with <= in encode_bpred_luma$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:467:19: replace \+= with \*= in encode_bpred_luma$',
     #   (Line anchors on `SEGMENT_QUANT_DELTAS`' two signs and on `encode_frame_filtered`'s segment
     #   assignment, segment-map index and B_PRED threshold had drifted off their lines and matched
     #   nothing. #1054 re-surveyed those operators where they now stand — the deltas, the `/ 64`
