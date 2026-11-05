@@ -439,8 +439,8 @@ fn still_config(
         ));
     }
     // Each factor is 1 or 2, so `factor > 1` is its AV1 `subsampling_*` flag.
-    let (fx, fy) = subsampling.factors();
-    let (sub_x, sub_y) = (u8::from(fx > 1), u8::from(fy > 1));
+    let f = subsampling.factors();
+    let (sub_x, sub_y) = (u8::from(f.width() > 1), u8::from(f.height() > 1));
     let config = Av1StillConfig {
         seq_profile: seq_profile_for(subsampling, bit_depth)?,
         seq_level_idx_0: headers::pick_level(width, height)?,

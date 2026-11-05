@@ -106,7 +106,7 @@ fn list() {
         ChromaSubsampling::Cs440,
         ChromaSubsampling::Cs400,
     ] {
-        let (x, y) = cs.factors();
-        println!("  {cs:?}: ({x}, {y})");
+        let f = cs.factors();
+        println!("  {cs:?}: ({}, {})", f.width(), f.height());
     }
 }

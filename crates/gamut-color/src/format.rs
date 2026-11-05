@@ -8,6 +8,10 @@
 //! `Cs400` (monochrome) is the grey and alpha planes of both [`Planar8`](crate::Planar8) and
 //! [`Planar16`](crate::Planar16).
 
+use core::num::NonZeroU32;
+
+use gamut_core::Dimensions;
+
 /// Bits per sample of a coded plane.
 ///
 /// `#[non_exhaustive]`: models the AV1 profile depths plus the 16-bit depth of the wider
@@ -104,23 +108,32 @@ impl ChromaSubsampling {
     /// Use [`chroma_dimensions`](Self::chroma_dimensions) for plane sizes, which handles that
     /// case.
     ///
+    /// Typed as [`Dimensions`] (width = horizontal factor, height = vertical factor) because a
+    /// factor is never zero, which that type carries.
+    ///
     /// # Examples
     ///
     /// ```
     /// use gamut_color::ChromaSubsampling;
     ///
-    /// let (fx, fy) = ChromaSubsampling::Cs422.factors();
-    /// assert_eq!((fx, fy), (2, 1));
+    /// let f = ChromaSubsampling::Cs422.factors();
+    /// assert_eq!((f.width(), f.height()), (2, 1));
     /// // The AV1 header flags are the factors' base-2 logarithms.
-    /// assert_eq!((fx.trailing_zeros(), fy.trailing_zeros()), (1, 0));
+    /// assert_eq!((f.width().trailing_zeros(), f.height().trailing_zeros()), (1, 0));
     /// ```
     #[must_use]
-    pub fn factors(self) -> (u32, u32) {
+    pub const fn factors(self) -> Dimensions {
+        /// Factor 1: the axis is not decimated.
+        const ONE: NonZeroU32 = NonZeroU32::MIN;
+        /// Factor 2: the axis is halved.
+        const TWO: NonZeroU32 = NonZeroU32::MIN.saturating_add(1);
         match self {
-            ChromaSubsampling::Cs444 => (1, 1),
-            ChromaSubsampling::Cs422 => (2, 1),
-            ChromaSubsampling::Cs420 | ChromaSubsampling::Cs400 => (2, 2),
-            ChromaSubsampling::Cs440 => (1, 2),
+            ChromaSubsampling::Cs444 => Dimensions::from_nonzero(ONE, ONE),
+            ChromaSubsampling::Cs422 => Dimensions::from_nonzero(TWO, ONE),
+            ChromaSubsampling::Cs420 | ChromaSubsampling::Cs400 => {
+                Dimensions::from_nonzero(TWO, TWO)
+            }
+            ChromaSubsampling::Cs440 => Dimensions::from_nonzero(ONE, TWO),
         }
     }
 
@@ -242,12 +255,16 @@ mod tests {
 
     #[test]
     fn factors_per_layout() {
-        assert_eq!(ChromaSubsampling::Cs444.factors(), (1, 1));
-        assert_eq!(ChromaSubsampling::Cs420.factors(), (2, 2));
-        assert_eq!(ChromaSubsampling::Cs422.factors(), (2, 1));
-        assert_eq!(ChromaSubsampling::Cs440.factors(), (1, 2));
+        let factors = |cs: ChromaSubsampling| {
+            let f = cs.factors();
+            (f.width(), f.height())
+        };
+        assert_eq!(factors(ChromaSubsampling::Cs444), (1, 1));
+        assert_eq!(factors(ChromaSubsampling::Cs420), (2, 2));
+        assert_eq!(factors(ChromaSubsampling::Cs422), (2, 1));
+        assert_eq!(factors(ChromaSubsampling::Cs440), (1, 2));
         // Monochrome carries AV1's inferred subsampling_x = subsampling_y = 1 (§6.4.2).
-        assert_eq!(ChromaSubsampling::Cs400.factors(), (2, 2));
+        assert_eq!(factors(ChromaSubsampling::Cs400), (2, 2));
     }
 
     #[test]
