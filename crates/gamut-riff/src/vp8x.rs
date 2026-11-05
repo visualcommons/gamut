@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn from_payload_rejects_a_canvas_whose_product_overflows() {
+    fn parse_rejects_a_canvas_whose_product_overflows() {
         // A hostile file can declare a canvas no encoder would produce: 2^24 x 2^24 = 2^48 pixels.
         // Rejecting it on read matches libwebp, which caps the decoded canvas area the same way.
         let mut payload = [0u8; VP8X_PAYLOAD_LEN];
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn from_payload_rejects_short_input() {
+    fn parse_rejects_short_input() {
         assert!(Vp8xHeader::parse(&[0u8; 9]).is_err());
     }
 
