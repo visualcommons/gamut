@@ -96,7 +96,6 @@ clap = { version = "4.5", features = ["derive"] }
 # be bumped without a breaking change. Default features only (UTF-8; the namespace-resolving
 # `NsReader` is in core).
 quick-xml = "0.40"
-wasm-bindgen = "0.2"
 # Decode-only: gamut-cli reads PNG/JPEG/PPM inputs; all encoding stays in gamut crates.
 # `default-features = false` drops image's own avif/webp decoders and rayon.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "pnm"] }
