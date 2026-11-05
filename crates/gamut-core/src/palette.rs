@@ -49,9 +49,15 @@ impl Palette {
                 "palette has more alpha values than entries",
             ));
         }
+        // Trailing opaque values are dropped, so the stored alpha is the shortest one that resolves
+        // every entry: equal observable palettes then compare and hash equal however they were built.
+        let significant = alpha
+            .iter()
+            .rposition(|&a| a != OPAQUE)
+            .map_or(0, |i| i + 1);
         Ok(Self {
             rgb: rgb.to_vec(),
-            alpha: alpha.to_vec(),
+            alpha: alpha[..significant].to_vec(),
         })
     }
 
@@ -78,7 +84,8 @@ impl Palette {
     /// Whether any entry is not fully opaque.
     #[must_use]
     pub fn has_transparency(&self) -> bool {
-        self.alpha.iter().any(|&alpha| alpha != OPAQUE)
+        // `with_alpha` drops trailing opaque values, so any stored value ends in a transparent one.
+        !self.alpha.is_empty()
     }
 }
 
@@ -126,6 +133,18 @@ mod tests {
         assert_eq!(palette.alpha(0), Some(10));
         assert_eq!(palette.alpha(2), Some(255));
         assert_eq!(palette.alpha(3), None);
+    }
+
+    #[test]
+    fn with_alpha_drops_trailing_opaque_values() {
+        let rgb = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+        let opaque = Palette::new(&rgb).unwrap();
+        assert_eq!(Palette::with_alpha(&rgb, &[255]).unwrap(), opaque);
+        assert_eq!(Palette::with_alpha(&rgb, &[255, 255, 255]).unwrap(), opaque);
+        // An opaque value before a transparent one is significant and kept.
+        let inner = Palette::with_alpha(&rgb, &[255, 0, 255]).unwrap();
+        assert_eq!(inner, Palette::with_alpha(&rgb, &[255, 0]).unwrap());
+        assert_eq!(inner.alpha, [255, 0]);
     }
 
     #[test]
