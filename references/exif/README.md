@@ -105,7 +105,8 @@ Where this reader deliberately differs from exiv2:
 
 The vendor tags themselves are staked per vendor in a subdirectory, before that vendor's view is
 implemented: [`canon/`](canon/README.md) (issue #977), [`leica/`](leica/README.md)
-(issue #978) and [`sony/`](sony/README.md) (issue #980).
+(issue #978), [`sony/`](sony/README.md) (issue #980) and [`fujifilm/`](fujifilm/README.md)
+(issue #981).
 
 Other vendors that exiv2 does not cover (Kodak and the rest) have no dialect yet. Each one is
 staked here by its vendor's sub-issue of #418 before it is implemented. A Canon note that Adobe DNG Converter moved into `DNGPrivateData` (`Adobe\0MakN`)
