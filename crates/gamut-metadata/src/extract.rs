@@ -79,7 +79,7 @@ impl MetadataExtractor {
 
         let exif = exif_bytes.map(Exif::parse).transpose()?;
         let icc = icc_bytes.map(IccProfile::parse).transpose()?;
-        let mut xmp = xmp_bytes.map(XmpMeta::from_packet).transpose()?;
+        let mut xmp = xmp_bytes.map(XmpMeta::parse).transpose()?;
 
         // Reconcile the legacy IIM carrier into the XMP graph — the single home for IPTC data.
         if let Some(iim) = iim_bytes {
@@ -129,7 +129,7 @@ impl MetadataExtractor {
             return Ok(Vec::new());
         };
         let iim = IimBlock::parse(iim)?;
-        let xmp = XmpMeta::from_packet(xmp)?;
+        let xmp = XmpMeta::parse(xmp)?;
         Ok(IptcReader::new()
             .policy(self.policy)
             .conflicts(&iim, &xmp)?)

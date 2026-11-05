@@ -31,14 +31,14 @@ fn icc_bytes() -> Vec<u8> {
 fn xmp_bytes_non_iptc() -> Vec<u8> {
     let mut xmp = XmpMeta::new();
     xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
-    xmp.to_packet()
+    xmp.to_bytes()
 }
 
 /// An XMP packet carrying an IPTC `photoshop:City` property.
 fn xmp_bytes_city(city: &str) -> Vec<u8> {
     let mut xmp = XmpMeta::new();
     xmp.set_text(WellKnownNs::Photoshop.uri(), "City", city);
-    xmp.to_packet()
+    xmp.to_bytes()
 }
 
 /// A legacy IIM dataset stream carrying `2:90` City.
@@ -109,7 +109,7 @@ fn extract_empty_yields_empty_metadata() {
 fn extract_drops_an_empty_xmp_graph() {
     // An XMP packet that parses to no properties is reported as absent, so `xmp.is_none()` stays
     // meaningful.
-    let empty = XmpMeta::new().to_packet();
+    let empty = XmpMeta::new().to_bytes();
     let meta = MetadataExtractor::new()
         .extract(&[MetadataBlock::Xmp(&empty)])
         .unwrap();

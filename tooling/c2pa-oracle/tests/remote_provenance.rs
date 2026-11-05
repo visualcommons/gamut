@@ -80,7 +80,7 @@ fn a_reference_c2pa_rs_wrote_into_a_gamut_png_is_remote_to_both() {
 fn a_reference_gamut_wrote_is_remote_to_both() {
     let mut xmp = XmpMeta::new();
     xmp.set_text(WellKnownNs::DcTerms.uri(), "provenance", URL);
-    let packet = String::from_utf8(xmp.to_packet()).expect("an XMP packet is UTF-8");
+    let packet = String::from_utf8(xmp.to_bytes()).expect("an XMP packet is UTF-8");
     let asset = png(Some(&packet));
 
     assert_eq!(

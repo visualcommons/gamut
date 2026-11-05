@@ -13,7 +13,7 @@
 //!
 //! # Quick start
 //!
-//! [`XmpMeta::from_packet`] reads a packet; [`XmpMeta::to_packet`] writes one. Accessors like
+//! [`XmpMeta::parse`] reads a packet; [`XmpMeta::to_bytes`] writes one. Accessors like
 //! [`XmpMeta::get_text`] / [`XmpMeta::set_text`] and [`XmpMeta::get_lang_alt`] /
 //! [`XmpMeta::set_lang_alt`] cover the common cases; [`WellKnownNs`] supplies the standard schema
 //! URIs so you do not hand-write them.
@@ -29,8 +29,8 @@
 //! meta.set_text(xmp, "CreatorTool", "gamut");
 //!
 //! // Serialize to an embeddable packet, then read it back.
-//! let packet = meta.to_packet();
-//! let parsed = XmpMeta::from_packet(&packet)?;
+//! let packet = meta.to_bytes();
+//! let parsed = XmpMeta::parse(&packet)?;
 //!
 //! assert_eq!(parsed.get_lang_alt(dc, "title", "x-default"), Some("My Photo"));
 //! assert_eq!(parsed.get_text(xmp, "CreatorTool"), Some("gamut"));
@@ -52,9 +52,9 @@
 //!   the public API (errors are surfaced via [`XmpError`]), so it can be changed without a breaking
 //!   change.
 //! - **Memory-safe on hostile input.** `#![forbid(unsafe_code)]` — XMP is XML from untrusted files.
-//! - **Sidecars are bytes too.** [`XmpSidecar`] reads and writes the standalone `.xmp` file RAW
-//!   workflows keep beside an image (Part 3, "External storage of metadata"); the crate has no
-//!   filesystem API, so the caller owns the path.
+//! - **Sidecars are bytes too.** [`XmpMeta::from_sidecar`] and [`XmpMeta::to_sidecar`] read and
+//!   write the standalone `.xmp` file RAW workflows keep beside an image (Part 3, "External
+//!   storage of metadata"); the crate has no filesystem API, so the caller owns the path.
 #![forbid(unsafe_code)]
 
 // Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
@@ -66,11 +66,13 @@ pub mod error;
 pub mod model;
 pub mod namespace;
 pub mod packet;
-pub mod sidecar;
 pub mod writer;
-// The reader has no configuration — `XmpMeta::from_packet` is the entry point and auto-detects the
+// The reader has no configuration — `XmpMeta::parse` is the entry point and auto-detects the
 // wrapper, encoding, and input form — so the module carries only that `impl` and stays private.
 mod reader;
+// Likewise the sidecar format: `XmpMeta::from_sidecar` / `XmpMeta::to_sidecar` are its whole
+// surface, so the module carries only that `impl` and stays private.
+mod sidecar;
 
 pub use error::{Result, XmpError};
 pub use model::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
@@ -78,5 +80,4 @@ pub use namespace::{
     DWC_URI_TRAILING_SLASH, Namespace, RDF_NAMESPACE, WellKnownNs, XML_NAMESPACE, XMPMETA_NAMESPACE,
 };
 pub use packet::XmpPacket;
-pub use sidecar::XmpSidecar;
 pub use writer::XmpWriter;

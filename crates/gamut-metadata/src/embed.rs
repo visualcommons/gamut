@@ -215,7 +215,7 @@ impl MetadataEmbedder {
         }
 
         let exif = meta.exif.as_ref().map(Exif::to_bytes).transpose()?;
-        let xmp = meta.xmp.as_ref().map(XmpMeta::to_packet);
+        let xmp = meta.xmp.as_ref().map(XmpMeta::to_bytes);
         let icc = meta.icc.as_ref().map(IccProfile::to_bytes).transpose()?;
         let iptc_iim = if self.emit_iptc_iim {
             self.encode_iim(meta)?

@@ -70,8 +70,8 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   **Deferred:** an opt-in canonicalization knob (a `ConvertPolicy`-style setting on the reader,
   never a silent rewrite) is the shape a consumer that needs `uri()` lookup would add; it is not
   planned until one asks.
-- **Sidecars require `x:xmpmeta` (issue #421).** `XmpSidecar::read` accepts everything
-  `XmpMeta::from_packet` does — XML declaration, BOM, wrapper or bare — but rejects a document
+- **Sidecars require `x:xmpmeta` (issue #421).** `XmpMeta::from_sidecar` accepts everything
+  `XmpMeta::parse` does — XML declaration, BOM, wrapper or bare — but rejects a document
   whose element is not `x:xmpmeta` with `XmpError::MissingXmpMeta` naming the element found. **This
   is stricter than the specification, not derived from it.** The vendored Part 1 §7.3.3 reads "An
   optional x:xmpmeta element **may** be placed around the rdf:RDF element" and "An XMP processor
@@ -80,20 +80,21 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   XML document with the leading XML declaration, the `.xmp` extension, `application/rdf+xml`,
   written "as though it were embedded and then had the XMP packets extracted and catenated by a
   postprocessor") never mention the element, and the string `xmpmeta` occurs in Part 3 exactly
-  once, inside an SVG example. So `read` rejects a sidecar the specification permits. What §7.3.3
-  supplies is the element's *purpose* — identifying XMP inside general XML text — and a standalone
+  once, inside an SVG example. So `from_sidecar` rejects a sidecar the specification permits. What
+  §7.3.3 supplies is the element's *purpose* — identifying XMP inside general XML text — and a
+  standalone
   `.xmp` file is that text, so gamut takes the element as the marker rather than reading any RDF
   document beside an image as XMP; exiv2 draws its own, different line (`isXmpType` keys on
-  `<?xpacket` **or** `<x:xmpmeta`). `XmpSidecar::write` emits the XML declaration Part 3 asks for,
+  `<?xpacket` **or** `<x:xmpmeta`). `XmpMeta::to_sidecar` emits the XML declaration Part 3 asks for,
   then a read-only (`end="r"`), unpadded packet wrapping the canonical body in `x:xmpmeta` —
   byte-stable per graph. No filesystem API and no enforced file name: the `.xmp`-beside-the-image
   convention is documented for the caller. The missing wrapper has its own error,
   `XmpError::MissingXmpMeta`, naming the element found: the wrapper-less form is *permitted* by
-  §7.3.3 and is what `XmpWriter::wrap_xmpmeta(false)` emits, so reporting it as a prohibited
+  §7.3.3 and is what `XmpWriter::with_xmpmeta_wrapper(false)` emits, so reporting it as a prohibited
   construct would assert a prohibition the spec does not make. exiv2 is more permissive still — its
   sniffer (`isXmpType`) accepts a `.xmp` file starting with `<?xpacket` **or** `<x:xmpmeta` — so a
   file exiv2 reads as a sidecar and gamut rejects is expected; the caller reads those bytes with
-  `XmpMeta::from_packet`.
+  `XmpMeta::parse`.
 - **A catenated packet is refused, not truncated (issue #562 — option 1 of 3, "reject").** Part 3's
   bullet asks that external metadata be written "as though it were embedded and then had the XMP
   packets extracted and catenated by a postprocessor", so a conforming producer may emit a `.xmp`
@@ -105,17 +106,17 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   first-wins, last-wins and error are all inventions; *keeping the truncation* (option 3, the
   behaviour before #562) read the first packet and silently dropped the rest, so a caller merging a
   sidecar into an image could lose properties with no signal. Rejecting cannot lose data, matches
-  the reference engine — Adobe XMPCore rejects two `XmpSidecar::write` outputs concatenated
+  the reference engine — Adobe XMPCore rejects two `XmpMeta::to_sidecar` outputs concatenated
   (`tests/oracle.rs::xmpcore_rejects_the_catenated_sidecar_gamut_rejects`) — and the offset leaves
   the merge to the caller who knows its rule: `bytes[..offset]` reads as the first packet and
-  `bytes[offset..]` as the rest. **`XmpMeta::from_packet` gets the same rejection**, because it is
-  `scan` + `parse`: a container (JPEG `APP1`, PNG `iTXt`, WebP `XMP `, an AVIF/HEIF `mime` item)
+  `bytes[offset..]` as the rest. **`XmpMeta::parse` gets the same rejection**, because it is
+  `scan` + `to_meta`: a container (JPEG `APP1`, PNG `iTXt`, WebP `XMP `, an AVIF/HEIF `mime` item)
   hands over one packet, so a catenation there is malformed input, and refusing it in `scan` keeps
   one rule for both entry points. **What this stops accepting**, named because it narrows a
   reader: any input holding a second `<?xpacket` instruction after the first trailer — a catenated
   sidecar, or an embedded payload with a stray packet appended — which previously parsed as its
   first packet. Bytes after the trailer that are not an `<?xpacket` instruction (whitespace, NUL
-  padding, an XML declaration) are still ignored. `XmpSidecar::write` emits exactly one packet, so
+  padding, an XML declaration) are still ignored. `XmpMeta::to_sidecar` emits exactly one packet, so
   gamut never produces the refused shape. `XmpError` is `#[non_exhaustive]`, so the new variant is
   additive; the behaviour change is filed as a fix, since the input it now refuses was mis-read.
 
@@ -129,7 +130,7 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
 | P4 | Part 2 | Standard schema coverage (dc/xmp/xmpRights/xmpMM/photoshop/exif/tiff/…) | ✅ done |
 | P5 | Part 1 §7 | **Keystone** — canonical RDF/XML serialization + packet emit (writable padding) | ✅ done |
 | P6 | — | exiv2 differential conformance gate | ✅ done |
-| P7 | Parts 1–3 | **v1 stabilization** (issue #189) — API finalization (`XmpPacket::parse` composition, `XmpWriter::with_namespace` prefix registration, model conveniences), conformance audit (control-character escaping fix, trailer `end=` matching, edge-case pins), gamut-iptc dogfood migration, docs | ✅ done |
+| P7 | Parts 1–3 | **v1 stabilization** (issue #189) — API finalization (`XmpPacket` scan/parse composition, since renamed `XmpPacket::to_meta` by issue #1072; `XmpWriter::with_namespace` prefix registration, model conveniences), conformance audit (control-character escaping fix, trailer `end=` matching, edge-case pins), gamut-iptc dogfood migration, docs | ✅ done |
 | P8 | Part 2; Part 3 "External storage" | **Breadth** (issue #421) — registry gains the twelve exiv2-documented schemas the issue selected (18 → 30 entries; exiv2's `kipi`, `mediapro`, `expressionmedia`, `MP`, `MPRI`, `MPReg` stay unregistered), `.xmp` sidecar read/write, per-schema and sidecar oracle tests | ✅ done |
 
 ## Intentional skips (audited for v1)
@@ -151,10 +152,11 @@ deliberately:
   supplies wrapper-optional parse, bare-body serialization, and the writable/padding envelope.
 - **Per-schema value validation (Part 2):** values are uninterpreted text; `WellKnownNs` is a
   namespace registry, not a validator — still true after the issue #421 additions.
-- **Sidecar file naming and I/O (Part 3):** `XmpSidecar` is bytes-in / bytes-out; locating
-  `photo.xmp` beside `photo.dng` is the caller's, as embedding is the format crates'.
-- **Decode limits (crate-wide, not sidecar-specific):** `XmpSidecar::read` takes an unbounded
-  `&[u8]` and parses the document before checking for the wrapper. `XmpMeta::from_packet` has
+- **Sidecar file naming and I/O (Part 3):** `XmpMeta::from_sidecar` / `to_sidecar` are bytes-in /
+  bytes-out; locating `photo.xmp` beside `photo.dng` is the caller's, as embedding is the format
+  crates'.
+- **Decode limits (crate-wide, not sidecar-specific):** `XmpMeta::from_sidecar` takes an unbounded
+  `&[u8]` and parses the document before checking for the wrapper. `XmpMeta::parse` has
   identical exposure on the same bytes, so the sidecar API (issue #421) adds no hostile-input class
   the crate did not already have; whether gamut-xmp should grow a decode-limit convention like
   `gamut-png`'s is a question for the crate as a whole and is deliberately left open.

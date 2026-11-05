@@ -27,7 +27,7 @@ impl XmpMeta {
     /// chunk, an AVIF `mime` item, a JPEG `APP1` payload, or a bare `rdf:RDF` / `x:xmpmeta` body),
     /// tolerating a leading UTF-8 byte-order mark.
     ///
-    /// This is exactly [`XmpPacket::scan`] followed by [`XmpPacket::parse`]; scan first instead
+    /// This is exactly [`XmpPacket::scan`] followed by [`XmpPacket::to_meta`]; scan first instead
     /// when the envelope matters (its writability and padding drive in-place editing).
     ///
     /// # Errors
@@ -37,8 +37,8 @@ impl XmpMeta {
     /// `<?xpacket?>` packet ([`XmpError::MultiplePackets`]: a container hands over one packet, so a
     /// catenation is refused rather than read as its first), the XML is malformed, there is no
     /// `rdf:RDF` element, or the RDF/XML uses a construct XMP does not permit.
-    pub fn from_packet(bytes: &[u8]) -> Result<XmpMeta> {
-        XmpPacket::scan(bytes)?.parse()
+    pub fn parse(bytes: &[u8]) -> Result<XmpMeta> {
+        XmpPacket::scan(bytes)?.to_meta()
     }
 }
 
@@ -52,13 +52,13 @@ impl XmpPacket {
     /// ```
     /// use gamut_xmp::{WellKnownNs, XmpPacket, XmpWriter};
     ///
-    /// # let original = gamut_xmp::XmpMeta::new().to_packet();
+    /// # let original = gamut_xmp::XmpMeta::new().to_bytes();
     /// let packet = XmpPacket::scan(&original)?;
-    /// let mut meta = packet.parse()?;
+    /// let mut meta = packet.to_meta()?;
     /// meta.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
     /// let rewritten = XmpWriter::new()
-    ///     .writable(packet.writable)
-    ///     .padding(packet.padding)
+    ///     .with_writable(packet.writable)
+    ///     .with_padding(packet.padding)
     ///     .serialize(&meta);
     /// # assert!(!rewritten.is_empty());
     /// # Ok::<(), gamut_xmp::XmpError>(())
@@ -68,7 +68,7 @@ impl XmpPacket {
     ///
     /// Returns an [`XmpError`] if the body is malformed XML, has no `rdf:RDF` element, or uses an
     /// RDF/XML construct XMP does not permit.
-    pub fn parse(&self) -> Result<XmpMeta> {
+    pub fn to_meta(&self) -> Result<XmpMeta> {
         interpret(&build_tree(&self.body)?)
     }
 }
@@ -545,7 +545,7 @@ mod tests {
     const FOO: &str = "http://example.com/foo/";
 
     fn parse(xml: &str) -> XmpMeta {
-        XmpMeta::from_packet(xml.as_bytes()).expect("parse")
+        XmpMeta::parse(xml.as_bytes()).expect("parse")
     }
 
     /// Wraps a body in a minimal `rdf:RDF` with the namespaces the tests use.
@@ -680,9 +680,8 @@ mod tests {
 
     #[test]
     fn rejects_disallowed_parse_type() {
-        let err =
-            XmpMeta::from_packet(rdf("<dc:x rdf:parseType=\"Literal\"><b/></dc:x>").as_bytes())
-                .unwrap_err();
+        let err = XmpMeta::parse(rdf("<dc:x rdf:parseType=\"Literal\"><b/></dc:x>").as_bytes())
+            .unwrap_err();
         assert!(matches!(err, XmpError::UnsupportedForm(_)), "got {err:?}");
     }
 
@@ -690,8 +689,8 @@ mod tests {
     fn rejects_parse_type_collection() {
         // parseType="Collection" shares a branch with "Literal" but must surface its own name in
         // the diagnostic (Part 1 §7.9 allows only "Resource").
-        let err = XmpMeta::from_packet(rdf("<dc:x rdf:parseType=\"Collection\"/>").as_bytes())
-            .unwrap_err();
+        let err =
+            XmpMeta::parse(rdf("<dc:x rdf:parseType=\"Collection\"/>").as_bytes()).unwrap_err();
         assert!(
             matches!(&err, XmpError::UnsupportedForm(m) if m.contains("Collection")),
             "got {err:?}"
@@ -738,10 +737,9 @@ mod tests {
 
     #[test]
     fn rejects_rdf_numbered_array_items() {
-        let err = XmpMeta::from_packet(
-            rdf("<dc:x><rdf:Bag><rdf:_1>a</rdf:_1></rdf:Bag></dc:x>").as_bytes(),
-        )
-        .unwrap_err();
+        let err =
+            XmpMeta::parse(rdf("<dc:x><rdf:Bag><rdf:_1>a</rdf:_1></rdf:Bag></dc:x>").as_bytes())
+                .unwrap_err();
         // The rdf:_n-specific diagnostic, not the generic "unexpected element" one.
         assert!(
             matches!(&err, XmpError::Prohibited(m) if m.contains("array item")),
@@ -751,7 +749,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_language() {
-        let err = XmpMeta::from_packet(
+        let err = XmpMeta::parse(
             rdf("<dc:title><rdf:Alt><rdf:li xml:lang=\"en\">a</rdf:li>\
                  <rdf:li xml:lang=\"EN\">b</rdf:li></rdf:Alt></dc:title>")
             .as_bytes(),
@@ -763,7 +761,7 @@ mod tests {
     #[test]
     fn missing_rdf_is_an_error() {
         assert!(matches!(
-            XmpMeta::from_packet(b"<html></html>"),
+            XmpMeta::parse(b"<html></html>"),
             Err(XmpError::MissingRdf)
         ));
     }
@@ -773,7 +771,7 @@ mod tests {
         // Properly namespaced, but a mismatched end tag — a genuine lexing failure.
         let bad = format!("<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\"><rdf:Description></rdf:RDF>");
         assert!(matches!(
-            XmpMeta::from_packet(bad.as_bytes()),
+            XmpMeta::parse(bad.as_bytes()),
             Err(XmpError::Xml(_))
         ));
     }
@@ -782,7 +780,7 @@ mod tests {
     fn undeclared_prefix_is_an_error() {
         // `rdf:` is used without an xmlns:rdf declaration.
         assert!(matches!(
-            XmpMeta::from_packet(b"<rdf:RDF><rdf:Description/></rdf:RDF>"),
+            XmpMeta::parse(b"<rdf:RDF><rdf:Description/></rdf:RDF>"),
             Err(XmpError::UnknownPrefix(_))
         ));
     }
@@ -839,7 +837,7 @@ mod tests {
     #[test]
     fn property_without_a_namespace_is_rejected() {
         // An unprefixed property element (no default namespace) has no namespace URI.
-        let err = XmpMeta::from_packet(
+        let err = XmpMeta::parse(
             format!(
                 "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\"><rdf:Description rdf:about=\"\">\
                  <plain>x</plain></rdf:Description></rdf:RDF>"
@@ -852,8 +850,7 @@ mod tests {
 
     #[test]
     fn multiple_child_elements_are_rejected() {
-        let err =
-            XmpMeta::from_packet(rdf("<dc:x><foo:a/><foo:b/></dc:x>").as_bytes()).unwrap_err();
+        let err = XmpMeta::parse(rdf("<dc:x><foo:a/><foo:b/></dc:x>").as_bytes()).unwrap_err();
         assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
     }
 
@@ -863,14 +860,14 @@ mod tests {
         let xml = format!(
             "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:foo=\"{FOO}\"><foo:Thing/></rdf:RDF>"
         );
-        let err = XmpMeta::from_packet(xml.as_bytes()).unwrap_err();
+        let err = XmpMeta::parse(xml.as_bytes()).unwrap_err();
         assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
     }
 
     #[test]
     fn rdf_value_carrying_a_qualifier_is_rejected() {
         // rdf:value must not carry xml:lang or nested qualifiers (Part 1 §7.8).
-        let err = XmpMeta::from_packet(
+        let err = XmpMeta::parse(
             rdf(
                 "<dc:x><rdf:Description><rdf:value xml:lang=\"en\">v</rdf:value>\
                  </rdf:Description></dc:x>",
@@ -883,9 +880,8 @@ mod tests {
 
     #[test]
     fn non_li_element_in_an_array_is_rejected() {
-        let err =
-            XmpMeta::from_packet(rdf("<dc:x><rdf:Bag><foo:item/></rdf:Bag></dc:x>").as_bytes())
-                .unwrap_err();
+        let err = XmpMeta::parse(rdf("<dc:x><rdf:Bag><foo:item/></rdf:Bag></dc:x>").as_bytes())
+            .unwrap_err();
         assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
     }
 
@@ -894,9 +890,8 @@ mod tests {
         // An rdf:-namespaced element that is neither rdf:li nor rdf:_n takes the generic branch,
         // not the rdf:_n one — so the condition truly needs both "rdf namespace" AND "starts with
         // '_'", not either alone.
-        let err =
-            XmpMeta::from_packet(rdf("<dc:x><rdf:Bag><rdf:foo/></rdf:Bag></dc:x>").as_bytes())
-                .unwrap_err();
+        let err = XmpMeta::parse(rdf("<dc:x><rdf:Bag><rdf:foo/></rdf:Bag></dc:x>").as_bytes())
+            .unwrap_err();
         let XmpError::Prohibited(msg) = &err else {
             panic!("expected Prohibited, got {err:?}");
         };
@@ -917,34 +912,34 @@ mod tests {
             "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\"/><rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\"/>"
         );
         assert!(
-            matches!(XmpMeta::from_packet(xml.as_bytes()), Err(XmpError::Xml(_))),
+            matches!(XmpMeta::parse(xml.as_bytes()), Err(XmpError::Xml(_))),
             "a second root element must be rejected, not silently replace the first"
         );
     }
 
     #[test]
-    fn packet_parse_composes_with_scan() {
-        // from_packet ≡ scan ∘ parse; the two-step form additionally exposes the envelope.
+    fn packet_to_meta_composes_with_scan() {
+        // XmpMeta::parse ≡ scan ∘ to_meta; the two-step form additionally exposes the envelope.
         let mut meta = XmpMeta::new();
         meta.set_text(DC, "format", "text/plain");
-        let bytes = meta.to_packet();
+        let bytes = meta.to_bytes();
 
         let packet = XmpPacket::scan(&bytes).expect("scan");
         assert!(packet.writable, "default writer output is writable");
         assert_eq!(
-            packet.parse().expect("parse"),
-            XmpMeta::from_packet(&bytes).expect("from_packet")
+            packet.to_meta().expect("to_meta"),
+            XmpMeta::parse(&bytes).expect("parse")
         );
     }
 
     #[test]
-    fn packet_parse_reports_body_errors() {
+    fn packet_to_meta_reports_body_errors() {
         let packet = XmpPacket {
             body: "<html></html>".into(),
             writable: false,
             padding: 0,
         };
-        assert!(matches!(packet.parse(), Err(XmpError::MissingRdf)));
+        assert!(matches!(packet.to_meta(), Err(XmpError::MissingRdf)));
     }
 
     #[test]

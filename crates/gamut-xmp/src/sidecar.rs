@@ -8,13 +8,14 @@
 //! the `.xmp` extension and the same base name as the image; applications find it by looking in the
 //! image's directory.
 //!
-//! [`XmpSidecar::read`] and [`XmpSidecar::write`] are the bytes-in / bytes-out pair. This crate has
-//! no filesystem API and the naming convention is documented, not enforced: the caller owns the
-//! path, exactly as the format crates own the embedded packet's location in their containers.
+//! [`XmpMeta::from_sidecar`] and [`XmpMeta::to_sidecar`] are the bytes-in / bytes-out pair. This
+//! crate has no filesystem API and the naming convention is documented, not enforced: the caller
+//! owns the path, exactly as the format crates own the embedded packet's location in their
+//! containers.
 //!
 //! **One packet, not a catenation.** That "catenated by a postprocessor" phrase describes a file
-//! holding *several* `<?xpacket?>` packets end to end — a shape [`XmpSidecar::write`] never
-//! produces (it emits exactly one) and [`XmpSidecar::read`] refuses with
+//! holding *several* `<?xpacket?>` packets end to end — a shape [`XmpMeta::to_sidecar`] never
+//! produces (it emits exactly one) and [`XmpMeta::from_sidecar`] refuses with
 //! [`XmpError::MultiplePackets`], as the reference engine does, rather than read the first packet
 //! and silently drop the rest. The error carries the offset at which the next packet begins, so a
 //! caller can split the file and read each packet itself (issue
@@ -30,46 +31,45 @@ use crate::namespace::XMPMETA_NAMESPACE;
 use crate::packet::XmpPacket;
 use crate::writer::XmpWriter;
 
-/// The XMP sidecar file format: an XMP packet as a standalone `.xmp` file.
-///
-/// The one thing this crate requires of a sidecar beyond an embedded packet is the `x:xmpmeta`
-/// element — **a gamut rule, stricter than the specification rather than derived from it**. Part 1
-/// §7.3.3 says an "optional" `x:xmpmeta` element "may be placed around the rdf:RDF element" and that
-/// a processor "should tolerate" one: permission, never a requirement. Part 3's "External storage
-/// of metadata" bullets never mention the element at all. A wrapper-less `.xmp` file is therefore
-/// spec-conformant, and [`XmpSidecar::read`] rejects it anyway.
-///
-/// What §7.3.3 does supply is the element's purpose — "to identify XMP metadata within general XML
-/// text that might contain other non-XMP uses of RDF" — and a standalone `.xmp` file is exactly
-/// that general XML text: without the element nothing in the bytes says the RDF is XMP. exiv2 draws
-/// the line elsewhere again, accepting `<?xpacket` **or** `<x:xmpmeta`, so an xpacket-wrapped bare
-/// `rdf:RDF` is a sidecar to exiv2 and not to this crate. [`XmpSidecar::write`] always emits the
-/// element.
-///
-/// ```
-/// use gamut_xmp::{WellKnownNs, XmpMeta, XmpSidecar};
-///
-/// let mut meta = XmpMeta::new();
-/// meta.set_text(WellKnownNs::Xmp.uri(), "Rating", "5");
-///
-/// // The bytes of `photo.xmp`, ready to be written beside `photo.dng`...
-/// let file = XmpSidecar::write(&meta);
-/// // ...and read back from it.
-/// let parsed = XmpSidecar::read(&file)?;
-/// assert_eq!(parsed.get_text(WellKnownNs::Xmp.uri(), "Rating"), Some("5"));
-/// # Ok::<(), gamut_xmp::XmpError>(())
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct XmpSidecar;
-
-impl XmpSidecar {
-    /// Parses the bytes of a `.xmp` sidecar file into a property graph.
+impl XmpMeta {
+    /// Parses the bytes of a `.xmp` sidecar file — an XMP packet stored as a standalone file
+    /// beside the image — into a property graph.
     ///
     /// Accepts a UTF-8 file with or without the leading XML declaration, with or without the
     /// `<?xpacket?>` wrapper, tolerating a leading byte-order mark — everything
-    /// [`XmpMeta::from_packet`] accepts — **provided** the document element is `x:xmpmeta`
+    /// [`XmpMeta::parse`] accepts — **provided** the document element is `x:xmpmeta`
     /// (namespace `adobe:ns:meta/`, Part 1 §7.3.3). Trailing padding inside the packet wrapper is
     /// ignored.
+    ///
+    /// ```
+    /// use gamut_xmp::{WellKnownNs, XmpMeta};
+    ///
+    /// let mut meta = XmpMeta::new();
+    /// meta.set_text(WellKnownNs::Xmp.uri(), "Rating", "5");
+    ///
+    /// // The bytes of `photo.xmp`, ready to be written beside `photo.dng`...
+    /// let file = meta.to_sidecar();
+    /// // ...and read back from it.
+    /// let parsed = XmpMeta::from_sidecar(&file)?;
+    /// assert_eq!(parsed.get_text(WellKnownNs::Xmp.uri(), "Rating"), Some("5"));
+    /// # Ok::<(), gamut_xmp::XmpError>(())
+    /// ```
+    ///
+    /// # The `x:xmpmeta` requirement
+    ///
+    /// The one thing this crate requires of a sidecar beyond an embedded packet is the
+    /// `x:xmpmeta` element — **a gamut rule, stricter than the specification rather than derived
+    /// from it**. Part 1 §7.3.3 says an "optional" `x:xmpmeta` element "may be placed around the
+    /// rdf:RDF element" and that a processor "should tolerate" one: permission, never a
+    /// requirement. Part 3's "External storage of metadata" bullets never mention the element at
+    /// all. A wrapper-less `.xmp` file is therefore spec-conformant, and this rejects it anyway.
+    ///
+    /// What §7.3.3 does supply is the element's purpose — "to identify XMP metadata within general
+    /// XML text that might contain other non-XMP uses of RDF" — and a standalone `.xmp` file is
+    /// exactly that general XML text: without the element nothing in the bytes says the RDF is
+    /// XMP. exiv2 draws the line elsewhere again, accepting `<?xpacket` **or** `<x:xmpmeta`, so an
+    /// xpacket-wrapped bare `rdf:RDF` is a sidecar to exiv2 and not to this crate.
+    /// [`XmpMeta::to_sidecar`] always emits the element.
     ///
     /// # A catenated file is refused
     ///
@@ -86,9 +86,9 @@ impl XmpSidecar {
     /// # Errors
     ///
     /// Returns [`XmpError::MissingXmpMeta`] naming the document element when it is not `x:xmpmeta`
-    /// — a bare `rdf:RDF` document is a packet body, valid XMP that [`XmpMeta::from_packet`]
+    /// — a bare `rdf:RDF` document is a packet body, valid XMP that [`XmpMeta::parse`]
     /// accepts, but not one this crate reads as a sidecar. Otherwise the same errors as
-    /// [`XmpMeta::from_packet`]: [`XmpError::MultiplePackets`] for a catenated file (above),
+    /// [`XmpMeta::parse`]: [`XmpError::MultiplePackets`] for a catenated file (above),
     /// [`XmpError::Encoding`] for non-UTF-8 input, [`XmpError::Xml`] for malformed XML,
     /// [`XmpError::MissingRdf`] when no `rdf:RDF` is found, and the RDF/XML-for-XMP errors for
     /// constructs XMP does not permit.
@@ -97,32 +97,33 @@ impl XmpSidecar {
     /// (`isXmpType`) accepts a file that starts with `<?xpacket` **or** `<x:xmpmeta`, so it reads
     /// as a sidecar both a wrapper-less packet and an xpacket-wrapped bare `rdf:RDF` that this
     /// rejects; and §7.3.3 calls the element optional, so the rejection is gamut's own choice and
-    /// not a spec requirement (see the type's documentation for why it is made). A caller who wants
-    /// that latitude uses [`XmpMeta::from_packet`].
-    pub fn read(bytes: &[u8]) -> Result<XmpMeta> {
+    /// not a spec requirement (see [above](#the-xxmpmeta-requirement) for why it is made). A caller
+    /// who wants that latitude uses [`XmpMeta::parse`].
+    pub fn from_sidecar(bytes: &[u8]) -> Result<XmpMeta> {
         let packet = XmpPacket::scan(bytes)?;
         // Parse first so a malformed file reports its malformation, not a missing wrapper.
-        let meta = packet.parse()?;
+        let meta = packet.to_meta()?;
         if let Some(root) = document_element_unless_xmpmeta(&packet.body)? {
             return Err(XmpError::MissingXmpMeta(root));
         }
         Ok(meta)
     }
 
-    /// Serializes a property graph as the bytes of a `.xmp` sidecar file.
+    /// Serializes this property graph as the bytes of a `.xmp` sidecar file — the inverse of
+    /// [`XmpMeta::from_sidecar`].
     ///
     /// The file is the XML declaration Part 3 asks for, then a read-only (`end="r"`, no padding)
     /// `<?xpacket?>` packet whose body is the canonical RDF/XML (Part 1 §7) inside `x:xmpmeta`.
     /// UTF-8, no byte-order mark. Being canonical, it is byte-stable for a given graph, so two
     /// sidecars of the same metadata diff clean.
     #[must_use]
-    pub fn write(meta: &XmpMeta) -> Vec<u8> {
+    pub fn to_sidecar(&self) -> Vec<u8> {
         let mut out = XML_DECLARATION.as_bytes().to_vec();
         out.extend_from_slice(
             &XmpWriter::new()
-                .wrap_xmpmeta(true)
-                .writable(false)
-                .serialize(meta),
+                .with_xmpmeta_wrapper(true)
+                .with_writable(false)
+                .serialize(self),
         );
         out
     }
@@ -137,19 +138,19 @@ const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 /// start tag and resolves its namespace, so the check is on the element's identity rather than on
 /// the literal `x:` prefix a writer happened to choose.
 ///
-/// **Reachability.** Called from [`XmpSidecar::read`] the answer can only ever be `None` or
-/// `Some("RDF")`: `read` parses the body first, and the reader admits exactly one document element,
-/// `rdf:RDF` or `x:xmpmeta` (`reader.rs`'s `find_rdf`, over a tree `build_tree` has already
-/// rejected multiple roots in). So on that path the namespace comparison, the `Empty` arm and the
-/// end-of-input error are all unreachable, and the second lex is a bounded extra pass over bytes
-/// already parsed once. It is kept as a total function over any XML — unit-tested directly for the
-/// cases `read` cannot produce — rather than threading the root element out of `find_rdf`, which
+/// **Reachability.** Called from [`XmpMeta::from_sidecar`] the answer can only ever be `None` or
+/// `Some("RDF")`: `from_sidecar` parses the body first, and the reader admits exactly one document
+/// element, `rdf:RDF` or `x:xmpmeta` (`reader.rs`'s `find_rdf`, over a tree `build_tree` has
+/// already rejected multiple roots in). So on that path the namespace comparison, the `Empty` arm
+/// and the end-of-input error are all unreachable, and the second lex is a bounded extra pass over
+/// bytes already parsed once. It is kept as a total function over any XML — unit-tested directly
+/// for the cases `from_sidecar` cannot produce — rather than threading the root element out of `find_rdf`, which
 /// would widen the blast radius in `reader.rs` for a one-off cost.
 ///
 /// # Errors
 ///
 /// Returns [`XmpError::Xml`] if the prolog cannot be lexed or the document has no element at all.
-/// [`XmpSidecar::read`] parses the body before calling this, so on that path neither happens.
+/// [`XmpMeta::from_sidecar`] parses the body before calling this, so on that path neither happens.
 fn document_element_unless_xmpmeta(xml: &str) -> Result<Option<String>> {
     let mut reader = NsReader::from_str(xml);
     loop {
@@ -187,10 +188,10 @@ mod tests {
     }
 
     #[test]
-    fn write_emits_the_exact_sidecar_for_an_empty_graph() {
+    fn to_sidecar_emits_the_exact_sidecar_for_an_empty_graph() {
         // Byte-exact: the XML declaration, the read-only packet wrapper with no padding, the
         // x:xmpmeta wrapper, and the canonical body — the file is meant to diff clean.
-        let file = XmpSidecar::write(&XmpMeta::new());
+        let file = XmpMeta::new().to_sidecar();
         assert_eq!(
             core::str::from_utf8(&file).unwrap(),
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -205,61 +206,61 @@ mod tests {
     }
 
     #[test]
-    fn read_accepts_what_write_produces() {
+    fn from_sidecar_accepts_what_to_sidecar_produces() {
         // The two halves agree on the wrapper requirement: a written sidecar reads back.
         let mut meta = XmpMeta::new();
         meta.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
-        let parsed = XmpSidecar::read(&XmpSidecar::write(&meta)).unwrap();
+        let parsed = XmpMeta::from_sidecar(&meta.to_sidecar()).unwrap();
         assert_eq!(parsed, meta);
     }
 
     #[test]
-    fn read_refuses_two_catenated_sidecars_and_the_offset_splits_them() {
-        // Issue #562: two `write` outputs end to end are refused rather than read as the first.
+    fn from_sidecar_refuses_two_catenated_sidecars_and_the_offset_splits_them() {
+        // Issue #562: two `to_sidecar` outputs end to end are refused rather than read as the first.
         // The offset lands on the second packet's header, past its XML declaration, and splitting
         // there recovers both graphs whole — the recovery the error's documentation promises.
         let mut rating = XmpMeta::new();
         rating.set_text(WellKnownNs::Xmp.uri(), "Rating", "5");
         let mut tool = XmpMeta::new();
         tool.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
-        let first = XmpSidecar::write(&rating);
+        let first = rating.to_sidecar();
         let mut file = first.clone();
-        file.extend_from_slice(&XmpSidecar::write(&tool));
+        file.extend_from_slice(&tool.to_sidecar());
 
         let offset = first.len() + XML_DECLARATION.len();
         assert_eq!(
-            XmpSidecar::read(&file),
+            XmpMeta::from_sidecar(&file),
             Err(XmpError::MultiplePackets(offset))
         );
-        assert_eq!(XmpSidecar::read(&file[..offset]).unwrap(), rating);
-        assert_eq!(XmpSidecar::read(&file[offset..]).unwrap(), tool);
+        assert_eq!(XmpMeta::from_sidecar(&file[..offset]).unwrap(), rating);
+        assert_eq!(XmpMeta::from_sidecar(&file[offset..]).unwrap(), tool);
     }
 
     #[test]
-    fn read_rejects_a_bare_rdf_document() {
+    fn from_sidecar_rejects_a_bare_rdf_document() {
         // A packet body without x:xmpmeta is valid embedded XMP but not a sidecar; the error names
         // the element found so the caller knows which wrapper is missing. It is deliberately not
-        // `Prohibited`: Part 1 §7.3.3 permits the wrapper-less form, and `XmpMeta::from_packet`
+        // `Prohibited`: Part 1 §7.3.3 permits the wrapper-less form, and `XmpMeta::parse`
         // reads exactly these bytes.
-        let err = XmpSidecar::read(RDF_ONLY.as_bytes()).unwrap_err();
+        let err = XmpMeta::from_sidecar(RDF_ONLY.as_bytes()).unwrap_err();
         assert!(
             matches!(&err, XmpError::MissingXmpMeta(root) if root == "RDF"),
             "got {err:?}"
         );
         assert!(
-            XmpMeta::from_packet(RDF_ONLY.as_bytes()).is_ok(),
+            XmpMeta::parse(RDF_ONLY.as_bytes()).is_ok(),
             "the same bytes must stay valid as an embedded packet"
         );
     }
 
     #[test]
-    fn read_rejects_a_bare_rdf_document_even_inside_the_packet_wrapper() {
+    fn from_sidecar_rejects_a_bare_rdf_document_even_inside_the_packet_wrapper() {
         // The xpacket wrapper alone does not make a sidecar: the document element must still be
         // x:xmpmeta.
         let file = format!(
             "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>{RDF_ONLY}<?xpacket end=\"r\"?>"
         );
-        let err = XmpSidecar::read(file.as_bytes()).unwrap_err();
+        let err = XmpMeta::from_sidecar(file.as_bytes()).unwrap_err();
         assert!(
             matches!(&err, XmpError::MissingXmpMeta(root) if root == "RDF"),
             "got {err:?}"
@@ -267,29 +268,29 @@ mod tests {
     }
 
     #[test]
-    fn read_accepts_a_wrapped_document_without_the_packet_wrapper() {
+    fn from_sidecar_accepts_a_wrapped_document_without_the_packet_wrapper() {
         // Part 1 §7.3.3: x:xmpmeta may stand without the xpacket instructions.
-        let meta = XmpSidecar::read(wrapped(RDF_ONLY).as_bytes()).unwrap();
+        let meta = XmpMeta::from_sidecar(wrapped(RDF_ONLY).as_bytes()).unwrap();
         assert!(meta.properties.is_empty());
     }
 
     #[test]
-    fn read_skips_bom_declaration_comment_and_whitespace_before_the_document_element() {
+    fn from_sidecar_skips_bom_declaration_comment_and_whitespace_before_the_document_element() {
         // Part 3 asks for the leading XML declaration; a BOM and a comment are legal XML prolog
         // too. None of them is the document element.
         let file = format!(
             "\u{FEFF}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- exported -->\n  {}",
             wrapped(RDF_ONLY)
         );
-        let meta = XmpSidecar::read(file.as_bytes()).unwrap();
+        let meta = XmpMeta::from_sidecar(file.as_bytes()).unwrap();
         assert!(meta.properties.is_empty());
     }
 
     #[test]
-    fn read_reports_malformed_xml_before_the_missing_wrapper() {
+    fn from_sidecar_reports_malformed_xml_before_the_missing_wrapper() {
         // Parse errors take precedence: an ill-formed bare document (mismatched end tag) is
         // "malformed XML", not "not a sidecar", so the diagnosis points at the real defect.
-        let err = XmpSidecar::read(
+        let err = XmpMeta::from_sidecar(
             b"<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"></oops>",
         )
         .unwrap_err();
@@ -323,7 +324,7 @@ mod tests {
 
     #[test]
     fn document_element_check_reports_an_element_less_document() {
-        // Only reachable outside `read` (which has already parsed an rdf:RDF); pinned so the
+        // Only reachable outside `from_sidecar` (which has already parsed an rdf:RDF); pinned so the
         // loop's EOF arm is a typed error, not a hang or a panic.
         let err = document_element_unless_xmpmeta("<?xml version=\"1.0\"?>\n<!-- nothing -->")
             .unwrap_err();

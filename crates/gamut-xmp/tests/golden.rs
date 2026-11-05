@@ -65,7 +65,7 @@ fn language_alternative_full_packet_read_only() {
         "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n{body}\n<?xpacket end=\"r\"?>"
     );
 
-    let packet = XmpWriter::new().writable(false).serialize(&meta);
+    let packet = XmpWriter::new().with_writable(false).serialize(&meta);
     assert_eq!(String::from_utf8(packet).unwrap(), expected);
 }
 

@@ -24,7 +24,7 @@
 //!
 //! let mut graph = gamut_metadata::xmp::XmpMeta::new();
 //! graph.set_text(gamut_metadata::xmp::WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
-//! assert!(has_xmp(&Located { xmp: graph.to_packet() })?);
+//! assert!(has_xmp(&Located { xmp: graph.to_bytes() })?);
 //! # Ok::<(), gamut_metadata::MetadataError>(())
 //! ```
 //!
