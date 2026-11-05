@@ -649,7 +649,8 @@ impl HeifImage {
         for px in canvas.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&fill);
         }
-        for (&input_id, &(dx, dy)) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
+        for (&input_id, offset) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
+            let (dx, dy) = (offset.horizontal, offset.vertical);
             let (src, dims) = self.decode_rgba_inner::<T>(input_id, decoder, stack)?;
             composite_over(
                 &mut canvas,

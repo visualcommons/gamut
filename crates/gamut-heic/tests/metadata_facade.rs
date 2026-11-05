@@ -1,7 +1,7 @@
 //! The `metadata` feature over a HEIF fixture: `HeifImage`'s `TypedMetadata` impl hands the Exif
 //! item (offset applied), the XMP `mime` item and the `colr` ICC profile to the facade, and the
 //! typed model equals the one the payloads were built from. Decode-only (the crate has no
-//! encoder), so the fixture is authored through `gamut_isobmff::write`.
+//! encoder), so the fixture is authored through `IsoBmffImage::to_bytes`.
 #![cfg(feature = "metadata")]
 
 mod common;
@@ -9,7 +9,7 @@ mod common;
 use common::{clean_file, hvc1_item, iref, item};
 use gamut_core::ErrorKind;
 use gamut_heic::{HeifContainer, Metadata, MetadataBlock, TypedMetadata};
-use gamut_isobmff::{ColourInformation, Item, Property, PropertyKind};
+use gamut_isobmff::{ColourInformation, Property, PropertyKind};
 use gamut_metadata::MetadataError;
 use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
@@ -49,19 +49,14 @@ fn payloads() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 /// given `ExifDataBlock` payload and an XMP `mime` item (3).
 fn fixture(exif_payload: Vec<u8>, xmp: Vec<u8>, icc: Vec<u8>) -> Vec<u8> {
     let mut primary = hvc1_item(1, vec![1, 2, 3, 4]);
-    primary.properties.push(Property {
-        essential: false,
-        kind: PropertyKind::Colour(ColourInformation::UnrestrictedIcc(icc)),
-    });
-    let exif = Item {
-        references: vec![iref(b"cdsc", &[1])],
-        ..item(2, *b"Exif", exif_payload)
-    };
-    let xmp = Item {
-        content_type: Some("application/rdf+xml".to_string()),
-        references: vec![iref(b"cdsc", &[1])],
-        ..item(3, *b"mime", xmp)
-    };
+    primary.properties.push(Property::new(
+        false,
+        PropertyKind::Colour(ColourInformation::UnrestrictedIcc(icc)),
+    ));
+    let exif = item(2, *b"Exif", exif_payload).with_references(vec![iref(b"cdsc", &[1])]);
+    let xmp = item(3, *b"mime", xmp)
+        .with_content_type("application/rdf+xml")
+        .with_references(vec![iref(b"cdsc", &[1])]);
     clean_file(1, vec![primary, exif, xmp])
 }
 
@@ -137,12 +132,10 @@ fn a_content_encoded_xmp_item_is_unsupported_from_both_accessors() {
     // A `deflate`-coded XMP item: its payload is not the packet, so it must not be labelled
     // `MetadataBlock::Xmp` and fail as unparsable — it is refused as a coding this crate lacks.
     let primary = hvc1_item(1, vec![1, 2, 3, 4]);
-    let xmp = Item {
-        content_type: Some("application/rdf+xml".to_string()),
-        content_encoding: Some("deflate".to_string()),
-        references: vec![iref(b"cdsc", &[1])],
-        ..item(2, *b"mime", vec![0x78, 0x9C, 0x03, 0x00])
-    };
+    let xmp = item(2, *b"mime", vec![0x78, 0x9C, 0x03, 0x00])
+        .with_content_type("application/rdf+xml")
+        .with_content_encoding("deflate")
+        .with_references(vec![iref(b"cdsc", &[1])]);
     let data = clean_file(1, vec![primary, xmp]);
     let container = HeifContainer::parse(&data).unwrap();
     for err in [

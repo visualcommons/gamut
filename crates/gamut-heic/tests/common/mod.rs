@@ -1,71 +1,52 @@
-//! Shared HEIF test fixtures: model builders that drive `gamut_isobmff::write`, plus hand-authored
+//! Shared HEIF test fixtures: model builders that drive `IsoBmffImage::to_bytes`, plus hand-authored
 //! box byte-builders (mirroring `gamut-isobmff/tests/common`) for the accounting/meta cases that a
 //! normalising writer cannot express.
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
-use gamut_isobmff::{IsoBmffImage, Item, ItemReference, Property, PropertyKind, write};
+use gamut_isobmff::{IsoBmffImage, Item, ItemReference, Property, PropertyKind};
 
 // ---- model builders (write-based fixtures) -------------------------------------------------
 
 /// A bare item: no name, no mime info, no references, no properties.
 pub fn item(id: u32, item_type: [u8; 4], payload: Vec<u8>) -> Item {
-    Item {
-        id,
-        item_type,
-        name: String::new(),
-        content_type: None,
-        content_encoding: None,
-        hidden: false,
-        references: vec![],
-        properties: vec![],
-        payload,
-    }
+    Item::new(id, item_type).with_payload(payload)
 }
 
 /// An `hvcC` codec-configuration property (essential), with the given opaque record bytes.
 pub fn hvcc(data: Vec<u8>) -> Property {
-    Property {
-        essential: true,
-        kind: PropertyKind::CodecConfiguration {
+    Property::new(
+        true,
+        PropertyKind::CodecConfiguration {
             kind: *b"hvcC",
             data,
         },
-    }
+    )
 }
 
 /// A non-essential `ispe` property.
 pub fn ispe(width: u32, height: u32) -> Property {
-    Property {
-        essential: false,
-        kind: PropertyKind::ImageSpatialExtents { width, height },
-    }
+    Property::new(false, PropertyKind::ImageSpatialExtents { width, height })
 }
 
 /// A non-essential `auxC` property with the given aux-type URN.
 pub fn auxc(aux_type: &str) -> Property {
-    Property {
-        essential: false,
-        kind: PropertyKind::AuxiliaryType {
+    Property::new(
+        false,
+        PropertyKind::AuxiliaryType {
             aux_type: aux_type.to_string(),
             aux_subtype: vec![],
         },
-    }
+    )
 }
 
 /// An outgoing item reference.
 pub fn iref(reference_type: &[u8; 4], to: &[u32]) -> ItemReference {
-    ItemReference {
-        reference_type: *reference_type,
-        to_item_ids: to.to_vec(),
-    }
+    ItemReference::new(*reference_type, to.to_vec())
 }
 
 /// A canonical HEVC coded-image item: `hvc1`, one `hvcC` + one `ispe`, with the given payload.
 pub fn hvc1_item(id: u32, payload: Vec<u8>) -> Item {
-    Item {
-        properties: vec![hvcc(vec![1, 2, 3, 4]), ispe(64, 48)],
-        ..item(id, *b"hvc1", payload)
-    }
+    item(id, *b"hvc1", payload).with_properties(vec![hvcc(vec![1, 2, 3, 4]), ispe(64, 48)])
 }
 
 /// Wraps items into a complete `heic` file whose primary is the item with `primary_id`.
@@ -75,7 +56,9 @@ pub fn heic_image(primary_id: u32, items: Vec<Item>) -> IsoBmffImage {
 
 /// Serialises a model to a clean HEIF file (`ftyp` + `meta` + `mdat`).
 pub fn clean_file(primary_id: u32, items: Vec<Item>) -> Vec<u8> {
-    write(&heic_image(primary_id, items)).expect("valid model")
+    heic_image(primary_id, items)
+        .to_bytes()
+        .expect("valid model")
 }
 
 // ---- hand-authored box byte-builders -------------------------------------------------------

@@ -7,7 +7,7 @@ mod common;
 use common::{auxc, clean_file, hvc1_item, hvcc, iref, ispe, item};
 use gamut_heic::{HeifContainer, HeifItem, ItemKind};
 use gamut_isobmff::{
-    EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, Property, PropertyKind, write,
+    EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, OverlayOffset, Property, PropertyKind,
 };
 
 const ALPHA_URN: &str = "urn:mpeg:hevc:2015:auxid:1";
@@ -20,54 +20,37 @@ fn ids(items: Vec<HeifItem<'_>>) -> Vec<u32> {
 
 /// A `hvc1` auxiliary (hidden) with the given aux-type URN and an `auxl` reference to `master`.
 fn aux_item(id: u32, master: u32, aux_urn: &str) -> Item {
-    Item {
-        hidden: true,
-        properties: vec![hvcc(vec![1, 2, 3, 4]), ispe(64, 48), auxc(aux_urn)],
-        references: vec![iref(b"auxl", &[master])],
-        ..item(id, *b"hvc1", vec![0xAA])
-    }
+    item(id, *b"hvc1", vec![0xAA])
+        .with_hidden(true)
+        .with_properties(vec![hvcc(vec![1, 2, 3, 4]), ispe(64, 48), auxc(aux_urn)])
+        .with_references(vec![iref(b"auxl", &[master])])
 }
 
 /// The full fixture: primary(1) + alpha(2) + depth(3) + thumbnail(4) + Exif(5) + XMP(6) + grid(7)
 /// over tiles 8..=11.
 fn rich_file() -> Vec<u8> {
-    let primary = Item {
-        // The premultiplied colour image is the source of the `prem` reference to its alpha (2).
-        references: vec![iref(b"prem", &[2])],
-        ..hvc1_item(1, vec![1, 2, 3, 4])
-    };
-    let thumbnail = Item {
-        references: vec![iref(b"thmb", &[1])],
-        ..hvc1_item(4, vec![7, 7])
-    };
-    let exif = Item {
-        references: vec![iref(b"cdsc", &[1])],
-        ..item(5, *b"Exif", b"\x00\x00\x00\x00MM\x00*".to_vec())
-    };
-    let xmp = Item {
-        content_type: Some("application/rdf+xml".to_string()),
-        references: vec![iref(b"cdsc", &[1])],
-        ..item(6, *b"mime", b"<x:xmpmeta/>".to_vec())
-    };
-    let grid = Item {
-        references: vec![iref(b"dimg", &[8, 9, 10, 11])],
-        ..item(
-            7,
-            *b"grid",
-            ImageGrid {
-                rows: 2,
-                columns: 2,
-                output_width: 128,
-                output_height: 96,
-            }
-            .to_bytes()
-            .unwrap(),
-        )
-    };
-    let tile = |id: u32| Item {
-        hidden: true,
-        ..hvc1_item(id, vec![0xEE])
-    };
+    // The premultiplied colour image is the source of the `prem` reference to its alpha (2).
+    let primary = hvc1_item(1, vec![1, 2, 3, 4]).with_references(vec![iref(b"prem", &[2])]);
+    let thumbnail = hvc1_item(4, vec![7, 7]).with_references(vec![iref(b"thmb", &[1])]);
+    let exif = item(5, *b"Exif", b"\x00\x00\x00\x00MM\x00*".to_vec())
+        .with_references(vec![iref(b"cdsc", &[1])]);
+    let xmp = item(6, *b"mime", b"<x:xmpmeta/>".to_vec())
+        .with_content_type("application/rdf+xml")
+        .with_references(vec![iref(b"cdsc", &[1])]);
+    let grid = item(
+        7,
+        *b"grid",
+        ImageGrid {
+            rows: 2,
+            columns: 2,
+            output_width: 128,
+            output_height: 96,
+        }
+        .to_bytes()
+        .unwrap(),
+    )
+    .with_references(vec![iref(b"dimg", &[8, 9, 10, 11])]);
+    let tile = |id: u32| hvc1_item(id, vec![0xEE]).with_hidden(true);
 
     clean_file(
         1,
@@ -121,25 +104,14 @@ fn brands_groups_and_alternatives_pin_exact_values() {
         1,
         vec![
             hvc1_item(1, vec![1, 2, 3, 4]),
-            Item {
-                hidden: true,
-                ..hvc1_item(2, vec![5, 6])
-            },
+            hvc1_item(2, vec![5, 6]).with_hidden(true),
         ],
     )
     .with_groups(vec![
-        EntityGroup {
-            group_type: *b"ster",
-            group_id: 7,
-            entity_ids: vec![1, 2],
-        },
-        EntityGroup {
-            group_type: *b"altr",
-            group_id: 8,
-            entity_ids: vec![2, 1],
-        },
+        EntityGroup::new(*b"ster", 7, vec![1, 2]),
+        EntityGroup::new(*b"altr", 8, vec![2, 1]),
     ]);
-    let data = write(&model).unwrap();
+    let data = model.to_bytes().unwrap();
     let c = HeifContainer::parse(&data).unwrap();
     let img = c.image();
 
@@ -190,25 +162,20 @@ fn grid_lens_parses_payload_and_validates_tile_count() {
 fn grid_lens_rejects_mismatched_tile_count() {
     // A 2x2 grid (4 tiles) whose `dimg` lists only 3 sources must fail — a decoder cannot assemble
     // it. The grid item is the primary (a grid is a displayable image).
-    let grid = Item {
-        references: vec![iref(b"dimg", &[2, 3, 4])], // 3 sources, not 4
-        ..item(
-            1,
-            *b"grid",
-            ImageGrid {
-                rows: 2,
-                columns: 2,
-                output_width: 32,
-                output_height: 32,
-            }
-            .to_bytes()
-            .unwrap(),
-        )
-    };
-    let tile = |id: u32| Item {
-        hidden: true,
-        ..hvc1_item(id, vec![0xEE])
-    };
+    let grid = item(
+        1,
+        *b"grid",
+        ImageGrid {
+            rows: 2,
+            columns: 2,
+            output_width: 32,
+            output_height: 32,
+        }
+        .to_bytes()
+        .unwrap(),
+    )
+    .with_references(vec![iref(b"dimg", &[2, 3, 4])]); // 3 sources, not 4
+    let tile = |id: u32| hvc1_item(id, vec![0xEE]).with_hidden(true);
     let data = clean_file(1, vec![grid, tile(2), tile(3), tile(4)]);
     let c = HeifContainer::parse(&data).unwrap();
 
@@ -222,13 +189,20 @@ fn overlay_lens_parses_payload_with_dimg_count() {
         canvas_fill_value: [0, 0, 0, 0xFFFF],
         output_width: 100,
         output_height: 80,
-        offsets: vec![(0, 0), (10, 20)],
+        offsets: vec![
+            OverlayOffset {
+                horizontal: 0,
+                vertical: 0,
+            },
+            OverlayOffset {
+                horizontal: 10,
+                vertical: 20,
+            },
+        ],
     };
-    let iovl = Item {
-        references: vec![iref(b"dimg", &[1, 1])],
-        properties: vec![],
-        ..item(2, *b"iovl", overlay.to_bytes().unwrap())
-    };
+    let iovl = item(2, *b"iovl", overlay.to_bytes().unwrap())
+        .with_references(vec![iref(b"dimg", &[1, 1])])
+        .with_properties(vec![]);
     let data = clean_file(1, vec![hvc1_item(1, vec![1, 2, 3, 4]), iovl]);
     let c = HeifContainer::parse(&data).unwrap();
 
@@ -248,23 +222,20 @@ fn brand_predicate_distinguishes_hevc_and_non_hevc() {
 
     // A generic `mif1` file whose primary carries `av01`/`av1C` (an AVIF-shaped file) is not an
     // HEVC still, even though `read` accepts the container.
-    let av1_item = Item {
-        properties: vec![Property {
-            essential: true,
-            kind: PropertyKind::CodecConfiguration {
-                kind: *b"av1C",
-                data: vec![0x81, 0x20, 0x0c, 0x00],
-            },
-        }],
-        ..item(1, *b"av01", vec![1, 2, 3, 4])
-    };
+    let av1_item = item(1, *b"av01", vec![1, 2, 3, 4]).with_properties(vec![Property::new(
+        true,
+        PropertyKind::CodecConfiguration {
+            kind: *b"av1C",
+            data: vec![0x81, 0x20, 0x0c, 0x00],
+        },
+    )]);
     let mut model = gamut_isobmff::IsoBmffImage::new(*b"mif1", vec![*b"mif1"], 1, vec![av1_item]);
-    let data = gamut_isobmff::write(&model).unwrap();
+    let data = model.to_bytes().unwrap();
     assert!(!HeifContainer::parse(&data).unwrap().image().is_hevc_still());
 
     // The same generic `mif1` container, but the primary is an `hvc1` item carrying `hvcC` → HEVC
     // still by the mif1 + hvcC fallback.
     model.items = vec![hvc1_item(1, vec![1, 2, 3, 4])];
-    let data = gamut_isobmff::write(&model).unwrap();
+    let data = model.to_bytes().unwrap();
     assert!(HeifContainer::parse(&data).unwrap().image().is_hevc_still());
 }

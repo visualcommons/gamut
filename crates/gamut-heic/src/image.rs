@@ -102,7 +102,7 @@ impl HeifImage {
     /// (`references/heif` §7), or — for the generic structural brand `mif1` — when the primary item
     /// carries an `hvcC` HEVC configuration. Image-*sequence* brands (`msf1`/`hevc`/`hevx`) are out
     /// of scope and are not treated as stills here, but a valid still-image `meta` is not rejected
-    /// for carrying one alongside `mif1` ([`gamut_isobmff::read`] skips a track beside `meta` and
+    /// for carrying one alongside `mif1` ([`IsoBmffImage::parse`](gamut_isobmff::IsoBmffImage::parse) skips a track beside `meta` and
     /// refuses a sequence-only file).
     #[must_use]
     pub fn is_hevc_still(&self) -> bool {
@@ -710,7 +710,8 @@ fn is_depth_urn(aux_type: &str) -> bool {
 /// `HeifImage::new`, which is `pub(crate)`, so they live here.
 #[cfg(test)]
 mod tests {
-    use gamut_isobmff::{IsoBmffImage, NclxColr, Property};
+    use gamut_core::Cicp;
+    use gamut_isobmff::{IsoBmffImage, Property};
 
     use super::*;
 
@@ -728,24 +729,13 @@ mod tests {
 
     /// A bare item of the given type and payload.
     fn item(item_type: [u8; 4], payload: Vec<u8>, properties: Vec<Property>) -> Item {
-        Item {
-            id: 1,
-            item_type,
-            name: String::new(),
-            content_type: None,
-            content_encoding: None,
-            hidden: false,
-            references: vec![],
-            properties,
-            payload,
-        }
+        Item::new(1, item_type)
+            .with_properties(properties)
+            .with_payload(payload)
     }
 
     fn colr(info: ColourInformation) -> Property {
-        Property {
-            essential: false,
-            kind: PropertyKind::Colour(info),
-        }
+        Property::new(false, PropertyKind::Colour(info))
     }
 
     #[test]
@@ -759,7 +749,7 @@ mod tests {
 
     #[test]
     fn icc_profile_finds_the_icc_colr_behind_an_nclx_one() {
-        let nclx = ColourInformation::Nclx(NclxColr {
+        let nclx = ColourInformation::Nclx(Cicp {
             colour_primaries: 1,
             transfer_characteristics: 13,
             matrix_coefficients: 6,

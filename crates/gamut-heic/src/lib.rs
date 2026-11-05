@@ -113,7 +113,7 @@
 //! ```
 //! use gamut_heic::{ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder};
 //! use gamut_core::Result;
-//! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, write};
+//! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind};
 //!
 //! // A stub HEVC decoder: ignores the codestream and returns a 2x2 solid-gray monochrome frame.
 //! struct GrayStub;
@@ -136,23 +136,17 @@
 //!     *b"heic",
 //!     vec![*b"heic", *b"mif1"],
 //!     1,
-//!     vec![Item {
-//!         id: 1,
-//!         item_type: *b"hvc1",
-//!         name: String::new(),
-//!         content_type: None,
-//!         content_encoding: None,
-//!         hidden: false,
-//!         references: vec![],
-//!         properties: vec![Property {
-//!             essential: true,
-//!             kind: PropertyKind::CodecConfiguration { kind: *b"hvcC", data: hvcc() },
-//!         }],
-//!         // 4-byte length prefix + an IDR_W_RADL NAL (type 19: header byte 0x26).
-//!         payload: vec![0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xDD],
-//!     }],
+//!     vec![
+//!         Item::new(1, *b"hvc1")
+//!             .with_properties(vec![Property::new(
+//!                 true,
+//!                 PropertyKind::CodecConfiguration { kind: *b"hvcC", data: hvcc() },
+//!             )])
+//!             // 4-byte length prefix + an IDR_W_RADL NAL (type 19: header byte 0x26).
+//!             .with_payload(vec![0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xDD]),
+//!     ],
 //! );
-//! let bytes = write(&img).unwrap();
+//! let bytes = img.to_bytes().unwrap();
 //!
 //! let container = HeifContainer::parse(&bytes).unwrap();
 //! assert!(container.image().is_hevc_still());
@@ -188,7 +182,7 @@ pub use c2pa::{
 pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{DecodedFrame, HevcDecoder};
 // The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-avif` (#505).
-pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paByteRange, C2paUnreadReason};
+pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paUnreadReason};
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `HeifImage::metadata` / `HeifImage::blocks` without a direct dependency, and the trait those
 // accessors are methods of.

@@ -129,10 +129,10 @@ present. A mid-update file carrying both an `original` and an `update` store rep
 order, with their purposes: choosing the *active* manifest is a validator's judgement and this crate
 reaches no verdict. The reported range is for observability and byte accounting only — it is **not**
 a BMFF exclusion range, since `c2pa.hash.bmff.v3` excludes by box path, not by byte offset (§18.6,
-§A.5.6). A type enforces it (#780): every C2PA range this crate reports (`C2paManifestStore`'s,
-`C2paStoreSummary`'s, `C2paUnreadBox`'s and `C2paMerkleBox`'s `range`, and the `slot` fields) is
-`gamut-isobmff`'s `C2paByteRange`, re-exported here and shared with `gamut-avif` — bounds, the
-bytes it covers and a `[start, end)` rendering, but no conversion back to a `Range<usize>`.
+§A.5.6). Every C2PA range this crate reports (`C2paManifestStore`'s, `C2paStoreSummary`'s,
+`C2paUnreadBox`'s and `C2paMerkleBox`'s `range`, and the `slot` fields) is a half-open `Range<u64>`
+of absolute file offsets (#1069), as `gamut-avif`'s are; the field docs, not a dedicated type (the
+former `C2paByteRange`, #780), say it is not an exclusion range.
 Nothing inside the store is parsed, no hash is computed and no signature is checked.
 
 **Shared framing (issue #505).** The framing above is no longer this crate's own parse: the user
@@ -216,7 +216,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Unknown top-level box (e.g. Google `mpvd` Motion Photo Video Data) retained as `SegmentKind::Box` | Android Motion Photo; `references/heif` §8a | ✅ | S1 |
 | Appended foreign stream from a second top-level `ftyp` (Samsung motion-photo MP4) retained opaque | `references/heif` §8b | ✅ | S1 |
 | Trailing non-box bytes (Samsung SEF trailer) retained as `SegmentKind::Trailer` (post ftyp+meta) | `references/heif` §8b | ✅ | S1 |
-| Stop rules identical to `gamut_isobmff::read` (first ftyp wins; trailer only after ftyp+meta) | 14496-12 | ✅ | S1 |
+| Stop rules identical to `gamut_isobmff::IsoBmffImage::parse` (first ftyp wins; trailer only after ftyp+meta) | 14496-12 | ✅ | S1 |
 | Meta-level accounting: `meta`/`iprp` children not consumed by the model surfaced as `UnknownBox` (e.g. `dinf`/`dref`, `uuid`) | 14496-12 | ✅ | S1 |
 | C2PA manifest store located in a top-level `uuid` `ContentProvenanceBox`: opaque bytes + exact byte range, purposes `manifest`/`original`/`update` (`c2pa`, `c2pa_manifest_stores`) | C2PA 2.4 §A.5.1, §A.5.3, §8.4.2.3 (`references/c2pa` pending, #431) | ✅ | S7 |
 | Reporting shape for a located store: presence, half-open range, size and `box_purpose` per store with the bytes absent by construction, rendered with the non-validation disclaimer inline (`c2pa_summary`, `C2paSummary::report_lines`, `C2PA_NOT_VALIDATED`) | C2PA 2.4 §15.12, §A.5.3 | ✅ | S7 (#448) |
