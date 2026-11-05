@@ -1,8 +1,9 @@
 //! The C2PA disclaimer's wording, pinned as a literal.
 //!
 //! Every headline test interpolates `C2PA_NOT_VALIDATED` into its expectation, so a reworded
-//! constant passes all of them; this one asserts the sentence itself. The same sentence is pinned in
-//! `gamut-avif`, `gamut-heic`, `gamut-png` and `gamut-riff`, so a drift in any copy fails here.
+//! constant passes all of them; this one asserts the sentence itself. It pins only this crate's
+//! copy: `gamut-avif`, `gamut-heic`, `gamut-png` and `gamut-riff` each pin their own copy in their
+//! own `tests/c2pa.rs`, so a drift in another crate's copy fails there, not here.
 
 #[test]
 fn c2pa_not_validated_is_the_pinned_sentence() {
