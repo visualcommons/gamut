@@ -46,7 +46,7 @@ fn metadata_facade_round_trips_through_a_jpeg_stream() {
     };
     let typed = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc));
 
-    let encoded = typed.encode().unwrap();
+    let encoded = typed.to_blocks().unwrap();
     let pixels = vec![128u8; 64];
     let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
     let jpeg = JpegEncoder::new()
@@ -57,13 +57,13 @@ fn metadata_facade_round_trips_through_a_jpeg_stream() {
         .unwrap();
 
     let read = metadata(&jpeg).unwrap();
-    let through_jpeg = Metadata::from_blocks(&[
+    let through_jpeg = Metadata::parse_blocks(&[
         MetadataBlock::Exif(read.exif.as_deref().unwrap()),
         MetadataBlock::Xmp(read.xmp.as_deref().unwrap()),
         MetadataBlock::Icc(read.icc.as_deref().unwrap()),
     ])
     .unwrap();
-    let direct = Metadata::from_blocks(&[
+    let direct = Metadata::parse_blocks(&[
         MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
         MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
         MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
@@ -103,7 +103,7 @@ fn metadata_facade_round_trips_through_a_webp_file() {
         }),
     );
 
-    let encoded = typed.encode().unwrap();
+    let encoded = typed.to_blocks().unwrap();
     let pixels = [64u8, 128, 192];
     let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(1, 1).unwrap()).unwrap();
     let mut file = Vec::new();
@@ -119,7 +119,7 @@ fn metadata_facade_round_trips_through_a_webp_file() {
     assert_eq!(read.xmp, encoded.xmp, "XMP payload is unmodified");
     assert_eq!(read.icc, encoded.icc, "ICC payload is unmodified");
 
-    let through_webp = Metadata::from_blocks(&[
+    let through_webp = Metadata::parse_blocks(&[
         MetadataBlock::Exif(read.exif.as_deref().unwrap()),
         MetadataBlock::Xmp(read.xmp.as_deref().unwrap()),
         MetadataBlock::Icc(read.icc.as_deref().unwrap()),

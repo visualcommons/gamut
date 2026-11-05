@@ -15,11 +15,11 @@ use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
 use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
 
-/// The format crate's own error behind a [`MetadataError::Container`], which is how both accessors
+/// The format crate's own error behind a [`MetadataError::Core`], which is how both accessors
 /// report a payload they cannot locate.
 fn container_error(err: MetadataError) -> gamut_core::Error {
     match err {
-        MetadataError::Container(inner) => inner,
+        MetadataError::Core(inner) => inner,
         other => panic!("expected a container error, got {other:?}"),
     }
 }
@@ -36,7 +36,7 @@ fn payloads() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         tags: Vec::new(),
     };
     let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
-        .encode()
+        .to_blocks()
         .unwrap();
     (
         encoded.exif.unwrap(),
@@ -72,7 +72,7 @@ fn typed_metadata_is_extracted_from_the_items_and_the_colr() {
     let (exif, xmp, icc) = payloads();
     // The model the payloads came from, as the facade itself extracts it (the ICC header's
     // `size` is stamped by serialization, so the hand-built model is not the comparison point).
-    let expected = Metadata::from_blocks(&[
+    let expected = Metadata::parse_blocks(&[
         MetadataBlock::Exif(&exif),
         MetadataBlock::Xmp(&xmp),
         MetadataBlock::Icc(&icc),

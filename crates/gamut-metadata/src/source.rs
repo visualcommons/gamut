@@ -1,4 +1,4 @@
-//! Carrier-agnostic metadata blocks.
+//! Carrier-agnostic metadata blocks, and the carrier vocabulary they share.
 
 /// A located metadata payload, handed over by a container crate for parsing.
 ///
@@ -37,4 +37,57 @@ pub enum MetadataBlock<'a> {
     /// does for a multi-segment `APP2 ICC_PROFILE`. One block per segment would not error: a
     /// repeated block kind takes the last occurrence, so the model would quietly hold a fragment.
     C2pa(&'a [u8]),
+}
+
+/// A metadata carrier: one genuinely distinct serialization a container holds, named without its
+/// payload — one per [`MetadataBlock`] variant.
+///
+/// The vocabulary a [`MetadataSink`](crate::MetadataSink) states its writable carriers in, and the
+/// `gamut` umbrella's capability table states each format crate's in.
+///
+/// `#[non_exhaustive]` and `#[repr(u8)]` with **permanent, append-only** discriminants: a later
+/// carrier is added at the end and never renumbers an existing one, so the value is stable across
+/// the C ABI. Match with a wildcard arm; iterate with [`Carrier::ALL`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum Carrier {
+    /// An EXIF blob (a TIFF stream, with or without the `Exif\0\0` marker).
+    Exif = 0,
+    /// An XMP packet — which is also where IPTC Core/Extension lives.
+    Xmp = 1,
+    /// An ICC profile.
+    Icc = 2,
+    /// The legacy binary IPTC-IIM dataset stream.
+    IptcIim = 3,
+    /// A C2PA manifest store (JUMBF superbox). Read-only by nature: the facade never copies a store
+    /// forward (see [`C2paPolicy`](crate::C2paPolicy)), so no encoder **writes** one as a carrier.
+    /// An encoder that can place a store does so only as a signing workflow — a store computed for
+    /// that exact output — which is not carrying metadata from one file to another.
+    C2pa = 4,
+}
+
+impl Carrier {
+    /// Every carrier, in discriminant order — the way to enumerate a `#[non_exhaustive]` enum.
+    ///
+    /// A slice, not a fixed-length array, precisely because the enum is `#[non_exhaustive]`:
+    /// appending a carrier would change an array constant's *type*, breaking every caller who
+    /// named it, which is the opposite of what `#[non_exhaustive]` promises.
+    pub const ALL: &'static [Self] = &[Self::Exif, Self::Xmp, Self::Icc, Self::IptcIim, Self::C2pa];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn carrier_discriminants_are_the_documented_append_only_values() {
+        // The `repr(u8)` values are a public contract (C ABI); pin them so a reorder is a failure.
+        // Collected rather than `map`ped over an array: `ALL` is a slice, so its length is part of
+        // what this compares, and an appended variant without its discriminant fails here.
+        assert_eq!(
+            Carrier::ALL.iter().map(|&c| c as u8).collect::<Vec<_>>(),
+            (0..5).collect::<Vec<u8>>()
+        );
+    }
 }

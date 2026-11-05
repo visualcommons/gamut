@@ -63,7 +63,7 @@ pub struct Metadata {
     /// §11.1.4.2) — if present.
     ///
     /// Opaque: the facade never parses, validates, or signs it. Extraction fills this field from a
-    /// [`MetadataBlock::C2pa`], but [`encode`](Self::encode) **never** emits it — a manifest's hard
+    /// [`MetadataBlock::C2pa`], but [`to_blocks`](Self::to_blocks) **never** emits it — a manifest's hard
     /// binding digests the finished file (C2PA 2.4 §9.1, §15.12.1.1), so copying a store into a
     /// rewritten file publishes a signature over bytes that no longer exist. See
     /// [`C2paPolicy`](crate::C2paPolicy) to be told rather than have it dropped quietly.
@@ -78,7 +78,7 @@ pub struct Metadata {
     pub c2pa: Option<Vec<u8>>,
     /// Data none of the carriers above models, in namespaces the caller owns.
     ///
-    /// **Never serialized** — [`encode`](Self::encode) drops these (see
+    /// **Never serialized** — [`to_blocks`](Self::to_blocks) drops these (see
     /// [`ExtensionPolicy`](crate::ExtensionPolicy)) and extraction never produces them. Order is
     /// preserved; a `(namespace, key)` pair appears at most once when maintained through
     /// [`set_extension`](Self::set_extension).
@@ -110,12 +110,13 @@ impl Metadata {
 
     /// Extracts a unified model from already-located container metadata blocks, using default
     /// options. A convenience for [`MetadataExtractor::new().extract(blocks)`](MetadataExtractor::extract);
-    /// use [`MetadataExtractor`] directly to choose an IPTC [`ConflictPolicy`](crate::ConflictPolicy).
+    /// use [`MetadataExtractor`] directly to choose an IPTC
+    /// [`ConflictPolicy`](gamut_iptc::ConflictPolicy).
     ///
     /// # Errors
     ///
     /// As [`MetadataExtractor::extract`].
-    pub fn from_blocks(blocks: &[MetadataBlock<'_>]) -> Result<Self> {
+    pub fn parse_blocks(blocks: &[MetadataBlock<'_>]) -> Result<Self> {
         MetadataExtractor::new().extract(blocks)
     }
 
@@ -126,7 +127,7 @@ impl Metadata {
     /// # Errors
     ///
     /// As [`MetadataEmbedder::embed`].
-    pub fn encode(&self) -> Result<EncodedMetadata> {
+    pub fn to_blocks(&self) -> Result<EncodedMetadata> {
         MetadataEmbedder::new().embed(self)
     }
 
@@ -157,7 +158,7 @@ impl Metadata {
     /// non-simple value (an array or structure) is ignored. Should a non-canonical graph carry
     /// the property twice, the first occurrence wins, as [`XmpMeta::get`] defines. The HTTP `Link`
     /// header route of §15.5.3.2 is deliberately not modelled: see the
-    /// [`provenance`](crate::provenance) module.
+    /// [`ProvenanceState`] docs.
     #[must_use]
     pub fn provenance(&self) -> ProvenanceState {
         let remote = self

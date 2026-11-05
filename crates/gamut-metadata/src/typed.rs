@@ -32,7 +32,7 @@
 //! construction rather than per crate. [`blocks`](TypedMetadata::blocks) is fallible because
 //! *locating* a payload can fail in a container that resolves it lazily — an ISOBMFF item is an
 //! extent and an offset, not bytes — and that failure is
-//! [`MetadataError::Container`](crate::MetadataError::Container), carrying the format crate's own
+//! [`MetadataError::Core`](crate::MetadataError::Core), carrying the format crate's own
 //! [`gamut_core::Error`]. A crate whose payloads are already bytes simply never returns it; the
 //! `?` it costs a caller there is the price of one signature for every format, which is what lets
 //! the trait be used as `dyn TypedMetadata` at all.
@@ -45,15 +45,15 @@ use crate::source::MetadataBlock;
 ///
 /// Object-safe: a caller may hold any wired format's metadata as `&dyn TypedMetadata`. Implement
 /// [`blocks`](Self::blocks); [`metadata`](Self::metadata) defaults to
-/// [`Metadata::from_blocks`] over it, and is overridden only by a type that holds a carrier as an
+/// [`Metadata::parse_blocks`] over it, and is overridden only by a type that holds a carrier as an
 /// already-typed model rather than as bytes (as `gamut-dng`'s `DngMetadata` holds its EXIF
 /// sub-IFD).
 pub trait TypedMetadata {
     /// The located payloads as [`MetadataBlock`]s — already normalised to the boundaries
     /// [`MetadataBlock`] documents (an EXIF block is the bare TIFF stream, an ICC block the
-    /// reassembled profile) — ready for [`Metadata::from_blocks`] or a
+    /// reassembled profile) — ready for [`Metadata::parse_blocks`] or a
     /// [`MetadataExtractor`](crate::MetadataExtractor) with a chosen
-    /// [`ConflictPolicy`](crate::ConflictPolicy). Each carrier appears only when the file holds
+    /// [`ConflictPolicy`](crate::iptc::ConflictPolicy). Each carrier appears only when the file holds
     /// it.
     ///
     /// The one exception is a carrier the type holds as an already-typed model rather than as
@@ -67,19 +67,19 @@ pub trait TypedMetadata {
     ///
     /// # Errors
     ///
-    /// Returns [`MetadataError::Container`](crate::MetadataError::Container) when the container
+    /// Returns [`MetadataError::Core`](crate::MetadataError::Core) when the container
     /// holds a carrier whose payload cannot be located; no carrier is parsed here.
     fn blocks(&self) -> Result<Vec<MetadataBlock<'_>>>;
 
     /// Parses the located payloads into the unified [`Metadata`] model. The default is
-    /// [`Metadata::from_blocks`] over [`blocks`](Self::blocks).
+    /// [`Metadata::parse_blocks`] over [`blocks`](Self::blocks).
     ///
     /// # Errors
     ///
     /// Returns whatever [`blocks`](Self::blocks) returns, then the
     /// [`MetadataError`](crate::MetadataError) naming the carrier whose parse failed.
     fn metadata(&self) -> Result<Metadata> {
-        Metadata::from_blocks(&self.blocks()?)
+        Metadata::parse_blocks(&self.blocks()?)
     }
 }
 
@@ -112,8 +112,8 @@ mod tests {
     #[test]
     fn default_metadata_propagates_a_container_failure() {
         let err = Fixed(Err("unlocatable")).metadata().unwrap_err();
-        let MetadataError::Container(inner) = err else {
-            panic!("expected Container, got {err:?}");
+        let MetadataError::Core(inner) = err else {
+            panic!("expected Core, got {err:?}");
         };
         assert_eq!(inner.static_message(), Some("unlocatable"));
     }

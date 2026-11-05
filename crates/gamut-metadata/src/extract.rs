@@ -21,7 +21,8 @@ use crate::source::MetadataBlock;
 /// Configure it fluently, then call [`extract`](Self::extract):
 ///
 /// ```no_run
-/// use gamut_metadata::{ConflictPolicy, MetadataBlock, MetadataExtractor};
+/// use gamut_metadata::iptc::ConflictPolicy;
+/// use gamut_metadata::{MetadataBlock, MetadataExtractor};
 ///
 /// # fn demo(exif: &[u8], xmp: &[u8]) -> Result<(), gamut_metadata::MetadataError> {
 /// let meta = MetadataExtractor::new()

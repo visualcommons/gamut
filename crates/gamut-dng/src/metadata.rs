@@ -7,7 +7,7 @@
 //! single opaque payloads in the file, so they are carried verbatim as the byte blocks the
 //! facade consumes — the same shape `gamut-png` and `gamut-webp` hand over — and
 //! [`DngMetadata::blocks`] presents them as [`MetadataBlock`]s ready for
-//! [`gamut_metadata::Metadata::from_blocks`].
+//! [`gamut_metadata::Metadata::parse_blocks`].
 //!
 //! The C2PA store is the one carrier with a placement rule of its own (C2PA 2.4 §A.3.6: the
 //! last main IFD, at the end of the file) and a signer's exclusion contract (§18.5.5); both are
@@ -65,7 +65,7 @@ pub struct DngMetadata {
     ///
     /// Kept as its own carrier rather than folded into [`xmp`](Self::xmp): IIM is a genuinely
     /// separate serialization that DNG files really do hold, and reconciling it into an XMP graph
-    /// is a policy decision (see [`gamut_metadata::ConflictPolicy`]) that belongs to the caller,
+    /// is a policy decision (see [`gamut_metadata::iptc::ConflictPolicy`]) that belongs to the caller,
     /// not to the container. [`blocks`](Self::blocks) hands it over for exactly that.
     pub iptc: Option<Vec<u8>>,
     /// An ICC profile, stored in the `ICCProfile` tag (34675), verbatim.
@@ -129,9 +129,9 @@ impl TypedMetadata for DngMetadata {
         Ok(blocks)
     }
 
-    /// The unified model: [`Metadata::from_blocks`] over [`blocks`](TypedMetadata::blocks) (the
+    /// The unified model: [`Metadata::parse_blocks`] over [`blocks`](TypedMetadata::blocks) (the
     /// IPTC-IIM block reconciled into the XMP graph under the default
-    /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy)), with [`exif`](DngMetadata::exif)
+    /// [`ConflictPolicy`](gamut_metadata::iptc::ConflictPolicy)), with [`exif`](DngMetadata::exif)
     /// assigned onto [`Metadata::exif`].
     ///
     /// # Errors
@@ -139,7 +139,7 @@ impl TypedMetadata for DngMetadata {
     /// The [`MetadataError`](gamut_metadata::MetadataError) naming the byte carrier whose parse
     /// failed.
     fn metadata(&self) -> gamut_metadata::Result<Metadata> {
-        let mut unified = Metadata::from_blocks(&self.blocks()?)?;
+        let mut unified = Metadata::parse_blocks(&self.blocks()?)?;
         unified.exif.clone_from(&self.exif);
         Ok(unified)
     }

@@ -292,7 +292,7 @@ impl HeifImage {
 
 /// The facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over the primary item's
 /// located payloads; [`metadata`](gamut_metadata::TypedMetadata::metadata) is the trait's default,
-/// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
+/// [`Metadata::parse_blocks`](gamut_metadata::Metadata::parse_blocks) over
 /// [`blocks`](gamut_metadata::TypedMetadata::blocks), so a payload that is located but does not
 /// parse is the facade's [`MetadataError`](gamut_metadata::MetadataError) naming the carrier.
 ///
@@ -313,7 +313,7 @@ impl gamut_metadata::TypedMetadata for HeifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`MetadataError::Container`](gamut_metadata::MetadataError::Container) carrying
+    /// Returns [`MetadataError::Core`](gamut_metadata::MetadataError::Core) carrying
     /// this crate's [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
     /// Exif item's payload is malformed — shorter than its 4-byte `exif_tiff_header_offset`, or
     /// with the offset past the payload's end — and carrying an

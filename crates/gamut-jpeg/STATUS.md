@@ -63,7 +63,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   dependency on `gamut-metadata`): `JpegMetadata` implements the facade's `TypedMetadata` trait
   (#628) — `blocks` (EXIF = the TIFF stream, `Exif\0\0` stripped; XMP = the `xpacket`; ICC = the
   reassembled profile; never `Err`, but fallible by the trait's shared signature) and `metadata`
-  (`Metadata::from_blocks`), both returning `gamut_metadata::MetadataError`;
+  (`Metadata::parse_blocks`), both returning `gamut_metadata::MetadataError`;
   `JpegEncoder::with_metadata(&Metadata)` (default `MetadataEmbedder`) and
   `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies), routing each carrier to the
   raw setter above. IPTC-IIM and C2PA blocks are typed `Unsupported` on the encoder (no APP13 /

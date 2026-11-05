@@ -3382,9 +3382,9 @@ mod typed {
                 tags: Vec::new(),
             };
             let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
-                .encode()
+                .to_blocks()
                 .unwrap();
-            Metadata::from_blocks(&[
+            Metadata::parse_blocks(&[
                 MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
                 MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
                 MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
@@ -3430,7 +3430,7 @@ mod typed {
             );
             assert_eq!(
                 exiv2_oracle::image_icc(&file).unwrap(),
-                typed.encode().unwrap().icc
+                typed.to_blocks().unwrap().icc
             );
         }
 
@@ -3449,7 +3449,7 @@ mod typed {
         fn encoded_blocks_route_to_the_raw_setters() {
             // Each present field lands in its item / property / box — the EXIF one without the
             // facade's signature — and an absent one leaves an earlier setting.
-            let encoded = typed().encode().unwrap();
+            let encoded = typed().to_blocks().unwrap();
             let file = encode(
                 &AvifEncoder::lossless()
                     .with_encoded_metadata(&encoded)
@@ -3590,7 +3590,7 @@ mod typed {
                 err.static_message(),
                 Some("AVIF: metadata does not serialize")
             );
-            assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+            assert_eq!(err.detail(), Some("icc: duplicate tag signature"));
         }
     }
 }

@@ -706,7 +706,7 @@ mod tests {
             err.static_message(),
             Some("JXL: metadata does not serialize")
         );
-        assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+        assert_eq!(err.detail(), Some("icc: duplicate tag signature"));
     }
 
     #[cfg(feature = "metadata")]

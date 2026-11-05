@@ -28,6 +28,13 @@ struct ReadmeDoctests;
 /// can differ from the version of the binary or consumer that links it.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Which metadata carrier each gamut format crate can locate or write. Here rather than in
+/// `gamut-metadata` because it is a table over the format crates, and the umbrella is the crate
+/// that holds that list; behind the `metadata` feature because it speaks the facade's
+/// [`Carrier`](metadata::Carrier).
+#[cfg(feature = "metadata")]
+pub mod capability;
+
 #[cfg(feature = "av1")]
 pub use gamut_av1 as av1;
 #[cfg(feature = "av2")]

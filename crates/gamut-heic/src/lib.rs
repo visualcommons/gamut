@@ -94,7 +94,7 @@
 //! same payloads are wired to the `gamut-metadata` facade's typed models through its
 //! `TypedMetadata` trait: [`HeifImage::blocks`] hands them over as `MetadataBlock`s and
 //! [`HeifImage::metadata`] parses them into a unified `Metadata`, both reporting the facade's
-//! `MetadataError` (a payload that cannot be located is `MetadataError::Container`, carrying this
+//! `MetadataError` (a payload that cannot be located is `MetadataError::Core`, carrying this
 //! crate's [`Error`](gamut_core::Error)). A C2PA manifest store lives outside the item model, in a
 //! top-level `uuid` box; [`HeifContainer::c2pa`] locates it. The dependency direction stays
 //! `gamut-heic → gamut-metadata`.

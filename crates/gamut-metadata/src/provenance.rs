@@ -1,38 +1,22 @@
 //! Where an image's C2PA provenance lives — embedded in the file, at a remote URL, both, or
-//! nowhere.
-//!
-//! C2PA 2.4 gives a still image two independent ways to carry provenance. The manifest store can be
-//! **embedded** in the file (§11.1.4.2; the facade holds it verbatim in
-//! [`Metadata::c2pa`](crate::Metadata::c2pa)), or it can be **external**, in which case §11.5
-//! recommends the claim generator add a `dcterms:provenance` key to the asset's XMP whose value —
-//! "a URI reference" — says where to find it. §11.5 is explicit that the mechanism is *only* for
-//! external manifests; §15.5.3.1 lists the key among the places a validator looks when no store is
-//! embedded. The two sources are independent bytes in the file, so a file may carry both, and the
-//! lens reports both rather than letting one hide the other — what a validator then does with the
-//! pair is the spec's business (§15.5.2.1 / §15.5.3.1: it uses the embedded store and does not
-//! consult the URL), not this crate's.
-//!
-//! [`ProvenanceState`] is the facade's answer to "does this image have Content Credentials, and
-//! where?" — four states, never collapsed to a boolean, so a file with no embedded store and a
-//! remote URL reports [`Remote`](ProvenanceState::Remote) rather than a confident
-//! [`None`](ProvenanceState::None). It is a *lens* computed by
-//! [`Metadata::provenance`](crate::Metadata::provenance), not stored state.
-//!
-//! # What gamut does not do
-//!
-//! - **It never fetches the URL.** Resolving it, and judging whatever it points at, is a
-//!   validator's job and a network operation; the workspace ships neither (see
-//!   `references/c2pa/README.md`). The URL is handed over as the string the XMP carried, with
-//!   surrounding whitespace trimmed and nothing else changed; a value that is empty or only
-//!   whitespace counts as no URL.
-//! - **The HTTP `Link` header route is out of scope.** §15.5.3.2 defines an HTTP `Link` relation
-//!   that carries the same pointer for an asset served over HTTP. A header is a property of a
-//!   *transfer*, not of the file's bytes, so a file-format library cannot observe it; a caller that
-//!   fetched the asset itself holds the header and may consult it before this lens. This is a
-//!   deliberate boundary, not an omission.
+//! nowhere: [`ProvenanceState`].
 
 /// Where the C2PA manifest store that vouches for an image lives, as far as the image's own
 /// metadata says.
+///
+/// C2PA 2.4 gives a still image two independent ways to carry provenance. The manifest store can be
+/// **embedded** in the file (§11.1.4.2; the facade holds it verbatim in
+/// [`Metadata::c2pa`](crate::Metadata::c2pa)), or it can be **external**, in which case §11.5
+/// recommends the claim generator add a `dcterms:provenance` key to the asset's XMP whose value —
+/// "a URI reference" — says where to find it. §11.5 is explicit that the mechanism is *only* for
+/// external manifests; §15.5.3.1 lists the key among the places a validator looks when no store is
+/// embedded. What a validator then does with the pair is the spec's business (§15.5.2.1 /
+/// §15.5.3.1: it uses the embedded store and does not consult the URL), not this crate's.
+///
+/// This type is the facade's answer to "does this image have Content Credentials, and where?" —
+/// never collapsed to a boolean, so a file with no embedded store and a remote URL reports
+/// [`Remote`](Self::Remote) rather than a confident [`None`](Self::None). It is a *lens* computed
+/// by [`Metadata::provenance`](crate::Metadata::provenance), not stored state.
 ///
 /// Returned by [`Metadata::provenance`](crate::Metadata::provenance), which combines two
 /// independent sources: whether the container located an embedded store
@@ -45,9 +29,19 @@
 ///
 /// The remote URL is carried as the string the XMP held, with surrounding whitespace trimmed and
 /// otherwise verbatim; an empty or whitespace-only value counts as no URL. **gamut never resolves
-/// it**; see the
-/// [module docs](self) for why, and for the HTTP `Link` header route this type deliberately does
-/// not model.
+/// it**; see [below](#what-gamut-does-not-do) for why, and for the HTTP `Link` header route this
+/// type deliberately does not model.
+///
+/// # What gamut does not do
+///
+/// - **It never fetches the URL.** Resolving it, and judging whatever it points at, is a
+///   validator's job and a network operation; the workspace ships neither (see
+///   `references/c2pa/README.md`).
+/// - **The HTTP `Link` header route is out of scope.** §15.5.3.2 defines an HTTP `Link` relation
+///   that carries the same pointer for an asset served over HTTP. A header is a property of a
+///   *transfer*, not of the file's bytes, so a file-format library cannot observe it; a caller that
+///   fetched the asset itself holds the header and may consult it before this lens. This is a
+///   deliberate boundary, not an omission.
 ///
 /// Marked `#[non_exhaustive]` so a further provenance source can be added without a breaking
 /// change; match with a wildcard arm, or use [`is_embedded`](Self::is_embedded) and
@@ -60,7 +54,8 @@
 pub enum ProvenanceState {
     /// No embedded manifest store and no `dcterms:provenance` URL. This is what the metadata
     /// says, not a validity verdict — the asset may still carry provenance by a route the file
-    /// cannot express (see the [module docs](self) on the HTTP `Link` header).
+    /// cannot express (see [*What gamut does not do*](Self#what-gamut-does-not-do) on the HTTP
+    /// `Link` header).
     None,
     /// No embedded store; the XMP points at an external manifest at this URL (C2PA 2.4 §11.5).
     /// The string is the `dcterms:provenance` value with surrounding whitespace trimmed,

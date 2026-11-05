@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::{Args, ValueEnum};
 use gamut::avif::{AvifEncodeReport, AvifEncoder, Speed as AvifSpeed};
+use gamut::capability::{Direction, Format as MetadataFormat, supports};
 use gamut::color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
 use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut::exif::{Exif, ExifTag, ExifWriter, IfdKind, Value as ExifValue};
@@ -16,8 +17,7 @@ use gamut::jxl::{
     ColorSpec as JxlColorSpec, Container as JxlContainer, Distance as JxlDistance,
     Effort as JxlEffort, JxlEncoder, ModularMode as JxlModularMode, Orientation as JxlOrientation,
 };
-use gamut::metadata::EncodedMetadata;
-use gamut::metadata::capability::{Carrier, Direction, Format as MetadataFormat, supports};
+use gamut::metadata::{Carrier, EncodedMetadata};
 use gamut::png::{PngEncoder, PngMetadata, Preset as PngCodecPreset};
 use gamut::tiff::{Compression as TiffCompression, IFD0_EXIF_TAGS, TiffEncoder};
 use gamut::webp::{Effort as WebpEffort, NearLossless as WebpNearLossless, WebpEncoder};
@@ -370,7 +370,7 @@ impl OutputFormat {
         }
     }
 
-    /// The format as `gamut-metadata`'s capability table names it, which decides what metadata an
+    /// The format as `gamut::capability` table names it, which decides what metadata an
     /// output of this format can hold.
     fn container(self) -> MetadataFormat {
         match self {
@@ -1074,7 +1074,7 @@ struct Carried {
 /// `None` when the encoder fits its colour type to the profile itself, as a PNG input re-encoded to
 /// PNG does — reporting on stderr everything left behind.
 ///
-/// What the output can hold is `gamut-metadata`'s capability table, not a judgement made here, so
+/// What the output can hold is `gamut::capability` table, not a judgement made here, so
 /// no output arm is handed a carrier the table says its format cannot write. Beyond that table:
 ///
 /// - a **C2PA manifest store** is never carried, into any format: its hard binding covers the

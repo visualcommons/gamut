@@ -49,7 +49,7 @@ fn gamut_provenance(asset: &[u8]) -> ProvenanceState {
     .into_iter()
     .flatten()
     .collect();
-    Metadata::from_blocks(&blocks)
+    Metadata::parse_blocks(&blocks)
         .expect("the facade reads the located blocks")
         .provenance()
 }

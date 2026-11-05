@@ -53,8 +53,9 @@ mutual-inverse or consistency law over the pair — an encoder and its decoder a
 "the encoder's reconstruction equals the decoder's output, bit-for-bit" has no narrower home. Name
 it for the law, not for either module.
 
-`crates/gamut/tests/` is **mutation-invisible** (`test_workspace = false`, and `crates/gamut/**` is
-in `exclude_globs`). Nothing may be pinned *only* there **by choice**. A test the third linkage
+`crates/gamut/tests/` is **mutation-invisible** for every other crate (`test_workspace = false`:
+a mutant in a format crate runs that crate's tests only; the umbrella's own mutants — its
+`capability` table — are the only ones these tests see). Nothing may be pinned *only* there **by choice**. A test the third linkage
 cause forces to the umbrella is the exception, and it carries the cost explicitly: it names the
 crate-level test that pins the same behaviour, or its module doc states that the behaviour is
 accepted as mutation-invisible and why.

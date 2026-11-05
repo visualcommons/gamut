@@ -1940,9 +1940,9 @@ pub(crate) mod typed {
             Ok(blocks)
         }
 
-        /// The unified model: [`Metadata::from_blocks`] over [`blocks`](TypedMetadata::blocks)
+        /// The unified model: [`Metadata::parse_blocks`] over [`blocks`](TypedMetadata::blocks)
         /// (the IPTC-IIM block reconciled into the XMP graph under the default
-        /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy)), with the Exif carriers —
+        /// [`ConflictPolicy`](gamut_metadata::iptc::ConflictPolicy)), with the Exif carriers —
         /// [`ifd0`](TiffMetadata::ifd0), [`exif`](TiffMetadata::exif) and
         /// [`gps`](TiffMetadata::gps) — assigned onto [`Metadata::exif`] as one model whose 0th
         /// IFD, Exif sub-IFD and GPS sub-IFD they are, in
@@ -1954,7 +1954,7 @@ pub(crate) mod typed {
         /// The [`MetadataError`](gamut_metadata::MetadataError) naming the byte carrier whose
         /// parse failed.
         fn metadata(&self) -> gamut_metadata::Result<Metadata> {
-            let mut unified = Metadata::from_blocks(&self.blocks()?)?;
+            let mut unified = Metadata::parse_blocks(&self.blocks()?)?;
             unified.exif = exif_model(
                 self,
                 self.exif_byte_order.unwrap_or(ByteOrder::LittleEndian),

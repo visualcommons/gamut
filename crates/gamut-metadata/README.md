@@ -21,7 +21,7 @@ extract/embed surface.
   serialization to them; the leaf crates own correctness (and their own oracle test suites).
 - **Cross-format reconciliation.** The two IPTC carriers — legacy IIM and IPTC-Core-in-XMP — are
   merged into the single XMP graph via `gamut-iptc`, resolving disagreements with a configurable
-  `ConflictPolicy` (`conflicts()` reports them without resolving). Because each datum is stored once,
+  `iptc::ConflictPolicy` (`conflicts()` reports them without resolving). Because each datum is stored once,
   the extract → embed → extract round-trip is a **true equality** — with one documented exception,
   `c2pa`, below.
 - **Extensions are not a carrier.** `Metadata::extensions` is a namespaced table for data no
@@ -61,7 +61,7 @@ let mut meta = Metadata::default();
 meta.set_extension("com.example.raw", "WhiteLevel", Value::Long(vec![16_383]));
 
 // Embedding cannot carry it: dropped by default, or refused when losing it must be an error.
-let blocks = meta.encode()?;                       // no block corresponds to the extension
+let blocks = meta.to_blocks()?;                       // no block corresponds to the extension
 let strict = MetadataEmbedder::new()
     .extension_policy(ExtensionPolicy::Reject)
     .embed(&meta);                                  // Err(MetadataError::UnembeddableExtension { .. })
@@ -98,10 +98,10 @@ use gamut_metadata::{C2paPolicy, Metadata, MetadataBlock, MetadataEmbedder};
 
 # fn demo(manifest_store: &[u8]) -> gamut_metadata::Result<()> {
 // A container located a manifest store; extraction carries the bytes through untouched.
-let meta = Metadata::from_blocks(&[MetadataBlock::C2pa(manifest_store)])?;
+let meta = Metadata::parse_blocks(&[MetadataBlock::C2pa(manifest_store)])?;
 assert_eq!(meta.c2pa.as_deref(), Some(manifest_store));
 
-let blocks = meta.encode()?;
+let blocks = meta.to_blocks()?;
 assert_eq!(blocks.c2pa, None);                      // dropped by default...
 let strict = MetadataEmbedder::new()
     .c2pa_policy(C2paPolicy::Reject)
@@ -150,7 +150,7 @@ validity verdict and does not choose between the two sources.
 use gamut_metadata::{Metadata, MetadataBlock, ProvenanceState};
 
 # fn demo(xmp_payload: &[u8]) -> gamut_metadata::Result<()> {
-let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(xmp_payload)])?;
+let meta = Metadata::parse_blocks(&[MetadataBlock::Xmp(xmp_payload)])?;
 match meta.provenance() {
     ProvenanceState::Remote(url) => println!("external manifest at {url}"), // not fetched
     ProvenanceState::Embedded => println!("manifest store embedded"),
@@ -172,7 +172,8 @@ consult it before this lens.
 ## Usage
 
 ```rust
-use gamut_metadata::{ConflictPolicy, MetadataBlock, MetadataExtractor};
+use gamut_metadata::iptc::ConflictPolicy;
+use gamut_metadata::{MetadataBlock, MetadataExtractor};
 
 # fn demo(
 #     exif_payload: &[u8],
@@ -198,7 +199,7 @@ if let Some(iptc) = meta.iptc() {
 }
 
 // Serialize back to per-carrier blocks for a container to embed.
-let blocks = meta.encode()?;
+let blocks = meta.to_blocks()?;
 // blocks.exif / blocks.xmp / blocks.icc are Some(Vec<u8>) when their field was present.
 # let _ = blocks;
 # Ok(())
@@ -207,6 +208,15 @@ let blocks = meta.encode()?;
 
 The umbrella [`gamut`](../gamut) crate re-exports this crate as `gamut::metadata` behind its
 `metadata` feature.
+
+## Migrating from 2.x
+
+- `Metadata::from_blocks` / `Metadata::encode` are `Metadata::parse_blocks` / `Metadata::to_blocks`.
+- `MetadataError::Container` is `MetadataError::Core`, and every variant's `Display` is now the
+  wrapped error's own (no `EXIF: ` / `XMP: ` / `ICC: ` / `IPTC: ` / `container: ` prefix in front).
+- The modules are private; every item is at the crate root. `ConflictPolicy` / `FieldConflict` are
+  reached as `iptc::ConflictPolicy` / `iptc::FieldConflict`.
+- `capability` moved to the umbrella as `gamut::capability`; `Carrier` stays here, at the root.
 
 ## Migrating from 1.x
 
@@ -228,52 +238,13 @@ Use `Metadata::default()` plus field assignment when you also need `extensions`,
 arm to any exhaustive `match` on `MetadataBlock`. Nothing else changed: every existing method keeps
 its signature and behaviour.
 
-## Capability query
+## Which formats carry what
 
-The facade never parses a container, so it cannot say whether a *file* carries metadata. What it
-can say — statically, from a crate that depends on no format crate — is whether gamut's crate for a
-format can **locate** or **write** a given carrier at all. `gamut_metadata::capability` is that
-table, per (format × carrier × direction), transcribed from each crate's `STATUS.md` with the row
-cited on every cell:
-
-| Format | EXIF | XMP | ICC | IPTC-IIM | C2PA | typed wiring |
-| --- | --- | --- | --- | --- | --- | --- |
-| JPEG | r/w | r/w | r/w | — | — | ✅ (`metadata` feature) |
-| PNG | r/w | r/w | r/w | — | r | ✅ (`metadata` feature) |
-| WebP | r/w | r/w | r/w | — | r | ✅ (`metadata` feature) |
-| AVIF | r/w | r/w | r/w | — | r | ✅ (`metadata` feature) |
-| HEIC | r | r | r | — | r | ✅ (`metadata` feature) |
-| JPEG XL | r/w | r/w | r/w | — | — | ✅ (`metadata` feature) |
-| TIFF | r/w | r/w | r/w | r/w | r | ✅ (`metadata` feature) |
-| DNG | r/w | r/w | r/w | r/w | r | ✅ |
-
-```rust
-use gamut_metadata::capability::{Carrier, Direction, Format, supports, typed_wiring};
-
-assert!(supports(Format::Jpeg, Carrier::Exif, Direction::Write));
-assert!(!supports(Format::Heic, Carrier::Exif, Direction::Write)); // decode-only crate
-assert!(typed_wiring(Format::Png));    // `blocks()` / `metadata()` / an encoder builder exist there
-```
-
-`supports` describes the crate's **raw** surface — its byte-level `metadata()` / `with_*` API;
-`typed_wiring` says whether it also exposes this crate's models directly. C2PA is read-only
-everywhere by construction — no embedder copies a manifest store forward (see above).
-
-Both describe the surface a crate **defines**, not the surface a particular build compiled: a
-`const` table sees neither another crate's Cargo features nor the target. Two places where that
-gap is real, and both are in the table's own docs. `gamut-jxl` gates its reader on its `decode`
-feature and its encoder on `encode`, so a build with `default-features = false, features =
-["encode"]` has no reader while the table still says `r`. And typed wiring reaches three of the
-four wired crates through an optional `metadata` feature of their own (`gamut-jpeg`, `gamut-jxl`,
-`gamut-heic`, each off by default and each forwarded weakly by the `gamut` umbrella) — but
-**`gamut-dng` has no such feature**: it depends on this crate unconditionally, so `gamut-dng/metadata`
-is not something a manifest can ask for.
-
-The enums are `#[repr(u8)]` with append-only discriminants. `Format` and `Carrier` are
-`#[non_exhaustive]` and carry their `ALL` constants as **slices** rather than fixed-length arrays,
-so appending a variant does not change a constant's type under a caller who named it; `Direction`
-is exhaustive and keeps an array. The audio/video half of the same question is outside an
-image-first workspace and stays with issue #216.
+This crate names no format crate, so the table of which gamut format crate locates or writes which
+`Carrier` lives with the set of format crates: the `gamut` umbrella's `capability` module
+(`gamut::capability`, behind its `metadata` feature). `Carrier` itself — one variant per
+`MetadataBlock` kind, `#[repr(u8)]` with append-only discriminants and an `ALL` slice — is defined
+here, because `MetadataSink` states its writable carriers in it.
 
 ## Consumer integration
 
@@ -282,15 +253,20 @@ crate wires the facade in behind an optional `metadata` Cargo feature (a normal,
 dependency — release ordering follows it): its decoded metadata type implements the object-safe
 `TypedMetadata` trait — `blocks()` (the located payloads as `MetadataBlock`s, e.g. a JPEG's EXIF
 with the `Exif\0\0` signature already stripped, an ISOBMFF `Exif` item with its
-`exif_tiff_header_offset` already applied) and `metadata()` (by default `Metadata::from_blocks`
+`exif_tiff_header_offset` already applied) and `metadata()` (by default `Metadata::parse_blocks`
 over them). Both are fallible and both return `MetadataError` in every crate, so one function
 written over `&dyn TypedMetadata` serves every wired format; a payload the container cannot
-locate (HEIC's lazily resolved items) is `MetadataError::Container`, carrying the format crate's
-own `gamut_core::Error`. Its encoder gains `with_metadata(&Metadata)` — embedding
-through `MetadataEmbedder::new()` and routing each `EncodedMetadata` field to the crate's raw
-setter — plus `with_encoded_metadata(&EncodedMetadata)` for a caller who chose the embedder's
-policies. A carrier the container cannot write is a typed `Unsupported` error there, never a silent
-drop, and a manifest store is never copied forward.
+locate (HEIC's lazily resolved items) is `MetadataError::Core`, carrying the format crate's
+own `gamut_core::Error`.
+
+Its encoder implements `MetadataSink`: the raw carrier setters (`write_exif`, `write_xmp`,
+`write_icc`, and `write_iptc_iim` where the format has a carrier for it) plus `CARRIERS`, the
+`Carrier`s it writes. The trait provides `with_metadata(&Metadata)` — embedding through
+`MetadataEmbedder::new()` — and `with_encoded_metadata(&EncodedMetadata)` for a caller who chose
+the embedder's policies, both returning `gamut_core::Result` (`MetadataError` converts into
+`gamut_core::Error`). The precedence below is implemented once, in those provided methods: a
+present carrier the encoder does not write is a typed `Unsupported` error before any setter runs,
+never a silent drop, and a manifest store is never copied forward.
 
 **Precedence.** A carrier absent from the model leaves whatever the caller set earlier untouched;
 a carrier *present* in the model overwrites it, because the routing is the raw setter. That is
@@ -305,8 +281,9 @@ encoding follows the same rule.
 
 Wired today: every format crate — `gamut-dng` (its `DngMetadata` holds the facade's `Exif` by
 value), and behind a `metadata` feature `gamut-jpeg`, `gamut-png`, `gamut-webp`, `gamut-avif`,
-`gamut-heic` (decode-only), `gamut-jxl` and `gamut-tiff`. Every encoding crate spells the builder
-`with_metadata`; `gamut-png` and `gamut-tiff` name the builder carrying their own whole metadata
+`gamut-heic` (decode-only), `gamut-jxl` and `gamut-tiff`. Each encoding crate still carries its own
+`with_metadata` body until it adopts `MetadataSink` in its own change. Every encoding crate spells
+the builder `with_metadata`; `gamut-png` and `gamut-tiff` name the builder carrying their own whole metadata
 type apart from it (`with_png_metadata`, `with_tiff_metadata`).
 
 ## License

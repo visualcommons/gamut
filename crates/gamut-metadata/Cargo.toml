@@ -16,8 +16,9 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-# Only for `MetadataError::Container`: a format crate's locate failure (its `gamut_core::Error`)
-# surfaced through `TypedMetadata::blocks` with its kind and message intact.
+# The workspace error, in both directions: `MetadataError::Core` carries a format crate's locate
+# failure through `TypedMetadata::blocks` intact, `From<MetadataError> for gamut_core::Error`
+# funnels the facade's errors out, and `MetadataSink` speaks `gamut_core::Result` to encoders.
 gamut-core.workspace = true
 gamut-exif.workspace = true
 gamut-xmp.workspace = true
