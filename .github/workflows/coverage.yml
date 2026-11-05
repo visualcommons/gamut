@@ -1,0 +1,193 @@
+name: Coverage
+
+# The workspace's test gate: `cargo llvm-cov` runs the whole suite instrumented, fails on any test
+# failure, and enforces the 80% line floor. It is the only workflow that runs the tests.
+#
+# Not run per pull request (issue #956). The job takes ~2 h, and gamut-av1's oracle sweeps are
+# ~90 min of that. As a PR check it held every merge for that long, and again for every master
+# merge-in. PRs now gate on ci.yml's fast lanes (format and metadata, Clippy, doctests, rustdoc).
+# Tests run here, after the merge, the same way the incremental mutation survey does (#964):
+#
+#   * push to master — once master has been quiet for an hour (`tooling/ci-quiet/run.sh wait`),
+#     at the head it settled on. A newer push cancels the older run's wait through the `quiet`
+#     job's concurrency group, so a burst of merges is verified once, at its end, rather than
+#     queueing one ~2 h run per commit. A failure turns that master commit red.
+#   * nightly and manual — the same wait, capped, so the tree is verified at least daily.
+#   * release PRs (`release-plz-*`) — straight away, no wait: the release PR is where the code
+#     that will be published is re-verified before anyone merges it.
+#
+# Every other pull request gets this workflow's job as `skipped`.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    # Nightly, off the top of the hour that every scheduled workflow on GitHub crowds onto.
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quiet:
+    name: Wait for master to go quiet
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Push runs supersede each other: a newer push cancels this wait, and its own run verifies
+    # the newer head. Scheduled and manual runs get a group of their own so a push cannot cancel
+    # them; they wait at most MAX_WAIT_SECS instead.
+    concurrency:
+      group: coverage-quiet-${{ github.event_name == 'push' && 'push' || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'push' }}
+    # The hour of quiet plus the scheduled runs' four-hour cap, with room for the API calls.
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.wait.outputs.run }}
+      sha: ${{ steps.wait.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: tooling/ci-quiet
+      - name: Wait for an hour without a push to master
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECT_SHA: ${{ github.event_name == 'push' && github.sha || '' }}
+          MAX_WAIT_SECS: ${{ github.event_name == 'push' && '0' || '14400' }}
+        run: tooling/ci-quiet/run.sh wait
+
+  coverage:
+    name: Coverage (test gate)
+    needs: quiet
+    # A release PR runs straight away; master runs only when `quiet` says master settled, at the
+    # head it settled on. `!cancelled()` lets the release-PR case through `quiet` being skipped.
+    if: >-
+      !cancelled() && (
+        (github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-')) ||
+        needs.quiet.outputs.run == 'true'
+      )
+    # On master: one run at a time plus the newest pending, and a running one is never cancelled,
+    # since it may be the only verification a tree gets. A release PR's newer push supersedes it.
+    concurrency:
+      group: coverage-run-${{ github.event_name == 'pull_request' && github.ref || 'master' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    # About 2.5x the job's measured time: 2h11m on PR #961, the run that set this (#960). Not
+    # tighter, because runner speed alone has varied by up to 2.9x: a cold run on the same day
+    # reached the same test 2.9x later. Without it GitHub's 360-minute default was the only bound on
+    # a job that had drifted to 4h31m. Tighten it when the `Level::Best` parse speed-up (#959)
+    # brings the job back down.
+    timeout-minutes: 330
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: false
+      # Same jobs × cores OOM as ci.yml's lint job: this one also builds every C++ oracle
+      # (`--workspace --all-features`), and instrumented builds are heavier still.
+      CARGO_BUILD_JOBS: 2
+      # See the sccache rationale above ci.yml's `jobs:` key.
+      SCCACHE_GHA_ENABLED: "true"
+      CC: sccache gcc
+      CXX: sccache g++
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The head `quiet` found master settled on; a release PR (and a dispatch) its own SHA.
+          ref: ${{ needs.quiet.outputs.sha || github.sha }}
+          submodules: recursive
+      - name: Install system build deps (pkg-config; nasm is vendored, rest via mise)
+        # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
+        # Chrome/Microsoft source on the runner image makes `apt-get update` exit 100, so drop
+        # the entries this project does not consume, then update and install unmasked. Full
+        # rationale, and why classification is per source entry, is in ci.yml.
+        run: |
+          # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          # SC2016: `$0` is awk's, not the shell's; the program is single-quoted so it stays literal.
+          # shellcheck disable=SC2016
+          prune='
+          function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
+          function flush(  i) {
+            if (n == 0) return
+            if (uri == "" || ok(uri)) { for (i = 0; i < n; i++) print s[i]; if (uri != "") keep++ } else drop++
+            n = 0; uri = ""
+          }
+          /^[ \t]*(deb|deb-src)[ \t]/ { flush(); if (ok($0)) { print; keep++ } else drop++; next }
+          /^[ \t]*$/ { flush(); print; next }
+          /^[ \t]*URIs:/ { uri = $0 }
+          { s[n++] = $0 }
+          END { flush(); exit (keep > 0 ? 0 : 10) }'
+          work=$(mktemp -d)
+          ubuntu=0
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            out="$work/$(echo "$f" | tr / _)"
+            rc=0
+            # SC2024: only the read of "$f" needs root; "$out" is our own mktemp file.
+            # shellcheck disable=SC2024
+            sudo awk "$prune" "$f" > "$out" || rc=$?
+            case "$rc" in
+              0) ubuntu=$((ubuntu + 1)) ;;
+              10) ;;
+              *) echo "::error::could not read or classify $f (awk exit $rc); not guessing at it"
+                 exit 1 ;;
+            esac
+            echo "$rc" > "$out.rc"
+          done
+          if [ "$ubuntu" -eq 0 ]; then
+            # Classification recognised nothing as Ubuntu's -- a re-hosted archive, a renamed mirrorlist.
+            # Prune nothing and carry on: that is exactly how this step behaved before the guard existed,
+            # whereas failing here would turn one runner-image change into a total outage across every
+            # job. A genuinely unreachable archive, or a missing package, still fails loudly at the
+            # unmasked `update`/`install` below.
+            echo "::warning::no Ubuntu apt source recognised; standing down and leaving sources as they are"
+          else
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              [ -f "$f" ] || continue
+              out="$work/$(echo "$f" | tr / _)"
+              if [ "$(cat "$out.rc")" = 10 ]; then
+                echo "removing third-party source $f"
+                sudo rm -f "$f"
+              elif sudo cmp -s "$out" "$f"; then
+                echo "keeping $f"
+              else
+                echo "dropping third-party entries from $f"
+                sudo rm -f "$f"
+                sudo cp "$out" "$f"
+              fi
+            done
+          fi
+          sudo apt-get update
+          sudo apt-get install -y pkg-config
+      - uses: jdx/mise-action@v4
+        with:
+          install_args: cmake ninja meson aqua:taiki-e/cargo-llvm-cov
+      # `aom`/`dav1d` are `update = none` in `.gitmodules` (issue #378), so the `recursive`
+      # checkout above deliberately skips them; this job builds the AV1/AVIF oracles, so it
+      # pulls them explicitly. Every other submodule still arrives with the checkout.
+      - name: Fetch the AV1 oracle submodules
+        run: mise run fetch-av1-oracles
+      - name: Clear pre-installed Rust toolchain
+        # Same rustup `bin/cargo-fmt` conflict guard as ci.yml's lint job.
+        run: rustup toolchain uninstall stable || true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+      # This is the workspace's test gate as well as its coverage gate: llvm-cov runs the same
+      # suite `cargo test` would and fails the job on any test failure. The invocation lives in
+      # mise.toml so the exclusion regex and the 80% threshold are not duplicated here.
+      - name: Generate coverage report
+        run: mise run coverage-lcov
+      - name: Generate coverage summary
+        run: cargo llvm-cov report --summary-only
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-report
+          path: lcov.info
