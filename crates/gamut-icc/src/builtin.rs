@@ -44,12 +44,12 @@
 //! code points 4 and 5 are pure gammas ICC.1:2022 §10.18 encodes exactly, yet
 //! `gamut_color::cicp::TransferCharacteristics` models neither. Code points 1, 6, 14 and 15 are
 //! one curve with a closed form §10.18 defines exactly, so this module encodes all four, and
-//! `TransferCharacteristics` models all four too; `gamut_color::transfer::eotf_for` maps each
-//! to the same Table 3 curve this module writes.
+//! `TransferCharacteristics` models all four too; `gamut_color::transfer::standard_eotf_for` maps
+//! each to the same Table 3 curve this module writes.
 //!
 //! ```
 //! use gamut_color::cicp::TransferCharacteristics as Tc;
-//! use gamut_color::transfer::eotf_for;
+//! use gamut_color::transfer::standard_eotf_for;
 //! use gamut_icc::{Cicp, IccProfile};
 //!
 //! // Each of the four BT.709-family code points has a `TransferCharacteristics` variant …
@@ -60,7 +60,7 @@
 //! // … and each evaluates Table 3's curve: V = 0.5 is 0.259719 in light, the value this module
 //! // writes for the same code points (pinned by `bt709_curve_inverts_the_h273_transfer`).
 //! for tc in [Tc::Bt709, Tc::Bt601, Tc::Bt2020_10, Tc::Bt2020_12] {
-//!     let light = eotf_for(tc).expect("BT.709-family code point has an EOTF")(0.5);
+//!     let light = standard_eotf_for(tc).expect("BT.709-family code point has an EOTF")(0.5);
 //!     assert!((light - 0.259_719).abs() < 1e-6);
 //! }
 //! // The display gammas 2.2 and 2.8 have no variant …
@@ -157,7 +157,7 @@
 //!
 //! [`IccProfile::from_source_profile`] stays on the literal reading. No `SourceProfile` bundle
 //! `gamut-color` defines projects onto transfer 1, 6, 14 or 15 today, and one that did would be
-//! read the way `gamut-color`'s own `eotf_for` reads those code points — as the inverse OETF.
+//! read the way `gamut-color`'s own `standard_eotf_for` reads those code points — as the inverse OETF.
 //!
 //! # HDR: the PQ profile is peak-referred
 //!

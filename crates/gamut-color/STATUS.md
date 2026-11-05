@@ -79,7 +79,7 @@ tolerance-level, not bit-for-bit.
   points 1, 6, 14 and 15 — `Bt709`, `Bt601`, `Bt2020_10`, `Bt2020_12`, one curve per Table 3)
   is implemented as `bt709_eotf` / `bt709_oetf`. The display reading H.273 §8.2 NOTE 1 names
   for them, the Rec. ITU-R BT.1886 EOTF, is `bt1886_eotf` at reference
-  black zero only (`V^2.4`, issue #586); `eotf_for` keeps the inverse OETF, and BT.1886's
+  black zero only (`V^2.4`, issue #586); `standard_eotf_for` keeps the inverse OETF, and BT.1886's
   non-zero-black form (`Lb > 0`) is not modelled.
 - **Better chroma resampling** (sharp-YUV-style) — the box filter is the documented baseline.
 - **Bit-reproducible math substrate** — chromahash's `cbrt_halley`/portable-pow tier is

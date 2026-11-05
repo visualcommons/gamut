@@ -545,8 +545,8 @@ on the measurements below; moxcms's equivalent (`allow_use_cicp_transfer`) defau
 analogy was deliberately not followed.
 
 - **Closed forms come from `gamut-color`.** `standard_eotf_for`/`standard_oetf_for` — the
-  standards-pure dispatch whose PQ arm is ST 2084 normalized to its 10 000 cd/m² peak, not
-  `eotf_for`'s encoder-exact SDR tone map — reach code points 1, 6, 8, 13, 14, 15, 16 and 18
+  standards-pure dispatch whose PQ arm is ST 2084 normalized to its 10 000 cd/m² peak (the
+  tone-mapping `eotf_for` beside it was removed in #1066) — reach code points 1, 6, 8, 13, 14, 15, 16 and 18
   (HLG, scene-referred, added with this work; 6 and 15, the same curve as 1 and 14 in H.273
   Table 3, since #675). Code point 8 builds the structural identity so the optimizer still
   elides it.
