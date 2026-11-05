@@ -167,8 +167,10 @@ pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and ne
 /// C2PA 2.4 §A.5.3 places a manifest-store box before the first `mdat`, yet requires the `update`
 /// box of a mid-update file to be the last box of the file — past that boundary by the
 /// specification's own instruction. So [`AfterMediaData`](Self::AfterMediaData) says only where the
-/// bytes are. (`moov`, §A.5.3's other boundary, never reaches a parsed AVIF: image sequences are out
-/// of scope and refused.)
+/// bytes are. Only `mdat` is a boundary here. `moov`, §A.5.3's other one, does reach a parsed AVIF:
+/// an `avis` file keeps its `moov` beside the `meta` still it carries (#646), yet a box after that
+/// `moov` and before the first `mdat` reports [`BeforeMediaData`](Self::BeforeMediaData).
+/// `gamut-heic`'s position type tells that case apart; this one does not.
 ///
 /// Non-exhaustive and with permanent discriminants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
