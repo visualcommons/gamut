@@ -228,7 +228,7 @@ fn summarize(data: &TagData) -> String {
             c.colour_primaries,
             c.transfer_characteristics,
             c.matrix_coefficients,
-            c.video_full_range_flag
+            u8::from(c.full_range)
         ),
         TagData::Measurement(_) => "measurement".to_owned(),
         TagData::ViewingConditions(_) => "viewing conditions".to_owned(),

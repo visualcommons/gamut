@@ -1,7 +1,9 @@
 //! The decoded element data a tag can hold (ICC.1:2022 §10).
 
+use gamut_core::Cicp;
+
 use crate::bytes::{ByteReader, push_date_time, push_s15fixed16, push_u16fixed16, push_xyz_number};
-use crate::cicp::{Cicp, decode_cicp, encode_cicp};
+use crate::cicp::{decode_cicp, encode_cicp};
 use crate::colorant::{
     ColorantOrder, ColorantTable, decode_colorant_order, decode_colorant_table,
     encode_colorant_order, encode_colorant_table,
@@ -324,7 +326,7 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) -> Result<()> {
         TagData::LutBToA(lut) => encode_lut_b_to_a(lut, out)?,
         TagData::NamedColor2(named) => encode_named_color2(named, out)?,
         TagData::Chromaticity(chrm) => encode_chromaticity(chrm, out),
-        TagData::Cicp(cicp) => encode_cicp(cicp, out),
+        TagData::Cicp(cicp) => encode_cicp(cicp, out)?,
         TagData::Measurement(meas) => encode_measurement(meas, out),
         TagData::ViewingConditions(view) => encode_viewing_conditions(view, out),
         TagData::Data(data) => encode_data(data, out),
@@ -584,7 +586,7 @@ mod tests {
                 colour_primaries: 9,
                 transfer_characteristics: 16,
                 matrix_coefficients: 0,
-                video_full_range_flag: 1,
+                full_range: true,
             }),
             TagData::Measurement(Measurement {
                 observer: 1,

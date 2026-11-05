@@ -50,7 +50,8 @@
 //! ```
 //! use gamut_color::cicp::TransferCharacteristics as Tc;
 //! use gamut_color::transfer::standard_eotf_for;
-//! use gamut_icc::{Cicp, IccProfile};
+//! use gamut_core::Cicp;
+//! use gamut_icc::IccProfile;
 //!
 //! // Each of the four BT.709-family code points has a `TransferCharacteristics` variant …
 //! assert_eq!(Tc::from_code_point(1), Some(Tc::Bt709));
@@ -70,7 +71,7 @@
 //! // … yet are encodable here, as are all four BT.709-family code points; that the latter
 //! // encode one curve is pinned by `every_bt709_family_code_point_builds_the_same_curve`.
 //! let axes = Cicp { colour_primaries: 1, transfer_characteristics: 1,
-//!                   matrix_coefficients: 0, video_full_range_flag: 1 };
+//!                   matrix_coefficients: 0, full_range: true };
 //! for code in [1, 4, 5, 6, 14, 15] {
 //!     assert!(IccProfile::from_cicp(Cicp { transfer_characteristics: code, ..axes }).is_some());
 //! }
@@ -110,9 +111,9 @@
 //!   A narrow-range RGB `cicpType` is a legal tag — it is simply not one this module can build,
 //!   the same case as primaries with no chromaticities or a transfer with no ICC tone curve. A
 //!   caller holding such samples scales them to full range and passes `1`.
-//! * **Anything else** — any other flag byte, or narrow range under coefficients H.273 leaves
-//!   unknown (2) or reserved — says nothing this module can rely on about the RGB, and is
-//!   declined.
+//! * **Narrow range under any other coefficients** — ones H.273 leaves unknown (2) or reserved —
+//!   says nothing this module can rely on about the RGB, and is declined. (`gamut_core::Cicp`
+//!   holds the flag as a `bool`, so no flag value outside H.273's single bit reaches here.)
 //!
 //! Carrying the caller's `0` through unchanged — the option that looks most conservative, since it
 //! discards nothing — is not merely inconsistent. §9.2.17 makes it **non-conforming**: the colour
@@ -222,8 +223,8 @@ use gamut_color::linalg::mat_mul3;
 use gamut_color::matrix::{bradford_adapt, rgb_to_xyz_matrix};
 use gamut_color::transfer::{BT709_ALPHA, BT709_BETA, BT1886_GAMMA, pq_eotf};
 use gamut_color::{Chromaticities, RgbGamut, SourceProfile};
+use gamut_core::Cicp;
 
-use crate::cicp::Cicp;
 use crate::curve::{Curve, ParametricCurve};
 use crate::header::{ColorSpace, DeviceClass, ProfileHeader};
 use crate::mluc::{Mluc, MlucRecord};
@@ -394,12 +395,12 @@ impl BuiltinProfile {
     /// The space whose axes are exactly `primaries` and the H.273 transfer code point
     /// `transfer`, if there is one. Lets [`IccProfile::from_cicp`] name a profile it recognizes
     /// instead of describing it by code point.
-    fn for_axes(primaries: ColorPrimaries, transfer: u8) -> Option<Self> {
+    fn for_axes(primaries: ColorPrimaries, transfer: u16) -> Option<Self> {
         Self::ALL.into_iter().find(|space| {
             space
                 .parts()
                 .axes
-                .is_some_and(|(p, t)| p == primaries && cicp_byte(t.code_point()) == transfer)
+                .is_some_and(|(p, t)| p == primaries && t.code_point() == transfer)
         })
     }
 
@@ -431,10 +432,11 @@ impl BuiltinProfile {
 /// # Examples
 ///
 /// ```
-/// use gamut_icc::{Cicp, CicpTransferReading, IccProfile};
+/// use gamut_core::Cicp;
+/// use gamut_icc::{CicpTransferReading, IccProfile};
 ///
 /// let bt709 = Cicp { colour_primaries: 1, transfer_characteristics: 1,
-///                    matrix_coefficients: 0, video_full_range_flag: 1 };
+///                    matrix_coefficients: 0, full_range: true };
 /// let display = IccProfile::from_cicp_with(bt709, CicpTransferReading::Bt1886Display);
 /// assert!(display.is_some());
 /// assert_ne!(display, IccProfile::from_cicp(bt709));
@@ -456,66 +458,45 @@ pub enum CicpTransferReading {
     Bt1886Display = 1,
 }
 
-/// The one `VideoFullRangeFlag` a profile built here can describe (ITU-T H.273 signals full range
-/// as `1`).
-///
-/// Stated once and read from both ends of the module: it is what [`rgb_conforming_cicp`] writes
-/// and what [`rgb_is_full_range`] accepts, so the tag and the precondition cannot drift. Every
-/// colorant, `chad` and tone curve written here is defined over full-scale RGB; see the module
-/// docs for which narrow-range signalling that still admits.
-const FULL_RANGE: u8 = 1;
-
 /// ITU-T H.273 (07/2024) §8.3: the `MatrixCoefficients` code points for which
 /// `VideoFullRangeFlag` scales Y, Cb and Cr (equations 30 to 32) rather than R, G and B — so a
 /// narrow range under them leaves de-matrixed RGB full scale. Transcribed from the clause's own
 /// list; every other code point is an RGB-range one (0, 8, 16, 17), unknown (2) or reserved.
-const LUMA_CHROMA_MATRICES: [u8; 12] = [1, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15];
+const LUMA_CHROMA_MATRICES: [u16; 12] = [1, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15];
 
 /// Whether the RGB samples a profile built from `cicp` applies to are full range — full range
 /// signalled outright, or narrow range on luma–chroma signals the caller de-matrixes first.
 fn rgb_is_full_range(cicp: Cicp) -> bool {
-    match cicp.video_full_range_flag {
-        FULL_RANGE => true,
-        0 => LUMA_CHROMA_MATRICES.contains(&cicp.matrix_coefficients),
-        _ => false,
-    }
+    cicp.full_range || LUMA_CHROMA_MATRICES.contains(&cicp.matrix_coefficients)
 }
 
 /// The `cicpType` value for a pair of CICP axes.
 fn cicp_of(primaries: ColorPrimaries, transfer: TransferCharacteristics) -> Cicp {
     rgb_conforming_cicp(Cicp {
-        colour_primaries: cicp_byte(primaries.code_point()),
-        transfer_characteristics: cicp_byte(transfer.code_point()),
+        colour_primaries: primaries.code_point(),
+        transfer_characteristics: transfer.code_point(),
         // Both set by `rgb_conforming_cicp`, which owns the §10.3 and range rules for every
         // constructor.
         matrix_coefficients: 0,
-        video_full_range_flag: FULL_RANGE,
+        full_range: true,
     })
 }
 
 /// `cicp` as it describes the RGB the profile applies to: `MatrixCoefficients` replaced by the
-/// zero ICC.1:2022 §10.3 **requires** of an RGB or XYZ profile, and `VideoFullRangeFlag` by
-/// [`FULL_RANGE`].
+/// zero ICC.1:2022 §10.3 **requires** of an RGB or XYZ profile, and `VideoFullRangeFlag` set,
+/// because every colorant, `chad` and tone curve written here is defined over full-scale RGB.
 ///
-/// The flag is written, not passed through, because once the coefficients are `0` a flag of `0`
-/// would read as narrow-range *RGB* — which is not what a caller's narrow-range luma–chroma
+/// The flag is written, not passed through, because once the coefficients are `0` a narrow-range
+/// flag would read as narrow-range *RGB* — which is not what a caller's narrow-range luma–chroma
 /// signalling decodes to. Only triples [`rgb_is_full_range`] admits reach here, so the value
 /// written is always the range of the samples the colorants and curves are defined over. The two
 /// axes the profile is built from pass through untouched.
 fn rgb_conforming_cicp(cicp: Cicp) -> Cicp {
     Cicp {
         matrix_coefficients: 0,
-        video_full_range_flag: FULL_RANGE,
+        full_range: true,
         ..cicp
     }
-}
-
-/// A CICP code point as the byte `cicpType` stores it (ICC.1:2022 §10.3 — four `uInt8`s).
-///
-/// ITU-T H.273 defines every code point in `0..=255`, so this is total for any modelled value; a
-/// value that does not fit a byte cannot be signalled at all and becomes `2` (Unspecified).
-fn cicp_byte(code_point: u16) -> u8 {
-    u8::try_from(code_point).unwrap_or(2)
 }
 
 /// The `s15Fixed16` a `parametricCurveType` function type 0 parameter (ICC.1:2022 §10.18) carries
@@ -600,7 +581,7 @@ impl Trc {
     /// `parametricCurveType` form and no `gamut-color` EOTF to sample. SMPTE ST 240 (7) is also
     /// declined: its inverse is a §10.18 type 3 closed form, but it needs its own α/β and toe
     /// constants, which nothing here or in `gamut-color` yet supplies or gates.
-    fn for_code_point(transfer: u8, reading: CicpTransferReading) -> Option<Self> {
+    fn for_code_point(transfer: u16, reading: CicpTransferReading) -> Option<Self> {
         match (transfer, reading) {
             (1 | 6 | 14 | 15, CicpTransferReading::InverseOetf) => Some(Trc::Bt709),
             (1 | 6 | 14 | 15, CicpTransferReading::Bt1886Display) => Some(Trc::Gamma(BT1886_GAMMA)),
@@ -920,17 +901,18 @@ impl IccProfile {
     /// Returns `None` when the profile cannot describe the signalling: a primaries code point
     /// with no chromaticities, whether unmodelled or
     /// [`Unspecified`](ColorPrimaries::Unspecified); a transfer code point with no ICC tone
-    /// curve, such as HLG (18) or Unspecified (2); narrow range under coefficients that are not
-    /// luma–chroma ones; or a `VideoFullRangeFlag` other than `0` or `1`.
+    /// curve, such as HLG (18) or Unspecified (2); or narrow range under coefficients that are
+    /// not luma–chroma ones.
     ///
     /// # Examples
     ///
     /// ```
-    /// use gamut_icc::{BuiltinProfile, Cicp, IccProfile};
+    /// use gamut_core::Cicp;
+    /// use gamut_icc::{BuiltinProfile, IccProfile};
     ///
     /// // BT.709 primaries + sRGB transfer is sRGB, and is built as such.
     /// let signalled = Cicp { colour_primaries: 1, transfer_characteristics: 13,
-    ///                        matrix_coefficients: 0, video_full_range_flag: 1 };
+    ///                        matrix_coefficients: 0, full_range: true };
     /// assert_eq!(IccProfile::from_cicp(signalled), IccProfile::builtin(BuiltinProfile::Srgb));
     ///
     /// // The BT.601 matrix an AVIF `nclx` box may carry does not change the profile, and is not
@@ -939,12 +921,12 @@ impl IccProfile {
     /// assert_eq!(IccProfile::from_cicp(matrixed), IccProfile::from_cicp(signalled));
     ///
     /// // Narrow range on Y/Cb/Cr de-matrixes to full-scale RGB: the same profile …
-    /// let narrow_ycbcr = Cicp { video_full_range_flag: 0, ..matrixed };
+    /// let narrow_ycbcr = Cicp { full_range: false, ..matrixed };
     /// assert_eq!(IccProfile::from_cicp(narrow_ycbcr), IccProfile::from_cicp(signalled));
     ///
     /// // … but narrow range on the RGB samples themselves is a scaling this profile does not
     /// // perform.
-    /// let narrow_rgb = Cicp { video_full_range_flag: 0, ..signalled };
+    /// let narrow_rgb = Cicp { full_range: false, ..signalled };
     /// assert!(IccProfile::from_cicp(narrow_rgb).is_none());
     ///
     /// // "Unspecified" primaries name no chromaticities, so no profile can be built.
@@ -979,10 +961,11 @@ impl IccProfile {
     /// # Examples
     ///
     /// ```
-    /// use gamut_icc::{Cicp, CicpTransferReading, IccProfile, KnownTag, TagData};
+    /// use gamut_core::Cicp;
+    /// use gamut_icc::{CicpTransferReading, IccProfile, KnownTag, TagData};
     ///
     /// let bt709 = Cicp { colour_primaries: 1, transfer_characteristics: 1,
-    ///                    matrix_coefficients: 0, video_full_range_flag: 1 };
+    ///                    matrix_coefficients: 0, full_range: true };
     /// let display = IccProfile::from_cicp_with(bt709, CicpTransferReading::Bt1886Display)
     ///     .expect("BT.709 is buildable");
     /// let Some(TagData::ParametricCurve(trc)) = display.get(KnownTag::RedTrc) else {
@@ -1006,7 +989,7 @@ impl IccProfile {
         if !rgb_is_full_range(cicp) {
             return None;
         }
-        let primaries = ColorPrimaries::from_code_point(u16::from(cicp.colour_primaries))?;
+        let primaries = ColorPrimaries::from_code_point(cicp.colour_primaries)?;
         let chromaticities = primaries.chromaticities()?;
         let transfer = cicp.transfer_characteristics;
         let trc = Trc::for_code_point(transfer, reading)?;
@@ -1129,14 +1112,6 @@ mod tests {
         }
     }
 
-    /// A code point too large for `cicpType`'s `uInt8` becomes Unspecified. Unreachable from any
-    /// modelled CICP value — H.273 code points are bytes — so it is pinned at that input directly.
-    #[test]
-    fn an_oversized_code_point_signals_unspecified() {
-        assert_eq!(cicp_byte(255), 255);
-        assert_eq!(cicp_byte(256), 2);
-    }
-
     /// The `parametricCurveType` type 3 parameters this module writes for sRGB reproduce
     /// `gamut-color`'s own `srgb_eotf`. Without this the coefficients would be a second,
     /// unguarded copy of the IEC 61966-2-1 curve that could drift from the crate that owns it.
@@ -1212,13 +1187,13 @@ mod tests {
                 Trc::Gamma(BT1886_GAMMA).tag(),
             ),
         ] {
-            for code in [1_u8, 6, 14, 15] {
+            for code in [1_u16, 6, 14, 15] {
                 let profile = IccProfile::from_cicp_with(
                     Cicp {
                         colour_primaries: 1,
                         transfer_characteristics: code,
                         matrix_coefficients: 0,
-                        video_full_range_flag: 1,
+                        full_range: true,
                     },
                     reading,
                 )
@@ -1260,14 +1235,14 @@ mod tests {
     /// or wrongly left out of it, fails.
     #[test]
     fn the_reading_reaches_only_the_bt709_family() {
-        const BT709_FAMILY: [u8; 4] = [1, 6, 14, 15];
+        const BT709_FAMILY: [u16; 4] = [1, 6, 14, 15];
         let rgb = |transfer| Cicp {
             colour_primaries: 1,
             transfer_characteristics: transfer,
             matrix_coefficients: 0,
-            video_full_range_flag: 1,
+            full_range: true,
         };
-        for transfer in 0..=u8::MAX {
+        for transfer in 0..=255_u16 {
             let literal = IccProfile::from_cicp(rgb(transfer));
             let display =
                 IccProfile::from_cicp_with(rgb(transfer), CicpTransferReading::Bt1886Display);
@@ -1314,7 +1289,7 @@ mod tests {
                     colour_primaries: 1,
                     transfer_characteristics: transfer,
                     matrix_coefficients: 0,
-                    video_full_range_flag: 1,
+                    full_range: true,
                 },
                 reading,
             )
@@ -1372,7 +1347,7 @@ mod tests {
                 continue;
             };
             assert_eq!(
-                BuiltinProfile::for_axes(primaries, cicp_byte(transfer.code_point())),
+                BuiltinProfile::for_axes(primaries, transfer.code_point()),
                 Some(space),
                 "{space:?} is the space for its own axes"
             );
@@ -1395,7 +1370,7 @@ mod tests {
         for space in BuiltinProfile::ALL {
             let Space { axes, trc, .. } = space.parts();
             if let Some((_, transfer)) = axes {
-                let code = cicp_byte(transfer.code_point());
+                let code = transfer.code_point();
                 for reading in READINGS {
                     assert_eq!(
                         Trc::for_code_point(code, reading),
@@ -1510,9 +1485,9 @@ mod tests {
         // display gammas 2.2 (4) and 2.8 (5), linear (8), sRGB (13) and PQ (16). Every other
         // byte — reserved, unspecified, the two logarithmic curves, ST 240, HLG, and everything
         // H.273 has not assigned — has no ICC tone curve here.
-        const ENCODABLE: [u8; 9] = [1, 4, 5, 6, 8, 13, 14, 15, 16];
+        const ENCODABLE: [u16; 9] = [1, 4, 5, 6, 8, 13, 14, 15, 16];
 
-        for code in 0..=u8::MAX {
+        for code in 0..=255_u16 {
             if ENCODABLE.contains(&code) {
                 continue;
             }
@@ -1536,7 +1511,7 @@ mod tests {
             colour_primaries: 1,
             transfer_characteristics: 13,
             matrix_coefficients: 0,
-            video_full_range_flag: 1,
+            full_range: true,
         };
         assert!(IccProfile::from_cicp(srgb).is_some(), "the control builds");
         for (label, cicp) in [
@@ -1590,10 +1565,10 @@ mod tests {
             colour_primaries: 9,
             transfer_characteristics: 16,
             matrix_coefficients: 0,
-            video_full_range_flag: 1,
+            full_range: true,
         };
         let reference = IccProfile::from_cicp(conforming).expect("the control builds");
-        for matrix in [1_u8, 5, 6, 9] {
+        for matrix in [1_u16, 5, 6, 9] {
             let signalled = Cicp {
                 matrix_coefficients: matrix,
                 ..conforming
@@ -1609,51 +1584,6 @@ mod tests {
         }
     }
 
-    /// Under RGB coefficients, full range is a precondition of `from_cicp`, not a field it
-    /// normalises: every other `VideoFullRangeFlag` byte is declined. Under luma–chroma
-    /// coefficients every byte but `0` and `1` is declined too.
-    ///
-    /// The complement is swept rather than sampled at `0`, so a guard that admitted any byte
-    /// beyond the two H.273 defines is seen. The control at `1` builds from the same axes, so the
-    /// axes cannot be what any rejection is about.
-    #[test]
-    fn a_cicp_triple_that_is_not_full_range_is_declined() {
-        let full = Cicp {
-            colour_primaries: 1,
-            transfer_characteristics: 13,
-            matrix_coefficients: 0,
-            video_full_range_flag: FULL_RANGE,
-        };
-        assert!(
-            IccProfile::from_cicp(full).is_some(),
-            "the full-range control builds"
-        );
-        for flag in 0..=u8::MAX {
-            if flag == FULL_RANGE {
-                continue;
-            }
-            assert_eq!(
-                IccProfile::from_cicp(Cicp {
-                    video_full_range_flag: flag,
-                    ..full
-                }),
-                None,
-                "RGB coefficients, video_full_range_flag {flag}"
-            );
-            if flag != 0 {
-                assert_eq!(
-                    IccProfile::from_cicp(Cicp {
-                        matrix_coefficients: 9,
-                        video_full_range_flag: flag,
-                        ..full
-                    }),
-                    None,
-                    "luma–chroma coefficients, video_full_range_flag {flag}"
-                );
-            }
-        }
-    }
-
     /// Narrow range is built exactly when H.273 §8.3 puts it on Y, Cb and Cr — equations 30 to
     /// 32's list, 1, 4–7 and 9–15 — and then yields the full-range profile, whose `cicpType`
     /// says `1`: de-matrixing a narrow-range luma–chroma signal gives full-scale RGB, and that is
@@ -1665,18 +1595,18 @@ mod tests {
     /// here — the or-pattern-like membership test has no mutant for either.
     #[test]
     fn narrow_range_builds_only_under_luma_chroma_coefficients() {
-        const EQUATIONS_30_TO_32: [u8; 12] = [1, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15];
+        const EQUATIONS_30_TO_32: [u16; 12] = [1, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15];
         let full = Cicp {
             colour_primaries: 9,
             transfer_characteristics: 16,
             matrix_coefficients: 0,
-            video_full_range_flag: FULL_RANGE,
+            full_range: true,
         };
         let want = IccProfile::from_cicp(full).expect("the full-range control builds");
-        for matrix in 0..=u8::MAX {
+        for matrix in 0..=255_u16 {
             let got = IccProfile::from_cicp(Cicp {
                 matrix_coefficients: matrix,
-                video_full_range_flag: 0,
+                full_range: false,
                 ..full
             });
             if EQUATIONS_30_TO_32.contains(&matrix) {
@@ -1928,18 +1858,18 @@ mod tests {
     }
 
     /// The profile `from_cicp` builds for full-range RGB signalling of `primaries` and `transfer`.
-    fn rgb_cicp(primaries: u8, transfer: u8) -> Option<IccProfile> {
+    fn rgb_cicp(primaries: u16, transfer: u16) -> Option<IccProfile> {
         IccProfile::from_cicp(Cicp {
             colour_primaries: primaries,
             transfer_characteristics: transfer,
             matrix_coefficients: 0,
-            video_full_range_flag: 1,
+            full_range: true,
         })
     }
 
     /// Every primaries code point `from_cicp` builds, found by asking it rather than restated.
-    fn buildable_primaries() -> Vec<u8> {
-        (0..=u8::MAX)
+    fn buildable_primaries() -> Vec<u16> {
+        (0..=255_u16)
             .filter(|&code| rgb_cicp(code, 13).is_some())
             .collect()
     }
@@ -2094,7 +2024,7 @@ mod tests {
     fn oracle_every_encodable_transfer_matches_its_curve_through_lcms() {
         let srgb = lcms2_oracle::srgb();
         let peak = pq_eotf(1.0);
-        for code in [1_u8, 4, 5, 6, 8, 13, 14, 15, 16] {
+        for code in [1_u16, 4, 5, 6, 8, 13, 14, 15, 16] {
             let ours = opened_by_lcms(&rgb_cicp(1, code).expect("an encodable transfer"));
             for step in 0..=64 {
                 let light_or_signal = f64::from(step) / 64.0;
@@ -2141,13 +2071,13 @@ mod tests {
     /// rounding of `g` is under 1e-6 of it.
     #[test]
     fn oracle_bt1886_reading_matches_its_curve_through_lcms() {
-        for code in [1_u8, 6, 14, 15] {
+        for code in [1_u16, 6, 14, 15] {
             let profile = IccProfile::from_cicp_with(
                 Cicp {
                     colour_primaries: 1,
                     transfer_characteristics: code,
                     matrix_coefficients: 0,
-                    video_full_range_flag: 1,
+                    full_range: true,
                 },
                 CicpTransferReading::Bt1886Display,
             )
@@ -2182,18 +2112,20 @@ mod tests {
     /// against bytes this crate did not produce.
     #[test]
     fn oracle_cicp_tag_matches_the_lcms_synthesiser() {
+        let byte = |code: u16| u8::try_from(code).expect("an H.273 code point is a byte");
         for primaries in buildable_primaries() {
-            for transfer in [1_u8, 4, 5, 6, 8, 13, 14, 15, 16] {
+            for transfer in [1_u16, 4, 5, 6, 8, 13, 14, 15, 16] {
                 let ours = IccProfile::from_cicp(Cicp {
                     colour_primaries: primaries,
                     transfer_characteristics: transfer,
                     matrix_coefficients: 9,
-                    video_full_range_flag: 1,
+                    full_range: true,
                 })
                 .expect("buildable signalling");
-                let lcms =
-                    IccProfile::parse(&lcms2_oracle::cicp(primaries, transfer, 0, 1).to_bytes())
-                        .expect("lcms2's profile parses");
+                let lcms = IccProfile::parse(
+                    &lcms2_oracle::cicp(byte(primaries), byte(transfer), 0, 1).to_bytes(),
+                )
+                .expect("lcms2's profile parses");
                 assert_eq!(
                     ours.get(KnownTag::Cicp),
                     lcms.get(KnownTag::Cicp),

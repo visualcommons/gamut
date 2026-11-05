@@ -254,8 +254,9 @@ impl IccProfile {
 
 #[cfg(test)]
 mod tests {
+    use gamut_core::Cicp;
+
     use super::*;
-    use crate::cicp::Cicp;
     use crate::header::ProfileHeader;
     use crate::profile::Tag;
 
@@ -434,7 +435,7 @@ mod tests {
 
     /// A §8-complete matrix Display profile with a `data` colour space, carrying a decoded `cicp`
     /// tag whose only non-default field is `MatrixCoefficients`.
-    fn with_cicp(data: ColorSpace, matrix_coefficients: u8) -> IccProfile {
+    fn with_cicp(data: ColorSpace, matrix_coefficients: u16) -> IccProfile {
         let mut p = profile(
             DeviceClass::Display,
             data,
@@ -449,14 +450,14 @@ mod tests {
                 colour_primaries: 9,
                 transfer_characteristics: 16,
                 matrix_coefficients,
-                video_full_range_flag: 1,
+                full_range: true,
             }),
         ));
         p
     }
 
     /// The §10.3 finding for `space`, as `validate` words it.
-    fn matrix_finding(space: &str, shall: &str, is: u8) -> ConformanceIssue {
+    fn matrix_finding(space: &str, shall: &str, is: u16) -> ConformanceIssue {
         ConformanceIssue {
             requirement: format!(
                 "§10.3 cicpType with a '{space}' data colour space: MatrixCoefficients {shall} (is {is})"

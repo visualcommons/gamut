@@ -169,7 +169,13 @@ and B under the others (0, 8, 16, 17; equations 27 to 29):
 | flag `1`, any coefficients | nothing | built; tag flag `1` |
 | flag `0`, luma–chroma coefficients (`9-16-9-0`, `1-13-6-0`) | Y, Cb, Cr — de-matrixed RGB is full scale | built, the same profile as flag `1`; tag flag `1` |
 | flag `0`, RGB coefficients (§10.3's `1-1-0-0`, `9-16-0-0`) | the RGB samples themselves | **declined** |
-| flag `0` under coefficient 2 (unknown) or a reserved one; any flag byte but `0`/`1` | unknown | **declined** |
+| flag `0` under coefficient 2 (unknown) or a reserved one | unknown | **declined** |
+
+A `cicpType` element is modelled as the workspace's one `gamut_core::Cicp`, whose flag is a
+`bool`. §10.3 encodes the flag "as specified in Recommendation ITU-T H.273", where §8.3 makes it a
+single bit, so the reader rejects an element whose flag byte is 2–255 — the one input that model
+stops accepting — and the writer refuses a code point above 255, which `Cicp`'s `u16` fields can
+hold but §10.3's `uInt8Number` cannot.
 
 The tag writes `1` for the admitted narrow-range case because it describes the RGB the profile
 applies to, the same reason it writes `MatrixCoefficients` `0`: once the coefficients are `0`, a

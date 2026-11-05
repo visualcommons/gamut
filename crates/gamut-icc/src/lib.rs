@@ -108,7 +108,6 @@ mod validate;
 mod writer;
 
 pub use builtin::{BuiltinProfile, CicpTransferReading};
-pub use cicp::Cicp;
 pub use colorant::{Colorant, ColorantOrder, ColorantTable};
 pub use curve::{Curve, CurveOrParametric, ParametricCurve};
 pub use data::DataElement;

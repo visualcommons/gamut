@@ -515,15 +515,15 @@ mod tests {
 
     /// `profile` with its `cicp` tag's transfer byte set to `transfer`, or the tag removed for
     /// `None`.
-    fn with_cicp_transfer(mut profile: IccProfile, transfer: Option<u8>) -> IccProfile {
+    fn with_cicp_transfer(mut profile: IccProfile, transfer: Option<u16>) -> IccProfile {
         let sig = Signature::from(KnownTag::Cicp);
         profile.tags.retain(|tag| tag.signature != sig);
         if let Some(transfer_characteristics) = transfer {
-            let cicp = gamut_icc::Cicp {
+            let cicp = gamut_core::Cicp {
                 colour_primaries: 9,
                 transfer_characteristics,
                 matrix_coefficients: 0,
-                video_full_range_flag: 1,
+                full_range: true,
             };
             profile.tags.push(Tag::new(sig, TagData::Cicp(cicp)));
         }

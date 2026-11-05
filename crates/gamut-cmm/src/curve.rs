@@ -276,8 +276,8 @@ impl ToneCurve {
     /// Linear (code point 8) is returned as the structural identity rather than as a closed
     /// form of `x ↦ x`: the two evaluate identically, and only the structural one is elided
     /// by [`crate::optimize`] ([`is_identity`](Self::is_identity)).
-    pub(crate) fn cicp_transfer(code_point: u8) -> Option<ToneCurve> {
-        let tc = TransferCharacteristics::from_code_point(u16::from(code_point))?;
+    pub(crate) fn cicp_transfer(code_point: u16) -> Option<ToneCurve> {
+        let tc = TransferCharacteristics::from_code_point(code_point)?;
         if tc == TransferCharacteristics::Linear {
             return Some(ToneCurve {
                 repr: Repr::Icc(CurveOrParametric::Curve(Curve::Identity)),
@@ -971,7 +971,7 @@ mod tests {
             pq_oetf_normalized, srgb_eotf, srgb_oetf,
         };
         type Transfer = fn(f64) -> f64;
-        let cases: [(u8, Transfer, Transfer); 7] = [
+        let cases: [(u16, Transfer, Transfer); 7] = [
             (1, bt709_eotf, bt709_oetf),
             (6, bt709_eotf, bt709_oetf),
             (13, srgb_eotf, srgb_oetf),

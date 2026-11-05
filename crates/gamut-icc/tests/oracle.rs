@@ -458,7 +458,7 @@ fn cicp_tag_matches_lcms() {
     assert_eq!(cicp.colour_primaries, 9);
     assert_eq!(cicp.transfer_characteristics, 16);
     assert_eq!(cicp.matrix_coefficients, 0);
-    assert_eq!(cicp.video_full_range_flag, 1);
+    assert!(cicp.full_range);
 }
 
 /// Every synthesizer added for the transform-oracle work (issue #322) produces a profile that
