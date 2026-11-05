@@ -27,7 +27,7 @@ use gamut_ifd::{
 
 use crate::decoder::{DecodedDng, DngDecoder};
 use crate::tags;
-use crate::values::{Compression, PhotometricInterpretation};
+use crate::values::{dng_compression, dng_photometric};
 
 /// The magic number of an embedded DNG camera-profile stream (the `.dcp` form): the two bytes
 /// after the byte-order mark, `0x4352` (`"RC"` little-endian) where a TIFF header carries `42`.
@@ -119,10 +119,7 @@ impl Findings {
     /// recognise.
     fn check_codes(&mut self, ifd: &Ifd, page: usize) {
         if let Some(code) = ifd.get_u32(tags::COMPRESSION)
-            && u16::try_from(code)
-                .ok()
-                .and_then(Compression::from_code)
-                .is_none()
+            && u16::try_from(code).ok().and_then(dng_compression).is_none()
         {
             self.anomalies.push(Anomaly::unknown_code(
                 page,
@@ -132,10 +129,7 @@ impl Findings {
             ));
         }
         if let Some(code) = ifd.get_u32(tags::PHOTOMETRIC_INTERPRETATION)
-            && u16::try_from(code)
-                .ok()
-                .and_then(PhotometricInterpretation::from_code)
-                .is_none()
+            && u16::try_from(code).ok().and_then(dng_photometric).is_none()
         {
             self.anomalies.push(Anomaly::unknown_code(
                 page,

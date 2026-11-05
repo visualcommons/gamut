@@ -334,7 +334,12 @@ separate path (below).
   `MIN_STORE_LEN`, so a signer needs no direct `gamut-ifd` dependency either;
   `lossless_jpeg::{encode, decode}` stay module-scoped deliberately (a codec namespace).
 - `Compression::is_supported` became `is_decodable` (every decodable scheme encodes, with the
-  documented `jxl-encode`/Deflate-depth caveats).
+  documented `jxl-encode`/Deflate-depth caveats). Since #1133, `Compression`,
+  `PhotometricInterpretation`, `Predictor` and `SampleFormat` are `gamut-ifd`'s shared
+  `#[repr(u16)]` enums, re-exported from `values` under their TIFF names (`Compression::None`
+  and `Jpeg`, `Predictor::HorizontalDifferencing{,X2,X4}`), and `is_decodable`/`is_lossy` are
+  public free functions `values::{is_decodable, is_lossy}(Compression)`, since an inherent
+  method on gamut-ifd's type is impossible here.
 - JPEG XL range semantics are frozen to the reference SDK's: decoded JXL data is full-range
   16-bit; a JXL IFD's `BitsPerSample` records codestream precision; encode requires 16-bit
   input.
@@ -598,7 +603,8 @@ measures the codec is not the place to change it:
   one component at full width — and are not re-measured here; the `cfa` rows of a new run read a
   different codestream. The gain was measured where the paragraph below says it belongs, on the
   real-camera corpus: each CFA file decoded with gamut and re-encoded with
-  `Compression::LosslessJpeg`, same samples, before and after.
+  `Compression::Jpeg` (lossless JPEG; `Compression::LosslessJpeg` before #1133), same samples,
+  before and after.
 
   | corpus file | raw samples (16-bit) | codestream before | after | whole DNG before | after |
   | --- | --- | --- | --- | --- | --- |

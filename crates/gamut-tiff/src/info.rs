@@ -9,8 +9,11 @@
 use gamut_core::{Error, Result};
 use gamut_ifd::{ByteOrder, Ifd};
 
-use crate::compression::Compression;
-use crate::ifd::{PhotometricInterpretation, Predictor, SampleFormat};
+use crate::compression::{Compression, tiff_compression};
+use crate::ifd::{
+    PhotometricInterpretation, Predictor, SampleFormat, tiff_photometric, tiff_predictor,
+    tiff_sample_format,
+};
 use crate::tags;
 
 /// Reads a required unsigned-integer tag.
@@ -80,7 +83,7 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
         ));
     }
 
-    let compression = Compression::try_from(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))?;
+    let compression = tiff_compression(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))?;
     let samples_per_pixel = ifd.get_u32(tags::SAMPLES_PER_PIXEL).unwrap_or(1);
     // TIFF 6.0 defaults SamplesPerPixel (277) to 1 and gives 0 no meaning: a pixel with no
     // components stores nothing. Refused here because every per-sample tag below would otherwise
@@ -123,7 +126,7 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
     let formats = ifd.get_u32_vec(tags::SAMPLE_FORMAT).unwrap_or_default();
     let sample_format = match formats.first() {
         None => SampleFormat::UnsignedInteger,
-        Some(&first) if formats.iter().all(|&f| f == first) => SampleFormat::try_from(first)?,
+        Some(&first) if formats.iter().all(|&f| f == first) => tiff_sample_format(first)?,
         Some(_) => {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -132,12 +135,12 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
         }
     };
 
-    let photometric = PhotometricInterpretation::try_from(require_u32(
+    let photometric = tiff_photometric(require_u32(
         ifd,
         tags::PHOTOMETRIC_INTERPRETATION,
         "TIFF: missing PhotometricInterpretation",
     )?)?;
-    let predictor = Predictor::try_from(ifd.get_u32(tags::PREDICTOR).unwrap_or(1))?;
+    let predictor = tiff_predictor(ifd.get_u32(tags::PREDICTOR).unwrap_or(1))?;
 
     Ok(TiffInfo {
         width,

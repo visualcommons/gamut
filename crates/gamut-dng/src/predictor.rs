@@ -26,9 +26,9 @@ use crate::values::{Compression, Predictor};
 fn x_factor(predictor: Predictor) -> Option<usize> {
     match predictor {
         Predictor::None => Some(0),
-        Predictor::HorizontalDifference => Some(1),
-        Predictor::HorizontalDifferenceX2 => Some(2),
-        Predictor::HorizontalDifferenceX4 => Some(4),
+        Predictor::HorizontalDifferencing => Some(1),
+        Predictor::HorizontalDifferencingX2 => Some(2),
+        Predictor::HorizontalDifferencingX4 => Some(4),
         _ => None,
     }
 }
@@ -56,7 +56,7 @@ pub(crate) fn validate(
     };
     let predictor = u16::try_from(code)
         .ok()
-        .and_then(Predictor::from_code)
+        .and_then(|code| Predictor::try_from(code).ok())
         .ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: unknown Predictor code")
         })?;
@@ -65,7 +65,7 @@ pub(crate) fn validate(
     }
     // Lossless JPEG and JPEG XL predict internally; the SDK reader ignores tag 317 for them, so a
     // stray value must not change the pixels or fail the decode.
-    if matches!(compression, Compression::LosslessJpeg | Compression::JpegXl) {
+    if matches!(compression, Compression::Jpeg | Compression::JpegXl) {
         return Ok(Predictor::None);
     }
     if x_factor(predictor).is_none() {
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn horizontal_difference_accumulates_along_a_row() {
         let mut samples = [10u16, 1, 2, 3];
-        undo(Predictor::HorizontalDifference, &mut samples, 4, 1, 1, 16);
+        undo(Predictor::HorizontalDifferencing, &mut samples, 4, 1, 1, 16);
         assert_eq!(samples, [10, 11, 13, 16]);
     }
 
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn rows_do_not_carry_into_each_other() {
         let mut samples = [1u16, 1, 100, 1];
-        undo(Predictor::HorizontalDifference, &mut samples, 2, 2, 1, 16);
+        undo(Predictor::HorizontalDifferencing, &mut samples, 2, 2, 1, 16);
         assert_eq!(samples, [1, 2, 100, 101], "row 1 must not see row 0's tail");
     }
 
@@ -155,7 +155,7 @@ mod tests {
     fn planes_are_differenced_independently() {
         // Two pixels, three samples each: [r0,g0,b0, dr,dg,db].
         let mut samples = [10u16, 20, 30, 1, 2, 3];
-        undo(Predictor::HorizontalDifference, &mut samples, 2, 1, 3, 16);
+        undo(Predictor::HorizontalDifferencing, &mut samples, 2, 1, 3, 16);
         assert_eq!(samples, [10, 20, 30, 11, 22, 33]);
     }
 
@@ -164,7 +164,14 @@ mod tests {
     #[test]
     fn x2_differences_against_two_pixels_left() {
         let mut samples = [5u16, 7, 1, 2, 3, 4];
-        undo(Predictor::HorizontalDifferenceX2, &mut samples, 6, 1, 1, 16);
+        undo(
+            Predictor::HorizontalDifferencingX2,
+            &mut samples,
+            6,
+            1,
+            1,
+            16,
+        );
         // even indices: 5, 5+1=6, 6+3=9 | odd indices: 7, 7+2=9, 9+4=13
         assert_eq!(samples, [5, 7, 6, 9, 9, 13]);
     }
@@ -173,7 +180,14 @@ mod tests {
     #[test]
     fn x4_differences_against_four_pixels_left() {
         let mut samples = [1u16, 2, 3, 4, 10, 20, 30, 40];
-        undo(Predictor::HorizontalDifferenceX4, &mut samples, 8, 1, 1, 16);
+        undo(
+            Predictor::HorizontalDifferencingX4,
+            &mut samples,
+            8,
+            1,
+            1,
+            16,
+        );
         assert_eq!(samples, [1, 2, 3, 4, 11, 22, 33, 44]);
     }
 
@@ -181,10 +195,10 @@ mod tests {
     #[test]
     fn eight_bit_addition_wraps_at_the_byte() {
         let mut samples = [200u16, 100];
-        undo(Predictor::HorizontalDifference, &mut samples, 2, 1, 1, 8);
+        undo(Predictor::HorizontalDifferencing, &mut samples, 2, 1, 1, 8);
         assert_eq!(samples, [200, 44], "300 mod 256");
         let mut wide = [200u16, 100];
-        undo(Predictor::HorizontalDifference, &mut wide, 2, 1, 1, 16);
+        undo(Predictor::HorizontalDifferencing, &mut wide, 2, 1, 1, 16);
         assert_eq!(wide, [200, 300], "16-bit data must not wrap at the byte");
     }
 
@@ -200,7 +214,7 @@ mod tests {
     #[test]
     fn single_column_is_a_no_op() {
         let mut samples = [7u16, 9];
-        undo(Predictor::HorizontalDifference, &mut samples, 1, 2, 1, 16);
+        undo(Predictor::HorizontalDifferencing, &mut samples, 1, 2, 1, 16);
         assert_eq!(samples, [7, 9]);
     }
 
@@ -215,11 +229,11 @@ mod tests {
     /// The integer differencers are accepted for the schemes that do not predict internally.
     #[test]
     fn integer_predictors_are_accepted_for_deflate_and_uncompressed() {
-        for compression in [Compression::Deflate, Compression::Uncompressed] {
+        for compression in [Compression::Deflate, Compression::None] {
             for (code, want) in [
-                (2u32, Predictor::HorizontalDifference),
-                (34892, Predictor::HorizontalDifferenceX2),
-                (34893, Predictor::HorizontalDifferenceX4),
+                (2u32, Predictor::HorizontalDifferencing),
+                (34892, Predictor::HorizontalDifferencingX2),
+                (34893, Predictor::HorizontalDifferencingX4),
             ] {
                 assert_eq!(
                     validate(Some(code), compression, 16).expect("accepted"),
@@ -234,7 +248,7 @@ mod tests {
     /// applied or rejected — matching the SDK reader, which never inspects it there.
     #[test]
     fn self_predicting_schemes_ignore_the_tag() {
-        for compression in [Compression::LosslessJpeg, Compression::JpegXl] {
+        for compression in [Compression::Jpeg, Compression::JpegXl] {
             assert_eq!(
                 validate(Some(2), compression, 16).expect("ignored"),
                 Predictor::None,
