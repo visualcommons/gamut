@@ -18,7 +18,7 @@ use gamut::jxl::{
     Effort as JxlEffort, JxlEncoder, ModularMode as JxlModularMode, Orientation as JxlOrientation,
 };
 use gamut::metadata::{Carrier, EncodedMetadata};
-use gamut::png::{PngEncoder, PngMetadata, Preset as PngCodecPreset};
+use gamut::png::{Effort as PngEffort, PngEncoder, PngMetadata};
 use gamut::tiff::{Compression as TiffCompression, IFD0_EXIF_TAGS, TiffEncoder};
 use gamut::webp::{Effort as WebpEffort, NearLossless as WebpNearLossless, WebpEncoder};
 
@@ -302,24 +302,24 @@ pub(crate) enum JxlModular {
     Modular,
 }
 
-/// The highest `--png-effort`: the top level of `gamut_png::Preset`'s ladder.
+/// The highest `--png-effort`: the top level of `gamut_png::Effort`'s ladder.
 ///
 /// The flag carries the codec's own ladder level, as `--webp-effort` and `--jxl-effort` carry
 /// theirs, so this bound is the one fact the command line restates about the ladder;
 /// `the_png_effort_range_is_exactly_the_codec_ladder` holds it to the codec.
 const PNG_EFFORT_MAX: u8 = 3;
 
-/// The default `--png-effort`: `gamut_png::Preset::Small`, which is what this command has always
+/// The default `--png-effort`: `gamut_png::Effort::Small`, which is what this command has always
 /// encoded with.
 const PNG_EFFORT_DEFAULT: u8 = 2;
 
-/// Resolves a `--png-effort` level onto the codec's [`PngCodecPreset`] rung through the codec's
-/// own [`PngCodecPreset::from_level`], rather than re-deciding the mapping here.
-fn png_preset(level: u8) -> PngCodecPreset {
+/// Resolves a `--png-effort` level onto the codec's [`PngEffort`] rung through the codec's
+/// own [`PngEffort::from_level`], rather than re-deciding the mapping here.
+fn png_effort(level: u8) -> PngEffort {
     // clap admits only `0..=PNG_EFFORT_MAX`, and `the_png_effort_range_is_exactly_the_codec_ladder`
     // pins every one of those as a level the codec admits, so the fallback is unreachable; it
     // exists because this is a CLI and a panic is not an error report.
-    PngCodecPreset::from_level(level).unwrap_or_default()
+    PngEffort::from_level(level).unwrap_or_default()
 }
 
 impl JpegSubsampling {
@@ -817,9 +817,9 @@ fn encode(
             );
             // The rung sets every size/time knob; `--png-refinement-passes` still overrides the
             // one it names, so it must be applied after.
-            let mut encoder = PngEncoder::new().with_preset(png_preset(args.png_effort));
+            let mut encoder = PngEncoder::new().with_effort(png_effort(args.png_effort));
             if let Some(passes) = args.png_refinement_passes {
-                encoder = encoder.with_effort(passes);
+                encoder = encoder.with_deflate_passes(passes);
             }
             // A PNG input keeps every chunk it carries (issue #483), with its Exif rewritten; its
             // ICC profile is the file's own, so it needs no check against the samples here.
@@ -1356,8 +1356,8 @@ mod tests {
 
     use super::{
         AvifEffort, AvifEncoder, BitDepth, ChromaSubsampling, ConvertArgs, Dimensions,
-        InputMetadata, Job, JpegChroma, MatrixCoefficients, OutputFormat, Plan, PngCodecPreset,
-        Samples, avif_encoder, carry, plan, png_preset,
+        InputMetadata, Job, JpegChroma, MatrixCoefficients, OutputFormat, Plan, PngEffort, Samples,
+        avif_encoder, carry, plan, png_effort,
     };
     use crate::error::CliError;
 
@@ -1512,15 +1512,15 @@ mod tests {
     fn the_png_effort_range_is_exactly_the_codec_ladder() {
         // The levels clap admits and the codec's rungs are two lists that must stay the same
         // list. Walking `from_level` from zero is the codec's own enumeration of its ladder, so a
-        // rung added to `gamut_png::Preset` fails here instead of being silently unreachable from
+        // rung added to `gamut_png::Effort` fails here instead of being silently unreachable from
         // the command line, and each admitted level must resolve to the rung of that level.
         let from_flag: Vec<u8> = (0..=u8::MAX)
             .filter(|level| parse_png(&["--png-effort", &level.to_string()]).is_ok())
-            .map(|level| png_preset(level).level())
+            .map(|level| png_effort(level).level())
             .collect();
         let from_codec: Vec<u8> = (0..=u8::MAX)
-            .map_while(PngCodecPreset::from_level)
-            .map(PngCodecPreset::level)
+            .map_while(PngEffort::from_level)
+            .map(PngEffort::level)
             .collect();
         assert!(
             from_flag == from_codec,
@@ -1532,14 +1532,14 @@ mod tests {
     fn png_effort_defaults_to_the_small_rung() {
         // `small` is what this command encoded with before the flag existed.
         let args = parse_png(&[]).unwrap();
-        assert_eq!(png_preset(args.png_effort), PngCodecPreset::Small);
+        assert_eq!(png_effort(args.png_effort), PngEffort::Small);
         assert_eq!(args.png_refinement_passes, None);
     }
 
     #[test]
     fn png_refinement_passes_is_its_own_flag() {
         let args = parse_png(&["--png-effort", "3", "--png-refinement-passes", "0"]).unwrap();
-        assert_eq!(png_preset(args.png_effort), PngCodecPreset::Smallest);
+        assert_eq!(png_effort(args.png_effort), PngEffort::Smallest);
         assert_eq!(args.png_refinement_passes, Some(0));
     }
 

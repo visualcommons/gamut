@@ -120,7 +120,7 @@ pub use deconstruct::{
     ChunkStats, DEFAULT_MAX_CHUNKS, DeconstructLimits, FilterHistogram, FilterScan, PassStats,
     PngReport, Segment, SegmentKind, SkippedFilterScan, deconstruct, deconstruct_with_limits,
 };
-pub use encoder::{MetadataNotice, PngEncodeReport, PngEncoder, Preset};
+pub use encoder::{Effort, MetadataNotice, PngEncodeReport, PngEncoder};
 pub use filter::{FilterStrategy, FilterType};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
 pub use gamut_deflate::Level;

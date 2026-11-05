@@ -1,4 +1,4 @@
-//! The effort ladder's contract (issue #484), across every rung [`Preset::from_level`] admits.
+//! The effort ladder's contract (issue #484), across every rung [`Effort::from_level`] admits.
 //!
 //! A rung names a *combination* of the five independent size/time knobs, so what it owes a caller
 //! is not any particular knob value — those are re-tunable as this crate's corpus grows — but
@@ -11,13 +11,13 @@
 //!    sees it.
 //! 2. **Every rung buys something.** Each rung's total over the corpus is *strictly* smaller than
 //!    the rung above it. A rung that bought nothing would not be a rung.
-//! 3. **[`Preset::Balanced`] changes nothing.** It encodes byte-identically to a default
+//! 3. **[`Effort::Balanced`] changes nothing.** It encodes byte-identically to a default
 //!    [`PngEncoder`], which is what makes the dial additive: adopting it cannot move a caller who
 //!    was not already asking for something else.
 //!
 //! # Why the ordering is asserted over the corpus and not per row
 //!
-//! Because per row it is **false**, and measurably so. `Preset::Fast` fixes the Paeth predictor
+//! Because per row it is **false**, and measurably so. `Effort::Fast` fixes the Paeth predictor
 //! where `Balanced` runs the per-row `MinSumAbs` search, and a fixed predictor beats a heuristic
 //! on a picture that suits it: on `demotable_rgb16` at 32x32, `Fast` emits **155** bytes against
 //! `Balanced`'s **161**. That is not a defect — a cheaper rung coming out smaller costs the caller
@@ -28,22 +28,22 @@
 //! Measured at this revision (`cargo test -p gamut-png --test effort -- --nocapture`), totals in
 //! bytes over the nine rows below: **Fast 17 530, Balanced 16 952, Small 16 497, Smallest 15 903**.
 //!
-//! Fixtures are the shared efficiency corpus at a small side, because `Preset::Smallest` is the
+//! Fixtures are the shared efficiency corpus at a small side, because `Effort::Smallest` is the
 //! slowest code in the crate — a full DEFLATE per brute-force candidate — and this suite runs
 //! inside the coverage and mutation lanes.
 
 mod common;
 
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgb16, Rgba8};
-use gamut_png::{PngEncoder, Preset};
+use gamut_png::{Effort, PngEncoder};
 
-/// Every rung, fastest first — derived from [`Preset::from_level`] rather than listed, so a rung
+/// Every rung, fastest first — derived from [`Effort::from_level`] rather than listed, so a rung
 /// appended to the ladder is measured here without this file being touched. That the
 /// discriminants are contiguous from zero is pinned inline in `src/encoder.rs`
-/// (`every_preset_level_round_trips_and_the_ladder_is_contiguous`), which is what makes walking
+/// (`every_effort_level_round_trips_and_the_ladder_is_contiguous`), which is what makes walking
 /// until the first `None` the whole ladder rather than a prefix of it.
-fn ladder() -> Vec<Preset> {
-    (0..=u8::MAX).map_while(Preset::from_level).collect()
+fn ladder() -> Vec<Effort> {
+    (0..=u8::MAX).map_while(Effort::from_level).collect()
 }
 
 /// One corpus row: the fixture's samples in the layout it is generated in.
@@ -148,18 +148,18 @@ fn every_rung_stores_the_pixels_it_was_handed() {
     // below; `tests/oracle.rs` is where 16-bit fidelity is pinned, at its own stored depth.
     for row in corpus().into_iter().filter(|row| row.depth == 8) {
         let expected = expected_rgba8(&row);
-        for preset in ladder() {
-            let png = encode(&PngEncoder::new().with_preset(preset), &row);
+        for effort in ladder() {
+            let png = encode(&PngEncoder::new().with_effort(effort), &row);
             let (w, h, rgba) = libpng_oracle::decode_rgba8(&png);
             assert_eq!(
                 (w, h),
                 (row.side, row.side),
-                "{}/{preset:?}: size",
+                "{}/{effort:?}: size",
                 row.name
             );
             assert!(
                 rgba == expected,
-                "{}/{preset:?}: a rung changed what the file stores",
+                "{}/{effort:?}: a rung changed what the file stores",
                 row.name
             );
         }
@@ -177,7 +177,7 @@ fn every_rung_is_strictly_smaller_over_the_corpus_than_the_one_above_it() {
         .map(|row| {
             rungs
                 .iter()
-                .map(|&preset| encode(&PngEncoder::new().with_preset(preset), row).len())
+                .map(|&effort| encode(&PngEncoder::new().with_effort(effort), row).len())
                 .collect()
         })
         .collect();
@@ -216,12 +216,12 @@ fn every_rung_is_strictly_smaller_over_the_corpus_than_the_one_above_it() {
 
 #[test]
 fn the_balanced_rung_is_a_default_encoder() {
-    // Not a tautology: `Preset::Balanced` spells its knob values out rather than reading them back
+    // Not a tautology: `Effort::Balanced` spells its knob values out rather than reading them back
     // from `PngEncoder::new`, so this is the assertion that keeps the two from drifting — and it
     // is what makes the whole dial additive.
     for row in corpus() {
         let untouched = encode(&PngEncoder::new(), &row);
-        let balanced = encode(&PngEncoder::new().with_preset(Preset::Balanced), &row);
+        let balanced = encode(&PngEncoder::new().with_effort(Effort::Balanced), &row);
         assert!(
             untouched == balanced,
             "{}: the balanced rung is not the encoder default ({} bytes against {})",

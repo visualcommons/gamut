@@ -67,7 +67,7 @@ fn effort_budget_round_trips_and_defaults_to_six_passes() {
     for effort in [0u8, 15] {
         let encoder = PngEncoder::new()
             .with_compression(Level::Best)
-            .with_effort(effort)
+            .with_deflate_passes(effort)
             .with_filter(FilterStrategy::None);
         round_trip::<Rgb8>(&encoder, &src, w, h);
     }
@@ -90,8 +90,8 @@ fn effort_budget_round_trips_and_defaults_to_six_passes() {
         png
     };
     let implicit = encode(PngEncoder::new());
-    assert_eq!(implicit, encode(PngEncoder::new().with_effort(6)));
-    assert_ne!(implicit, encode(PngEncoder::new().with_effort(0)));
+    assert_eq!(implicit, encode(PngEncoder::new().with_deflate_passes(6)));
+    assert_ne!(implicit, encode(PngEncoder::new().with_deflate_passes(0)));
 }
 
 #[test]
