@@ -1057,6 +1057,12 @@ mod tests {
         let mut canvas = [200u8, 0, 128, 128];
         composite_over(&mut canvas, (1, 1), &[0, 100, 0, 128], (1, 1), (0, 0));
         assert_eq!(canvas, [66, 67, 43, 192]);
+        // A nearly transparent source over opaque mid-gray: the destination term is
+        // round(128·255·254/255) = 32512, then 32512/255 = 127.5… rounds to 127 at out_a = 255;
+        // a rounding offset larger than half would carry it to 128.
+        let mut canvas = [128u8, 0, 0, 255];
+        composite_over(&mut canvas, (1, 1), &[0, 0, 0, 1], (1, 1), (0, 0));
+        assert_eq!(canvas, [127, 0, 0, 255]);
     }
 
     #[test]
