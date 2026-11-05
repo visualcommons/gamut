@@ -857,6 +857,25 @@ mod tests {
     }
 
     #[test]
+    fn a_grid_of_multi_row_tiles_takes_each_tiles_rows_in_turn() {
+        // A 2×2 grid of 2×2 tiles: the stub's luma for payload [1, 1, a, b, c] is [1, 1, a, b].
+        let tile = |id: u32, t: u8| coded(id, &[1, 1, 10 + t, 20 + t, 0]);
+        let image = image(vec![
+            grid(1, (2, 2), (3, 4), &[2, 3, 4, 5]),
+            tile(2, 0),
+            tile(3, 1),
+            tile(4, 2),
+            tile(5, 3),
+        ]);
+        let frame = planar(&image, 1, DecodeLimits::default()).unwrap();
+        assert_eq!(
+            frame.y(),
+            [1, 1, 1, 10, 20, 11, 1, 1, 1, 12, 22, 13],
+            "rows: tile row 0 (top halves, bottom halves), then tile row 1"
+        );
+    }
+
+    #[test]
     fn a_grid_of_mismatched_tiles_or_an_overhanging_output_is_refused() {
         let mismatched = image(vec![
             grid(1, (2, 1), (2, 1), &[2, 3]),
@@ -877,6 +896,19 @@ mod tests {
             refusal(planar(&overhang, 1, DecodeLimits::default())).1,
             Some("HEIF: grid output dimensions exceed the tiled canvas")
         );
+        // An empty output on either axis is refused by the same check, inside the canvas.
+        for output in [(0, 1), (1, 0)] {
+            let empty = image(vec![
+                grid(1, (2, 1), output, &[2, 3]),
+                coded(2, &[0, 0]),
+                coded(3, &[0, 0]),
+            ]);
+            assert_eq!(
+                refusal(planar(&empty, 1, DecodeLimits::default())).1,
+                Some("HEIF: grid output dimensions exceed the tiled canvas"),
+                "{output:?}"
+            );
+        }
     }
 
     #[test]
@@ -1110,6 +1142,21 @@ mod tests {
         let refused =
             image.decode_item_rgba8::<StubCodec>(1, &StubBackend::registry(), no_derivations);
         assert_eq!(refusal(refused).1, Some(DERIVED_ITEM_LIMIT));
+    }
+
+    #[test]
+    fn an_empty_overlay_canvas_is_refused() {
+        for output in [(0, 1), (1, 0)] {
+            let image = image(vec![
+                overlay(1, [0; 4], output, &[(2, 0, 0)]),
+                coded(2, &[0, 0]),
+            ]);
+            assert_eq!(
+                refusal(rgba8(&image, 1)).1,
+                Some("HEIF: overlay canvas is empty or too large"),
+                "{output:?}"
+            );
+        }
     }
 
     #[test]

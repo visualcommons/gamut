@@ -1317,4 +1317,27 @@ mod tests {
         let summary = C2paSummary::from_segments(&walk(&boxes));
         assert_eq!(summary.stores[0].position, C2paBoxPosition::AfterMovieBox);
     }
+
+    /// A `merkle` box is listed as auxiliary, never as an unread C2PA box.
+    #[test]
+    fn a_merkle_box_in_a_walk_is_listed_as_auxiliary() {
+        use gamut_isobmff::C2PA_UUID;
+
+        let mut merkle = C2PA_UUID.to_vec();
+        merkle.extend_from_slice(&[0, 0, 0, 0]);
+        merkle.extend_from_slice(b"merkle\0");
+        merkle.extend_from_slice(&[0xAB; 8]);
+        let boxes = [(*b"uuid", merkle)];
+        let segments = walk(&boxes);
+        let summary = C2paSummary::from_segments(&segments);
+        assert_eq!(
+            summary.merkle,
+            vec![C2paMerkleBox {
+                range: 0..segments[0].range.end as u64,
+                position: C2paBoxPosition::BeforeMediaData,
+            }]
+        );
+        assert!(summary.unread.is_empty());
+        assert_eq!(summary.presence(), C2paPresence::AuxiliaryOnly);
+    }
 }

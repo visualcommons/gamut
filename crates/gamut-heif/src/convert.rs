@@ -602,6 +602,10 @@ mod tests {
         assert_eq!(expand_gray::<u8>(235, 8, ColorRange::Limited), 255);
         // ((126 - 16)·255 + 109) / 219 = 128.6… → 128.
         assert_eq!(expand_gray::<u8>(126, 8, ColorRange::Limited), 128);
+        // (4·255 + 109) / 219 = 5.15…: the half-span rounding term carries it past 4.66….
+        assert_eq!(expand_gray::<u8>(20, 8, ColorRange::Limited), 5);
+        // At 10 bits black is 64 and the span 876: (438·1023 + 438) / 876 is exactly 512.
+        assert_eq!(limited(502, 10), rescale::<u16>(512, 1023));
         assert_eq!(expand_gray::<u8>(250, 8, ColorRange::Limited), 255);
         assert_eq!(expand_gray::<u8>(3, 8, ColorRange::Limited), 0);
         assert_eq!(limited(64, 10), 0);
@@ -762,18 +766,19 @@ mod tests {
         assert_eq!(px(0), px(2));
         assert_eq!(px(1), px(3));
         assert_ne!(px(0), px(1));
-        // 2×2 at 4:2:2: one chroma column per row; row y reads chroma[y] on both columns.
+        // 4×2 at 4:2:2: two chroma columns per row; pixel (x, y) reads chroma (x / 2, y).
+        let cb = vec![20, 80, 140, 200];
         let f = frame(
-            (2, 2),
+            (4, 2),
             8,
             ChromaSubsampling::Cs422,
-            [vec![128; 4], vec![60, 200], vec![128, 128]],
+            [vec![128; 8], cb.clone(), vec![128; 4]],
         );
         let rgba = to_rgba8(&f, (6, ColorRange::Full), ChromaUpsampling::Nearest).unwrap();
-        let px = |i: usize| &rgba[i * 4..i * 4 + 3];
-        assert_eq!(px(0), px(1));
-        assert_eq!(px(2), px(3));
-        assert_ne!(px(0), px(2));
+        let blue = |cb: u8| bt601_ycbcr_to_rgb(128, cb, 128, ColorRange::Full).2;
+        let blues: Vec<u8> = rgba.chunks(4).map(|px| px[2]).collect();
+        let expected: Vec<u8> = [0, 0, 1, 1, 2, 2, 3, 3].map(|c| blue(cb[c] as u8)).to_vec();
+        assert_eq!(blues, expected);
     }
 
     #[test]
@@ -817,6 +822,22 @@ mod tests {
     }
 
     #[test]
+    fn interpolated_upsampling_keeps_each_rows_own_luma() {
+        // Neutral chroma: every pixel is gray at its own luma, whatever the filter does.
+        let luma = vec![10, 200, 30, 220, 40, 90, 250, 0];
+        let f = frame(
+            (2, 4),
+            8,
+            ChromaSubsampling::Cs420,
+            [luma.clone(), vec![128; 2], vec![128; 2]],
+        );
+        let rgba = to_rgba8(&f, (6, ColorRange::Full), ChromaUpsampling::Interpolated).unwrap();
+        let grays: Vec<[u8; 3]> = rgba.chunks(4).map(|px| [px[0], px[1], px[2]]).collect();
+        let expected: Vec<[u8; 3]> = luma.iter().map(|&y| [y as u8; 3]).collect();
+        assert_eq!(grays, expected);
+    }
+
+    #[test]
     fn alpha_takes_the_auxiliarys_luma_at_its_own_depth() {
         let mut rgba = vec![0u8; 8];
         let alpha = frame(
@@ -827,6 +848,10 @@ mod tests {
         );
         apply_alpha(&mut rgba, (2, 1), &alpha, AlphaChroma::Monochrome, ORIGIN).unwrap();
         assert_eq!(rgba, [0, 0, 0, 0, 0, 0, 0, 255]);
+        // The 16-bit surface resolves the white level exactly: 1023 is 65535, not 65471.
+        let mut wide = vec![0u16; 8];
+        apply_alpha(&mut wide, (2, 1), &alpha, AlphaChroma::Monochrome, ORIGIN).unwrap();
+        assert_eq!((wide[3], wide[7]), (0, 65535));
     }
 
     #[test]
@@ -927,6 +952,11 @@ mod tests {
         let (moved, _, _) =
             crop_clap(&src, 4, 4, &clap((2, 1), (2, 1), (-2, 2), (1, 1)), ORIGIN).unwrap();
         assert_eq!(order(&moved), [8, 9, 12, 13]);
+        // Every term is a fraction: 4/2 × 4/2 moved by 2/2 = +1 to the right.
+        let (fractions, w, h) =
+            crop_clap(&src, 4, 4, &clap((4, 2), (4, 2), (2, 2), (0, 1)), ORIGIN).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(order(&fractions), [6, 7, 10, 11]);
     }
 
     #[test]
@@ -953,6 +983,9 @@ mod tests {
         assert_eq!(crop(clap((2, 1), (2, 1), (0, 1), (-2, 1))), outside);
         assert_eq!(crop(clap((2, 1), (2, 1), (2, 1), (0, 1))), outside);
         assert_eq!(crop(clap((2, 1), (2, 1), (0, 1), (2, 1))), outside);
+        // A window wider (taller) than the image, moved half a pixel so it starts at 0.
+        assert_eq!(crop(clap((5, 1), (2, 1), (1, 2), (0, 1))), outside);
+        assert_eq!(crop(clap((2, 1), (5, 1), (0, 1), (1, 2))), outside);
         // The whole image is a window inside it.
         assert!(crop_clap(&src, 4, 4, &clap((4, 1), (4, 1), (0, 1), (0, 1)), ORIGIN).is_ok());
     }
@@ -1005,5 +1038,65 @@ mod tests {
         composite_over(&mut untouched, (1, 1), &src[..4], (1, 1), (-1, 0));
         composite_over(&mut untouched, (1, 1), &src[..4], (1, 1), (0, -1));
         assert_eq!(untouched, [1, 2, 3, 4]);
+        // An opaque source over a transparent canvas of the same size is copied pixel for pixel,
+        // which fixes both row strides.
+        let mut canvas = vec![0u8; 16];
+        let src = numbered(2, 2).iter().map(|&v| v + 1).collect::<Vec<_>>();
+        let opaque: Vec<u8> = src
+            .chunks(4)
+            .flat_map(|px| [px[0], px[1], px[2], 255])
+            .collect();
+        composite_over(&mut canvas, (2, 2), &opaque, (2, 2), (0, 0));
+        assert_eq!(canvas, opaque);
+    }
+
+    #[test]
+    fn source_over_rounds_each_term_half_up() {
+        // Half over half: out_a = 128 + round(128·127/255) = 128 + 64. Each channel term rounds
+        // where the floor would not: blue is round(round(128·128·127/255)/192) = 43, not 42.
+        let mut canvas = [200u8, 0, 128, 128];
+        composite_over(&mut canvas, (1, 1), &[0, 100, 0, 128], (1, 1), (0, 0));
+        assert_eq!(canvas, [66, 67, 43, 192]);
+    }
+
+    #[test]
+    fn source_over_works_at_the_16_bit_scale() {
+        let mut canvas = [1000u16, 2000, 3000, 65535];
+        composite_over(&mut canvas, (1, 1), &[9, 8, 7, 65535], (1, 1), (0, 0));
+        assert_eq!(canvas, [9, 8, 7, 65535]);
+        let mut canvas = [1000u16, 2000, 3000, 65535];
+        composite_over(&mut canvas, (1, 1), &[9, 8, 7, 0], (1, 1), (0, 0));
+        assert_eq!(canvas, [1000, 2000, 3000, 65535]);
+    }
+
+    #[test]
+    fn interpolated_upsampling_reads_the_chroma_rows_the_filter_names() {
+        // 4×4 at 4:2:0: a 2×2 chroma plane whose four samples all differ. The oracle slices the
+        // plane by `chunks`, independently of the converter's own row arithmetic.
+        let cb = vec![20u16, 90, 160, 230];
+        let cr = vec![200u16, 60, 140, 30];
+        let f = frame(
+            (4, 4),
+            8,
+            ChromaSubsampling::Cs420,
+            [vec![128; 16], cb.clone(), cr.clone()],
+        );
+        let rgba = to_rgba8(&f, (6, ColorRange::Full), ChromaUpsampling::Interpolated).unwrap();
+        let matrix =
+            YcbcrMatrix::new(MatrixCoefficients::Bt601, ColorRange::Full, BitDepth::Eight).unwrap();
+        let rows = |plane: &[u16]| plane.chunks(2).map(<[u16]>::to_vec).collect::<Vec<_>>();
+        let (cb_rows, cr_rows) = (rows(&cb), rows(&cr));
+        let mut expected = Vec::new();
+        for y in 0..4 {
+            let (near, far) = taps(y, 2);
+            let (mut cb_up, mut cr_up) = (vec![0u32; 4], vec![0u32; 4]);
+            libavif::bilinear_row(&cb_rows[near], &cb_rows[far], &mut cb_up);
+            libavif::bilinear_row(&cr_rows[near], &cr_rows[far], &mut cr_up);
+            for x in 0..4 {
+                let (r, g, b) = matrix.to_rgb_sixteenths(128, cb_up[x], cr_up[x]);
+                expected.extend([r as u8, g as u8, b as u8, 255]);
+            }
+        }
+        assert_eq!(rgba, expected);
     }
 }

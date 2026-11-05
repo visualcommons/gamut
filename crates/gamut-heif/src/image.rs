@@ -710,6 +710,151 @@ mod tests {
         })
     }
 
+    fn references(item: Item, reference_type: [u8; 4], to: Vec<u32>) -> Item {
+        let mut refs = item.references.clone();
+        refs.push(ItemReference::new(reference_type, to));
+        item.with_references(refs)
+    }
+
+    /// One file exercising every role lens: a primary with a thumbnail, Exif, XMP and another
+    /// `mime` item, a premultiplied alpha, a grid with a dangling tile, and two entity groups.
+    fn roles() -> HeifImage {
+        let primary = references(coded(1, vec![]), *b"prem", vec![9]);
+        let mut xmp = references(Item::new(4, *b"mime"), *b"cdsc", vec![1]);
+        xmp.content_type = Some("application/rdf+xml".to_owned());
+        let mut other_mime = references(Item::new(5, *b"mime"), *b"cdsc", vec![1]);
+        other_mime.content_type = Some("text/plain".to_owned());
+        let items = vec![
+            primary,
+            references(coded(2, vec![]), *b"thmb", vec![1]),
+            other_mime,
+            xmp,
+            references(Item::new(3, *b"Exif"), *b"cdsc", vec![1]),
+            references(Item::new(6, *b"grid"), *b"dimg", vec![7, 99, 8]),
+            coded(7, vec![]),
+            coded(8, vec![]),
+            references(coded(9, vec![]), *b"auxl", vec![1]),
+            // A reference of another type to the primary, and a thumbnail of something else.
+            references(coded(10, vec![]), *b"base", vec![1]),
+            references(coded(11, vec![]), *b"thmb", vec![7]),
+        ];
+        let file =
+            IsoBmffImage::new(*b"heic", vec![*b"mif1", *b"heic"], 1, items).with_groups(vec![
+                EntityGroup::new(*b"ster", 20, vec![7, 8]),
+                EntityGroup::new(*b"altr", 21, vec![1, 6]),
+            ]);
+        HeifImage::new(file).unwrap()
+    }
+
+    fn ids(items: Vec<HeifItem<'_>>) -> Vec<u32> {
+        items.iter().map(HeifItem::id).collect()
+    }
+
+    #[test]
+    fn the_role_lenses_read_references_by_type_and_target() {
+        let image = roles();
+        assert_eq!(image.major_brand(), *b"heic");
+        assert_eq!(image.compatible_brands(), [*b"mif1", *b"heic"]);
+        assert_eq!(image.items().count(), 11);
+        assert_eq!(ids(image.thumbnails_of(1)), [2]);
+        assert_eq!(ids(image.auxiliaries_of(1)), [9]);
+        assert_eq!(ids(image.metadata_of(1)), [5, 4, 3]);
+        assert_eq!(image.exif().map(|i| i.id()), Some(3));
+        assert_eq!(image.xmp().map(|i| i.id()), Some(4));
+        assert_eq!(ids(image.derivation_sources(6)), [7, 8]);
+        assert!(image.derivation_sources(99).is_empty());
+        assert!(image.is_premultiplied(1));
+        assert!(!image.is_premultiplied(2));
+        assert_eq!(image.groups().len(), 2);
+        let alternatives: Vec<u32> = image.alternatives().iter().map(|g| g.group_id).collect();
+        assert_eq!(alternatives, [21]);
+    }
+
+    #[test]
+    fn kind_classifies_by_item_type() {
+        let kind = |ty: &[u8; 4]| {
+            image_with(vec![coded(1, vec![]), Item::new(2, *ty)])
+                .item(2)
+                .unwrap()
+                .kind()
+        };
+        for codec in [b"av01", b"hvc1", b"hev1", b"vvc1", b"vvi1"] {
+            assert_eq!(kind(codec), ItemKind::CodedImage { codec: *codec });
+        }
+        assert_eq!(kind(b"grid"), ItemKind::Grid);
+        assert_eq!(kind(b"iovl"), ItemKind::Overlay);
+        assert_eq!(kind(b"iden"), ItemKind::Identity);
+        assert_eq!(kind(b"Exif"), ItemKind::Exif);
+        assert_eq!(kind(b"mime"), ItemKind::Mime);
+        assert_eq!(kind(b"zzzz"), ItemKind::Unknown(*b"zzzz"));
+    }
+
+    #[test]
+    fn the_property_lenses_read_their_own_property() {
+        let clap = CleanAperture {
+            width_n: 4,
+            width_d: 1,
+            height_n: 2,
+            height_d: 1,
+            horiz_off_n: 0,
+            horiz_off_d: 1,
+            vert_off_n: 0,
+            vert_off_d: 1,
+        };
+        let pasp = PixelAspectRatio {
+            h_spacing: 4,
+            v_spacing: 3,
+        };
+        let clli = ContentLightLevel {
+            max_content_light_level: 1000,
+            max_pic_average_light_level: 400,
+        };
+        let mdcv = MasteringDisplay::new([[1, 2], [3, 4], [5, 6]], [7, 8], 9, 10);
+        let kinds = vec![
+            PropertyKind::ImageSpatialExtents {
+                width: 6,
+                height: 5,
+            },
+            PropertyKind::CleanAperture(clap),
+            PropertyKind::PixelAspectRatio(pasp),
+            PropertyKind::PixelInformation {
+                bits_per_channel: vec![10, 10, 10],
+            },
+            PropertyKind::ContentLightLevel(clli),
+            PropertyKind::MasteringDisplayColourVolume(mdcv),
+            PropertyKind::Rotation(1),
+        ];
+        let image = image_of(coded(1, kinds.into_iter().map(property).collect()));
+        let item = image.primary_item();
+        assert_eq!(item.dimensions(), Dimensions::new(6, 5).ok());
+        assert_eq!(item.clean_aperture(), Some(clap));
+        assert_eq!(item.pixel_aspect_ratio(), Some(pasp));
+        assert_eq!(item.bits_per_channel(), Some(&[10u8, 10, 10][..]));
+        assert_eq!(item.content_light_level(), Some(clli));
+        assert_eq!(item.mastering_display(), Some(mdcv));
+        assert_eq!(
+            item.transformative_properties(),
+            [
+                TransformativeProperty::CleanAperture(clap),
+                TransformativeProperty::Rotation(1)
+            ]
+        );
+        // None of them is invented for an item without the property.
+        let bare = image_of(coded(1, vec![]));
+        let bare = bare.primary_item();
+        assert_eq!(
+            (
+                bare.dimensions(),
+                bare.clean_aperture(),
+                bare.pixel_aspect_ratio(),
+                bare.bits_per_channel(),
+                bare.content_light_level(),
+                bare.mastering_display(),
+            ),
+            (None, None, None, None, None, None)
+        );
+    }
+
     #[test]
     fn a_missing_or_hidden_primary_is_refused() {
         let missing = HeifImage::new(IsoBmffImage::new(
