@@ -118,8 +118,10 @@ only writes or round-trips metadata never reads. A consumer of the `gamut-metada
 Enable the optional `geocoordinates` feature (also included by `full`) to convert a complete
 [`GpsInfo`] with `TryFrom` into `geocoordinates::Wgs84` or `geocoordinates::Coordinate`. The latter
 preserves EXIF sea-level altitude as an orthometric height; the 2D `Wgs84` newtype intentionally
-drops altitude. Malformed references, rationals, DMS components, and out-of-range positions return
-the typed [`GpsConversionError`].
+drops altitude. Missing coordinates, malformed rationals or DMS components, and out-of-range
+positions return the typed [`GpsConversionError`]. A latitude carries a `LatitudeRef` (N/S) and a
+longitude a `LongitudeRef` (E/W), so a reference from the wrong axis cannot be expressed; reading
+one from a file leaves that coordinate out of the [`GpsInfo`].
 
 ## Unreadable thumbnails
 

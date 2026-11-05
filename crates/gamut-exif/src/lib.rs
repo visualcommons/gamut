@@ -104,7 +104,7 @@ pub use exif::Exif;
 pub use gamut_ifd::{ByteOrder, FieldType, Ifd, Value};
 #[cfg(feature = "geocoordinates")]
 pub use gps::GpsConversionError;
-pub use gps::{GpsAltitude, GpsCoordinate, GpsInfo, GpsReference};
+pub use gps::{GpsAltitude, GpsInfo, GpsLatitude, GpsLongitude, LatitudeRef, LongitudeRef};
 pub use maker_note::canon::CanonMakerNote;
 pub use maker_note::fujifilm::FujifilmMakerNote;
 pub use maker_note::leica::{Leica4Tags, Leica9Tags, LeicaMakerNote};
