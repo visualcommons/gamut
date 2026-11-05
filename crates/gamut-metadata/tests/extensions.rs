@@ -303,13 +303,16 @@ fn encode_drops_extensions_under_the_default_policy() {
     meta.set_extension(NS, "WhiteLevel", Value::Long(vec![16_383]));
 
     // The extension produces no block of any kind.
-    assert_eq!(meta.encode().unwrap(), EncodedMetadata::default());
+    assert_eq!(meta.to_blocks().unwrap(), EncodedMetadata::default());
 
     // ...and it does not perturb the blocks a carrier would have produced on its own.
     let carriers = Metadata::from_carriers(Some(Exif::new(ByteOrder::LittleEndian)), None, None);
     let mut with_extension = carriers.clone();
     with_extension.set_extension(NS, "WhiteLevel", Value::Long(vec![16_383]));
-    assert_eq!(with_extension.encode().unwrap(), carriers.encode().unwrap());
+    assert_eq!(
+        with_extension.to_blocks().unwrap(),
+        carriers.to_blocks().unwrap()
+    );
 }
 
 #[test]
@@ -355,7 +358,7 @@ fn carrier_roundtrip_equality_holds_when_extensions_are_present() {
         .unwrap();
     m1.set_extension(NS, "WhiteLevel", Value::Long(vec![16_383]));
 
-    let m2 = reextract(&m1.encode().unwrap());
+    let m2 = reextract(&m1.to_blocks().unwrap());
 
     // The keystone still holds over the three carriers...
     assert_eq!(m1.exif, m2.exif);

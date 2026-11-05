@@ -17,7 +17,7 @@ use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataEmbedder,
 use crate::{JpegEncoder, JpegMetadata};
 
 /// The facade's [`TypedMetadata`] over the located APP-segment payloads; [`metadata`]
-/// (`TypedMetadata::metadata`) is the trait's default, [`Metadata::from_blocks`] over
+/// (`TypedMetadata::metadata`) is the trait's default, [`Metadata::parse_blocks`] over
 /// [`blocks`](TypedMetadata::blocks).
 ///
 /// ```
@@ -160,9 +160,9 @@ mod tests {
             tags: Vec::new(),
         };
         let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
-            .encode()
+            .to_blocks()
             .unwrap();
-        Metadata::from_blocks(&[
+        Metadata::parse_blocks(&[
             MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
             MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
             MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn encoded_blocks_route_to_the_raw_setters() {
         // Each present field lands in its APP segment; an absent one leaves an earlier setting.
-        let encoded = typed().encode().unwrap();
+        let encoded = typed().to_blocks().unwrap();
         let jpeg = encode(JpegEncoder::new().with_encoded_metadata(&encoded).unwrap());
         let read = crate::metadata(&jpeg).unwrap();
         // `EncodedMetadata::exif` carries the `Exif\0\0` signature; the stream stores the TIFF.
@@ -335,6 +335,6 @@ mod tests {
             err.static_message(),
             Some("JPEG: metadata does not serialize")
         );
-        assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+        assert_eq!(err.detail(), Some("icc: duplicate tag signature"));
     }
 }

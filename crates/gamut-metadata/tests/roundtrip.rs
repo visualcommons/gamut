@@ -3,11 +3,11 @@
 
 use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
-use gamut_metadata::iptc::{IimBlock, IimCharset, IimDataSet};
+use gamut_metadata::iptc::{ConflictPolicy, IimBlock, IimCharset, IimDataSet};
 use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
 use gamut_metadata::{
-    C2paPolicy, ConflictPolicy, EncodedMetadata, ExtensionPolicy, Metadata, MetadataBlock,
-    MetadataEmbedder, MetadataError, MetadataExtractor,
+    C2paPolicy, EncodedMetadata, ExtensionPolicy, Metadata, MetadataBlock, MetadataEmbedder,
+    MetadataError, MetadataExtractor,
 };
 
 // --- carrier fixtures (each produced by its own leaf crate, so the bytes are genuine) ------------
@@ -186,7 +186,7 @@ fn conflicts_reports_carrier_disagreements() {
 #[test]
 fn embed_serializes_only_present_carriers() {
     let meta = Metadata::from_carriers(Some(Exif::new(ByteOrder::LittleEndian)), None, None);
-    let enc = meta.encode().unwrap();
+    let enc = meta.to_blocks().unwrap();
     assert!(enc.exif.is_some());
     assert_eq!(enc.xmp, None);
     assert_eq!(enc.icc, None);
@@ -194,15 +194,15 @@ fn embed_serializes_only_present_carriers() {
 
     // A wholly empty model produces no blocks at all.
     assert_eq!(
-        Metadata::default().encode().unwrap(),
+        Metadata::default().to_blocks().unwrap(),
         EncodedMetadata::default()
     );
 }
 
 #[test]
-fn from_blocks_matches_the_default_extractor() {
+fn parse_blocks_matches_the_default_extractor() {
     let xmp = xmp_bytes_non_iptc();
-    let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(&xmp)]).unwrap();
+    let meta = Metadata::parse_blocks(&[MetadataBlock::Xmp(&xmp)]).unwrap();
     assert_eq!(
         meta,
         MetadataExtractor::new()
@@ -268,7 +268,7 @@ fn roundtrip_all_carriers_is_lossless() {
         .unwrap();
     assert!(m1.exif.is_some() && m1.xmp.is_some() && m1.icc.is_some());
 
-    let m2 = reextract(&m1.encode().unwrap());
+    let m2 = reextract(&m1.to_blocks().unwrap());
     assert_eq!(m1, m2);
 }
 
@@ -284,7 +284,7 @@ fn roundtrip_iim_field_survives_via_xmp_without_reemitting_iim() {
     assert_eq!(m1.iptc().unwrap().city(), Some("Lyon"));
 
     // Default embed does NOT re-emit the legacy block...
-    let enc = m1.encode().unwrap();
+    let enc = m1.to_blocks().unwrap();
     assert!(enc.iptc_iim.is_none());
 
     // ...yet the City survives the round-trip, because it now lives in the XMP packet.
@@ -328,14 +328,14 @@ fn embed_drops_the_manifest_store_under_the_default_policy() {
         .unwrap();
     assert!(meta.c2pa.is_some());
 
-    let enc = meta.encode().unwrap();
+    let enc = meta.to_blocks().unwrap();
     // The store is not copied forward into the file these blocks describe...
     assert_eq!(enc.c2pa, None);
     // ...and its presence perturbs nothing else.
     let without = MetadataExtractor::new()
         .extract(&[MetadataBlock::Exif(&exif)])
         .unwrap();
-    assert_eq!(enc, without.encode().unwrap());
+    assert_eq!(enc, without.to_blocks().unwrap());
 }
 
 #[test]
@@ -400,7 +400,7 @@ fn roundtrip_deliberately_loses_the_manifest_store() {
         ])
         .unwrap();
 
-    let m2 = reextract(&m1.encode().unwrap());
+    let m2 = reextract(&m1.to_blocks().unwrap());
 
     // Equality over the serializable carriers still holds...
     assert_eq!(m1.exif, m2.exif);
@@ -411,13 +411,13 @@ fn roundtrip_deliberately_loses_the_manifest_store() {
     assert_ne!(m1, m2);
 
     // A second pass is stable: nothing was left to lose.
-    assert_eq!(m2, reextract(&m2.encode().unwrap()));
+    assert_eq!(m2, reextract(&m2.to_blocks().unwrap()));
 }
 
 #[test]
 fn roundtrip_empty_is_stable() {
     let m1 = MetadataExtractor::new().extract(&[]).unwrap();
-    let m2 = reextract(&m1.encode().unwrap());
+    let m2 = reextract(&m1.to_blocks().unwrap());
     assert_eq!(m1, m2);
     assert!(m2.is_empty());
 }

@@ -725,7 +725,7 @@ mod typed {
     }
 
     /// The facade's [`TypedMetadata`] over the located payloads; `metadata` is the trait's
-    /// default, `Metadata::from_blocks` over [`blocks`](TypedMetadata::blocks).
+    /// default, `Metadata::parse_blocks` over [`blocks`](TypedMetadata::blocks).
     ///
     /// ```
     /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};

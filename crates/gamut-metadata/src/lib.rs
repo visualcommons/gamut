@@ -18,7 +18,7 @@
 //! [`xmp`](Metadata::xmp), read back through the
 //! [`Metadata::iptc`] lens. The one genuinely separate IPTC carrier — the legacy binary IIM block —
 //! is reconciled *into* the XMP graph on [extraction](MetadataExtractor) (with a
-//! [`ConflictPolicy`]) and projected back out only on request when [embedding](MetadataEmbedder).
+//! [`ConflictPolicy`](iptc::ConflictPolicy)) and projected back out only on request when [embedding](MetadataEmbedder).
 //! Because each datum is stored once, the extract→embed→extract round-trip is a true equality —
 //! with one documented exception, [`c2pa`](Metadata::c2pa), below.
 //!
@@ -42,7 +42,7 @@
 //! - **Carrier round-trip** (the keystone). extract → embed → extract is a true equality over
 //!   [`exif`](Metadata::exif)/[`xmp`](Metadata::xmp)/[`icc`](Metadata::icc) —
 //!   [`c2pa`](Metadata::c2pa) excepted, for the reason [below](#c2pa-a-carrier-that-must-not-be-copied-forward).
-//!   Extensions take no part: extraction never produces one, and [`Metadata::encode`] drops them
+//!   Extensions take no part: extraction never produces one, and [`Metadata::to_blocks`] drops them
 //!   (or fails, under [`ExtensionPolicy::Reject`]).
 //!
 //! **Prefer a carrier whenever one exists** — only a carrier reaches the file. An unmodelled EXIF
@@ -65,7 +65,7 @@
 //! );
 //!
 //! // Embedding cannot carry it — by default it is dropped...
-//! assert_eq!(meta.encode()?, Metadata::default().encode()?);
+//! assert_eq!(meta.to_blocks()?, Metadata::default().to_blocks()?);
 //!
 //! // ...and a caller that must not lose it silently can say so.
 //! let rejected = MetadataEmbedder::new()
@@ -92,7 +92,7 @@
 //! exactly one hard binding (§9.1): a digest over the finished file, computed with the store's own
 //! byte range excluded (§15.12.1.1) and covering the asset's other metadata (§9.2.6). Re-encoding
 //! the image — or any metadata-only rewrite that moves a byte — invalidates it. So embedding
-//! **never** re-emits the store: [`Metadata::encode`] drops it, or fails under
+//! **never** re-emits the store: [`Metadata::to_blocks`] drops it, or fails under
 //! [`C2paPolicy::Reject`], and `extract → embed → extract` deliberately loses it. C2PA's model for
 //! a derivative asset is a *new* manifest carrying the parent as an ingredient, not the parent's
 //! signature laundered onto different bytes; producing one is signing work, outside this crate.
@@ -102,11 +102,11 @@
 //!
 //! // A container located a manifest store; extraction carries the bytes through untouched.
 //! let store = b"\0\0\0\x14jumbc2pa".to_vec();
-//! let meta = Metadata::from_blocks(&[MetadataBlock::C2pa(&store)])?;
+//! let meta = Metadata::parse_blocks(&[MetadataBlock::C2pa(&store)])?;
 //! assert_eq!(meta.c2pa.as_deref(), Some(&store[..]));
 //!
 //! // Embedding refuses to launder it into a rewritten file — quietly by default...
-//! assert_eq!(meta.encode()?.c2pa, None);
+//! assert_eq!(meta.to_blocks()?.c2pa, None);
 //!
 //! // ...or loudly, for a caller that must notice provenance is being dropped.
 //! let rejected = MetadataEmbedder::new()
@@ -131,7 +131,7 @@
 //! — because the key is reserved for external manifests (§11.5) yet a file may carry both, and the
 //! lens reports what the file carries. The URL is reported as found; **gamut never
 //! resolves it**, and the HTTP `Link` header route (§15.5.3.2) is out of scope for a file-format
-//! library — see the [`provenance`] module for both.
+//! library — see [`ProvenanceState`] for both.
 //!
 //! ```
 //! use gamut_metadata::{Metadata, MetadataBlock, ProvenanceState};
@@ -146,7 +146,7 @@
 //! );
 //! let packet = graph.to_bytes();
 //!
-//! let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(&packet)])?;
+//! let meta = Metadata::parse_blocks(&[MetadataBlock::Xmp(&packet)])?;
 //! assert_eq!(meta.c2pa, None); // nothing embedded...
 //! assert_eq!(
 //!     meta.provenance().remote_url(), // ...yet not "no provenance"
@@ -156,23 +156,19 @@
 //! # Ok::<(), gamut_metadata::MetadataError>(())
 //! ```
 //!
-//! # Which formats carry what
+//! # Format crates: one shape in, one shape out
 //!
-//! The facade never parses a container, so it cannot say whether a *file* has metadata — but it can
-//! say whether gamut's crate for a format can locate or write a given carrier at all, before a
-//! caller pulls that crate in. [`capability::supports`] answers per (format × carrier × direction),
-//! and [`capability::typed_wiring`] says whether the format crate also exposes these typed models
-//! directly (behind its `metadata` feature) rather than as raw bytes. A wired crate does so through
-//! one shape, the object-safe [`TypedMetadata`] trait on its decoded-metadata type, so a caller can
-//! write one function over every wired format:
+//! The facade names no format crate. A format crate wires itself in through two traits defined
+//! here, so a caller writes one function over every wired format:
 //!
-//! ```
-//! use gamut_metadata::capability::{Carrier, Direction, Format, supports, typed_wiring};
+//! - **Out:** its decoded-metadata type implements the object-safe [`TypedMetadata`], handing over
+//!   the located payloads as [`MetadataBlock`]s.
+//! - **In:** its encoder implements [`MetadataSink`] — the raw carrier setters plus the
+//!   [`Carrier`]s it writes — and gets `with_metadata` / `with_encoded_metadata` with the
+//!   precedence every gamut encoder shares, implemented once here.
 //!
-//! assert!(supports(Format::Jpeg, Carrier::Exif, Direction::Write));
-//! assert!(!supports(Format::Heic, Carrier::Exif, Direction::Write)); // decode-only crate
-//! assert!(typed_wiring(Format::Jpeg));
-//! ```
+//! Which format crate locates or writes which carrier is a question about the set of format
+//! crates, so it is answered where that set lives: the `gamut` umbrella's `capability` module.
 //!
 //! # Quick start
 //!
@@ -186,11 +182,11 @@
 //! let packet = graph.to_bytes();
 //!
 //! // Extract a unified model from the located blocks...
-//! let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(&packet)])?;
+//! let meta = Metadata::parse_blocks(&[MetadataBlock::Xmp(&packet)])?;
 //! assert_eq!(meta.iptc().unwrap().city(), Some("Kyoto"));
 //!
 //! // ...then serialize back to per-carrier byte blocks for a container to embed.
-//! let blocks = meta.encode()?;
+//! let blocks = meta.to_blocks()?;
 //! assert!(blocks.xmp.is_some());
 //! # Ok::<(), gamut_metadata::MetadataError>(())
 //! ```
@@ -209,29 +205,29 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
-pub mod capability;
-pub mod embed;
-pub mod error;
-pub mod extension;
-pub mod extract;
-pub mod metadata;
-pub mod provenance;
-pub mod source;
-pub mod typed;
+mod embed;
+mod error;
+mod extension;
+mod extract;
+mod metadata;
+mod provenance;
+mod sink;
+mod source;
+mod typed;
 
-// Re-export the per-format crates so consumers reach everything through one entry point.
 pub use embed::{C2paPolicy, EncodedMetadata, ExtensionPolicy, MetadataEmbedder};
 pub use error::{MetadataError, Result};
 pub use extension::{MetadataExtension, RESERVED_NAMESPACE_PREFIX};
 pub use extract::MetadataExtractor;
+// The per-format crates, re-exported whole because the model holds their types by value: one
+// dependency reaches everything. No leaf item is re-exported again at the root: the IPTC
+// reconciliation knobs are `iptc::{ConflictPolicy, FieldConflict}`.
 pub use gamut_exif as exif;
 pub use gamut_icc as icc;
 pub use gamut_iptc as iptc;
-// Surface the IPTC reconciliation knobs at the facade level so callers configure extraction without
-// reaching into the `iptc` submodule.
-pub use gamut_iptc::{ConflictPolicy, FieldConflict};
 pub use gamut_xmp as xmp;
 pub use metadata::Metadata;
 pub use provenance::ProvenanceState;
-pub use source::MetadataBlock;
+pub use sink::MetadataSink;
+pub use source::{Carrier, MetadataBlock};
 pub use typed::TypedMetadata;

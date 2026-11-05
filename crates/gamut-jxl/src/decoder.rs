@@ -213,7 +213,7 @@ fn exif_box_tiff_stream(payload: &[u8]) -> Result<&[u8]> {
 
 /// The facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over the located payloads;
 /// [`metadata`](gamut_metadata::TypedMetadata::metadata) is the trait's default,
-/// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
+/// [`Metadata::parse_blocks`](gamut_metadata::Metadata::parse_blocks) over
 /// [`blocks`](gamut_metadata::TypedMetadata::blocks).
 #[cfg(feature = "metadata")]
 impl gamut_metadata::TypedMetadata for JxlMetadata {

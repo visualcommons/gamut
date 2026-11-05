@@ -12,9 +12,8 @@
 //! It is deliberately re-exports and nothing else — no wrapper bodies. A wrapper would be an
 //! executable line that no gate ever runs (bench targets carry `test = false`, so neither
 //! `cargo test`, `cargo llvm-cov` nor `cargo mutants` reach them), which would both drag the
-//! coverage floor and generate unkillable mutants. `.cargo/mutants.toml` already states the rule
-//! this follows, in its `crates/gamut/**` entry: "pure feature-gated re-exports (no function
-//! bodies), so it carries no logic of its own to mutate."
+//! coverage floor and generate unkillable mutants. A module of re-exports alone has no function
+//! body, so `cargo mutants` generates nothing from it and it needs no exclusion.
 
 pub use crate::crc32::Crc32;
 pub use crate::encoder::BRUTE_FORCE_STRATEGIES;

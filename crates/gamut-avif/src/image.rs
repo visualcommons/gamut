@@ -325,7 +325,7 @@ impl AvifImage {
 
 /// The facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over the primary item's
 /// located payloads; [`metadata`](gamut_metadata::TypedMetadata::metadata) is the trait's default,
-/// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
+/// [`Metadata::parse_blocks`](gamut_metadata::Metadata::parse_blocks) over
 /// [`blocks`](gamut_metadata::TypedMetadata::blocks). Compiled with the `metadata` feature.
 ///
 /// AVIF's payloads are ISOBMFF items, framed rather than bare — the `Exif` item wraps its TIFF
@@ -370,7 +370,7 @@ impl gamut_metadata::TypedMetadata for AvifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`MetadataError::Container`](gamut_metadata::MetadataError::Container) carrying
+    /// Returns [`MetadataError::Core`](gamut_metadata::MetadataError::Core) carrying
     /// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the `Exif`
     /// item's offset field is short or points past the payload, and carrying an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the XMP item
@@ -771,8 +771,8 @@ mod tests {
         fn an_unlocatable_exif_stream_is_a_container_error() {
             let image = image(vec![item(2, *b"Exif", b"\0\0\0\x09MM\0*")]);
             let err = image.blocks().unwrap_err();
-            let MetadataError::Container(inner) = err else {
-                panic!("expected Container, got {err:?}");
+            let MetadataError::Core(inner) = err else {
+                panic!("expected Core, got {err:?}");
             };
             assert_eq!(
                 inner.static_message(),
@@ -786,8 +786,8 @@ mod tests {
             xmp.content_type = Some("application/rdf+xml".to_owned());
             xmp.content_encoding = Some("deflate".to_owned());
             let err = image(vec![xmp]).blocks().unwrap_err();
-            let MetadataError::Container(inner) = err else {
-                panic!("expected Container, got {err:?}");
+            let MetadataError::Core(inner) = err else {
+                panic!("expected Core, got {err:?}");
             };
             assert_eq!(inner.kind(), gamut_core::ErrorKind::Unsupported);
             assert_eq!(

@@ -27,11 +27,10 @@ exclude_globs = [
     # behaviour cargo-mutants can exercise. Excluded like the binding/binary crates (matches the
     # coverage gate's --ignore-filename-regex).
     "crates/gamut-jxl-sys/**",
-    # The `gamut` umbrella is pure feature-gated re-exports (no function bodies), so it carries no
-    # logic of its own to mutate. (`gamut-metadata` used to be excluded here on the same grounds —
-    # a thin facade delegating to gamut-exif/xmp/icc/iptc — but its extension table owns real
-    # lookup/replace/remove logic now, so it is mutation-tested in full.)
-    "crates/gamut/**",
+    # The `gamut` umbrella is no longer excluded: besides its feature-gated re-exports (no function
+    # bodies, so no mutants) it owns the `capability` table moved out of gamut-metadata (#1077),
+    # which is live logic and is mutation-tested from its inline tests. (`gamut-metadata` was once
+    # excluded here as a thin facade too, and is mutation-tested in full for the same reason.)
     "tooling/**",
     # `invariants` modules are the executable laws a property test and the fuzz tier both drive
     # (`docs/testing.md`) — the oracle, not the system under test, exactly like `tooling/**` above,
@@ -130,7 +129,7 @@ exclude_re = [
     # `a_constructed_palette_is_never_empty`, which also asserts the constructor's refusal --
     # the invariant this argument rests on.
     '^crates/gamut-png/src/palette\.rs:150:9: replace PngPalette::is_empty -> bool with false$',
-    # gamut-metadata capability::typed_wiring -- equivalent because every format is wired (#510).
+    # gamut capability::typed_wiring -- equivalent because every format is wired (#510).
     # The table's cell is `true` for each of the eight `Format` variants, and its `match` names
     # all eight with no wildcard, so the constant `true` agrees with the body on every value a
     # caller can pass: no input distinguishes it. It stops being equivalent the moment a variant
@@ -138,7 +137,7 @@ exclude_re = [
     #
     # The *other* direction is NOT excluded: `with false` is killed by
     # `typed_wiring_names_every_format`.
-    '^crates/gamut-metadata/src/capability\.rs:263:5: replace typed_wiring -> bool with true$',
+    '^crates/gamut/src/capability\.rs:228:5: replace typed_wiring -> bool with true$',
     # gamut-ifd track::subtract — disabling the merge guard is equivalent by construction: the
     # skip loop discards every claim with `end <= pos`, and the covered arm advances `pos` to
     # `r.end.min(end)`, strictly greater than `pos`, so an unmerged sorted-but-overlapping list

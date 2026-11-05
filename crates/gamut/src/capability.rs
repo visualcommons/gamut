@@ -1,11 +1,13 @@
 //! Which metadata carrier each gamut format crate can locate or write, as a queryable table.
 //!
-//! The facade is container-agnostic, so it cannot *do* anything with a format; what it can do is
-//! answer, statically and without pulling any format crate in, the question a caller asks before
-//! reaching for one: "can gamut read (or write) EXIF in a WebP?". The real matrix is not uniform —
-//! HEIC is decode-only, JPEG and JPEG XL locate no C2PA store, IPTC-IIM rides only in the TIFF
-//! family — so the
-//! model is per **(format × carrier × direction)** rather than a flat per-format flag.
+//! The metadata facade ([`gamut::metadata`](crate::metadata)) is container-agnostic and names no
+//! format crate, so the list of format crates — and what each does with each carrier — lives
+//! here, in the umbrella that already holds that list. It answers, statically and whichever format
+//! features this build enabled, the question a caller asks before reaching for a format: "can
+//! gamut read (or write) EXIF in a WebP?". The real matrix is not uniform — HEIC is decode-only,
+//! JPEG and JPEG XL locate no C2PA store, IPTC-IIM rides only in the TIFF family — so the model is
+//! per **(format × carrier × direction)** rather than a flat per-format flag, over the facade's own
+//! [`Carrier`] vocabulary.
 //!
 //! Two questions, two functions:
 //!
@@ -13,24 +15,24 @@
 //!   ([`Direction::Write`]) the carrier as a raw payload? This is the crate's own surface
 //!   (`metadata()` / `with_exif`-style setters).
 //! - [`typed_wiring`] — does the format crate also expose the facade's typed models directly
-//!   (a [`TypedMetadata`](crate::TypedMetadata) impl and a `with_metadata` encoder builder),
-//!   behind that crate's optional `metadata` Cargo feature where it has one?
+//!   (a [`TypedMetadata`](crate::metadata::TypedMetadata) impl and a `with_metadata` encoder
+//!   builder), behind that crate's optional `metadata` Cargo feature where it has one?
 //!
 //! Both answer for the surface a crate **defines**, not for what a particular build compiled: a
 //! `const fn` sees neither the Cargo features another crate was built with nor the target. Each
 //! function's own docs name the cases where that gap is real.
 //!
-//! The table is a transcription of each crate's `STATUS.md` **as of this facade version**; every
-//! arm below cites the row that justifies it, and the cell changes in the pull request that changes
-//! the row. It is deliberately a `const` table rather than a runtime registry: the set of formats is
-//! the workspace's, fixed at build time, and a query must be answerable from a crate that depends on
-//! no format crate at all (the release topology forbids the reverse edge).
+//! The table is a transcription of each crate's `STATUS.md`; every arm below cites the row that
+//! justifies it, and the cell changes in the pull request that changes the row. It is deliberately
+//! a `const` table rather than a runtime registry: the set of formats is the workspace's, fixed at
+//! build time, and a query must be answerable whichever format features are on.
 //!
 //! The audio/video half of the same question — which *media* containers carry which metadata — is
 //! outside an image-first workspace and stays with the issue that asked for it.
 //!
 //! ```
-//! use gamut_metadata::capability::{Carrier, Direction, Format, supports, typed_wiring};
+//! use gamut::capability::{Direction, Format, supports, typed_wiring};
+//! use gamut::metadata::Carrier;
 //!
 //! // HEIC is decode-only: EXIF can be located but never written.
 //! assert!(supports(Format::Heic, Carrier::Exif, Direction::Read));
@@ -44,6 +46,8 @@
 //! // where it has one).
 //! assert!(typed_wiring(Format::Png));
 //! ```
+
+use gamut_metadata::Carrier;
 
 /// A still-image container format with a gamut crate.
 ///
@@ -105,36 +109,6 @@ impl Format {
     }
 }
 
-/// A metadata carrier: one genuinely distinct serialization a container holds, matching the
-/// variants of [`MetadataBlock`](crate::MetadataBlock).
-///
-/// `#[non_exhaustive]` and `#[repr(u8)]` with permanent, append-only discriminants, like
-/// [`Format`]. Iterate with [`Carrier::ALL`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-#[repr(u8)]
-pub enum Carrier {
-    /// An EXIF blob (a TIFF stream, with or without the `Exif\0\0` marker).
-    Exif = 0,
-    /// An XMP packet — which is also where IPTC Core/Extension lives.
-    Xmp = 1,
-    /// An ICC profile.
-    Icc = 2,
-    /// The legacy binary IPTC-IIM dataset stream.
-    IptcIim = 3,
-    /// A C2PA manifest store (JUMBF superbox). Read-only by nature everywhere: the facade never
-    /// copies a store forward (see [`C2paPolicy`](crate::C2paPolicy)), so no format **writes** one
-    /// as a carrier. The format crates that can place a store do so only as a signing workflow —
-    /// a `with_c2pa_reserved` slot, or a `with_c2pa` store computed for that exact output — which
-    /// is not carrying metadata from one file to another, and [`supports`] does not count it.
-    C2pa = 4,
-}
-
-impl Carrier {
-    /// Every carrier, in discriminant order. A slice for the same reason as [`Format::ALL`].
-    pub const ALL: &'static [Self] = &[Self::Exif, Self::Xmp, Self::Icc, Self::IptcIim, Self::C2pa];
-}
-
 /// Which way the metadata moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -165,56 +139,38 @@ impl Direction {
 /// encoder on `encode`, so under `default-features = false, features = ["encode"]` no reader
 /// exists while this table still answers `true` for [`Direction::Read`]. A caller who switches a
 /// format crate's own default features off owns that intersection.
+///
+/// A carrier the facade appends to its `#[non_exhaustive]` [`Carrier`] answers `false` until a
+/// cell here names it.
 #[must_use]
 pub const fn supports(format: Format, carrier: Carrier, direction: Direction) -> bool {
     let read = matches!(direction, Direction::Read);
     match (format, carrier) {
         // gamut-jpeg STATUS.md P7: APP1 EXIF + XMP and multi-segment APP2 ICC, read (`metadata()`)
         // and write (`with_exif` / `with_xmp` / `with_icc_profile`).
-        (Format::Jpeg, Carrier::Exif | Carrier::Xmp | Carrier::Icc) => true,
-        // gamut-jpeg STATUS.md "Not implemented": APP13 IPTC-IIM deferred; no APP11 (C2PA) carriage.
-        (Format::Jpeg, Carrier::IptcIim | Carrier::C2pa) => false,
-
         // gamut-png STATUS.md P8 (eXIf / iCCP / iTXt-XMP setters) and D5 (raw eXIf / iCCP / XMP
         // payloads on decode).
-        (Format::Png, Carrier::Exif | Carrier::Xmp | Carrier::Icc) => true,
-        // gamut-png STATUS.md C1: the `caBX` manifest store is located on decode
-        // (`PngMetadata::c2pa`); written only as a signing workflow (see `Carrier::C2pa`).
-        (Format::Png, Carrier::C2pa) => read,
-        // gamut-png STATUS.md: no IPTC-IIM chunk exists in PNG.
-        (Format::Png, Carrier::IptcIim) => false,
-
         // gamut-webp STATUS.md M4: `ICCP` / `EXIF` / `XMP ` chunks embedded on encode and preserved
         // on decode (`metadata` / `with_icc_profile` / `with_exif` / `with_xmp`).
-        (Format::WebP, Carrier::Exif | Carrier::Xmp | Carrier::Icc) => true,
-        // gamut-webp STATUS.md M4 "C2PA manifest store": the `C2PA` chunk is preserved on decode
-        // (`WebpMetadata::c2pa`); written only as a signing workflow (see `Carrier::C2pa`).
-        (Format::WebP, Carrier::C2pa) => read,
-        // gamut-webp STATUS.md: RIFF has no IPTC-IIM chunk.
-        (Format::WebP, Carrier::IptcIim) => false,
-
         // gamut-avif STATUS.md M4: Exif / XMP items with a `cdsc` reference and `colr` `prof` ICC,
         // written by `AvifEncoder::with_exif` / `with_xmp` / `with_icc_profile` and read back.
-        (Format::Avif, Carrier::Exif | Carrier::Xmp | Carrier::Icc) => true,
-        // gamut-avif STATUS.md "C2PA carriage" (#444): the top-level `uuid` box is located on read
-        // (`AvifContainer::c2pa_slot`); written only as a signing workflow (see `Carrier::C2pa`).
-        (Format::Avif, Carrier::C2pa) => read,
-        // gamut-avif STATUS.md: no IPTC-IIM item type.
-        (Format::Avif, Carrier::IptcIim) => false,
+        // gamut-jxl STATUS.md "Exif / XMP container boxes" (written by `with_exif` / `with_xmp`,
+        // read back by `JxlDecoder::metadata`) and "Colour signalling" (`ColorSpec::Icc` written,
+        // `embedded_icc_profile` read).
+        (
+            Format::Jpeg | Format::Png | Format::WebP | Format::Avif | Format::Jxl,
+            Carrier::Exif | Carrier::Xmp | Carrier::Icc,
+        ) => true,
+
+        // C2PA manifest stores located on read and written only as a signing workflow (see
+        // `Carrier::C2pa`): gamut-png STATUS.md C1 (`caBX`, `PngMetadata::c2pa`); gamut-webp
+        // STATUS.md M4 "C2PA manifest store" (the `C2PA` chunk, `WebpMetadata::c2pa`); gamut-avif
+        // STATUS.md "C2PA carriage" (#444, the top-level `uuid` box, `AvifContainer::c2pa_slot`).
+        (Format::Png | Format::WebP | Format::Avif, Carrier::C2pa) => read,
 
         // gamut-heic STATUS.md B (Exif/XMP lens via `cdsc`, `colr` accessor) and S7 (C2PA manifest
         // store located in a top-level `uuid` box). The crate is decode-only: nothing is written.
         (Format::Heic, Carrier::Exif | Carrier::Xmp | Carrier::Icc | Carrier::C2pa) => read,
-        // gamut-heic STATUS.md: HEIF has no IPTC-IIM item type.
-        (Format::Heic, Carrier::IptcIim) => false,
-
-        // gamut-jxl STATUS.md "Exif / XMP container boxes" (written by `with_exif` / `with_xmp`,
-        // read back by `JxlDecoder::metadata`) and "Colour signalling" (`ColorSpec::Icc` written,
-        // `embedded_icc_profile` read).
-        (Format::Jxl, Carrier::Exif | Carrier::Xmp | Carrier::Icc) => true,
-        // gamut-jxl STATUS.md: no IPTC-IIM box; the `jumb` (C2PA) box is neither located nor
-        // written, and a Brotli-compressed `brob` metadata box is a typed `Unsupported`.
-        (Format::Jxl, Carrier::IptcIim | Carrier::C2pa) => false,
 
         // gamut-tiff STATUS.md "Additions since the freeze (#446)": `TiffDecoder::metadata` locates
         // the Exif (its 0th-IFD fields in IFD 0, `ExifIFD` and `GPSInfo`), XMP (700), IPTC-IIM
@@ -222,25 +178,34 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
         // writes the first four (the facade path refuses an Exif model holding a thumbnail, or a
         // 0th-IFD field outside `gamut_tiff::IFD0_EXIF_TAGS`, which a `TiffMetadata` has no
         // carrier for — #876).
-        (Format::Tiff, Carrier::Exif | Carrier::Xmp | Carrier::Icc | Carrier::IptcIim) => true,
-        // The C2PA store is written only as a signing workflow (see `Carrier::C2pa`).
-        (Format::Tiff, Carrier::C2pa) => read,
-
         // gamut-dng STATUS.md P16: EXIF sub-IFD + XMP (700) / IPTC-IIM (33723) / ICC (34675),
         // embedded and decoded (`DngMetadata`, `DngMetadata::blocks`).
-        (Format::Dng, Carrier::Exif | Carrier::Xmp | Carrier::Icc | Carrier::IptcIim) => true,
-        // gamut-dng STATUS.md P26 (#442): the store is decoded as `DngMetadata::c2pa`; written only
-        // as a signing workflow (see `Carrier::C2pa`).
-        (Format::Dng, Carrier::C2pa) => read,
+        (
+            Format::Tiff | Format::Dng,
+            Carrier::Exif | Carrier::Xmp | Carrier::Icc | Carrier::IptcIim,
+        ) => true,
+        // The TIFF C2PA store (52545) is written only as a signing workflow (see
+        // `Carrier::C2pa`); gamut-dng STATUS.md P26 (#442): the store is decoded as
+        // `DngMetadata::c2pa`, likewise written only as a signing workflow.
+        (Format::Tiff | Format::Dng, Carrier::C2pa) => read,
+
+        // Every other cell is `false`, in one arm because they share the answer:
+        // gamut-jpeg STATUS.md "Not implemented" (APP13 IPTC-IIM deferred; no APP11 C2PA
+        // carriage); gamut-png (no IPTC-IIM chunk), gamut-webp (RIFF has no IPTC-IIM chunk),
+        // gamut-avif and gamut-heic (HEIF has no IPTC-IIM item type) STATUS.md; gamut-jxl STATUS.md
+        // (no IPTC-IIM box; the `jumb` C2PA box is neither located nor written). The arm also
+        // answers for a carrier the facade appends, which `Carrier`'s `#[non_exhaustive]` makes
+        // this match name with a wildcard.
+        _ => false,
     }
 }
 
 /// Whether the crate for `format` exposes the facade's typed models directly — a
-/// [`TypedMetadata`](crate::TypedMetadata) impl on its decoded metadata and a `with_metadata`
-/// builder on its encoder.
+/// [`TypedMetadata`](crate::metadata::TypedMetadata) impl on its decoded metadata and a
+/// `with_metadata` builder on its encoder.
 ///
 /// `false` would mean the crate still hands its payloads over as raw bytes that a caller feeds to
-/// [`Metadata::from_blocks`](crate::Metadata::from_blocks) by hand. Every format with a gamut
+/// [`Metadata::parse_blocks`](crate::metadata::Metadata::parse_blocks) by hand. Every format with a gamut
 /// crate is wired today, so the answer is `true` throughout; a format appended to the
 /// `#[non_exhaustive]` [`Format`] starts `false` until its crate is wired.
 ///
@@ -253,8 +218,8 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
 ///
 /// Seven of the eight wired crates put that surface behind an optional `metadata` Cargo feature of
 /// their own — `gamut-jpeg`, `gamut-png`, `gamut-webp`, `gamut-avif`, `gamut-heic`, `gamut-jxl`
-/// and `gamut-tiff`, each off by default, and each forwarded weakly by the `gamut` umbrella's
-/// `metadata` feature. `gamut-dng` has **no such feature**: it depends on this crate
+/// and `gamut-tiff`, each off by default, and each forwarded weakly by this umbrella's
+/// `metadata` feature. `gamut-dng` has **no such feature**: it depends on the facade
 /// unconditionally, because its `DngMetadata` holds the facade's `Exif` by value, so
 /// `gamut-dng/metadata` is not a feature that can be asked for. As with [`supports`], the answer
 /// describes what the crate defines, not what a given build compiled.
@@ -389,10 +354,6 @@ mod tests {
         assert_eq!(
             Format::ALL.iter().map(|&f| f as u8).collect::<Vec<_>>(),
             (0..8).collect::<Vec<u8>>()
-        );
-        assert_eq!(
-            Carrier::ALL.iter().map(|&c| c as u8).collect::<Vec<_>>(),
-            (0..5).collect::<Vec<u8>>()
         );
         assert_eq!(Direction::ALL.map(|d| d as u8), [0, 1]);
     }

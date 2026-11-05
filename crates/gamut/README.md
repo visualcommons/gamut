@@ -41,7 +41,7 @@ documents link here rather than restating it.
 | `png`        | PNG encoder + decoder (`gamut-png`)                                      |
 | `jpeg`       | JPEG-1 (ITU-T T.81) codec (`gamut-jpeg`)                                 |
 | `isobmff`    | ISOBMFF/HEIF still-image container primitive (`gamut-isobmff`)           |
-| `metadata`   | Metadata facade + primitives (`gamut-metadata` + `exif`/`xmp`/`icc`/`iptc`/`ifd`), plus the `metadata` feature of every enabled format crate that has one |
+| `metadata`   | Metadata facade + primitives (`gamut-metadata` + `exif`/`xmp`/`icc`/`iptc`/`ifd`), plus the `metadata` feature of every enabled format crate that has one, and `gamut::capability` (which format crate locates or writes which carrier) |
 | `exif-describe` | `metadata` plus EXIF tag-value descriptions (`gamut_metadata::exif::describe`, via `gamut-metadata/exif-describe`) |
 | `cmm`        | ICC colour management module over `gamut-icc` profiles (`gamut-cmm`); with `jpeg`, also `JpegDecoder::decode_srgb` |
 | `tonemap`    | Scalar tone-mapping curves for HDR→SDR (`gamut-tonemap`)                 |

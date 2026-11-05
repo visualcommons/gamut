@@ -168,7 +168,7 @@ mod typed {
     use crate::WebpEncoder;
 
     /// The facade's [`TypedMetadata`] over the located chunk payloads; `metadata` is the trait's
-    /// default, [`Metadata::from_blocks`] over [`blocks`](TypedMetadata::blocks).
+    /// default, [`Metadata::parse_blocks`] over [`blocks`](TypedMetadata::blocks).
     ///
     /// ```
     /// use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
@@ -316,9 +316,9 @@ mod typed {
                 tags: Vec::new(),
             };
             let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
-                .encode()
+                .to_blocks()
                 .unwrap();
-            Metadata::from_blocks(&[
+            Metadata::parse_blocks(&[
                 MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
                 MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
                 MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
@@ -381,7 +381,7 @@ mod typed {
             );
             assert_eq!(
                 exiv2_oracle::image_icc(&file).unwrap(),
-                typed.encode().unwrap().icc
+                typed.to_blocks().unwrap().icc
             );
         }
 
@@ -424,7 +424,7 @@ mod typed {
         fn encoded_blocks_route_to_the_raw_setters() {
             // Each present field lands in its chunk — the EXIF one without the facade's
             // signature — and an absent one leaves an earlier setting.
-            let encoded = typed().encode().unwrap();
+            let encoded = typed().to_blocks().unwrap();
             let file = encode(
                 &WebpEncoder::lossless()
                     .with_encoded_metadata(&encoded)
@@ -542,7 +542,7 @@ mod typed {
                 err.static_message(),
                 Some("WebP: metadata does not serialize")
             );
-            assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+            assert_eq!(err.detail(), Some("icc: duplicate tag signature"));
         }
     }
 }

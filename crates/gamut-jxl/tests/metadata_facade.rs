@@ -45,9 +45,9 @@ fn typed() -> Metadata {
     xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
     let srgb = common::icc_profile(&encode(container_encoder())).expect("oracle synthesizes sRGB");
     let encoded = Metadata::from_carriers(Some(exif), Some(xmp), None)
-        .encode()
+        .to_blocks()
         .unwrap();
-    Metadata::from_blocks(&[
+    Metadata::parse_blocks(&[
         MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
         MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
         MetadataBlock::Icc(&srgb),
@@ -82,7 +82,7 @@ fn a_manifest_store_is_never_copied_forward() {
 
 #[test]
 fn encoded_blocks_route_to_the_setters_with_the_exif_signature_stripped() {
-    let encoded = typed().encode().unwrap();
+    let encoded = typed().to_blocks().unwrap();
     let jxl = encode(container_encoder().with_encoded_metadata(&encoded).unwrap());
     let read = JxlDecoder::new().metadata(&jxl).unwrap();
     // `EncodedMetadata::exif` carries `Exif\0\0`; the `Exif` box carries the TIFF stream.

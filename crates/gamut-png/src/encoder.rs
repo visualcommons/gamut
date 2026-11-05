@@ -3053,9 +3053,9 @@ mod typed {
                 tags: Vec::new(),
             };
             let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
-                .encode()
+                .to_blocks()
                 .unwrap();
-            Metadata::from_blocks(&[
+            Metadata::parse_blocks(&[
                 MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
                 MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
                 MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
@@ -3097,7 +3097,7 @@ mod typed {
             );
             assert_eq!(
                 exiv2_oracle::image_icc(&png).unwrap(),
-                typed.encode().unwrap().icc
+                typed.to_blocks().unwrap().icc
             );
         }
 
@@ -3141,7 +3141,7 @@ mod typed {
             // Each present field lands in its chunk — the EXIF one without the facade's
             // signature, the profile under the fixed name — and an absent one leaves an earlier
             // setting.
-            let encoded = typed().encode().unwrap();
+            let encoded = typed().to_blocks().unwrap();
             let png = encode(&PngEncoder::new().with_encoded_metadata(&encoded).unwrap());
             let read = crate::metadata(&png).unwrap();
             assert_eq!(
@@ -3175,7 +3175,7 @@ mod typed {
             // The fixed name must itself satisfy §11.3.2.3, or every typed ICC embed would be
             // reported as bent.
             let mut only_icc = EncodedMetadata::default();
-            only_icc.icc = typed().encode().unwrap().icc;
+            only_icc.icc = typed().to_blocks().unwrap().icc;
             let encoder = PngEncoder::new().with_encoded_metadata(&only_icc).unwrap();
             assert!(encoder.metadata_notices().is_empty());
         }
@@ -3232,7 +3232,7 @@ mod typed {
                 err.static_message(),
                 Some("PNG: metadata does not serialize")
             );
-            assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+            assert_eq!(err.detail(), Some("icc: duplicate tag signature"));
         }
     }
 }

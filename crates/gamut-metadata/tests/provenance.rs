@@ -34,12 +34,12 @@ fn c2pa_store() -> Vec<u8> {
 #[test]
 fn no_store_and_no_url_is_none() {
     let xmp = xmp_without_provenance();
-    let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(&xmp)]).unwrap();
+    let meta = Metadata::parse_blocks(&[MetadataBlock::Xmp(&xmp)]).unwrap();
     assert_eq!(meta.provenance(), ProvenanceState::None);
 
     // No metadata at all is None too, not a panic or a synthesized state.
     assert_eq!(
-        Metadata::from_blocks(&[]).unwrap().provenance(),
+        Metadata::parse_blocks(&[]).unwrap().provenance(),
         ProvenanceState::None
     );
 }
@@ -49,7 +49,7 @@ fn url_without_a_store_is_remote() {
     // The issue's motivating case: a file with no embedded manifest store but a
     // `dcterms:provenance` URL must not report None.
     let xmp = xmp_with_provenance_text(URL);
-    let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(&xmp)]).unwrap();
+    let meta = Metadata::parse_blocks(&[MetadataBlock::Xmp(&xmp)]).unwrap();
     assert_eq!(meta.provenance(), ProvenanceState::Remote(URL.to_owned()));
 }
 
@@ -57,7 +57,7 @@ fn url_without_a_store_is_remote() {
 fn store_without_a_url_is_embedded() {
     let (xmp, store) = (xmp_without_provenance(), c2pa_store());
     let meta =
-        Metadata::from_blocks(&[MetadataBlock::Xmp(&xmp), MetadataBlock::C2pa(&store)]).unwrap();
+        Metadata::parse_blocks(&[MetadataBlock::Xmp(&xmp), MetadataBlock::C2pa(&store)]).unwrap();
     assert_eq!(meta.provenance(), ProvenanceState::Embedded);
 }
 
@@ -67,7 +67,7 @@ fn store_and_url_is_embedded_and_remote() {
     // the embedded store must not hide the URL, and the URL must not hide the store.
     let (xmp, store) = (xmp_with_provenance_text(URL), c2pa_store());
     let meta =
-        Metadata::from_blocks(&[MetadataBlock::Xmp(&xmp), MetadataBlock::C2pa(&store)]).unwrap();
+        Metadata::parse_blocks(&[MetadataBlock::Xmp(&xmp), MetadataBlock::C2pa(&store)]).unwrap();
     assert_eq!(
         meta.provenance(),
         ProvenanceState::EmbeddedAndRemote(URL.to_owned())
