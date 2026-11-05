@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use gamut_color::transfer::srgb_eotf;
 use gamut_color::{ColorRange, rgb_to_ycbcr, xyb};
 use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, PixelFormat, Result, Rgb8};
-use gamut_dsp::jpeg::fdct8x8;
+use gamut_dsp::jpeg::forward_dct8x8;
 use gamut_dsp::math::round_div_nearest;
 
 use crate::backend::{self, EncoderSlot, JpegEncodeRequest, JpegStreamEncoder, RasterRef};
@@ -1037,7 +1037,7 @@ fn dct_block(plane: &Plane, bx: usize, by: usize) -> [i32; 64] {
             block[row * 8 + col] = plane.level_shifted(bx * 8 + col, by * 8 + row);
         }
     }
-    fdct8x8(&mut block);
+    forward_dct8x8(&mut block);
     block
 }
 
@@ -2011,9 +2011,9 @@ mod tests {
 
     // --- Reference-pipeline tests: encode per-pixel-distinct images, decode the scan with the
     // test decoder, and compare every block against an independently computed expectation
-    // (gather with edge replication → fdct8x8 → round_div_nearest quantize). Distinct content is
-    // the point: any mutated pixel/block/MCU coordinate reads different samples somewhere and
-    // diverges. Solid colors could not see those mutants. ---
+    // (gather with edge replication → forward_dct8x8 → round_div_nearest quantize). Distinct
+    // content is the point: any mutated pixel/block/MCU coordinate reads different samples
+    // somewhere and diverges. Solid colors could not see those mutants. ---
 
     /// The test-side reference for one 8×8 block of `plane` at block coords `(bx, by)`: the same
     /// §A.3.1/§A.3.3/§A.3.4 stages, written independently of the production gather.
@@ -2024,7 +2024,7 @@ mod tests {
             let y = (by * 8 + i / 8).min(plane.height - 1);
             *cell = i32::from(plane.data[y * plane.width + x]) - 128;
         }
-        fdct8x8(&mut block);
+        forward_dct8x8(&mut block);
         let mut q = [0i32; 64];
         for (dst, (&coeff, &step)) in q.iter_mut().zip(block.iter().zip(quant.iter())) {
             *dst = round_div_nearest(coeff, i32::from(step));

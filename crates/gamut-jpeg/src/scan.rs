@@ -21,7 +21,7 @@
 use std::num::{NonZeroI32, NonZeroU16};
 
 use gamut_core::{Error, Result};
-use gamut_dsp::jpeg::{idct8x8_int, idct8x8_int_dc};
+use gamut_dsp::jpeg::{inverse_dct8x8_int, inverse_dct8x8_int_dc};
 
 use crate::huffman::{DecTable, LOOKAHEAD, extend};
 use crate::syntax::{Frame, ScanHeader, Tables};
@@ -503,7 +503,7 @@ impl Ctx<'_> {
         // Inverse DCT, level shift and clamp (§A.3.1). A block that coded no AC coefficient is
         // flat, and its one value comes from the kernel's DC shortcut without a transform.
         if last == 0 {
-            write_flat(idct8x8_int_dc(zz[0]), &mut self.plane, bx, by);
+            write_flat(inverse_dct8x8_int_dc(zz[0]), &mut self.plane, bx, by);
         } else {
             write_block(&mut zz, &mut self.plane, bx, by);
         }
@@ -527,7 +527,7 @@ fn level_shift(s: i32) -> u8 {
 /// (§A.3.1). The single reconstruction tail shared by the sequential ([`Ctx::decode_block`]) and
 /// progressive ([`ProgComp::into_plane`]) paths, so both produce byte-identical samples.
 fn write_block(zz: &mut [i32; 64], plane: &mut Plane, bx: usize, by: usize) {
-    idct8x8_int(zz);
+    inverse_dct8x8_int(zz);
     plane.ensure_rows((by + 1) * 8);
     let stride = plane.stride;
     for (row, samples) in zz.as_chunks::<8>().0.iter().enumerate() {
