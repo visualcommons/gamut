@@ -110,7 +110,7 @@ fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
             .encode_with_report(&raw, &common::sample_profile(), &mut dng)
             .expect("encode");
         let excl = report.c2pa.expect("ranges");
-        let (_, _, ifd0) = gamut_ifd::read_header(&dng).expect("header");
+        let ifd0 = gamut_ifd::read_header(&dng).expect("header").first_ifd;
 
         let report = deconstruct(&dng).expect("deconstruct");
         assert_clean(&report);

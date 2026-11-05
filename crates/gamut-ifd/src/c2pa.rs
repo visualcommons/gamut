@@ -722,8 +722,8 @@ fn patch_entry(
 mod tests {
     use super::*;
     use crate::{
-        Segment, SegmentReport, SpanKind, TiffFile, WriteOptions, read, read_audited, read_header,
-        write, write_with,
+        Segment, SegmentReport, SpanKind, TiffFile, WriteOptions, WriteOutput, read, read_audited,
+        read_header, write, write_with,
     };
 
     /// A store whose bytes are not a palindrome and not repeated, so a byte-swapped or
@@ -780,7 +780,10 @@ mod tests {
         for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
             let mut ifd = sample_ifd();
             ifd.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
-            let (bytes, map) = write_with(
+            let WriteOutput {
+                bytes,
+                segments: map,
+            } = write_with(
                 &file(order, Variant::Classic, vec![ifd]),
                 &WriteOptions::default(),
             )
@@ -821,7 +824,10 @@ mod tests {
     fn locate_reads_bigtiff_count_and_offset_widths() {
         let mut ifd = sample_ifd();
         ifd.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
-        let (bytes, map) = write_with(
+        let WriteOutput {
+            bytes,
+            segments: map,
+        } = write_with(
             &file(ByteOrder::BigEndian, Variant::Big, vec![ifd]),
             &WriteOptions::default(),
         )
@@ -882,7 +888,10 @@ mod tests {
     fn locate_follows_the_chain_to_its_last_directory() {
         let mut last = Ifd::new();
         last.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
-        let (bytes, map) = write_with(
+        let WriteOutput {
+            bytes,
+            segments: map,
+        } = write_with(
             &file(
                 ByteOrder::LittleEndian,
                 Variant::Classic,
@@ -1115,12 +1124,12 @@ mod tests {
             );
             assert_eq!(locate(&bytes[..]).expect("locate"), Some(excl));
 
-            let (_, mut report) = read_audited(&bytes).expect("audit");
+            let mut report = read_audited(&bytes[..]).expect("audit").report;
             report
                 .classify_padding(&mut (&bytes[..]))
                 .expect("classify");
             assert!(report.is_fully_classified(), "{order:?}: {report:?}");
-            let (_, _, ifd0) = read_header(&bytes).expect("header");
+            let ifd0 = read_header(&bytes).expect("header").first_ifd;
             assert!(report.segments.contains(&Segment {
                 range: excl.store(),
                 kind: SpanKind::Value {

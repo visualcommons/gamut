@@ -4,8 +4,9 @@
 //!
 //! Every input is also driven through the streaming [`IfdReader`] and the two entry points must
 //! *agree* — both parse to equal files, or both fail. This is a **structure pin, not a
-//! differential**: `read` is *defined* as `IfdReader::open(data)?.read_file()` (and `read_tree`
-//! likewise), so the two sides are one parser reached twice and the comparison cannot fail while
+//! differential**: `read` is *defined* as `IfdReader::open(data)?.read_file()` (the sub-IFD tree
+//! walk exists only as [`IfdReader::read_tree`], so it has no second entry point to pin), so the
+//! two sides are one parser reached twice and the comparison cannot fail while
 //! those bodies stand. It is kept because a `read` that stopped delegating — growing a second
 //! directory walk, and with it a second set of hostile-input guards to drift — is exactly the
 //! regression the crate's one-parser design exists to prevent. Being unfalsifiable by input, it
@@ -13,11 +14,16 @@
 //! half of every execution and search for a counterexample that does not exist.
 
 use gamut_ifd::{
-    ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_audited, read_tree, write,
+    AuditedFile, ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_audited, write,
 };
 
 /// Sub-IFD pointer tags a DNG/EXIF-shaped consumer would follow.
 const POINTER_TAGS: &[u16] = &[330, 34665, 34853];
+
+/// The sub-IFD tree walk over a whole in-memory file.
+fn read_tree(data: &[u8], pointer_tags: &[u16]) -> gamut_core::Result<TiffFile> {
+    IfdReader::open(data)?.read_tree(pointer_tags)
+}
 
 /// A representative stream: two chained IFDs, inline and out-of-line values of several types, and
 /// a sub-IFD tree two levels deep.
@@ -68,18 +74,12 @@ fn survives(data: &[u8]) {
         (Err(_), Err(_)) => {}
         _ => panic!("flat readers disagree: slice {slice:?} vs stream {stream:?}"),
     }
-    let slice_tree = read_tree(data, POINTER_TAGS);
-    let stream_tree = IfdReader::open(data).and_then(|mut r| r.read_tree(POINTER_TAGS));
-    match (&slice_tree, &stream_tree) {
-        (Ok(a), Ok(b)) => assert_same_parse(a, b, "tree"),
-        (Err(_), Err(_)) => {}
-        _ => panic!("tree readers disagree: slice {slice_tree:?} vs stream {stream_tree:?}"),
-    }
+    let _ = read_tree(data, POINTER_TAGS);
     // The dual-ledger differential invariant (issue #263): whenever a parse succeeds, every
     // byte the parser physically read is inside a structural claim, and every Parsed claim was
     // physically read. Over the whole hostile corpus, a parser that eats bytes it does not
     // declare — or declares bytes it never touched — is caught here mechanically.
-    if let Ok((_, report)) = read_audited(data) {
+    if let Ok(AuditedFile { report, .. }) = read_audited(data) {
         assert!(
             report.unclaimed_reads.is_empty(),
             "parser read bytes it never claimed: {report:?}"
@@ -220,7 +220,10 @@ fn overlapping_value_offset_parses_and_surfaces_in_audit() {
     );
     // The overlap is not silent: the byte audit flags the value span nesting into the header as a
     // structural conflict (partial overlap, not identical-extent legal sharing).
-    let (audited, report) = read_audited(data).expect("audited parse");
+    let AuditedFile {
+        file: audited,
+        report,
+    } = read_audited(data).expect("audited parse");
     assert_eq!(audited, file);
     assert_eq!(report.conflicts.len(), 1, "header/value overlap flagged");
     assert!(!report.is_fully_classified());

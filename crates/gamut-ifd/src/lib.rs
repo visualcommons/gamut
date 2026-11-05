@@ -15,7 +15,7 @@
 //! back, laying out the IFD chain and out-of-line value pool with the two-pass offset machinery.
 //! A codec storing strips or tiles after the tree hands them to [`write_with_blocks`], and a
 //! decoder resolves them back with [`extent_slices`] and [`rows_per_strip`].
-//! [`read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
+//! [`IfdReader::read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
 //! well-known structural ones live in [`tags`]); [`resolve_subtree`] runs the same guarded walk
 //! over **one** directory a caller already holds, scoped per level by a [`SubtreeScope`]. The
 //! same [`tags`] module holds the shared tag registry — each tag TIFF 6.0 and DNG 1.7.1.0 define,
@@ -109,23 +109,23 @@ mod value;
 mod writer;
 
 pub use audit::{
-    Anomaly, Audit, AuditFinding, AuditSpec, Auditor, DeconstructReport, Severity, SkipReason,
-    StandardAuditSpec, UnknownFieldType, UnknownTag, audit, standard_data_extents,
+    Anomaly, Audit, AuditFinding, AuditOutcome, AuditSpec, Auditor, DeconstructReport, Severity,
+    SkipReason, StandardAuditSpec, UnknownFieldType, UnknownTag, audit, standard_data_extents,
 };
 pub use blocks::{BlockRun, PlacedRun, write_with_blocks};
 pub use byte_order::ByteOrder;
 pub use entry::{Field, Ifd, SubIfd, Variant};
 pub use extent::{ZeroRowsPerStrip, extent_slices, rows_per_strip};
 pub use reader::{
-    SubtreeScope, TiffFile, read, read_audited, read_header, read_ifd_at, read_tree,
+    AuditedFile, Header, SubtreeScope, TiffFile, read, read_audited, read_header, read_ifd_at,
     resolve_subtree,
 };
 pub use segment::{
     Claim, Conflict, DataLabel, Range, Segment, SegmentMap, SegmentReport, SharedSpan, SpanKind,
 };
 pub use source::{ReadAt, Rebased, StreamSource};
-pub use stream::{IfdChain, IfdReader, RawEntry, RawIfd};
-pub use track::{ReadLedger, Tracked};
+pub use stream::{ChainedIfd, DecodedIfd, IfdChain, IfdReader, RawEntry, RawIfd};
+pub use track::{ReadLedger, Tracked, TrackedParts};
 pub use types::FieldType;
 pub use value::{UnknownValue, Value};
-pub use writer::{WriteOptions, align_word, write, write_with};
+pub use writer::{WriteOptions, WriteOutput, align_word, write, write_with};

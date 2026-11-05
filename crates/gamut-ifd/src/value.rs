@@ -154,7 +154,7 @@ pub enum Value {
     /// `DOUBLE` — IEEE double-precision floats.
     Double(Vec<f64>),
     /// `IFD` — 32-bit sub-IFD offsets (TIFF Technical Note 1); `Long`-shaped, but typed as a
-    /// child-directory pointer, so [`read_tree`](crate::read_tree) follows it.
+    /// child-directory pointer, so [`read_tree`](crate::IfdReader::read_tree) follows it.
     Ifd(Vec<u32>),
     /// An entry whose field-type code is unrecognised, preserved verbatim (see [`UnknownValue`]).
     Unknown(UnknownValue),

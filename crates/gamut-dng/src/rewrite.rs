@@ -107,8 +107,9 @@ impl DngRewrite {
     /// `ExtraCameraProfiles` (embedded camera-profile streams; carrying them through a rewrite
     /// is deferred).
     pub fn open(data: &[u8]) -> Result<Self> {
-        let (order, variant, _) = gamut_ifd::read_header(data)?;
-        let file = gamut_ifd::read_tree(data, ifd_tags::STANDARD_POINTER_TAGS)?;
+        let mut reader = IfdReader::open(data)?;
+        let (order, variant) = (reader.order(), reader.variant());
+        let file = reader.read_tree(ifd_tags::STANDARD_POINTER_TAGS)?;
         for ifd in &file.ifds {
             if ifd.get(tags::EXTRA_CAMERA_PROFILES).is_some() {
                 return Err(Error::unsupported(
@@ -267,11 +268,11 @@ impl DngRewrite {
         };
         let mut pin = pin_at;
         let probe = match write_with(&tree, &opts(pin)) {
-            Ok((bytes, _)) => bytes,
+            Ok(written) => written.bytes,
             Err(_) if pin.is_some() => {
                 pin = None;
                 maker_note = MakerNotePreservation::Relocated;
-                write_with(&tree, &opts(None))?.0
+                write_with(&tree, &opts(None))?.bytes
             }
             Err(e) => return Err(e),
         };
@@ -296,7 +297,7 @@ impl DngRewrite {
         for ifd in &mut tree.ifds {
             patch_payload_offsets(ifd, self.variant, &mut cursor_sets)?;
         }
-        let (mut bytes, _map) = write_with(&tree, &opts(pin))?;
+        let mut bytes = write_with(&tree, &opts(pin))?.bytes;
         debug_assert_eq!(bytes.len(), probe.len(), "structural determinism");
         let base = usize::try_from(base)
             .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows"))?;

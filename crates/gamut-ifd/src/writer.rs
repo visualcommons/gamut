@@ -209,12 +209,23 @@ fn put_offset(out: &mut [u8], pos: usize, v: u64, order: ByteOrder, variant: Var
 /// a directory with more than `u16::MAX` entries, or a total layout past the 4 GiB offset limit.
 /// (BigTIFF widths cannot overflow in practice.)
 pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
-    write_with(file, &WriteOptions::default()).map(|(bytes, _map)| bytes)
+    write_with(file, &WriteOptions::default()).map(|written| written.bytes)
+}
+
+/// What [`write_with`] returns: the serialised stream and the writer's own account of it.
+#[derive(Debug, Clone)]
+pub struct WriteOutput {
+    /// The serialised TIFF/IFD stream.
+    pub bytes: Vec<u8>,
+    /// Every byte of [`bytes`](Self::bytes) declared by kind — header, directory bodies, value
+    /// spans, preamble and padding — so `segments.finish(None)` is fully classified.
+    pub segments: SegmentMap,
 }
 
 /// Like [`write()`], but takes [`WriteOptions`] (value pinning) and returns, alongside the
-/// bytes, a [`SegmentMap`] in which the writer **declares every byte it emitted** — header,
-/// directory bodies, value spans, and all zero-fill padding. `map.finish(None)` is therefore
+/// bytes, a [`SegmentMap`] ([`WriteOutput::segments`]) in which the writer **declares every byte
+/// it emitted** — header, directory bodies, value spans, and all zero-fill padding.
+/// `segments.finish(None)` is therefore
 /// fully classified by construction, closing the audit loop: an independent audit of the
 /// returned stream must reproduce this map segment for segment.
 ///
@@ -224,7 +235,7 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
 /// same conditions as [`write()`], or if a pin
 /// ([`WriteOptions::with_pin`]) is unsatisfiable: its tag absent or duplicated, its value inline or
 /// unsizable, its offset colliding with the directory region or another pin.
-pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, SegmentMap)> {
+pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<WriteOutput> {
     let order = file.order;
     let variant = file.variant;
     let entry_size = variant.entry_size();
@@ -561,7 +572,10 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
         SpanKind::Padding,
         Claim::Parsed,
     );
-    Ok((out, map))
+    Ok(WriteOutput {
+        bytes: out,
+        segments: map,
+    })
 }
 
 #[cfg(test)]
@@ -755,11 +769,11 @@ mod tests {
         })
         .expect("write");
         assert_eq!(&bytes[0..2], b"II");
-        let (order, variant, first) = read_header(&bytes).expect("header");
-        assert_eq!(order, ByteOrder::LittleEndian);
-        assert_eq!(variant, Variant::Big);
+        let header = read_header(&bytes).expect("header");
+        assert_eq!(header.order, ByteOrder::LittleEndian);
+        assert_eq!(header.variant, Variant::Big);
         assert_eq!(bytes[2], 0x2b); // magic 43
-        assert_eq!(first, 16); // 16-byte header
+        assert_eq!(header.first_ifd, 16); // 16-byte header
         let parsed = read(&bytes).expect("read back");
         assert_eq!(parsed.variant, Variant::Big);
         assert_eq!(
@@ -936,14 +950,20 @@ mod tests {
             variant: Variant::Classic,
             ifds: vec![sample_ifd()],
         };
-        let (bytes, map) = write_with(&file, &WriteOptions::default()).expect("write");
+        let WriteOutput {
+            bytes,
+            segments: map,
+        } = write_with(&file, &WriteOptions::default()).expect("write");
         let writer_report = map.finish(None);
         assert!(
             writer_report.is_fully_classified(),
             "writer must declare every byte: {writer_report:?}"
         );
 
-        let (parsed, mut audit_report) = crate::read_audited(&bytes).expect("audit");
+        let crate::AuditedFile {
+            file: parsed,
+            report: mut audit_report,
+        } = crate::read_audited(&bytes[..]).expect("audit");
         assert_eq!(parsed, file);
         audit_report
             .classify_padding(&mut (&bytes[..]))
@@ -965,12 +985,15 @@ mod tests {
         };
         let preamble = b"APPLEDNG\0\0";
         let opts = WriteOptions::default().with_preamble(*preamble);
-        let (bytes, map) = write_with(&file, &opts).expect("write");
+        let WriteOutput {
+            bytes,
+            segments: map,
+        } = write_with(&file, &opts).expect("write");
 
         let header_len = Variant::Classic.header_size();
         assert_eq!(&bytes[header_len..header_len + preamble.len()], preamble);
         // The first directory starts after the preamble, word-aligned — not at the header's end.
-        let (_, _, first) = read_header(&bytes).expect("header");
+        let first = read_header(&bytes).expect("header").first_ifd;
         assert_eq!(first, align_word((header_len + preamble.len()) as u64));
 
         // Declared, not merely emitted: the writer's map is complete and an independent audit
@@ -989,7 +1012,10 @@ mod tests {
                     && s.range.len == preamble.len() as u64),
             "the preamble must be declared as one: {writer_report:?}"
         );
-        let (parsed, mut audit_report) = crate::read_audited(&bytes).expect("audit");
+        let crate::AuditedFile {
+            file: parsed,
+            report: mut audit_report,
+        } = crate::read_audited(&bytes[..]).expect("audit");
         assert_eq!(parsed, file, "the directory survives a preamble");
         audit_report
             .classify_padding(&mut (&bytes[..]))
@@ -1008,10 +1034,10 @@ mod tests {
         };
         let plain = write_with(&file, &WriteOptions::default())
             .expect("write")
-            .0;
+            .bytes;
         let empty = write_with(&file, &WriteOptions::default().with_preamble(Vec::new()))
             .expect("write")
-            .0;
+            .bytes;
         assert_eq!(plain, empty);
     }
 
@@ -1027,9 +1053,12 @@ mod tests {
             ifds: vec![sample_ifd()],
         };
         let opts = WriteOptions::default().with_preamble(vec![0xABu8; 5]);
-        let (bytes, map) = write_with(&file, &opts).expect("write");
+        let WriteOutput {
+            bytes,
+            segments: map,
+        } = write_with(&file, &opts).expect("write");
         let header_len = Variant::Classic.header_size() as u64;
-        let (_, _, first) = read_header(&bytes).expect("header");
+        let first = read_header(&bytes).expect("header").first_ifd;
         assert_eq!(first, header_len + 6, "5 bytes of preamble, padded to 6");
         assert_eq!(bytes[13], 0, "the filler byte is zero");
 
@@ -1045,7 +1074,10 @@ mod tests {
             }),
             "the whole header/directory gap is the preamble: {writer_report:?}"
         );
-        let (parsed, mut audit_report) = crate::read_audited(&bytes).expect("audit");
+        let crate::AuditedFile {
+            file: parsed,
+            report: mut audit_report,
+        } = crate::read_audited(&bytes[..]).expect("audit");
         assert_eq!(parsed, file);
         audit_report
             .classify_padding(&mut (&bytes[..]))
@@ -1065,14 +1097,17 @@ mod tests {
             ifds: vec![sample_ifd()],
         };
         let opts = WriteOptions::default().with_preamble(vec![0u8; 4]);
-        let (bytes, map) = write_with(&file, &opts).expect("write");
+        let WriteOutput {
+            bytes,
+            segments: map,
+        } = write_with(&file, &opts).expect("write");
         let header_len = Variant::Classic.header_size() as u64;
-        let (_, _, first) = read_header(&bytes).expect("header");
+        let first = read_header(&bytes).expect("header").first_ifd;
         assert_eq!(first, header_len + 4);
 
         let writer_report = map.finish(None);
         assert!(writer_report.is_fully_classified());
-        let (_, mut audit_report) = crate::read_audited(&bytes).expect("audit");
+        let mut audit_report = crate::read_audited(&bytes[..]).expect("audit").report;
         audit_report
             .classify_padding(&mut (&bytes[..]))
             .expect("classify");
@@ -1112,7 +1147,10 @@ mod tests {
         };
         let pin_at = 100u64;
         let opts = WriteOptions::default().with_pin(37500, pin_at);
-        let (bytes, map) = write_with(&file, &opts).expect("write");
+        let WriteOutput {
+            bytes,
+            segments: map,
+        } = write_with(&file, &opts).expect("write");
         // The blob sits exactly at the pin.
         assert_eq!(&bytes[pin_at as usize..pin_at as usize + note.len()], &note);
         // The entry's value offset points at the pin.
@@ -1171,7 +1209,9 @@ mod tests {
         let opts = WriteOptions::default()
             .with_pin(37500, 100)
             .with_pin(37501, 110);
-        let (bytes, _) = write_with(&file, &opts).expect("abutting pins are legal");
+        let bytes = write_with(&file, &opts)
+            .expect("abutting pins are legal")
+            .bytes;
 
         assert_eq!(&bytes[100..110], &[0xC5; 10]);
         assert_eq!(&bytes[110..120], &[0xD6; 10]);
@@ -1206,7 +1246,10 @@ mod tests {
         let pool_start = 50u64;
         let pin_at = pool_start + pooled.len() as u64;
         let opts = WriteOptions::default().with_pin(37500, pin_at);
-        let (bytes, map) = write_with(&file, &opts).expect("write");
+        let WriteOutput {
+            bytes,
+            segments: map,
+        } = write_with(&file, &opts).expect("write");
 
         let pooled_at = bytes
             .windows(pooled.len())
@@ -1249,7 +1292,10 @@ mod tests {
         // 50..70 -- straight through this pin.
         let pin_at = 60u64;
         let opts = WriteOptions::default().with_pin(37500, pin_at);
-        let (bytes, map) = write_with(&file, &opts).expect("write");
+        let WriteOutput {
+            bytes,
+            segments: map,
+        } = write_with(&file, &opts).expect("write");
 
         // The pin is intact: the pool did not write over it.
         assert_eq!(
@@ -1298,8 +1344,9 @@ mod tests {
         };
 
         // Classic header (8) + one-entry directory (18) ends exactly at byte 26.
-        let (bytes, _) = write_with(&file, &WriteOptions::default().with_pin(37500, 26))
-            .expect("pin at directory boundary");
+        let bytes = write_with(&file, &WriteOptions::default().with_pin(37500, 26))
+            .expect("pin at directory boundary")
+            .bytes;
         assert_eq!(&bytes[26..36], note.as_slice());
     }
 

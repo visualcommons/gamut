@@ -208,14 +208,14 @@ impl DngMetadata {
 }
 
 /// The pointer tags [`DngRewrite::open`](crate::DngRewrite::open) resolves inside the Exif
-/// subtree: every standard one, because it hands [`gamut_ifd::read_tree`] the flat
+/// subtree: every standard one, because it hands [`gamut_ifd::IfdReader::read_tree`] the flat
 /// [`STANDARD_POINTER_TAGS`](gamut_ifd::tags::STANDARD_POINTER_TAGS) list, which that reader
 /// resolves **at every node** — the Exif directory and anything nested in it included.
 const EXIF_SUBTREE_POINTER_TAGS: &[u16] = gamut_ifd::tags::STANDARD_POINTER_TAGS;
 
 /// The on-disk field-type codes that make a directory entry a sub-IFD pointer to the reader:
 /// `LONG` (4), the typed `IFD` (13) of TIFF Technical Note 1, and BigTIFF's `LONG8` (16) /
-/// `IFD8` (18) — the set [`gamut_ifd::read_tree`] follows.
+/// `IFD8` (18) — the set [`gamut_ifd::IfdReader::read_tree`] follows.
 ///
 /// Stated as **codes** rather than as [`Value`] variants, because the reader classifies an entry
 /// by the code it parses, and the code is the one discriminator that survives the write/read

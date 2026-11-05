@@ -1270,7 +1270,11 @@ mod tests {
             )
             .expect("encode");
         // Magic 43, the fixed offset-size 8, and a 16-byte header (first IFD at offset >= 16).
-        let (order, variant, first) = gamut_ifd::read_header(&out).expect("header");
+        let gamut_ifd::Header {
+            order,
+            variant,
+            first_ifd: first,
+        } = gamut_ifd::read_header(&out).expect("header");
         assert_eq!(order, ByteOrder::LittleEndian);
         assert_eq!(variant, Variant::Big);
         assert_eq!(out[2], 0x2b);

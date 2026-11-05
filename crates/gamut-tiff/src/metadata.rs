@@ -465,7 +465,7 @@ pub(crate) fn ifd0_refusal(fields: &Ifd) -> Option<&'static str> {
 /// after IFD 0 feeds one field of [`TiffMetadata`] — the C2PA manifest store, whose entry holds
 /// the store's bytes directly rather than a pointer — so a *pointer* on such a page is a
 /// thrown-away target too, and one on page 1 of a two-page document used to fail the whole call.
-/// [`gamut_ifd::read_tree`] cannot be scoped either way: it resolves the flat list it is given at
+/// [`gamut_ifd::IfdReader::read_tree`] cannot be scoped either way: it resolves the flat list it is given at
 /// every node of every page.
 const IFD0_POINTER_TAGS: &[u16] = &[tags::EXIF_IFD, tags::GPS_INFO];
 
@@ -495,7 +495,7 @@ const EXIF_SUBTREE_POINTER_TAGS: &[u16] = gamut_ifd::tags::STANDARD_POINTER_TAGS
 /// The walk [`read_metadata`] runs over IFD 0: [`IFD0_POINTER_TAGS`] at the page itself,
 /// [`EXIF_SUBTREE_POINTER_TAGS`] at every level below it, at most [`MAX_POINTER_DEPTH`] deep.
 ///
-/// A per-level list rather than [`gamut_ifd::read_tree`]'s one flat list, because the two levels
+/// A per-level list rather than [`gamut_ifd::IfdReader::read_tree`]'s one flat list, because the two levels
 /// answer opposite questions: at IFD 0 a followed pointer can only add a failure mode, and below
 /// it an *un*followed pointer becomes a stale offset in a directory the caller is handed. The
 /// root is the only level whose directory is a page, and the walk never leaves IFD 0's subtree,
@@ -509,7 +509,7 @@ fn metadata_scope() -> SubtreeScope<'static> {
 /// hostile pointer graph: a directory a hundred levels down is still a directory, and a file of a
 /// few kilobytes holds enough of them to exhaust the stack.
 ///
-/// It is **two**, not [`gamut_ifd::read_tree`]'s sixteen, because the walk starts at a page and
+/// It is **two**, not [`gamut_ifd::IfdReader::read_tree`]'s sixteen, because the walk starts at a page and
 /// the deepest tree the tags it follows can legitimately reach is IFD 0 → `ExifIFD` → one
 /// directory the Exif spec puts inside it, `InteroperabilityIFD` (EXIF 2.3 §4.6.3). Nothing
 /// conformant nests a further directory below that, so a third level is already out of spec — a
@@ -735,7 +735,7 @@ fn iptc_value(value: Option<&Value>, order: ByteOrder) -> Option<Vec<u8>> {
 /// [`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved)'s placement rule,
 /// not from disagreement here.
 pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
-    let (order, variant, _) = read_header(data)?;
+    let gamut_ifd::Header { order, variant, .. } = read_header(data)?;
     // The chain alone: `read` follows no pointer at all. A file with no IFD carries no metadata.
     let mut ifds = read(data)?.ifds;
     let Some(ifd0) = ifds.first_mut() else {

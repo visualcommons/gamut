@@ -16,7 +16,8 @@ use std::collections::BTreeSet;
 
 use gamut_core::ErrorKind;
 use gamut_ifd::{
-    AuditFinding, AuditSpec, Ifd, IfdReader, RawIfd, ReadAt, SegmentReport, tags as ifd_tags,
+    AuditFinding, AuditSpec, DecodedIfd, Ifd, IfdReader, RawIfd, ReadAt, SegmentReport,
+    tags as ifd_tags,
 };
 
 use crate::error::{ExifError, Result};
@@ -120,7 +121,7 @@ impl ExifReader {
         &self,
         reader: &mut IfdReader<S>,
         raw: &RawIfd,
-    ) -> gamut_core::Result<(Ifd, Vec<AuditFinding>)> {
+    ) -> gamut_core::Result<DecodedIfd> {
         if self.recovers() {
             reader.decode_ifd_lenient(raw)
         } else {
@@ -154,7 +155,7 @@ impl ExifReader {
         }
         let mut pages = Vec::with_capacity(2);
         for (raw, kind) in raws.iter().zip([IfdKind::Image, IfdKind::Thumbnail]) {
-            let (ifd, findings) = self.decode(reader, raw)?;
+            let DecodedIfd { ifd, findings } = self.decode(reader, raw)?;
             record_entries(&findings, kind, report);
             pages.push(ifd);
         }
@@ -295,10 +296,11 @@ impl ExifReader {
         };
         let offset = u64::from(offset);
         let followed = reader.read_ifd(offset).and_then(|raw| {
-            self.decode(reader, &raw).map(|(ifd, findings)| {
-                record_entries(&findings, kind, report);
-                ifd
-            })
+            self.decode(reader, &raw)
+                .map(|DecodedIfd { ifd, findings }| {
+                    record_entries(&findings, kind, report);
+                    ifd
+                })
         });
         parent.remove(ptr);
         match followed {

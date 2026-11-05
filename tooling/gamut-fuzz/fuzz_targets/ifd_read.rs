@@ -42,8 +42,9 @@
 //!
 //! An earlier draft also compared `read(data)` against `IfdReader::open(data)?.read_file()` and
 //! called it a differential between two doors. It is not one: `reader.rs` defines `read` as
-//! *exactly* that expression (and `read_tree` likewise), so the two sides are the same function
-//! call written twice and the comparison cannot fail for any input. It is a **structure pin** on
+//! *exactly* that expression (and the tree walk exists only as `IfdReader::read_tree`), so the
+//! two sides are the same function call written twice and the comparison cannot fail for any
+//! input. It is a **structure pin** on
 //! the wrappers staying thin — worth having, but bounded and deterministic work, not a search.
 //! It is kept where it belongs, in `crates/gamut-ifd/tests/robustness.rs`, whose `survives`
 //! helper drives both doors over the exhaustive truncation and single-byte-overwrite corpus.
@@ -56,7 +57,7 @@
 
 #![no_main]
 
-use gamut_ifd::{read, read_audited, read_tree};
+use gamut_ifd::{AuditedFile, IfdReader, read, read_audited};
 use libfuzzer_sys::fuzz_target;
 
 /// Sub-IFD pointer tags a DNG/EXIF-shaped consumer would follow.
@@ -70,7 +71,7 @@ fuzz_target!(|data: &[u8]| {
     // The byte audit: the live check, in two halves that fail for different defects. Only
     // meaningful on a parse that succeeded, because an abandoned parse has no complete claim set
     // to reconcile against.
-    if let Ok((_, report)) = read_audited(data) {
+    if let Ok(AuditedFile { report, .. }) = read_audited(data) {
         assert!(
             report.unclaimed_reads.is_empty(),
             "parser read bytes it never claimed: {report:?}"
@@ -86,5 +87,5 @@ fuzz_target!(|data: &[u8]| {
     // version of the flat one; neither result is compared against anything, because the only
     // available comparand is the same function under another name (see the module docs).
     let _ = read(data);
-    let _ = read_tree(data, POINTER_TAGS);
+    let _ = IfdReader::open(data).and_then(|mut reader| reader.read_tree(POINTER_TAGS));
 });

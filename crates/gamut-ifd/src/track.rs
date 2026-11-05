@@ -186,9 +186,21 @@ impl<S> Tracked<S> {
 
     /// Unwraps into the inner source and the final ledger.
     #[must_use]
-    pub fn into_parts(self) -> (S, ReadLedger) {
-        (self.inner, self.ledger)
+    pub fn into_parts(self) -> TrackedParts<S> {
+        TrackedParts {
+            source: self.inner,
+            ledger: self.ledger,
+        }
     }
+}
+
+/// What [`Tracked::into_parts`] returns: the unwrapped source and every byte read through it.
+#[derive(Debug)]
+pub struct TrackedParts<S> {
+    /// The source [`Tracked::new`] wrapped.
+    pub source: S,
+    /// The final ledger of bytes read.
+    pub ledger: ReadLedger,
 }
 
 impl<S: ReadAt> ReadAt for Tracked<S> {
@@ -296,9 +308,9 @@ mod tests {
         assert!(tracked.read_exact_at(3, &mut buf).is_err(), "out of bounds");
         assert_eq!(tracked.ledger().spans(), spans(&[(0, 2)]));
         assert_eq!(ReadAt::len(&mut tracked).expect("len"), 4);
-        let (inner, ledger) = tracked.into_parts();
-        assert_eq!(inner, data);
-        assert_eq!(ledger.spans(), spans(&[(0, 2)]));
+        let parts = tracked.into_parts();
+        assert_eq!(parts.source, data);
+        assert_eq!(parts.ledger.spans(), spans(&[(0, 2)]));
     }
 
     /// Reads through a `Rebased` view of a tracked source land in the ledger at **physical**

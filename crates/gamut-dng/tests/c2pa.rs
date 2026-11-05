@@ -70,7 +70,7 @@ fn store_is_written_last_verbatim_and_both_ranges_are_reported() {
             "{order:?}: the count is the length"
         );
         // Inside IFD 0's body, which starts at the header's first-IFD offset.
-        let (_, _, ifd0) = read_header(&dng).expect("header");
+        let ifd0 = read_header(&dng).expect("header").first_ifd;
         assert!(excl.count_field().start > ifd0);
         assert!(
             excl.count_field().end() < excl.store().start,
@@ -248,7 +248,7 @@ fn a_mistyped_c2pa_tag_is_an_extra_not_a_store() {
 /// `(tag, type, count, value/offset word)`. Returns the new directory's offset.
 fn append_trailing_ifd(dng: &mut Vec<u8>, entries: &[(u16, u16, u32, u32)]) -> u64 {
     let le = ByteOrder::LittleEndian;
-    let (_, _, mut ifd) = read_header(dng).expect("header");
+    let mut ifd = read_header(dng).expect("header").first_ifd;
     let next_at = loop {
         let n = usize::from(le.u16(dng[ifd as usize..ifd as usize + 2].try_into().expect("2")));
         let next_at = ifd as usize + 2 + n * 12;

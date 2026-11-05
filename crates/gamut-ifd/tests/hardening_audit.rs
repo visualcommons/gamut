@@ -14,7 +14,7 @@
 //! (`overlapping_value_offset_parses_and_surfaces_in_audit`).
 
 use gamut_core::{Error, ErrorKind};
-use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_tree, write};
+use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, write};
 
 /// Unwraps the `InvalidInput` message — the string rawshift keys its `ParseError` mapping on.
 fn msg<T: std::fmt::Debug>(res: Result<T, Error>) -> &'static str {
@@ -142,7 +142,6 @@ fn circular_sub_ifd_pointer() {
         0x1a, 0x00, 0x00, 0x00, // offset 26 — itself
         0x00, 0x00, 0x00, 0x00, // next IFD = 0
     ];
-    assert_eq!(msg(read_tree(data, &[330])), "TIFF: sub-IFD pointer loop");
     assert_eq!(
         msg(IfdReader::open(data).and_then(|mut r| r.read_tree(&[330]))),
         "TIFF: sub-IFD pointer loop"
@@ -164,7 +163,6 @@ fn sub_ifd_depth_bomb() {
         ifds: vec![ifd],
     })
     .expect("write");
-    assert_eq!(msg(read_tree(&data, &[330])), "TIFF: sub-IFD tree too deep");
     assert_eq!(
         msg(IfdReader::open(&data[..]).and_then(|mut r| r.read_tree(&[330]))),
         "TIFF: sub-IFD tree too deep"

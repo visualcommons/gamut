@@ -10,7 +10,7 @@ and the offset-driven read/write spine — never pixels, compression, or photome
 values and following IFDs need absolute offsets that are only known after sizes are fixed, so the
 writer plans the layout then back-patches the offset words; a read → write → read round-trip
 reproduces the directory exactly. At v1 the symmetry extends to whole sub-IFD trees:
-`read_tree(&write(&file)?, tags)? == file`.
+`IfdReader::open(&write(&file)?[..])?.read_tree(tags)? == file`.
 
 ## How it was built
 
@@ -39,7 +39,7 @@ read/write code paths byte-for-byte.
 P5's **write** side landed with the DNG codec (issue #109): [`write`](src/writer.rs) lays out the
 whole IFD *tree* — [`Ifd::set_sub_ifd`](src/entry.rs) attaches children under a pointer tag
 (`SubIFDs`/`ExifIFD`/…), the writer places them and synthesises the offset-array field. The **read**
-side closed with v1 (issue #181): [`read_tree`](src/reader.rs) follows caller-named pointer tags
+side closed with v1 (issue #181): [`read_tree`](src/stream.rs) follows caller-named pointer tags
 (the generic [`read`] cannot know which `LONG` tags are offsets) with depth and cycle guards,
 rebuilding the tree `write` flattens; [`read_ifd_at`](src/reader.rs) stays as the per-pointer escape
 hatch for lenient decoders (gamut-dng skips unparseable children while hunting the raw IFD,
@@ -76,7 +76,10 @@ The API was frozen after a full-surface review; the additions and breaks:
 - **Fallible `write`** — classic-width overflow (entry count > `u16::MAX`, layout > 4 GiB) is a
   typed error instead of silent truncation; the layout contract (word alignment, structural
   determinism) is documented API.
-- **`read_tree`** — write's inverse over sub-IFD trees; sub-IFD groups are tag-sorted (canonical).
+- **`IfdReader::read_tree`** — write's inverse over sub-IFD trees; sub-IFD groups are tag-sorted
+  (canonical). Since #1132 it is a method only: the slice-taking free function it duplicated is
+  gone, and `read_audited` takes any `ReadAt` source, so the slice and stream readers share one
+  audited read.
 - **`Ifd::remove`**, **`Value::as_str`/`as_bytes`/`as_rationals`/`as_srationals`**,
   **`Value::offset_array`**, **`align_word`** — the pieces every consumer had hand-rolled.
 - **Single canonical paths** — modules are private; the surface is the crate-root re-export list
@@ -113,7 +116,8 @@ shape. P9 adds the streaming layer **additively** — the frozen v1 slice surfac
 - [`IfdReader`](src/stream.rs) — lazy walker: `read_ifd` fetches one directory body into raw
   entries (value/offset words verbatim, in file byte order); `value` fetches/decodes one value
   on demand, span-checked against the source length *before* allocating; `ifds()` iterates the
-  chain; `read_file` / `read_tree` / the coverage methods mirror the slice APIs exactly.
+  chain; `read_file` / the coverage methods mirror the slice APIs exactly, and `read_tree` is the
+  one sub-IFD tree walk.
 - [`tags`](src/tags.rs) — the structural pointer tags (`SubIFDs`, `ExifIFD`, `GPSInfo`,
   `InteroperabilityIFD`; `MakerNote` as the named-but-not-followable blob carrier), deduplicating
   the three consumers' copies. The one sanctioned exception to "no tag semantics": these tags
