@@ -713,8 +713,8 @@ fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
         &log,
     ));
     clone.push_backend(ScriptedInflater::new("clone-only", false, Act::Work, &log));
-    DecodeImage::<Rgb8>::decode_image(&decoder, &png).expect("decode");
-    DecodeImage::<Rgb8>::decode_image(&clone, &png).expect("decode");
+    let _: ImageBuf<Rgb8> = DecodeImage::<Rgb8>::decode_image(&decoder, &png).expect("decode");
+    let _: ImageBuf<Rgb8> = DecodeImage::<Rgb8>::decode_image(&clone, &png).expect("decode");
     assert_eq!(
         entries(&log),
         vec![
