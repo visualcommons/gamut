@@ -48,7 +48,7 @@ assert_eq!(round_div_nearest(-10, 4), -3);
 
 ## Status
 
-**v1: the public surface is frozen.** The complete AV1 1-D kernel family (DCT 4–64, ADST
+**Stable at the current major.** The complete AV1 1-D kernel family (DCT 4–64, ADST
 4/8/16, identity 4–32, lossless WHT), the shared integer math, and µ-law companding ship today
 and their signatures will not change; every future extension is additive — a new sibling module
 per spec family, or new functions in an existing one. See [`STATUS.md`](STATUS.md) for the

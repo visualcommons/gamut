@@ -54,8 +54,7 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   ← nothing.
 - **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core.
 - **gamut-av1** — AV1 codec. ← core, color, dsp, bitstream.
-- **gamut-av2** / **gamut-vvc** — placeholder codecs: module docs only, no items, outside the
-  v1 freeze. ← nothing.
+- **gamut-av2** / **gamut-vvc** — placeholder codecs: module docs only, no items. ← nothing.
 - **gamut-jxl** — JPEG XL, uniquely a **wrapper** over the format's reference implementations
   rather than clean-slate (maintainer-approved departure from the pure-Rust rule): encode
   wraps **libjxl 0.12.0** statically via `gamut-jxl-sys` (off wasm32), decode wraps the
@@ -135,7 +134,7 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   PNG/JPEG/WebP/JXL input with gamut's own decoders (only PPM uses the third-party `image`
   crate) and encodes only with gamut crates, and exposes `primitives` re-exports as inspection
   subcommands. ← gamut, `clap`, `image`, `thiserror`, `tracing`, `tracing-subscriber`.
-- **gamut-wasm** (cdylib) — placeholder, outside the v1 freeze. ← nothing.
+- **gamut-wasm** (cdylib) — placeholder. ← nothing.
 - **gamut-ffi** (cdylib/staticlib). ← gamut, codec-abi, color.
 
 ## Code correctness
