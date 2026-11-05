@@ -1,6 +1,6 @@
 [package]
 name = "gamut-vvc"
-description = "VVC (H.266) image encoder and decoder (intra-frame still-image coding)."
+description = "Placeholder: VVC (H.266) image encoder and decoder (intra-frame still-image coding)."
 version = "0.2.2"
 edition.workspace = true
 rust-version.workspace = true
@@ -14,9 +14,3 @@ categories.workspace = true
 
 [lints]
 workspace = true
-
-[dependencies]
-gamut-core.workspace = true
-gamut-color.workspace = true
-gamut-dsp.workspace = true
-gamut-bitstream.workspace = true

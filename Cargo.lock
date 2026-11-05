@@ -704,12 +704,6 @@ dependencies = [
 [[package]]
 name = "gamut-av2"
 version = "0.1.4"
-dependencies = [
- "gamut-bitstream",
- "gamut-color",
- "gamut-core",
- "gamut-dsp",
-]
 
 [[package]]
 name = "gamut-avif"
@@ -1016,20 +1010,10 @@ dependencies = [
 [[package]]
 name = "gamut-vvc"
 version = "0.2.2"
-dependencies = [
- "gamut-bitstream",
- "gamut-color",
- "gamut-core",
- "gamut-dsp",
-]
 
 [[package]]
 name = "gamut-wasm"
 version = "0.1.4"
-dependencies = [
- "gamut",
- "wasm-bindgen",
-]
 
 [[package]]
 name = "gamut-webp"
