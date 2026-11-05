@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-exif-v2.0.0...gamut-exif-v3.0.0) - 2026-11-05
+
+### Added
+
+- *(exif)* decode Fujifilm MakerNote tags into a read-only view ([#1039](https://github.com/visualcommons/gamut/pull/1039))
+- *(exif)* decode Sony MakerNote tags into a read-only view ([#1034](https://github.com/visualcommons/gamut/pull/1034))
+- *(exif)* add the Leica MakerNote dialects and decode their tags ([#1008](https://github.com/visualcommons/gamut/pull/1008))
+- *(exif)* decode Canon MakerNote tags into a read-only view ([#1000](https://github.com/visualcommons/gamut/pull/1000))
+- *(exif)* resolve the MakerNote dispatch layout per vendor ([#990](https://github.com/visualcommons/gamut/pull/990))
+- *(gamut-ifd)* shared tag registry for TIFF 6.0 and DNG tags ([#892](https://github.com/visualcommons/gamut/pull/892))
+
+### Other
+
+- *(gamut-ifd)* [**breaking**] named-struct returns, one audited reader, core Segment, flat C2PA exports ([#1140](https://github.com/visualcommons/gamut/pull/1140))
+- *(gamut-exif)* [**breaking**] with_* setters, one error type, one path per item ([#1139](https://github.com/visualcommons/gamut/pull/1139))
+- *(gamut-ifd)* [**breaking**] own the shared TIFF/DNG audit types, extents and writer layout ([#1130](https://github.com/visualcommons/gamut/pull/1130))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- *(gamut-core)* [**breaking**] opaque Error, private Dimensions fields, shared vocabulary ([#1126](https://github.com/visualcommons/gamut/pull/1126))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-exif-v1.0.0...gamut-exif-v2.0.0) - 2026-10-12
 
 ### Migration notes

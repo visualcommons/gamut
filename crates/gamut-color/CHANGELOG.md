@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/visualcommons/gamut/compare/gamut-color-v3.0.0...gamut-color-v4.0.0) - 2026-11-05
+
+### Added
+
+- *(gamut-color, gamut-jpeg, gamut-webp, gamut-avif)* [**breaking**] upsample chroma like each reference decoder by default ([#1044](https://github.com/visualcommons/gamut/pull/1044))
+
+### Other
+
+- *(gamut-color)* [**breaking**] type ChromaSubsampling::factors as Dimensions ([#1145](https://github.com/visualcommons/gamut/pull/1145))
+- *(gamut-color)* [**breaking**] one chroma/CICP vocabulary, kernels to gamut-dsp, Color spelling ([#1135](https://github.com/visualcommons/gamut/pull/1135))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- *(gamut-core)* [**breaking**] opaque Error, private Dimensions fields, shared vocabulary ([#1126](https://github.com/visualcommons/gamut/pull/1126))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-color-v2.0.0...gamut-color-v3.0.0) - 2026-10-12
 
 ### Added

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/visualcommons/gamut/compare/gamut-cmm-v0.1.0...gamut-cmm-v0.2.0) - 2026-11-05
+
+### Added
+
+- *(gamut-jpeg)* [**breaking**] XYB parity with jpegli — B-only subsampling and an sRGB decode through gamut-cmm ([#1043](https://github.com/visualcommons/gamut/pull/1043))
+- *(gamut-cmm)* [**breaking**] add f32 and 16-bit fixed-point CLUT precision tiers ([#994](https://github.com/visualcommons/gamut/pull/994))
+
+### Other
+
+- *(gamut-cmm)* [**breaking**] growable options, image-typed buffers, no name collisions ([#1153](https://github.com/visualcommons/gamut/pull/1153))
+- *(gamut-icc)* [**breaking**] named tag table, repr'd header enums, core Cicp/Error, split builtin ([#1146](https://github.com/visualcommons/gamut/pull/1146))
+- *(gamut-color)* [**breaking**] one chroma/CICP vocabulary, kernels to gamut-dsp, Color spelling ([#1135](https://github.com/visualcommons/gamut/pull/1135))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+- *(gamut-cmm)* gate LUT sources into a sampled-TRC destination against lcms2 ([#1023](https://github.com/visualcommons/gamut/pull/1023))
+- *(gamut-cmm)* add lcms2's 8-bit matrix-shaper pass ([#1001](https://github.com/visualcommons/gamut/pull/1001))
+
 ## [0.1.0](https://github.com/visualcommons/gamut/releases/tag/gamut-cmm-v0.1.0) - 2026-10-12
 
 ### Added

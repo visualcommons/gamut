@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-iptc-v2.0.0...gamut-iptc-v3.0.0) - 2026-11-05
+
+### Other
+
+- *(gamut-iptc)* [**breaking**] one path per namespace, named read sources, split extension.rs ([#1134](https://github.com/visualcommons/gamut/pull/1134))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-iptc-v1.0.0...gamut-iptc-v2.0.0) - 2026-10-12
 
 ### Added
