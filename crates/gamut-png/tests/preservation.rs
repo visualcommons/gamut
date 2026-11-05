@@ -1,4 +1,4 @@
-//! `PngEncoder::with_png_metadata` / `with_metadata_from` (issue #483): what a re-encode carries
+//! `PngEncoder::with_png_metadata` (issue #483): what a re-encode carries
 //! forward from the file it rewrites, and what it deliberately does not.
 //!
 //! Example and drift-guard level, over gamut's own read→write seam. The source files are built
@@ -15,8 +15,8 @@ mod common;
 use common::{chunk, ihdr_payload, png_from_chunks, tiny_exif, tiny_icc_profile, zlib};
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
 use gamut_png::{
-    Background, MetadataNotice, PngDecoder, PngEncoder, PngImage, PngMetadata, SrgbIntent,
-    TextChunkKind,
+    Background, Cicp, MetadataNotice, ModificationTime, PngDecoder, PngEncoder, PngImage,
+    PngMetadata, SrgbIntent, TextChunkKind,
 };
 use libpng_oracle::{OracleText, OracleTextKind};
 
@@ -299,12 +299,12 @@ fn a_sub_byte_grey_background_names_the_same_grey_after_a_re_encode() {
         panic!("two-bit grey decodes to Gray8");
     };
     assert_eq!(pixels.as_samples(), [170; 4]);
-    assert_eq!(decoded.background, Some(Background::Gray(170)));
+    assert_eq!(decoded.metadata.background, Some(Background::Gray(170)));
 
     let encode = |reduce: bool| {
         PngEncoder::new()
             .with_auto_reduce(reduce)
-            .with_metadata_from(&decoded)
+            .with_png_metadata(&decoded.metadata)
             .encode_to_vec(pixels.as_ref())
             .expect("re-encode")
     };
@@ -340,13 +340,16 @@ fn a_palette_index_background_is_carried_onto_the_same_palette() {
     let palette = decoded.palette.as_ref().expect("palette");
     let mut out = Vec::new();
     PngEncoder::new()
-        .with_metadata_from(&decoded)
+        .with_png_metadata(&decoded.metadata)
         .encode_indexed8(indices.as_ref(), palette, &mut out)
         .expect("re-encode");
 
     let re = PngDecoder::new().decode(&out).unwrap();
-    let Some(Background::Index(index)) = re.background else {
-        panic!("background carried as an index, got {:?}", re.background);
+    let Some(Background::Index(index)) = re.metadata.background else {
+        panic!(
+            "background carried as an index, got {:?}",
+            re.metadata.background
+        );
     };
     let re_palette = re.palette.as_ref().expect("palette");
     assert_eq!(re_palette.rgb(index), Some([40, 50, 60]));
@@ -440,7 +443,9 @@ fn a_profile_name_no_reader_accepts_is_left_behind_with_a_notice() {
         ("pro\0file", MetadataNotice::IccpNameNull),
         ("\u{153}rofile", MetadataNotice::IccpNameNotLatin1),
     ] {
-        let encoder = PngEncoder::new().with_icc_profile(name, &tiny_icc_profile());
+        let encoder = PngEncoder::new()
+            .with_icc_profile_name(name)
+            .with_icc_profile(&tiny_icc_profile());
         assert_eq!(encoder.metadata_notices(), [notice], "name {name:?}");
         assert!(!notice.carried(), "name {name:?}");
         assert_eq!(
@@ -458,7 +463,7 @@ fn a_profile_name_no_reader_accepts_is_left_behind_with_a_notice() {
 /// Kills the time notice's path into [`PngEncoder::metadata_notices`].
 #[test]
 fn an_out_of_range_time_is_left_behind_with_a_notice() {
-    let encoder = PngEncoder::new().with_time(2026, 6, 15, 24, 0, 0);
+    let encoder = PngEncoder::new().with_time(ModificationTime::new(2026, 6, 15, 24, 0, 0));
     assert_eq!(encoder.metadata_notices(), [MetadataNotice::TimeOutOfRange]);
     assert_eq!(
         chunk_payload(&re_encoded_bytes(|_| encoder.clone()), b"tIME"),
@@ -501,6 +506,25 @@ fn a_cicp_is_carried_only_when_its_matrix_coefficients_are_zero() {
     );
 }
 
+/// A carried non-RGB cICP replaces a cICP the caller set before the carry: the chunk is omitted,
+/// not left holding the caller's earlier code points. cICP outranks every other colour chunk
+/// (§4.3 Table 1, priority 1), so a stale caller cICP beside the source's carried `iCCP`/`sRGB`
+/// would override the colour statement the carry brought; the encoder writes the code points it
+/// was last handed, and reports that it dropped them.
+#[test]
+fn a_carried_non_rgb_cicp_replaces_an_earlier_caller_cicp() {
+    let non_rgb = gamut_png::metadata(&source(&[chunk(b"cICP", &[9, 16, 1, 1])])).unwrap();
+    let encoder = PngEncoder::new()
+        .with_cicp(Cicp::new(1, 13, true))
+        .with_png_metadata(&non_rgb);
+    assert_eq!(re_encoded(|_| encoder.clone()).cicp, None);
+    // `source` also holds a C2PA store, whose own notice follows.
+    assert_eq!(
+        encoder.metadata_notices().first(),
+        Some(&MetadataNotice::NonRgbCicp)
+    );
+}
+
 /// Drift guard. A C2PA manifest store is signed over the exact bytes of the file it was made for,
 /// which is why C2PA 2.4 §A.3.2 marks `caBX` unsafe to copy: carried into a re-encode it is
 /// invalid by construction, and a validator would report a tampered file rather than an unsigned
@@ -516,31 +540,6 @@ fn the_c2pa_manifest_store_is_never_carried_forward() {
         encoder.metadata_notices(),
         [MetadataNotice::C2paManifestStore]
     );
-}
-
-/// The two entry points differ only in which read surface they take, so a field wired into one
-/// and not the other is a bug this catches — the same anti-drift shape `tests/metadata.rs` uses
-/// for the two *read* walks.
-#[test]
-fn with_metadata_from_agrees_with_with_png_metadata() {
-    let png = source(&[
-        chunk(b"cICP", &[9, 16, 0, 1]),
-        chunk(b"sBIT", &[5, 6, 5]),
-        chunk(b"bKGD", &[0, 10, 0, 20, 0, 30]),
-        chunk(b"pHYs", &[0, 0, 0x0E, 0xC4, 0, 0, 0x0E, 0xC4, 1]),
-        chunk(b"tIME", &[0x07, 0xEA, 10, 16, 12, 34, 56]),
-    ]);
-    let decoded = PngDecoder::new().decode(&png).unwrap();
-    let meta = gamut_png::metadata(&png).unwrap();
-
-    let from_decoded = re_encoded(|e| e.with_metadata_from(&decoded));
-    let from_metadata = re_encoded(|e| e.with_png_metadata(&meta));
-    assert_eq!(from_decoded, from_metadata);
-    // A pair of empty results would satisfy the comparison above.
-    assert!(from_decoded.icc_profile.is_some() && from_decoded.cicp.is_some());
-    assert!(!from_decoded.texts.is_empty() && from_decoded.exif.is_some());
-    assert!(from_decoded.significant_bits.is_some() && from_decoded.background.is_some());
-    assert!(from_decoded.physical_dimensions.is_some() && from_decoded.modification_time.is_some());
 }
 
 /// §11.3.3.3 makes a `zTXt` "semantically equivalent" to a `tEXt`, so a decode that keeps only the
@@ -673,7 +672,8 @@ fn xmp_chunks(png: &[u8]) -> usize {
 fn carrying_an_xmp_packet_replaces_one_already_set() {
     let meta = gamut_png::metadata(&source(&[])).unwrap();
     let out = re_encoded_bytes(|e| {
-        e.with_xmp("<x:xmpmeta id='set directly'/>")
+        e.with_xmp("<x:xmpmeta id='set directly'/>".as_bytes())
+            .unwrap()
             .with_png_metadata(&meta)
     });
 
@@ -694,7 +694,8 @@ fn carrying_an_xmp_packet_replaces_one_already_set() {
 fn carrying_a_source_without_a_packet_keeps_one_already_set() {
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"tEXt", b"Author\0me")])).unwrap();
     let re = re_encoded(|e| {
-        e.with_xmp("<x:xmpmeta id='set directly'/>")
+        e.with_xmp("<x:xmpmeta id='set directly'/>".as_bytes())
+            .unwrap()
             .with_png_metadata(&meta)
     });
     assert_eq!(re.xmp(), Some(&b"<x:xmpmeta id='set directly'/>"[..]));

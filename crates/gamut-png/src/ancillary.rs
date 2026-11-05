@@ -37,31 +37,32 @@
 use gamut_core::{Error, Result};
 use gamut_deflate::{DeflateEncoder, Level};
 
-use crate::decoded::XMP_KEYWORD;
+use crate::decoded::{Background, Cicp, ModificationTime, PhysicalDimensions, XMP_KEYWORD};
 use crate::encoder::MetadataNotice;
 use crate::{ColorType, chunk};
 
 /// The rendering intent for an `sRGB` chunk (PNG spec §11.3.2.5).
+///
+/// `#[repr(u8)]` with the chunk's intent codes (§11.3.2.5 Table 16) as its discriminants, which
+/// are permanent: the value crosses the C ABI as that plain integer. Closed, because the table
+/// defines exactly these four.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum SrgbIntent {
     /// Perceptual (intent code 0).
-    Perceptual,
+    Perceptual = 0,
     /// Relative colorimetric (intent code 1).
-    RelativeColorimetric,
+    RelativeColorimetric = 1,
     /// Saturation (intent code 2).
-    Saturation,
+    Saturation = 2,
     /// Absolute colorimetric (intent code 3).
-    AbsoluteColorimetric,
+    AbsoluteColorimetric = 3,
 }
 
 impl SrgbIntent {
-    fn code(self) -> u8 {
-        match self {
-            SrgbIntent::Perceptual => 0,
-            SrgbIntent::RelativeColorimetric => 1,
-            SrgbIntent::Saturation => 2,
-            SrgbIntent::AbsoluteColorimetric => 3,
-        }
+    /// The chunk's intent code: the discriminant.
+    const fn code(self) -> u8 {
+        self as u8
     }
 
     /// The intent for an sRGB chunk's code byte, or `None` if the code is not defined.
@@ -78,20 +79,23 @@ impl SrgbIntent {
 }
 
 /// The unit for a `pHYs` chunk's pixel dimensions.
+///
+/// `#[repr(u8)]` with the chunk's unit specifiers (§11.3.4.3 Table 24) as its discriminants,
+/// which are permanent: the value crosses the C ABI as that plain integer. Closed, because the
+/// table defines exactly these two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum PhysicalUnit {
     /// Unit is unknown; the values give only an aspect ratio (unit code 0).
-    Unknown,
+    Unknown = 0,
     /// Pixels per metre (unit code 1).
-    Meter,
+    Meter = 1,
 }
 
 impl PhysicalUnit {
-    fn code(self) -> u8 {
-        match self {
-            PhysicalUnit::Unknown => 0,
-            PhysicalUnit::Meter => 1,
-        }
+    /// The chunk's unit specifier: the discriminant.
+    const fn code(self) -> u8 {
+        self as u8
     }
 
     /// The unit for a `pHYs` unit specifier, or `None` for a value §11.3.4.3 Table 24 does not
@@ -357,6 +361,11 @@ fn profile_name_verdict(name: &str) -> core::result::Result<IccpName, MetadataNo
 /// A writable `iCCP` profile name: its Latin-1 bytes, and the advisory notice it carries.
 type IccpName = (Vec<u8>, Option<MetadataNotice>);
 
+/// The `iCCP` profile name written when none is set: 1–79 printable Latin-1 characters with no
+/// leading, trailing or consecutive space, as §11.3.2.3 requires, so a profile set without a name
+/// draws no notice.
+pub(crate) const DEFAULT_ICC_PROFILE_NAME: &str = "ICC profile";
+
 /// Whether a `tIME`'s month, day, hour, minute and second each lie within the range §11.3.5.1's
 /// Table 26 gives it (1–12, 1–31, 0–23, 0–59, 0–60; the year is any two-byte value). The one rule
 /// both directions apply: the reader skips a chunk outside it as malformed (§13.1), and the writer
@@ -409,8 +418,13 @@ pub(crate) struct Ancillary {
     /// sRGB: rendering-intent code.
     pub srgb: Option<u8>,
     /// cICP: (colour primaries, transfer function, video full-range flag). The matrix
-    /// coefficients byte is not carried because §11.3.2.6 fixes it at 0 for PNG.
+    /// coefficients byte is not carried because §11.3.2.6 fixes it at 0 for PNG. Set through
+    /// [`Self::set_cicp`], which leaves it empty for a non-RGB matrix.
     pub cicp: Option<(u8, u8, bool)>,
+    /// Why the code points last given to [`Self::set_cicp`] were dropped, if they were. A
+    /// single-value slot like [`cicp`](Self::cicp) itself, so setting code points again replaces
+    /// it.
+    cicp_notice: Option<MetadataNotice>,
     /// sBIT: significant bits per channel (1–4 values, matching the colour type).
     pub sbit: Option<Vec<u8>>,
     /// bKGD: background colour, pre-serialised to its colour-type-specific bytes.
@@ -423,14 +437,14 @@ pub(crate) struct Ancillary {
     /// Why the time last given to [`Self::set_time`] was dropped, if it was. A single-value slot
     /// like [`time`](Self::time) itself, so setting a time again replaces it.
     time_notice: Option<MetadataNotice>,
-    /// iCCP: (profile name as its Latin-1 bytes, raw ICC profile bytes); compressed at emit
-    /// time. Set through [`Self::set_icc_profile`], which leaves it empty for a name §11.3.2.3
-    /// gives no chunk to.
-    pub iccp: Option<(Vec<u8>, Vec<u8>)>,
-    /// What §11.3.2.3 says about the profile name last given to [`Self::set_icc_profile`]: why
-    /// the profile was dropped, or the deviation it was written with. A single-value slot like
-    /// [`iccp`](Self::iccp) itself, so setting a profile again replaces it.
-    iccp_notice: Option<MetadataNotice>,
+    /// iCCP: the raw ICC profile bytes, compressed at emit time. Set through
+    /// [`Self::set_icc_profile`]; [`Self::iccp`] is what is written.
+    pub icc_profile: Option<Vec<u8>>,
+    /// The `iCCP` profile name last given to [`Self::set_icc_profile_name`], or `None` for
+    /// [`DEFAULT_ICC_PROFILE_NAME`]. Held as given; §11.3.2.3's verdict on it is taken where the
+    /// chunk is written or reported ([`Self::iccp`], [`Self::iccp_notice`]), so setting the name
+    /// or the profile again replaces both the slot and its notice.
+    icc_name: Option<String>,
     /// eXIf: raw EXIF/TIFF bytes (the chunk payload starts with the TIFF byte-order marker).
     pub exif: Option<Vec<u8>>,
     /// caBX: the C2PA manifest store, raw and uncompressed (C2PA 2.4 §A.3.2) — or a run of zero
@@ -449,17 +463,56 @@ impl Ancillary {
         self.srgb = Some(intent.code());
     }
 
-    pub(crate) fn set_physical(&mut self, x: u32, y: u32, unit: PhysicalUnit) {
-        self.phys = Some((x, y, unit.code()));
+    pub(crate) fn set_physical(&mut self, phys: PhysicalDimensions) {
+        self.phys = Some((phys.x_ppu, phys.y_ppu, phys.unit.code()));
+    }
+
+    /// Sets the `cICP` code points, or — for matrix coefficients other than 0, which §11.3.2.6
+    /// forbids in PNG ("Matrix Coefficients shall be set to 0") — leaves the slot empty and
+    /// records [`MetadataNotice::NonRgbCicp`] in its place.
+    pub(crate) fn set_cicp(&mut self, cicp: Cicp) {
+        let rgb = cicp.matrix_coefficients == 0;
+        self.cicp = rgb.then_some((
+            cicp.color_primaries,
+            cicp.transfer_function,
+            cicp.full_range,
+        ));
+        self.cicp_notice = (!rgb).then_some(MetadataNotice::NonRgbCicp);
+    }
+
+    /// Why the code points last set were dropped, if they were.
+    pub(crate) fn cicp_notice(&self) -> Option<MetadataNotice> {
+        self.cicp_notice
+    }
+
+    /// Sets the `bKGD` background in the form its variant names, as the colour-type-specific
+    /// bytes §11.3.4.1 Table 22 gives it: a 2-byte grey, three 2-byte samples, or a 1-byte index.
+    pub(crate) fn set_background(&mut self, background: Background) {
+        self.bkgd = Some(match background {
+            Background::Gray(gray) => gray.to_be_bytes().to_vec(),
+            Background::Rgb(red, green, blue) => [red, green, blue]
+                .iter()
+                .flat_map(|sample| sample.to_be_bytes())
+                .collect(),
+            Background::Index(index) => vec![index],
+        });
     }
 
     /// Sets the `tIME` time, or — for a field outside its Table 26 range, which this crate's
     /// reader skips as malformed — leaves the slot empty and records
     /// [`MetadataNotice::TimeOutOfRange`] in its place.
-    pub(crate) fn set_time(&mut self, year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8) {
+    pub(crate) fn set_time(&mut self, time: ModificationTime) {
+        let ModificationTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        } = time;
         let [yh, yl] = year.to_be_bytes();
-        let in_range = time_in_range(month, day, hour, min, sec);
-        self.time = in_range.then_some([yh, yl, month, day, hour, min, sec]);
+        let in_range = time_in_range(month, day, hour, minute, second);
+        self.time = in_range.then_some([yh, yl, month, day, hour, minute, second]);
         self.time_notice = (!in_range).then_some(MetadataNotice::TimeOutOfRange);
     }
 
@@ -468,21 +521,40 @@ impl Ancillary {
         self.time_notice
     }
 
-    /// Sets the `iCCP` profile, routing its name through [`profile_name_verdict`]: a name no
-    /// chunk this crate's reader accepts can hold leaves the slot empty, and either way the
-    /// verdict's notice replaces the previous profile's.
-    pub(crate) fn set_icc_profile(&mut self, name: &str, profile: &[u8]) {
-        let (iccp, notice) = match profile_name_verdict(name) {
-            Ok((bytes, notice)) => (Some((bytes, profile.to_vec())), notice),
-            Err(notice) => (None, Some(notice)),
-        };
-        self.iccp = iccp;
-        self.iccp_notice = notice;
+    /// Sets the raw `iCCP` profile, written under the name [`Self::set_icc_profile_name`] last
+    /// gave (or [`DEFAULT_ICC_PROFILE_NAME`]).
+    pub(crate) fn set_icc_profile(&mut self, profile: &[u8]) {
+        self.icc_profile = Some(profile.to_vec());
     }
 
-    /// What §11.3.2.3 says about the profile name in the `iCCP` slot, if anything.
+    /// Sets the name the `iCCP` profile is written under, replacing the previous one.
+    pub(crate) fn set_icc_profile_name(&mut self, name: &str) {
+        self.icc_name = Some(name.to_owned());
+    }
+
+    /// §11.3.2.3's verdict on the profile name, routed through [`profile_name_verdict`], or `None`
+    /// when no profile is set and so no chunk is in question.
+    fn iccp_verdict(&self) -> Option<core::result::Result<IccpName, MetadataNotice>> {
+        self.icc_profile.as_ref()?;
+        let name = self.icc_name.as_deref().unwrap_or(DEFAULT_ICC_PROFILE_NAME);
+        Some(profile_name_verdict(name))
+    }
+
+    /// The `iCCP` chunk to write: the profile name as its Latin-1 bytes and the raw profile, or
+    /// `None` when no profile is set or its name is one no chunk this crate's reader accepts can
+    /// hold.
+    pub(crate) fn iccp(&self) -> Option<(Vec<u8>, &[u8])> {
+        let (name, _) = self.iccp_verdict()?.ok()?;
+        Some((name, self.icc_profile.as_deref()?))
+    }
+
+    /// What §11.3.2.3 says about the profile name in the `iCCP` slot, if anything: why the
+    /// profile is dropped, or the deviation it is written with.
     pub(crate) fn iccp_notice(&self) -> Option<MetadataNotice> {
-        self.iccp_notice
+        match self.iccp_verdict()? {
+            Ok((_, notice)) => notice,
+            Err(notice) => Some(notice),
+        }
     }
 
     pub(crate) fn add_text_latin1(&mut self, keyword: &str, text: &str) {
@@ -747,10 +819,10 @@ impl Ancillary {
         if let Some(gamma) = self.gamma {
             chunk::write_chunk(out, *b"gAMA", &gamma.to_be_bytes());
         }
-        if let Some((name, profile)) = &self.iccp {
-            // The name is already its Latin-1 bytes, 1–79 of them and null-free:
-            // `set_icc_profile` let nothing else into the slot (§11.3.2.3).
-            let mut data = name.clone();
+        if let Some((name, profile)) = self.iccp() {
+            // The name is already its Latin-1 bytes, 1–79 of them and null-free: `iccp` lets
+            // nothing else through (§11.3.2.3).
+            let mut data = name;
             data.push(0); // null separator
             data.push(0); // compression method: 0 = zlib/deflate
             DeflateEncoder::new()
@@ -817,11 +889,10 @@ impl Ancillary {
 
 /// The `caBX` payload the caller asked for.
 ///
-/// A reservation is held as its length, not as the zero bytes it stands for, so that the length
-/// is checked against PNG §5.3's 2^31 − 1 bound (in the encoder, before any byte is written)
-/// **before** anything is allocated: [`PngEncoder::with_c2pa_reserved`](crate::PngEncoder::with_c2pa_reserved)
-/// is an infallible builder, and a `usize::MAX` reservation must surface as the documented
-/// `InvalidInput`, not as an allocation failure at the setter.
+/// A reservation is held as its length, not as the zero bytes it stands for, so nothing is
+/// allocated for it until the encode writes it: [`PngEncoder::with_c2pa_reserved`](crate::PngEncoder::with_c2pa_reserved)
+/// checks the length against PNG §5.3's 2^31 − 1 bound, and the zero run is built only by the
+/// write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum C2paStore {
     /// A finished store, written verbatim.
@@ -1172,11 +1243,11 @@ mod tests {
     #[test]
     fn physical_unit_codes_are_distinct() {
         let mut unitless = Ancillary::default();
-        unitless.set_physical(300, 300, PhysicalUnit::Unknown);
+        unitless.set_physical(PhysicalDimensions::new(300, 300, PhysicalUnit::Unknown));
         assert_eq!(unitless.phys, Some((300, 300, 0)));
 
         let mut metric = Ancillary::default();
-        metric.set_physical(2835, 2835, PhysicalUnit::Meter);
+        metric.set_physical(PhysicalDimensions::new(2835, 2835, PhysicalUnit::Meter));
         assert_eq!(metric.phys, Some((2835, 2835, 1)));
     }
 
@@ -1201,8 +1272,8 @@ mod tests {
     #[test]
     fn post_plte_serialisation() {
         let mut a = Ancillary::default();
-        a.set_physical(2835, 2835, PhysicalUnit::Meter);
-        a.set_time(2026, 6, 13, 1, 2, 3);
+        a.set_physical(PhysicalDimensions::new(2835, 2835, PhysicalUnit::Meter));
+        a.set_time(ModificationTime::new(2026, 6, 13, 1, 2, 3));
         a.add_text_latin1("Title", "hi");
         let mut out = vec![0u8; 8];
         a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
@@ -1224,7 +1295,7 @@ mod tests {
     #[test]
     fn an_out_of_range_time_is_dropped_with_a_notice() {
         let mut a = Ancillary::default();
-        a.set_time(2026, 13, 1, 0, 0, 0);
+        a.set_time(ModificationTime::new(2026, 13, 1, 0, 0, 0));
         assert_eq!(a.time, None, "month 13 is not written");
         assert_eq!(a.time_notice(), Some(MetadataNotice::TimeOutOfRange));
         let mut out = vec![0u8; 8];
@@ -1232,7 +1303,7 @@ mod tests {
         assert_eq!(find_chunk(&out, b"tIME"), None);
         assert!(!MetadataNotice::TimeOutOfRange.carried());
 
-        a.set_time(2026, 12, 31, 23, 59, 60);
+        a.set_time(ModificationTime::new(2026, 12, 31, 23, 59, 60));
         assert_eq!(a.time, Some([7, 234, 12, 31, 23, 59, 60]));
         assert_eq!(
             a.time_notice(),
@@ -1249,7 +1320,7 @@ mod tests {
         a.add_text_latin1("Before", "set first");
         a.c2pa = Some(C2paStore::Store(b"\0\0\0\x1fjumb".to_vec()));
         a.add_text_compressed("After", "set later");
-        a.set_time(2026, 9, 6, 0, 0, 0);
+        a.set_time(ModificationTime::new(2026, 9, 6, 0, 0, 0));
         let mut out = vec![0u8; 8];
         a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
 
@@ -1281,10 +1352,45 @@ mod tests {
         assert_eq!(find_chunk(&none, b"caBX"), None);
     }
 
+    /// §11.3.2.6 admits matrix coefficients 0 only: [`Ancillary::set_cicp`] keeps RGB code points
+    /// with no notice, drops any other matrix with [`MetadataNotice::NonRgbCicp`], and a later
+    /// call replaces both the slot and its notice.
+    #[test]
+    fn set_cicp_keeps_rgb_code_points_and_drops_any_other_matrix_with_a_notice() {
+        let mut a = Ancillary::default();
+        a.set_cicp(Cicp::new(9, 16, true));
+        assert_eq!((a.cicp, a.cicp_notice()), (Some((9, 16, true)), None));
+
+        let mut non_rgb = Cicp::new(1, 13, false);
+        non_rgb.matrix_coefficients = 1;
+        a.set_cicp(non_rgb);
+        assert_eq!(
+            (a.cicp, a.cicp_notice()),
+            (None, Some(MetadataNotice::NonRgbCicp))
+        );
+
+        a.set_cicp(Cicp::new(1, 13, false));
+        assert_eq!((a.cicp, a.cicp_notice()), (Some((1, 13, false)), None));
+    }
+
+    /// [`Ancillary::set_background`] stores each [`Background`] form as the bytes §11.3.4.1
+    /// Table 22 gives it: two for a grey, six for an RGB triple, one for an index — big-endian.
+    #[test]
+    fn set_background_serialises_each_form_as_table_22_gives_it() {
+        let mut a = Ancillary::default();
+        a.set_background(Background::Gray(0x1234));
+        assert_eq!(a.bkgd, Some(vec![0x12, 0x34]));
+        a.set_background(Background::Rgb(0x0102, 0x0304, 0x0506));
+        assert_eq!(a.bkgd, Some(vec![1, 2, 3, 4, 5, 6]));
+        a.set_background(Background::Index(7));
+        assert_eq!(a.bkgd, Some(vec![7]));
+    }
+
     /// The `iCCP` payload [`Ancillary::set_icc_profile`] leads to, if any.
     fn iccp_chunk(name: &str) -> (Option<Vec<u8>>, Option<MetadataNotice>) {
         let mut a = Ancillary::default();
-        a.set_icc_profile(name, b"profile");
+        a.set_icc_profile_name(name);
+        a.set_icc_profile(b"profile");
         let mut pre = vec![0u8; 8];
         a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         (find_chunk(&pre, b"iCCP"), a.iccp_notice())
@@ -1356,28 +1462,45 @@ mod tests {
         }
     }
 
-    /// The notice belongs to the profile last set: a valid name set after a dropped one clears
-    /// it, and an invalid one set after a valid profile empties the slot. Kills a setter that
-    /// keeps either half of the previous profile's state.
+    /// The notice belongs to the name and profile last set: a valid name set after a dropped one
+    /// clears it, and an invalid one set after a valid profile empties the slot. A name with no
+    /// profile draws no notice, since no chunk is in question, and a profile with no name is
+    /// written under [`DEFAULT_ICC_PROFILE_NAME`]. Kills a setter that keeps either half of the
+    /// previous state.
     #[test]
-    fn setting_an_iccp_profile_again_replaces_its_notice_and_slot() {
+    fn setting_an_iccp_profile_or_name_again_replaces_its_notice_and_slot() {
         let mut a = Ancillary::default();
-        a.set_icc_profile("", b"profile");
-        a.set_icc_profile("p", b"profile");
-        assert_eq!(a.iccp_notice(), None);
-        assert!(a.iccp.is_some());
-        a.set_icc_profile("", b"profile");
+        a.set_icc_profile_name("");
+        assert_eq!((a.iccp(), a.iccp_notice()), (None, None));
+        a.set_icc_profile(b"profile");
         assert_eq!(a.iccp_notice(), Some(MetadataNotice::IccpNameLength));
-        assert_eq!(a.iccp, None);
+        a.set_icc_profile_name("p");
+        assert_eq!(a.iccp_notice(), None);
+        assert_eq!(a.iccp(), Some((b"p".to_vec(), &b"profile"[..])));
+        a.set_icc_profile_name("");
+        assert_eq!(a.iccp_notice(), Some(MetadataNotice::IccpNameLength));
+        assert_eq!(a.iccp(), None);
+
+        let mut unnamed = Ancillary::default();
+        unnamed.set_icc_profile(b"profile");
+        assert_eq!(unnamed.iccp_notice(), None);
+        assert_eq!(
+            unnamed.iccp(),
+            Some((
+                DEFAULT_ICC_PROFILE_NAME.as_bytes().to_vec(),
+                &b"profile"[..]
+            ))
+        );
     }
 
     #[test]
     fn iccp_and_exif_framing() {
-        let a = Ancillary {
-            iccp: Some((b"p".to_vec(), b"the quick brown fox".to_vec())),
+        let mut a = Ancillary {
+            icc_profile: Some(b"the quick brown fox".to_vec()),
             exif: Some(vec![0x49, 0x49, 0x2A, 0x00]),
             ..Default::default()
         };
+        a.set_icc_profile_name("p");
         let mut pre = vec![0u8; 8];
         a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         let iccp = find_chunk(&pre, b"iCCP").unwrap();
@@ -1787,7 +1910,7 @@ mod tests {
     fn a_profile_and_a_rendering_intent_are_both_written() {
         let mut a = Ancillary::default();
         a.set_srgb(SrgbIntent::Perceptual);
-        a.iccp = Some((b"prof".to_vec(), vec![0u8; 4]));
+        a.set_icc_profile(&[0u8; 4]);
         assert!(a.validate().is_ok(), "the pair is legal");
 
         let mut out = vec![0u8; 8];

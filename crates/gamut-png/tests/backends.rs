@@ -14,8 +14,8 @@ use gamut_core::{
 };
 use gamut_deflate::DeflateEncoder;
 use gamut_png::{
-    AbiDeflater, AbiInflater, CODEC_ID_ZLIB, FilterStrategy, IdatDeflater, IdatInflater, IdatInfo,
-    Level, PIXEL_FORMAT_FILTERED_BYTES, PngDecoder, PngEncoder, PngPalette,
+    AbiZlibDeflater, AbiZlibInflater, FilterStrategy, IdatInfo, Level, PIXEL_FORMAT_FILTERED_BYTES,
+    Palette, PngDecoder, PngEncoder, ZLIB_CODEC_ID, ZlibDeflater, ZlibInflater,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -182,7 +182,7 @@ fn default_output_is_byte_identical_across_colour_types_and_depths() {
     out.clear();
 
     let idx: Vec<u8> = (0..N).map(|i| (i % 5) as u8).collect();
-    let plte = PngPalette::new(&[[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255], [9, 9, 9]])
+    let plte = Palette::new(&[[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255], [9, 9, 9]])
         .expect("palette");
     PngEncoder::new()
         .encode_indexed8(
@@ -250,7 +250,7 @@ enum Act {
     Work,
     /// Return exactly `n` bytes of output — used to exercise the host's cap re-check.
     Produce(usize),
-    /// Decline late, the `Status::UNSUPPORTED` equivalent.
+    /// Return an `Unsupported` error after accepting: terminal, like any other error.
     DeclineLate,
     /// Fail terminally.
     Fail,
@@ -277,7 +277,7 @@ impl ScriptedInflater {
     }
 }
 
-impl IdatInflater for ScriptedInflater {
+impl ZlibInflater for ScriptedInflater {
     fn supports(&mut self, _info: &IdatInfo) -> bool {
         self.log
             .lock()
@@ -332,7 +332,7 @@ impl ScriptedDeflater {
     }
 }
 
-impl IdatDeflater for ScriptedDeflater {
+impl ZlibDeflater for ScriptedDeflater {
     fn supports(&mut self, _info: &IdatInfo) -> bool {
         self.log
             .lock()
@@ -481,7 +481,7 @@ fn all_inflaters_declining_falls_through_to_the_builtin_tail() {
     let mut decoder = PngDecoder::new();
     decoder
         .push_backend(ScriptedInflater::new("early", false, Act::Work, &log))
-        .push_backend(ScriptedInflater::new("late", true, Act::DeclineLate, &log));
+        .push_backend(ScriptedInflater::new("later", false, Act::Work, &log));
     let decoded: ImageBuf<Rgb8> =
         DecodeImage::<Rgb8>::decode_image(&decoder, &png).expect("decode");
     assert_eq!(
@@ -489,10 +489,21 @@ fn all_inflaters_declining_falls_through_to_the_builtin_tail() {
         rgb8,
         "the miniz_oxide tail must have produced this"
     );
-    assert_eq!(
-        entries(&log),
-        vec!["early:supports", "late:supports", "late:inflate"]
-    );
+    assert_eq!(entries(&log), vec!["early:supports", "later:supports"]);
+}
+
+#[test]
+fn an_unsupported_error_after_accepting_is_terminal_for_an_inflater() {
+    let (png, _) = sample_png();
+    let log = log();
+    let mut decoder = PngDecoder::new();
+    decoder
+        .push_backend(ScriptedInflater::new("late", true, Act::DeclineLate, &log))
+        .push_backend(ScriptedInflater::new("never", true, Act::Work, &log));
+    let err = DecodeImage::<Rgb8>::decode_image(&decoder, &png)
+        .expect_err("only supports() falls through");
+    assert_eq!(err.static_message(), Some("test: late decline"));
+    assert_eq!(entries(&log), vec!["late:supports", "late:inflate"]);
 }
 
 #[test]
@@ -548,7 +559,7 @@ fn all_deflaters_declining_falls_through_to_gamut_deflate() {
     let mut encoder = PngEncoder::new();
     encoder
         .push_backend(ScriptedDeflater::new("early", false, Act::Work, &log))
-        .push_backend(ScriptedDeflater::new("late", true, Act::DeclineLate, &log));
+        .push_backend(ScriptedDeflater::new("later", false, Act::Work, &log));
     let mut png = Vec::new();
     encoder
         .encode_image(
@@ -556,15 +567,27 @@ fn all_deflaters_declining_falls_through_to_gamut_deflate() {
             &mut png,
         )
         .expect("encode");
-    assert_eq!(
-        entries(&log),
-        vec!["early:supports", "late:supports", "late:deflate"]
-    );
+    assert_eq!(entries(&log), vec!["early:supports", "later:supports"]);
     assert_eq!(
         hex(&png),
         golden("rgb8"),
         "the built-in tail must produce byte-identical default output"
     );
+}
+
+#[test]
+fn an_unsupported_error_after_accepting_is_terminal_for_a_deflater() {
+    let rgb8 = rgb8_samples();
+    let log = log();
+    let mut encoder = PngEncoder::new();
+    encoder
+        .push_backend(ScriptedDeflater::new("late", true, Act::DeclineLate, &log))
+        .push_backend(ScriptedDeflater::new("never", true, Act::Work, &log));
+    let err = encoder
+        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb8, dims()).expect("rgb8"))
+        .expect_err("only supports() falls through");
+    assert_eq!(err.static_message(), Some("test: late decline"));
+    assert_eq!(entries(&log), vec!["late:supports", "late:deflate"]);
 }
 
 #[test]
@@ -741,21 +764,21 @@ fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
 #[test]
 fn debug_and_default_still_work_with_a_registry() {
     let mut encoder = PngEncoder::default();
-    assert!(format!("{encoder:?}").contains("Registry(0 backend(s))"));
+    assert!(format!("{encoder:?}").contains("Registry { backends: 0 }"));
     encoder.push_backend(ScriptedDeflater::new("d", true, Act::Work, &log()));
-    assert!(format!("{encoder:?}").contains("Registry(1 backend(s))"));
+    assert!(format!("{encoder:?}").contains("Registry { backends: 1 }"));
 
     let mut decoder = PngDecoder::default();
-    assert!(format!("{decoder:?}").contains("Registry(0 backend(s))"));
+    assert!(format!("{decoder:?}").contains("Registry { backends: 0 }"));
     decoder.push_backend(ScriptedInflater::new("i", true, Act::Work, &log()));
-    assert!(format!("{decoder:?}").contains("Registry(1 backend(s))"));
+    assert!(format!("{decoder:?}").contains("Registry { backends: 1 }"));
 }
 
 #[test]
 fn idat_info_describes_the_stream_the_backend_is_offered() {
     /// Captures the descriptor and declines.
     struct Capture(Arc<Mutex<Option<IdatInfo>>>);
-    impl IdatInflater for Capture {
+    impl ZlibInflater for Capture {
         fn supports(&mut self, info: &IdatInfo) -> bool {
             *self.0.lock().expect("slot") = Some(*info);
             false
@@ -793,7 +816,7 @@ struct AbiDec {
 impl Decoder for AbiDec {
     fn supports(&mut self, cfg: &StreamConfig) -> bool {
         assert!(cfg.is_abi_current());
-        cfg.codec_id == CODEC_ID_ZLIB
+        cfg.codec_id == ZLIB_CODEC_ID
     }
 
     fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
@@ -832,7 +855,7 @@ impl Encoder for AbiEnc {
     fn supports(&mut self, cfg: &EncodeConfig) -> bool {
         assert!(cfg.is_abi_current());
         self.seen_quality.lock().expect("seen").push(cfg.quality);
-        cfg.codec_id == CODEC_ID_ZLIB
+        cfg.codec_id == ZLIB_CODEC_ID
     }
 
     fn encode(
@@ -865,7 +888,7 @@ fn abi_adapters_round_trip_a_png() {
     let rgb8 = rgb8_samples();
     let seen_quality = Arc::new(Mutex::new(Vec::new()));
     let mut encoder = PngEncoder::new();
-    encoder.push_backend(AbiDeflater::new(AbiEnc {
+    encoder.push_backend(AbiZlibDeflater::new(AbiEnc {
         status: None,
         seen_quality: Arc::clone(&seen_quality),
     }));
@@ -880,7 +903,7 @@ fn abi_adapters_round_trip_a_png() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut decoder = PngDecoder::new();
-    decoder.push_backend(AbiInflater::new(AbiDec {
+    decoder.push_backend(AbiZlibInflater::new(AbiDec {
         status: None,
         seen: Arc::clone(&seen),
     }));
@@ -890,7 +913,7 @@ fn abi_adapters_round_trip_a_png() {
     assert_eq!(
         *seen.lock().expect("seen"),
         vec![(
-            CODEC_ID_ZLIB,
+            ZLIB_CODEC_ID,
             PIXEL_FORMAT_FILTERED_BYTES,
             W,
             H,
@@ -904,41 +927,56 @@ fn abi_adapters_round_trip_a_png() {
 }
 
 #[test]
-fn abi_late_unsupported_declines_to_the_builtin_tail() {
+fn abi_late_unsupported_is_terminal_not_a_fall_through() {
     let (png, rgb8) = sample_png();
     let mut decoder = PngDecoder::new();
-    decoder.push_backend(AbiInflater::new(AbiDec {
+    decoder.push_backend(AbiZlibInflater::new(AbiDec {
         status: Some(Status::UNSUPPORTED),
         seen: Arc::new(Mutex::new(Vec::new())),
     }));
-    let decoded: ImageBuf<Rgb8> = DecodeImage::<Rgb8>::decode_image(&decoder, &png)
-        .expect("a late UNSUPPORTED must fall through, not fail");
-    assert_eq!(decoded.as_samples(), rgb8);
+    let err = DecodeImage::<Rgb8>::decode_image(&decoder, &png)
+        .expect_err("a late UNSUPPORTED ends the decode; only supports() falls through");
+    assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+    assert_eq!(
+        err.static_message(),
+        Some("PNG: IDAT codec-abi backend declined the stream")
+    );
 
     let mut encoder = PngEncoder::new();
-    encoder.push_backend(AbiDeflater::new(AbiEnc {
+    encoder.push_backend(AbiZlibDeflater::new(AbiEnc {
         status: Some(Status::UNSUPPORTED),
         seen_quality: Arc::new(Mutex::new(Vec::new())),
     }));
-    let mut out = Vec::new();
-    encoder
-        .encode_image(
-            ImageRef::<Rgb8>::new(&rgb8, dims()).expect("rgb8"),
-            &mut out,
-        )
-        .expect("encode");
-    assert_eq!(
-        hex(&out),
-        golden("rgb8"),
-        "the gamut-deflate tail produced it"
-    );
+    let err = encoder
+        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb8, dims()).expect("rgb8"))
+        .expect_err("a late UNSUPPORTED ends the encode; only supports() falls through");
+    assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+}
+
+#[test]
+fn abi_adapters_hand_back_the_backend_they_wrap() {
+    let mut inflater = AbiZlibInflater::new(AbiDec {
+        status: Some(Status(-7)),
+        seen: Arc::new(Mutex::new(Vec::new())),
+    });
+    assert_eq!(inflater.get_ref().status, Some(Status(-7)));
+    inflater.get_mut().status = None;
+    assert_eq!(inflater.into_inner().status, None);
+
+    let mut deflater = AbiZlibDeflater::new(AbiEnc {
+        status: Some(Status(-8)),
+        seen_quality: Arc::new(Mutex::new(Vec::new())),
+    });
+    assert_eq!(deflater.get_ref().status, Some(Status(-8)));
+    deflater.get_mut().status = None;
+    assert_eq!(deflater.into_inner().status, None);
 }
 
 #[test]
 fn abi_other_statuses_propagate_as_typed_errors() {
     let (png, rgb8) = sample_png();
     let mut decoder = PngDecoder::new();
-    decoder.push_backend(AbiInflater::new(AbiDec {
+    decoder.push_backend(AbiZlibInflater::new(AbiDec {
         status: Some(Status(-42)),
         seen: Arc::new(Mutex::new(Vec::new())),
     }));
@@ -950,7 +988,7 @@ fn abi_other_statuses_propagate_as_typed_errors() {
     );
 
     let mut encoder = PngEncoder::new();
-    encoder.push_backend(AbiDeflater::new(AbiEnc {
+    encoder.push_backend(AbiZlibDeflater::new(AbiEnc {
         status: Some(Status(7)),
         seen_quality: Arc::new(Mutex::new(Vec::new())),
     }));
@@ -981,7 +1019,7 @@ fn abi_supports_false_skips_the_backend_entirely() {
         }
     }
     let mut decoder = PngDecoder::new();
-    decoder.push_backend(AbiInflater::new(WrongCodec));
+    decoder.push_backend(AbiZlibInflater::new(WrongCodec));
     let decoded: ImageBuf<Rgb8> =
         DecodeImage::<Rgb8>::decode_image(&decoder, &png).expect("decode");
     assert_eq!(decoded.as_samples(), rgb8);
@@ -992,7 +1030,7 @@ fn abi_deflater_quality_is_configurable() {
     let seen_quality = Arc::new(Mutex::new(Vec::new()));
     let mut encoder = PngEncoder::new();
     encoder.push_backend(
-        AbiDeflater::new(AbiEnc {
+        AbiZlibDeflater::new(AbiEnc {
             status: None,
             seen_quality: Arc::clone(&seen_quality),
         })
@@ -1011,9 +1049,9 @@ fn abi_deflater_quality_is_configurable() {
 
 #[test]
 fn abi_inflater_refuses_to_allocate_past_max_out() {
-    // Driven directly as an `IdatInflater`: through `PngDecoder` the cap and the expected size are
+    // Driven directly as an `ZlibInflater`: through `PngDecoder` the cap and the expected size are
     // always equal, so this defensive guard needs the trait exercised on its own.
-    let mut inflater = AbiInflater::new(AbiDec {
+    let mut inflater = AbiZlibInflater::new(AbiDec {
         status: None,
         seen: Arc::new(Mutex::new(Vec::new())),
     });
@@ -1036,19 +1074,19 @@ fn abi_inflater_refuses_to_allocate_past_max_out() {
 #[test]
 fn abi_configs_describe_the_job() {
     let info = IdatInfo::new(4, 2, 16, gamut_png::ColorType::Truecolor, 10);
-    let cfg = AbiInflater::<AbiDec>::config(&info);
+    let cfg = AbiZlibInflater::<AbiDec>::config(&info);
     assert!(cfg.is_abi_current());
-    assert_eq!(cfg.codec_id, CODEC_ID_ZLIB);
+    assert_eq!(cfg.codec_id, ZLIB_CODEC_ID);
     assert_eq!(cfg.width, 4);
     assert_eq!(cfg.height, 2);
     assert_eq!(cfg.bit_depth, 16);
     assert_eq!(cfg.extradata_len, 0);
 
-    let deflater = AbiDeflater::new(AbiEnc {
+    let deflater = AbiZlibDeflater::new(AbiEnc {
         status: None,
         seen_quality: Arc::new(Mutex::new(Vec::new())),
     });
-    assert_eq!(deflater.config().codec_id, CODEC_ID_ZLIB);
+    assert_eq!(deflater.config().codec_id, ZLIB_CODEC_ID);
     assert_eq!(deflater.config().quality, 100);
     assert_eq!(deflater.with_quality(3).config().quality, 3);
 }

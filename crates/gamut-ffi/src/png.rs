@@ -1,7 +1,7 @@
 //! PNG seam handles: [`GamutPngDecoder`] / [`GamutPngEncoder`] and their C entry points.
 //!
 //! The PNG seam is the zlib/IDAT layer: a pushed decoder backend inflates IDAT zlib streams, a
-//! pushed encoder backend deflates them (`CODEC_ID_ZLIB`). Backends are tried in push order;
+//! pushed encoder backend deflates them (`ZLIB_CODEC_ID`). Backends are tried in push order;
 //! the built-in implementations (`miniz_oxide` inflate / `gamut-deflate`) are the implicit
 //! tail.
 //!
@@ -49,7 +49,7 @@ seam_handle! {
     host = gamut::png::PngDecoder,
     new = gamut::png::PngDecoder::new(),
     seam = decoder,
-    push = |host, backend| { host.push_backend(gamut::png::AbiInflater::new(backend)); },
+    push = |host, backend| { host.push_backend(gamut::png::AbiZlibInflater::new(backend)); },
     fns = (gamut_png_decoder_new, gamut_png_decoder_free, gamut_png_decoder_push_backend),
     tests = png_decoder_tests,
 }
@@ -59,7 +59,7 @@ seam_handle! {
     host = gamut::png::PngEncoder,
     new = gamut::png::PngEncoder::new(),
     seam = encoder,
-    push = |host, backend| { host.push_backend(gamut::png::AbiDeflater::new(backend)); },
+    push = |host, backend| { host.push_backend(gamut::png::AbiZlibDeflater::new(backend)); },
     fns = (gamut_png_encoder_new, gamut_png_encoder_free, gamut_png_encoder_push_backend),
     tests = png_encoder_tests,
 }
@@ -185,14 +185,14 @@ pub unsafe extern "C" fn gamut_png_encoder_set_palette_order(
 #[cfg(test)]
 mod palette_order_tests {
     use gamut::core::{Dimensions, ImageRef, Indexed8};
-    use gamut::png::{PngEncoder, PngPalette};
+    use gamut::png::{Palette, PngEncoder};
 
     use super::*;
 
     /// What `encoder` writes for a picture whose first-seen palette order differs from its
     /// modified-Zeng order, so the two settings give different files.
     fn encode(encoder: &PngEncoder) -> Vec<u8> {
-        let palette = PngPalette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]]).unwrap();
+        let palette = Palette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]]).unwrap();
         let indices = [0u8, 2, 0, 2, 0, 2, 3, 2, 3, 1];
         let image = ImageRef::<Indexed8>::new(&indices, Dimensions::new(10, 1).unwrap()).unwrap();
         let mut out = Vec::new();

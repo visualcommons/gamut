@@ -18,33 +18,32 @@
 //! exactly to 8 bits, 8-bit samples widen to 16 — and refuse lossy requests (dropping alpha or
 //! transparency, narrowing 16-bit samples) with an
 //! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error unless
-//! [`PngDecoder::convert_policy`] permits them.
+//! [`PngDecoder::with_convert_policy`] permits them.
 
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
 use gamut_core::{
-    Bilevel, DecodeImage, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf,
-    Indexed8, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Bilevel, DecodeImage, DecodeLimits, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
+    ImageBuf, Indexed8, Palette, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
-use crate::backend::{IdatInflater, IdatInfo, Registry, run_inflaters};
+use crate::backend::{IdatInfo, Inflaters, ZlibInflater, run_inflaters};
 use crate::chunk::{CABX, ChunkReader};
 use crate::color::ColorType;
 use crate::decoded::{self, DecodedPng, PngHeader, PngImage, PngMetadata};
 use crate::filter::{self, FilterType};
 use crate::ihdr::{self, Ihdr};
-use crate::palette::PngPalette;
+use crate::palette::palette_from_chunks;
 use crate::{adam7, inflate, pack};
 
-/// Default cap on the decoded sample buffer: 64 MiB, a 4096×4096 RGBA8 image.
+/// Default cap on the decoded sample buffer: the workspace's
+/// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`], 64 MiB, a 4096×4096 RGBA8 image.
 ///
 /// `pub(crate)` because [`crate::deconstruct`] reports against the same budget: a file this
 /// decoder decodes is one the report walk will inflate to count filters.
-pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
+pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = DecodeLimits::DEFAULT_MAX_IMAGE_BYTES;
 /// Default cumulative cap on metadata payloads — inflated iCCP/zTXt/iTXt plus the raw `caBX`
 /// manifest store: 16 MiB.
 const DEFAULT_MAX_METADATA_BYTES: usize = 16 << 20;
-/// The spec's own dimension bound (§11.2.1): width and height are 1 ..= 2³¹ − 1.
-const SPEC_MAX_DIMENSION: u32 = i32::MAX as u32;
 
 /// The one refusal message for typed decodes the layout cannot hold losslessly.
 fn lossy() -> Error {
@@ -56,17 +55,16 @@ fn lossy() -> Error {
 
 /// A reusable PNG decoder with hostile-input limits.
 ///
-/// The defaults accept anything the spec allows dimensionally but cap the decoded sample buffer
-/// at 64 MiB — the byte budget, not the dimension caps, is the real safety guard (it bounds both
-/// the inflated scanline stream and the sample buffer, so peak memory stays within roughly twice
-/// the budget plus the input). Tighten the dimension caps when the application knows its domain.
+/// The defaults ([`DecodeLimits::default`]) accept anything the spec allows dimensionally — IHDR
+/// itself bounds each side to 2³¹ − 1 (§11.2.1) — but cap the decoded sample buffer at 64 MiB.
+/// The byte budget, not the dimension caps, is the real safety guard (it bounds both the inflated
+/// scanline stream and the sample buffer, so peak memory stays within roughly twice the budget
+/// plus the input). Tighten the dimension caps when the application knows its domain.
 #[derive(Debug, Clone)]
 pub struct PngDecoder {
-    max_width: u32,
-    max_height: u32,
-    max_image_bytes: usize,
+    limits: DecodeLimits,
     max_metadata_bytes: usize,
-    backends: Registry<dyn IdatInflater + Send>,
+    backends: Inflaters,
     policy: ConvertPolicy,
 }
 
@@ -77,33 +75,28 @@ impl Default for PngDecoder {
 }
 
 impl PngDecoder {
-    /// Creates a decoder with the default limits (spec-maximum dimensions, 64 MiB of decoded
-    /// samples, 16 MiB of inflated metadata).
+    /// Creates a decoder with the default limits ([`DecodeLimits::default`]: spec-maximum
+    /// dimensions and 64 MiB of decoded samples; and 16 MiB of inflated metadata).
     #[must_use]
     pub fn new() -> Self {
         Self {
-            max_width: SPEC_MAX_DIMENSION,
-            max_height: SPEC_MAX_DIMENSION,
-            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            limits: DecodeLimits::new(),
             max_metadata_bytes: DEFAULT_MAX_METADATA_BYTES,
-            backends: Registry::default(),
+            backends: Inflaters::new(),
             policy: ConvertPolicy::lossless(),
         }
     }
 
-    /// Appends a pluggable [`IdatInflater`] backend for the IDAT zlib stream (issue #278).
+    /// Appends a pluggable [`ZlibInflater`] backend for the IDAT zlib stream (issue #278).
     ///
     /// Backends are tried in **push order**; the built-in `miniz_oxide` inflater is the implicit
     /// tail, so pushing nothing keeps today's behaviour exactly. A backend that returns `false`
-    /// from [`IdatInflater::supports`] (or an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error from
-    /// [`IdatInflater::inflate`])
-    /// is skipped; one that accepts and then fails propagates its error rather than falling back —
-    /// see the [`backend`](crate::backend) module docs for the full contract.
+    /// from [`ZlibInflater::supports`] is skipped — the only fall-through; one that accepts and
+    /// then fails, with any error, propagates it rather than falling back.
     ///
     /// # The output cap stays with the host
     ///
-    /// The decoder's own budget (see [`with_max_image_bytes`](Self::with_max_image_bytes)) is
+    /// The decoder's own budget (the image-byte cap of [`with_limits`](Self::with_limits)) is
     /// passed to the backend as `max_out` *and* re-checked against the bytes it returns. A backend
     /// that overshoots is rejected with an
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error, never truncated, so
@@ -116,31 +109,26 @@ impl PngDecoder {
     ///
     /// # Cloning shares backends
     ///
-    /// [`PngDecoder`] is [`Clone`], and cloning copies the registry *handles*: the clone and the
-    /// original drive the **same** backend instances (held behind `Arc<Mutex<…>>`, since decoding
-    /// takes `&self`). Push a fresh backend instance if you need independent state.
+    /// [`PngDecoder`] is [`Clone`], and cloning copies the registry's list of *handles*: the clone
+    /// and the original drive the **same** backend instances (held behind `Arc<Mutex<…>>`, since
+    /// decoding takes `&self`), while a backend pushed to one afterwards is not seen by the other.
+    /// Push a fresh backend instance if you need independent state.
     ///
     /// Takes `&mut self` and returns `&mut Self` — unlike the `with_*` builder setters — because a
     /// registry accumulates rather than replaces.
-    pub fn push_backend(&mut self, backend: impl IdatInflater + 'static) -> &mut Self {
+    pub fn push_backend(&mut self, backend: impl ZlibInflater + Send + 'static) -> &mut Self {
         self.backends
             .push(std::sync::Arc::new(std::sync::Mutex::new(backend)));
         self
     }
 
-    /// Caps the accepted image dimensions; a wider or taller image is refused before any
-    /// allocation.
+    /// Sets the image limits: the per-side dimension caps and the decoded-sample byte budget
+    /// ([`DecodeLimits::max_image_bytes`], default 64 MiB). An image past any of them is refused
+    /// with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before
+    /// anything is allocated for its pixels.
     #[must_use]
-    pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
-        self.max_width = width;
-        self.max_height = height;
-        self
-    }
-
-    /// Caps the decoded sample buffer in bytes (default 64 MiB).
-    #[must_use]
-    pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
-        self.max_image_bytes = bytes;
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -161,7 +149,7 @@ impl PngDecoder {
     /// permission. Pass [`ConvertPolicy::permissive`] to get pixels in a fixed layout regardless
     /// of what the file carries.
     #[must_use]
-    pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
+    pub fn with_convert_policy(mut self, policy: ConvertPolicy) -> Self {
         self.policy = policy;
         self
     }
@@ -205,7 +193,7 @@ enum NativeSamples {
 struct NativeImage {
     header: Ihdr,
     samples: NativeSamples,
-    palette: Option<PngPalette>,
+    palette: Option<Palette>,
     trns_key: Option<TransparencyKey>,
 }
 
@@ -379,7 +367,7 @@ impl PngDecoder {
     /// Enforces the dimension and byte-budget limits (all math checked) and returns the exact
     /// byte length of the filtered scanline stream the IDAT data must inflate to.
     fn check_limits(&self, header: &Ihdr) -> Result<usize> {
-        if header.width > self.max_width || header.height > self.max_height {
+        if header.width > self.limits.max_width() || header.height > self.limits.max_height() {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "PNG: image exceeds the dimension limit",
@@ -396,7 +384,7 @@ impl PngDecoder {
         .ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: image dimensions overflow")
         })?;
-        if native_bytes > self.max_image_bytes {
+        if native_bytes > self.limits.max_image_bytes() {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "PNG: image exceeds the size limit",
@@ -442,19 +430,7 @@ impl PngDecoder {
             image,
             palette: native.palette,
             transparency: native.trns_key,
-            exif: meta.exif,
-            icc_profile: meta.icc_profile,
-            c2pa: meta.c2pa,
-            c2pa_ignored: meta.c2pa_ignored,
-            texts: meta.texts,
-            gamma: meta.gamma,
-            chromaticities: meta.chromaticities,
-            srgb: meta.srgb,
-            cicp: meta.cicp,
-            significant_bits: meta.significant_bits,
-            background: meta.background,
-            physical_dimensions: meta.physical_dimensions,
-            modification_time: meta.modification_time,
+            metadata: meta,
         })
     }
 
@@ -549,7 +525,9 @@ impl PngDecoder {
         // §11.2.2: every pixel of an indexed image must reference an existing palette entry
         // (indexed depths are at most 8, so the samples are always the byte variant).
         if let (Some(palette), NativeSamples::B8(indices)) = (&palette, &samples)
-            && indices.iter().any(|&idx| usize::from(idx) >= palette.len())
+            && indices
+                .iter()
+                .any(|&idx| usize::from(idx) >= palette.rgb_entries().len())
         {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -755,7 +733,7 @@ fn validate_plte_and_trns(
     header: &Ihdr,
     plte: Option<&[u8]>,
     trns: Option<&[u8]>,
-) -> Result<(Option<PngPalette>, Option<TransparencyKey>)> {
+) -> Result<(Option<Palette>, Option<TransparencyKey>)> {
     if let Some(plte) = plte {
         match header.color {
             ColorType::Grayscale | ColorType::GrayscaleAlpha => {
@@ -785,9 +763,9 @@ fn validate_plte_and_trns(
                 "PNG: an indexed image requires a PLTE chunk",
             )
         })?;
-        let palette = PngPalette::from_chunks(plte, trns)?;
+        let palette = palette_from_chunks(plte, trns)?;
         // §11.2.2: the palette must not have more entries than the bit depth can reference.
-        if palette.len() > 1 << header.bit_depth {
+        if palette.rgb_entries().len() > 1 << header.bit_depth {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "PNG: palette larger than the bit depth can reference",
@@ -967,8 +945,8 @@ fn dims(header: &Ihdr) -> Result<Dimensions> {
 
 /// The palette's grey values (every entry has `r == g == b`), or `None` if any entry is coloured —
 /// the gate for presenting an indexed file as a greyscale layout losslessly.
-fn gray_palette(palette: &PngPalette) -> Option<Vec<u8>> {
-    (0..palette.len())
+fn gray_palette(palette: &Palette) -> Option<Vec<u8>> {
+    (0..palette.rgb_entries().len())
         .map(|i| {
             let [r, g, b] = palette.rgb(i as u8)?;
             (r == g && g == b).then_some(r)
@@ -1114,7 +1092,7 @@ fn presentable(native: NativeImage) -> Result<Presentable> {
 
 /// Expands validated palette indices to RGB or RGBA bytes. Indices were range-checked during
 /// decode, so lookups cannot fail; a defensive default keeps the path panic-free regardless.
-fn expand_palette(indices: &[u8], palette: &PngPalette, with_alpha: bool) -> Vec<u8> {
+fn expand_palette(indices: &[u8], palette: &Palette, with_alpha: bool) -> Vec<u8> {
     let channels = if with_alpha { 4 } else { 3 };
     let mut out = Vec::with_capacity(indices.len() * channels);
     for &index in indices {
@@ -1261,7 +1239,7 @@ mod tests {
     use super::*;
     use crate::PngEncoder;
 
-    /// The policy set by `convert_policy` must reach the typed decode: a 16-bit file cannot fill
+    /// The policy set by `with_convert_policy` must reach the typed decode: a 16-bit file cannot fill
     /// an 8-bit layout under the default, and can under a permissive one. A decoder that dropped
     /// the setter on the floor would refuse both times.
     #[test]
@@ -1281,7 +1259,7 @@ mod tests {
             gamut_core::ErrorKind::Unsupported
         );
 
-        let lax = PngDecoder::new().convert_policy(ConvertPolicy::permissive());
+        let lax = PngDecoder::new().with_convert_policy(ConvertPolicy::permissive());
         let narrowed: ImageBuf<Gray8> = lax.decode_image(&png).expect("permissive decode");
         assert_eq!(narrowed.as_samples(), &[0, 255]);
     }
@@ -1353,7 +1331,7 @@ mod tests {
             let rgb: Vec<[u8; 3]> = (0..entries)
                 .map(|i| [i as u8, (i * 3) as u8, 255 - i as u8])
                 .collect();
-            let palette = PngPalette::with_transparency(&rgb, &[10, 250]).unwrap();
+            let palette = Palette::with_alpha(&rgb, &[10, 250]).unwrap();
             let (w, h) = (13u32, 9u32);
             let indices: Vec<u8> = (0..(w * h) as usize).map(|i| (i % entries) as u8).collect();
             let mut png = Vec::new();
@@ -1391,7 +1369,7 @@ mod tests {
     fn opaque_indexed_expands_to_rgb() {
         use gamut_core::Indexed8 as Idx;
         let rgb = [[1u8, 2, 3], [4, 5, 6], [7, 8, 9]];
-        let palette = PngPalette::new(&rgb).unwrap();
+        let palette = Palette::new(&rgb).unwrap();
         let indices = [0u8, 1, 2, 1, 0, 2];
         let mut png = Vec::new();
         PngEncoder::new()
@@ -1527,7 +1505,7 @@ mod tests {
     #[test]
     fn grey_layouts_accept_only_all_grey_palettes() {
         use gamut_core::Indexed8 as Idx;
-        let encode = |palette: &PngPalette| {
+        let encode = |palette: &Palette| {
             let indices = [0u8, 1, 0, 1, 1, 0];
             let mut png = Vec::new();
             PngEncoder::new()
@@ -1541,12 +1519,12 @@ mod tests {
         };
 
         // An entry with r == g but a different b is coloured: both grey layouts must refuse it.
-        let colored = encode(&PngPalette::new(&[[7, 7, 200], [3, 3, 3]]).unwrap());
+        let colored = encode(&Palette::new(&[[7, 7, 200], [3, 3, 3]]).unwrap());
         assert!(DecodeImage::<Gray8>::decode_image(&PngDecoder::new(), &colored).is_err());
         assert!(DecodeImage::<GrayAlpha8>::decode_image(&PngDecoder::new(), &colored).is_err());
 
         // An all-grey opaque palette resolves to its grey values (plus opaque alpha).
-        let grey = encode(&PngPalette::new(&[[7, 7, 7], [200, 200, 200]]).unwrap());
+        let grey = encode(&Palette::new(&[[7, 7, 7], [200, 200, 200]]).unwrap());
         let gray: ImageBuf<Gray8> = PngDecoder::new().decode_image(&grey).unwrap();
         assert_eq!(gray.as_samples(), [7, 200, 7, 200, 200, 7]);
         let ga: ImageBuf<GrayAlpha8> = PngDecoder::new().decode_image(&grey).unwrap();
@@ -1556,8 +1534,7 @@ mod tests {
         );
 
         // A grey palette with transparency: Gray8 refuses (alpha is lossy), GrayAlpha8 keeps it.
-        let keyed =
-            encode(&PngPalette::with_transparency(&[[7, 7, 7], [200, 200, 200]], &[128]).unwrap());
+        let keyed = encode(&Palette::with_alpha(&[[7, 7, 7], [200, 200, 200]], &[128]).unwrap());
         assert!(DecodeImage::<Gray8>::decode_image(&PngDecoder::new(), &keyed).is_err());
         let ga: ImageBuf<GrayAlpha8> = PngDecoder::new().decode_image(&keyed).unwrap();
         assert_eq!(
@@ -1673,13 +1650,20 @@ mod tests {
         let comment = "zlib-compressed comment body";
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_gamma(1.0 / 2.2)
+            .with_gamma(45_455)
             .with_srgb(SrgbIntent::Perceptual)
-            .with_cicp(9, 16, true)
-            .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
+            .with_cicp(crate::Cicp::new(9, 16, true))
+            .with_chromaticities(crate::Chromaticities::new(
+                (31_270, 32_900),
+                (64_000, 33_000),
+                (30_000, 60_000),
+                (15_000, 6_000),
+            ))
             .with_exif(&exif)
-            .with_icc_profile("prof", b"not-a-real-profile-but-bytes")
-            .with_xmp(xmp)
+            .with_icc_profile_name("prof")
+            .with_icc_profile(b"not-a-real-profile-but-bytes")
+            .with_xmp(xmp.as_bytes())
+            .unwrap()
             .with_text("Title", "gamut")
             .with_compressed_text("Comment", comment)
             .encode_image(
@@ -1697,29 +1681,29 @@ mod tests {
             PngImage::Rgb8(img) => assert_eq!(img.as_samples(), src),
             other => panic!("expected Rgb8, got {other:?}"),
         }
-        assert_eq!(decoded.gamma, Some(45455));
-        assert_eq!(decoded.srgb, Some(SrgbIntent::Perceptual));
-        let chrm = decoded.chromaticities.unwrap();
+        assert_eq!(decoded.metadata.gamma, Some(45455));
+        assert_eq!(decoded.metadata.srgb, Some(SrgbIntent::Perceptual));
+        let chrm = decoded.metadata.chromaticities.unwrap();
         assert_eq!(chrm.white, (31270, 32900));
         assert_eq!(chrm.blue, (15000, 6000));
-        assert_eq!(decoded.exif.as_deref(), Some(&exif[..]));
-        let icc = decoded.icc_profile.as_ref().unwrap();
+        assert_eq!(decoded.metadata.exif.as_deref(), Some(&exif[..]));
+        let icc = decoded.metadata.icc_profile.as_ref().unwrap();
         assert_eq!(icc.name, "prof");
         assert_eq!(icc.profile, b"not-a-real-profile-but-bytes");
-        assert_eq!(decoded.xmp(), Some(xmp.as_bytes()));
+        assert_eq!(decoded.metadata.xmp(), Some(xmp.as_bytes()));
         // The packet is the first annotation, in the order the setters ran.
-        assert_eq!(decoded.texts.len(), 3);
+        assert_eq!(decoded.metadata.texts.len(), 3);
         assert_eq!(
             (
-                decoded.texts[1].keyword.as_str(),
-                decoded.texts[1].text.as_str()
+                decoded.metadata.texts[1].keyword.as_str(),
+                decoded.metadata.texts[1].text.as_str()
             ),
             ("Title", "gamut")
         );
-        assert_eq!(decoded.texts[2].text, comment);
+        assert_eq!(decoded.metadata.texts[2].text, comment);
         assert!(decoded.palette.is_none());
         assert!(decoded.transparency.is_none());
-        let cicp = decoded.cicp.expect("cICP present");
+        let cicp = decoded.metadata.cicp.expect("cICP present");
         assert_eq!(
             (
                 cicp.color_primaries,
@@ -1738,7 +1722,7 @@ mod tests {
         use crate::decoded::PngImage;
 
         let rgb = [[9u8, 8, 7], [1, 2, 3]];
-        let palette = PngPalette::with_transparency(&rgb, &[128]).unwrap();
+        let palette = Palette::with_alpha(&rgb, &[128]).unwrap();
         let indices = [0u8, 1, 1, 0];
         let mut png = Vec::new();
         PngEncoder::new()
@@ -1760,23 +1744,32 @@ mod tests {
         assert_eq!(carried.alpha(1), Some(255));
     }
 
+    /// Default limits with the per-side caps set to `width` × `height`.
+    fn limits(width: u32, height: u32) -> DecodeLimits {
+        DecodeLimits::new()
+            .with_max_width(width)
+            .with_max_height(height)
+    }
+
     #[test]
     fn dimension_limit_is_exact() {
         let (png, _) = rgb_png(17, 13);
-        let decoder = PngDecoder::new().with_max_dimensions(17, 13);
+        let decoder = PngDecoder::new().with_limits(limits(17, 13));
         assert!(DecodeImage::<Rgb8>::decode_image(&decoder, &png).is_ok());
-        let narrow = PngDecoder::new().with_max_dimensions(16, 13);
+        let narrow = PngDecoder::new().with_limits(limits(16, 13));
         assert!(DecodeImage::<Rgb8>::decode_image(&narrow, &png).is_err());
-        let short = PngDecoder::new().with_max_dimensions(17, 12);
+        let short = PngDecoder::new().with_limits(limits(17, 12));
         assert!(DecodeImage::<Rgb8>::decode_image(&short, &png).is_err());
     }
 
     #[test]
     fn byte_budget_is_exact() {
         let (png, _) = rgb_png(8, 8);
-        let exact = PngDecoder::new().with_max_image_bytes(8 * 8 * 3);
+        let exact =
+            PngDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 8 * 3));
         assert!(DecodeImage::<Rgb8>::decode_image(&exact, &png).is_ok());
-        let tight = PngDecoder::new().with_max_image_bytes(8 * 8 * 3 - 1);
+        let tight =
+            PngDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 8 * 3 - 1));
         assert!(matches!(
             DecodeImage::<Rgb8>::decode_image(&tight, &png),
             Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported

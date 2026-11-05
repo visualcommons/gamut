@@ -1,26 +1,27 @@
 //! Adapters that plug a [`gamut_codec_abi`] backend into the PNG IDAT seam, in both directions.
 //!
-//! [`IdatInflater`] / [`IdatDeflater`] are PNG-local traits (see the [`backend`](crate::backend)
-//! module for why). [`AbiInflater`] and [`AbiDeflater`] wrap a generic
-//! [`gamut_codec_abi::Decoder`] / [`gamut_codec_abi::Encoder`] — which is what a C or `-sys`
-//! backend reaches through [`gamut_codec_abi::bridge`] — so a foreign zlib/DEFLATE implementation
-//! plugs in without either side knowing about the other.
+//! [`ZlibInflater`] / [`ZlibDeflater`] are PNG-local traits (see the `backend` module for why).
+//! [`AbiZlibInflater`] and [`AbiZlibDeflater`] wrap a generic [`gamut_codec_abi::Decoder`] /
+//! [`gamut_codec_abi::Encoder`] — which is what a C or `-sys` backend reaches through
+//! [`gamut_codec_abi::bridge`] — so a foreign zlib/DEFLATE implementation plugs in without either
+//! side knowing about the other.
 //!
 //! # Mapping
 //!
 //! | PNG seam | codec-abi |
 //! |---|---|
-//! | [`IdatInfo`] | [`StreamConfig`] / [`EncodeConfig`] with [`CODEC_ID_ZLIB`] |
+//! | [`IdatInfo`] | [`StreamConfig`] / [`EncodeConfig`] with [`ZLIB_CODEC_ID`] |
 //! | the filtered scanline stream | a single-plane [`ImageDesc`] (see below) |
 //! | `supports() == false` | `supports()` → `false` |
-//! | late decline ([`ErrorKind::Unsupported`]) | [`Status::UNSUPPORTED`] returned from the call |
-//! | any other failure | any other non-[`Status::OK`] status → [`ErrorKind::InvalidInput`] |
+//! | a failure after accepting | any non-[`Status::OK`] status from the call |
+//!
+//! `supports` is the only fall-through. A non-OK status from the call itself is a terminal error
+//! the host **propagates** rather than falling through to the next backend: an
+//! [`ErrorKind::Unsupported`] one for [`Status::UNSUPPORTED`], an [`ErrorKind::InvalidInput`] one
+//! for every other status.
 //!
 //! [`ErrorKind::Unsupported`]: gamut_core::ErrorKind::Unsupported
 //! [`ErrorKind::InvalidInput`]: gamut_core::ErrorKind::InvalidInput
-//!
-//! Only [`Status::UNSUPPORTED`] declines; every other non-OK status becomes a typed error the host
-//! **propagates** rather than falling through to the next backend.
 //!
 //! # The [`ImageDesc`] convention for this seam
 //!
@@ -40,19 +41,19 @@ use gamut_codec_abi::{
 };
 use gamut_core::{Error, Result};
 
-use crate::backend::{IdatDeflater, IdatInflater, IdatInfo};
+use crate::backend::{IdatInfo, ZlibDeflater, ZlibInflater};
 
 /// The codec id this seam agrees on: the FourCC `"zlib"`, big-endian.
 ///
 /// A PNG codestream is a zlib stream (RFC 1950 over DEFLATE), so both the decode and encode
 /// descriptors carry this id; a backend matches on it to recognise the job.
-pub const CODEC_ID_ZLIB: u32 = codec_id(*b"zlib");
+pub const ZLIB_CODEC_ID: u32 = codec_id(*b"zlib");
 
 /// The [`ImageDesc::pixel_format`] tag used across this seam: the namespace's
 /// [`OPAQUE_BYTES`](pixel_format::OPAQUE_BYTES) (`u32::MAX`).
 ///
 /// Deliberately **not** a pixel layout: the bytes are the filtered scanline stream (filter byte +
-/// packed samples per row), not pixels in any layout, and their meaning is [`CODEC_ID_ZLIB`]'s.
+/// packed samples per row), not pixels in any layout, and their meaning is [`ZLIB_CODEC_ID`]'s.
 pub const PIXEL_FORMAT_FILTERED_BYTES: u32 = pixel_format::OPAQUE_BYTES;
 
 /// The error a non-OK, non-`UNSUPPORTED` status becomes. Terminal: the host propagates it.
@@ -80,7 +81,7 @@ fn desc(info: &IdatInfo, ptr: *mut u8, len: usize) -> ImageDesc {
     )
 }
 
-/// Turns a terminal status into a typed error; [`Status::UNSUPPORTED`] into a late decline.
+/// Turns a non-OK status from an accepted job into its terminal typed error.
 fn from_status(status: Status) -> Error {
     if status.is_unsupported() {
         Error::unsupported(
@@ -93,16 +94,37 @@ fn from_status(status: Status) -> Error {
     }
 }
 
-/// Adapts a [`gamut_codec_abi::Decoder`] into an [`IdatInflater`].
+/// Adapts a [`gamut_codec_abi::Decoder`] into a [`ZlibInflater`].
 ///
-/// `D` must be [`Send`]: the PNG registry is shared behind `Arc<Mutex<…>>`. For a foreign C
-/// backend that means constructing [`gamut_codec_abi::bridge::ForeignDecoder`] through its `unsafe`
-/// constructor, by which the caller asserts thread-safety.
-pub struct AbiInflater<D> {
+/// To be pushed onto a [`PngDecoder`](crate::PngDecoder), `D` must also be [`Send`]: the decoder
+/// holds its registry behind `Arc<Mutex<…>>`. For a foreign C backend that means constructing
+/// [`gamut_codec_abi::bridge::ForeignDecoder`] through its `unsafe` constructor, by which the
+/// caller asserts thread-safety.
+pub struct AbiZlibInflater<D> {
     decoder: D,
 }
 
-impl<D: Decoder> AbiInflater<D> {
+impl<D> AbiZlibInflater<D> {
+    /// The wrapped codec-abi decoder.
+    #[must_use]
+    pub fn get_ref(&self) -> &D {
+        &self.decoder
+    }
+
+    /// The wrapped codec-abi decoder, mutably.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut D {
+        &mut self.decoder
+    }
+
+    /// Consumes the adapter, returning the wrapped codec-abi decoder.
+    #[must_use]
+    pub fn into_inner(self) -> D {
+        self.decoder
+    }
+}
+
+impl<D: Decoder> AbiZlibInflater<D> {
     /// Wraps a codec-abi decoder as a PNG IDAT inflater.
     #[must_use]
     pub fn new(decoder: D) -> Self {
@@ -114,7 +136,7 @@ impl<D: Decoder> AbiInflater<D> {
     #[must_use]
     pub fn config(info: &IdatInfo) -> StreamConfig {
         StreamConfig::new(
-            CODEC_ID_ZLIB,
+            ZLIB_CODEC_ID,
             info.width(),
             info.height(),
             u32::from(info.bit_depth()),
@@ -122,7 +144,7 @@ impl<D: Decoder> AbiInflater<D> {
     }
 }
 
-impl<D: Decoder + Send> IdatInflater for AbiInflater<D> {
+impl<D: Decoder> ZlibInflater for AbiZlibInflater<D> {
     fn supports(&mut self, info: &IdatInfo) -> bool {
         self.decoder.supports(&Self::config(info))
     }
@@ -149,17 +171,40 @@ impl<D: Decoder + Send> IdatInflater for AbiInflater<D> {
     }
 }
 
-/// Adapts a [`gamut_codec_abi::Encoder`] into an [`IdatDeflater`].
+/// Adapts a [`gamut_codec_abi::Encoder`] into a [`ZlibDeflater`].
 ///
 /// The encode job carries a `quality` knob that has no PNG meaning (DEFLATE is lossless), so it
 /// defaults to `100` and is settable via [`with_quality`](Self::with_quality) for backends that
 /// read it as an effort level.
-pub struct AbiDeflater<E> {
+///
+/// To be pushed onto a [`PngEncoder`](crate::PngEncoder), `E` must also be [`Send`], as for
+/// [`AbiZlibInflater`].
+pub struct AbiZlibDeflater<E> {
     encoder: E,
     quality: u32,
 }
 
-impl<E: Encoder> AbiDeflater<E> {
+impl<E> AbiZlibDeflater<E> {
+    /// The wrapped codec-abi encoder.
+    #[must_use]
+    pub fn get_ref(&self) -> &E {
+        &self.encoder
+    }
+
+    /// The wrapped codec-abi encoder, mutably.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut E {
+        &mut self.encoder
+    }
+
+    /// Consumes the adapter, returning the wrapped codec-abi encoder.
+    #[must_use]
+    pub fn into_inner(self) -> E {
+        self.encoder
+    }
+}
+
+impl<E: Encoder> AbiZlibDeflater<E> {
     /// Wraps a codec-abi encoder as a PNG IDAT deflater, at the default quality/effort of `100`.
     #[must_use]
     pub fn new(encoder: E) -> Self {
@@ -180,11 +225,11 @@ impl<E: Encoder> AbiDeflater<E> {
     /// The [`EncodeConfig`] this adapter presents.
     #[must_use]
     pub fn config(&self) -> EncodeConfig {
-        EncodeConfig::new(CODEC_ID_ZLIB, self.quality)
+        EncodeConfig::new(ZLIB_CODEC_ID, self.quality)
     }
 }
 
-impl<E: Encoder + Send> IdatDeflater for AbiDeflater<E> {
+impl<E: Encoder> ZlibDeflater for AbiZlibDeflater<E> {
     fn supports(&mut self, _info: &IdatInfo) -> bool {
         let cfg = self.config();
         self.encoder.supports(&cfg)

@@ -10,7 +10,8 @@ use gamut_core::{
     ImageBuf, ImageRef, Indexed8, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_png::{
-    FilterStrategy, FilterType, Level, PngDecoder, PngEncoder, PngImage, PngPalette, SrgbIntent,
+    Background, FilterStrategy, FilterType, Level, ModificationTime, Palette, PhysicalDimensions,
+    PngDecoder, PngEncoder, PngImage, SrgbIntent,
 };
 
 /// Encodes `src` as `P` with `encoder`, decodes as `P`, and asserts the samples survive.
@@ -67,7 +68,7 @@ fn effort_budget_round_trips_and_defaults_to_six_passes() {
     for effort in [0u8, 15] {
         let encoder = PngEncoder::new()
             .with_compression(Level::Best)
-            .with_effort(effort)
+            .with_deflate_passes(effort)
             .with_filter(FilterStrategy::None);
         round_trip::<Rgb8>(&encoder, &src, w, h);
     }
@@ -80,7 +81,8 @@ fn effort_budget_round_trips_and_defaults_to_six_passes() {
         encoder
             .with_compression(Level::Best)
             .with_filter(FilterStrategy::None)
-            .with_icc_profile("prof", &tiny_icc_profile())
+            .with_icc_profile_name("prof")
+            .with_icc_profile(&tiny_icc_profile())
             .with_compressed_text("Comment", &"squeeze ".repeat(40))
             .encode_image(
                 ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
@@ -90,8 +92,8 @@ fn effort_budget_round_trips_and_defaults_to_six_passes() {
         png
     };
     let implicit = encode(PngEncoder::new());
-    assert_eq!(implicit, encode(PngEncoder::new().with_effort(6)));
-    assert_ne!(implicit, encode(PngEncoder::new().with_effort(0)));
+    assert_eq!(implicit, encode(PngEncoder::new().with_deflate_passes(6)));
+    assert_ne!(implicit, encode(PngEncoder::new().with_deflate_passes(0)));
 }
 
 #[test]
@@ -119,7 +121,7 @@ fn indexed_round_trips_at_every_auto_depth() {
             .map(|i| [i as u8, (i * 11) as u8, (i * 29) as u8])
             .collect();
         let alpha: Vec<u8> = (0..entries.min(5)).map(|i| (i * 60) as u8).collect();
-        let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+        let palette = Palette::with_alpha(&rgb, &alpha).unwrap();
         // At least 256 pixels, so the cycling indices below name every entry of even the largest
         // palette -- `encode_indexed8` drops an entry no pixel names, which would otherwise make
         // this test about palette cleaning instead of about bit depth. An odd width keeps the
@@ -139,7 +141,7 @@ fn indexed_round_trips_at_every_auto_depth() {
         // And through the rich path, the palette itself survives.
         let rich = PngDecoder::new().decode(&png).unwrap();
         let carried = rich.palette.expect("palette carried");
-        assert_eq!(carried.len(), entries);
+        assert_eq!(carried.rgb_entries().len(), entries);
         for (i, &[r, g, b]) in rgb.iter().enumerate() {
             assert_eq!(carried.rgb(i as u8), Some([r, g, b]));
             let expected_alpha = alpha.get(i).copied().unwrap_or(255);
@@ -266,19 +268,30 @@ fn ancillary_pile_survives_decode() {
     let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#;
     let mut png = Vec::new();
     PngEncoder::new()
-        .with_gamma(1.0 / 2.2)
+        .with_gamma(45_455)
         .with_srgb(SrgbIntent::RelativeColorimetric)
-        .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
+        .with_chromaticities(gamut_png::Chromaticities::new(
+            (31_270, 32_900),
+            (64_000, 33_000),
+            (30_000, 60_000),
+            (15_000, 6_000),
+        ))
         .with_significant_bits(&[8, 8, 8])
-        .with_background_rgb(0, 0, 0)
-        .with_physical_dimensions(2835, 2835, gamut_png::PhysicalUnit::Meter)
-        .with_time(2026, 7, 17, 1, 2, 3)
+        .with_background(Background::Rgb(0, 0, 0))
+        .with_physical_dimensions(PhysicalDimensions::new(
+            2835,
+            2835,
+            gamut_png::PhysicalUnit::Meter,
+        ))
+        .with_time(ModificationTime::new(2026, 7, 17, 1, 2, 3))
         .with_text("Title", "gamut")
         .with_compressed_text("Comment", &"squeeze ".repeat(40))
         .with_international_text("Author", "gämut")
         .with_exif(&exif)
-        .with_icc_profile("prof", &icc)
-        .with_xmp(xmp)
+        .with_icc_profile_name("prof")
+        .with_icc_profile(&icc)
+        .with_xmp(xmp.as_bytes())
+        .unwrap()
         .encode_image(
             ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut png,
@@ -289,14 +302,17 @@ fn ancillary_pile_survives_decode() {
         panic!("expected Rgb8");
     };
     assert_eq!(img.as_samples(), src, "pixels survive the ancillary pile");
-    assert_eq!(decoded.gamma, Some(45455));
-    assert_eq!(decoded.srgb, Some(SrgbIntent::RelativeColorimetric));
-    assert!(decoded.chromaticities.is_some());
-    assert_eq!(decoded.exif.as_deref(), Some(exif.as_slice()));
-    assert_eq!(decoded.icc_profile.as_ref().unwrap().profile, icc);
-    assert_eq!(decoded.xmp(), Some(xmp.as_bytes()));
+    assert_eq!(decoded.metadata.gamma, Some(45455));
     assert_eq!(
-        decoded.texts.len(),
+        decoded.metadata.srgb,
+        Some(SrgbIntent::RelativeColorimetric)
+    );
+    assert!(decoded.metadata.chromaticities.is_some());
+    assert_eq!(decoded.metadata.exif.as_deref(), Some(exif.as_slice()));
+    assert_eq!(decoded.metadata.icc_profile.as_ref().unwrap().profile, icc);
+    assert_eq!(decoded.metadata.xmp(), Some(xmp.as_bytes()));
+    assert_eq!(
+        decoded.metadata.texts.len(),
         4,
         "three annotations and the XMP packet"
     );

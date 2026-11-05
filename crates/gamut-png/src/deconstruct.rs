@@ -579,7 +579,8 @@ pub struct DeconstructLimits {
     /// filters. Above it the scan is skipped as [`SkippedFilterScan::OverBudget`] and every other
     /// figure is still reported, because everything else is derived from framing and IHDR.
     ///
-    /// This is the quantity [`crate::PngDecoder::with_max_image_bytes`] budgets, and matching the
+    /// This is the quantity [`DecodeLimits::max_image_bytes`](gamut_core::DecodeLimits::max_image_bytes)
+    /// budgets in [`crate::PngDecoder::with_limits`], and matching the
     /// two is the point: a report is only "what a decode would have allocated" against a decoder
     /// configured the same way. The default matches the decoder's default.
     ///
@@ -625,7 +626,7 @@ impl DeconstructLimits {
     /// Sets [`max_image_bytes`](Self::max_image_bytes).
     ///
     /// Builder methods rather than a struct literal, matching
-    /// [`PngDecoder::with_max_image_bytes`](crate::PngDecoder::with_max_image_bytes) — and
+    /// [`DecodeLimits::with_max_image_bytes`](gamut_core::DecodeLimits::with_max_image_bytes) — and
     /// necessary as well as symmetrical, since a non-exhaustive struct cannot be built by literal
     /// outside this crate at all.
     #[must_use]

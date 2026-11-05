@@ -26,7 +26,9 @@ fn png_with_icc(icc: &[u8]) -> Vec<u8> {
     let image = ImageRef::<Rgba8>::new(&rgba, dims).unwrap();
     let mut encoder = PngEncoder::new();
     if !icc.is_empty() {
-        encoder = encoder.with_icc_profile("minimal", icc);
+        encoder = encoder
+            .with_icc_profile_name("minimal")
+            .with_icc_profile(icc);
     }
     let mut out = Vec::new();
     encoder.encode_image(image, &mut out).unwrap();

@@ -11,7 +11,10 @@ use common::{
     chunk, ihdr_payload, minimal_png, png_from_chunks, tiny_exif, tiny_icc_profile, zlib,
 };
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
-use gamut_png::{PhysicalUnit, PngDecoder, PngEncoder, PngMetadata, SrgbIntent};
+use gamut_png::{
+    Background, Cicp, ModificationTime, PhysicalDimensions, PhysicalUnit, PngDecoder, PngEncoder,
+    PngMetadata, SrgbIntent,
+};
 
 /// A 2×2 RGB8 source for the encoder-driven tests.
 fn source() -> Vec<u8> {
@@ -43,21 +46,23 @@ fn every_carrier_round_trips_byte_exact() {
     let c2pa = b"\0\0\0\x14jumbopaque store";
     let png = encode(|e| {
         e.with_exif(&exif)
-            .with_icc_profile("Tiny", &icc)
-            .with_xmp(xmp)
+            .with_icc_profile_name("Tiny")
+            .with_icc_profile(&icc)
+            .with_xmp(xmp.as_bytes())
+            .unwrap()
             .with_c2pa(c2pa)
             .with_text("Author", "nobody")
             .with_compressed_text("Comment", "compressed comment")
             .with_international_text("Title", "international title")
-            .with_gamma(1.0 / 2.2)
+            .with_gamma(45_455)
             .with_srgb(SrgbIntent::RelativeColorimetric)
-            .with_cicp(9, 16, true)
-            .with_chromaticities(
-                (0.3127, 0.3290),
-                (0.6400, 0.3300),
-                (0.3000, 0.6000),
-                (0.1500, 0.0600),
-            )
+            .with_cicp(Cicp::new(9, 16, true))
+            .with_chromaticities(gamut_png::Chromaticities::new(
+                (31_270, 32_900),
+                (64_000, 33_000),
+                (30_000, 60_000),
+                (15_000, 6_000),
+            ))
     });
 
     let meta = gamut_png::metadata(&png).unwrap();
@@ -102,48 +107,37 @@ fn metadata_agrees_with_decode_field_for_field() {
     let icc = tiny_icc_profile();
     let png = encode(|e| {
         e.with_exif(&exif)
-            .with_icc_profile("Tiny", &icc)
-            .with_xmp("<x:xmpmeta/>")
+            .with_icc_profile_name("Tiny")
+            .with_icc_profile(&icc)
+            .with_xmp("<x:xmpmeta/>".as_bytes())
+            .unwrap()
             .with_c2pa(b"\0\0\0\x10jumbc2pa")
             .with_text("Author", "nobody")
-            .with_gamma(1.0 / 2.2)
-            .with_chromaticities(
-                (0.3127, 0.3290),
-                (0.6400, 0.3300),
-                (0.3000, 0.6000),
-                (0.1500, 0.0600),
-            )
+            .with_gamma(45_455)
+            .with_chromaticities(gamut_png::Chromaticities::new(
+                (31_270, 32_900),
+                (64_000, 33_000),
+                (30_000, 60_000),
+                (15_000, 6_000),
+            ))
             // Every colour chunk at once, including the sRGB/iCCP pair §4.3 Table 1 ranks: a
             // comparison of two `None`s would not see a chunk wired into one walk and not the
             // other.
             .with_srgb(SrgbIntent::Perceptual)
-            .with_cicp(1, 13, true)
+            .with_cicp(Cicp::new(1, 13, true))
             // The two chunks shaped by the IHDR, which each walk has to read against its own
             // copy of the header, and the two that are not.
             .with_significant_bits(&[5, 6, 5])
-            .with_background_rgb(0, 20, 40)
-            .with_physical_dimensions(3_780, 3_780, PhysicalUnit::Meter)
-            .with_time(2026, 10, 16, 12, 34, 56)
+            .with_background(Background::Rgb(0, 20, 40))
+            .with_physical_dimensions(PhysicalDimensions::new(3_780, 3_780, PhysicalUnit::Meter))
+            .with_time(ModificationTime::new(2026, 10, 16, 12, 34, 56))
     });
 
     let meta = gamut_png::metadata(&png).unwrap();
     let decoded = PngDecoder::new().decode(&png).unwrap();
 
-    assert_eq!(meta.exif, decoded.exif);
-    assert_eq!(meta.icc_profile, decoded.icc_profile);
-    assert_eq!(meta.xmp(), decoded.xmp());
-    assert_eq!(meta.c2pa, decoded.c2pa);
-    assert_eq!(meta.c2pa_ignored, decoded.c2pa_ignored);
-    assert_eq!(meta.texts, decoded.texts);
-    assert_eq!(meta.gamma, decoded.gamma);
-    assert_eq!(meta.chromaticities, decoded.chromaticities);
-    assert_eq!(meta.srgb, decoded.srgb);
-    assert_eq!(meta.cicp, decoded.cicp);
-    assert_eq!(meta.significant_bits, decoded.significant_bits);
-    assert_eq!(meta.background, decoded.background);
-    assert_eq!(meta.physical_dimensions, decoded.physical_dimensions);
-    assert_eq!(meta.modification_time, decoded.modification_time);
-    // A `None` on both sides would pass every comparison above, so pin that the file really did
+    assert_eq!(meta, decoded.metadata);
+    // A `None` on both sides would pass the comparison above, so pin that the file really did
     // carry each field.
     assert!(meta.exif.is_some() && meta.icc_profile.is_some() && meta.xmp().is_some());
     assert!(meta.c2pa.is_some() && !meta.texts.is_empty());
@@ -247,7 +241,11 @@ fn ancillary_crc_mismatch_skips_the_chunk() {
 #[test]
 fn the_decoder_entry_point_honours_the_metadata_budget() {
     let icc = tiny_icc_profile();
-    let png = encode(|e| e.with_icc_profile("Tiny", &icc).with_gamma(1.0 / 2.2));
+    let png = encode(|e| {
+        e.with_icc_profile_name("Tiny")
+            .with_icc_profile(&icc)
+            .with_gamma(45_455)
+    });
 
     let generous = PngDecoder::new().with_max_metadata_bytes(1 << 20);
     assert!(generous.metadata(&png).unwrap().icc_profile.is_some());

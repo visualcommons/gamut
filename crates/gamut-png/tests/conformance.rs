@@ -8,7 +8,7 @@
 mod common;
 
 use common::{channels, gray8_scale, sample_bytes, tiny_exif, tiny_icc_profile};
-use gamut_core::{DecodeImage, GrayAlpha8, ImageBuf, Rgba8, Rgba16};
+use gamut_core::{DecodeImage, DecodeLimits, GrayAlpha8, ImageBuf, Rgba8, Rgba16};
 use gamut_png::{PngDecoder, PngImage};
 use libpng_oracle::{EncodeOpts, TextChunk, TextKind};
 
@@ -504,21 +504,25 @@ fn metadata_payloads_survive_byte_identical() {
 
     let decoded = PngDecoder::new().decode(&png).unwrap();
     assert_eq!(
-        decoded.exif.as_deref(),
+        decoded.metadata.exif.as_deref(),
         Some(exif.as_slice()),
         "eXIf verbatim"
     );
-    let profile = decoded.icc_profile.as_ref().expect("iCCP surfaced");
+    let profile = decoded
+        .metadata
+        .icc_profile
+        .as_ref()
+        .expect("iCCP surfaced");
     assert_eq!(profile.name, "test profile");
     assert_eq!(profile.profile, icc, "ICC bytes after inflation");
-    assert_eq!(decoded.xmp(), Some(xmp.as_bytes()), "XMP packet");
-    assert_eq!(decoded.gamma, Some(45455));
-    let chrm = decoded.chromaticities.expect("cHRM surfaced");
+    assert_eq!(decoded.metadata.xmp(), Some(xmp.as_bytes()), "XMP packet");
+    assert_eq!(decoded.metadata.gamma, Some(45455));
+    let chrm = decoded.metadata.chromaticities.expect("cHRM surfaced");
     assert_eq!(chrm.white, (31270, 32900));
     assert_eq!(chrm.red, (64000, 33000));
     assert_eq!(chrm.green, (30000, 60000));
     assert_eq!(chrm.blue, (15000, 6000));
-    let cicp_parsed = decoded.cicp.expect("cICP surfaced");
+    let cicp_parsed = decoded.metadata.cicp.expect("cICP surfaced");
     assert_eq!(
         (
             cicp_parsed.color_primaries,
@@ -528,17 +532,21 @@ fn metadata_payloads_survive_byte_identical() {
         ),
         (9, 16, 0, true)
     );
-    assert_eq!(decoded.texts.len(), 4, "the XMP packet is one of the texts");
-    assert_eq!(decoded.texts[0].keyword, "Title");
-    assert_eq!(decoded.texts[0].text, "conformance");
     assert_eq!(
-        decoded.texts[1].text,
+        decoded.metadata.texts.len(),
+        4,
+        "the XMP packet is one of the texts"
+    );
+    assert_eq!(decoded.metadata.texts[0].keyword, "Title");
+    assert_eq!(decoded.metadata.texts[0].text, "conformance");
+    assert_eq!(
+        decoded.metadata.texts[1].text,
         "the quick brown fox jumps over the lazy dog, compressed"
     );
-    assert_eq!(decoded.texts[2].text, "gämut, in UTF-8");
-    assert_eq!(decoded.texts[2].language.as_deref(), Some("en"));
+    assert_eq!(decoded.metadata.texts[2].text, "gämut, in UTF-8");
+    assert_eq!(decoded.metadata.texts[2].language.as_deref(), Some("en"));
     assert_eq!(
-        decoded.texts[2].translated_keyword.as_deref(),
+        decoded.metadata.texts[2].translated_keyword.as_deref(),
         Some("author")
     );
 }
@@ -561,7 +569,7 @@ fn srgb_intent_survives() {
             },
         );
         let decoded = PngDecoder::new().decode(&png).unwrap();
-        let srgb = decoded.srgb.expect("sRGB surfaced");
+        let srgb = decoded.metadata.srgb.expect("sRGB surfaced");
         assert_eq!(srgb as u8 as i32, intent, "intent {intent}");
     }
 }
@@ -573,14 +581,14 @@ fn decode_limits_hold_for_oracle_fixtures() {
     let png = fixture(24, 15, libpng_oracle::COLOR_RGB, 8, true, 8);
     assert!(
         PngDecoder::new()
-            .with_max_dimensions(24, 15)
+            .with_limits(DecodeLimits::new().with_max_width(24).with_max_height(15))
             .decode(&png)
             .is_ok(),
         "at the limit"
     );
     assert!(
         PngDecoder::new()
-            .with_max_dimensions(23, 15)
+            .with_limits(DecodeLimits::new().with_max_width(23).with_max_height(15))
             .decode(&png)
             .is_err(),
         "one past the width limit"

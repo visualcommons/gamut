@@ -21,23 +21,23 @@
 
 use gamut_core::{
     Bilevel, Dimensions, EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef,
-    Indexed8, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Indexed8, Palette, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::ancillary::{
-    Ancillary, C2paStore, PaletteOrigin, PhysicalUnit, SrgbIntent, WrittenHeader, WrittenPalette,
+    Ancillary, C2paStore, PaletteOrigin, SrgbIntent, WrittenHeader, WrittenPalette,
     background_entry,
 };
-use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
+use crate::backend::{Deflaters, IdatInfo, ZlibDeflater, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
 use crate::decoded::{
-    Background, Chromaticities, Cicp, DecodedPng, IccProfile, ModificationTime, PhysicalDimensions,
-    PngMetadata, TextChunk, TextChunkKind,
+    Background, Chromaticities, Cicp, ModificationTime, PhysicalDimensions, PngMetadata,
+    TextChunkKind,
 };
 use crate::filter::{self, FilterStrategy, FilterType};
-use crate::palette::{PaletteOrder, PngPalette};
+use crate::palette::{PaletteOrder, Plte};
 use crate::reduce::{self, Family, Reduced, Reductions};
 use crate::{ihdr, pack};
 
@@ -99,7 +99,7 @@ pub const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
 /// once, and nothing here caps how many. Each trial's filtered copy is the whole image, so peak
 /// memory grows with image size times the number of concurrent candidates; the optimal-parse span
 /// bounds only the parse buffers. Measured on a square RGB photograph at [`Level::Best`] with the
-/// [`Preset::Smallest`] span, a `BruteForce` encode's peak resident set with all eight candidates
+/// [`Effort::Smallest`] span, a `BruteForce` encode's peak resident set with all eight candidates
 /// was **2.7x to 5.0x** what the serial loop's was — typical rather than a bound, since the
 /// concurrent peak depends on scheduling; `STATUS.md` carries the table. That is the trade the
 /// maintainer's decision on #624 accepted; a caller encoding near its memory limit should budget
@@ -135,37 +135,16 @@ fn run_trials(trial: &(impl Fn(FilterStrategy) -> Result<Vec<u8>> + Sync)) -> Re
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PngEncodeReport {
-    /// Where the C2PA manifest-store chunk landed — the whole `caBX` span a `c2pa.hash.data`
+    /// The number of bytes appended to the output — the whole PNG.
+    pub len: usize,
+    /// Where the C2PA manifest-store chunk landed, as offsets from the first byte of this PNG
+    /// (not of the output buffer it was appended to) — the whole `caBX` span a `c2pa.hash.data`
     /// exclusion must cover, and the payload a signer fills — when [`with_c2pa`] or
     /// [`with_c2pa_reserved`] was set; `None` when neither was.
     ///
     /// [`with_c2pa`]: PngEncoder::with_c2pa
     /// [`with_c2pa_reserved`]: PngEncoder::with_c2pa_reserved
     pub c2pa: Option<C2paSpan>,
-}
-
-/// The metadata fields [`PngMetadata`] and [`DecodedPng`] both carry, borrowed.
-///
-/// The two read surfaces agree field for field on purpose (one reads the pixels, one does not),
-/// so [`PngEncoder::with_metadata`] and [`PngEncoder::with_metadata_from`] are the same function
-/// over two shapes. Borrowing rather than cloning into a `PngMetadata` keeps a large ICC profile
-/// or EXIF block from being copied twice on the way into the encoder.
-struct MetadataView<'a> {
-    exif: Option<&'a [u8]>,
-    icc_profile: Option<&'a IccProfile>,
-    /// The text annotations, the XMP packet among them.
-    texts: &'a [TextChunk],
-    gamma: Option<u32>,
-    chromaticities: Option<Chromaticities>,
-    srgb: Option<SrgbIntent>,
-    cicp: Option<Cicp>,
-    significant_bits: Option<&'a [u8]>,
-    background: Option<Background>,
-    physical_dimensions: Option<PhysicalDimensions>,
-    modification_time: Option<ModificationTime>,
-    /// Whether the source carried a C2PA manifest store. Only the presence is needed: a store is
-    /// never carried, but a caller has to be told it was left behind.
-    c2pa: bool,
 }
 
 /// Something [`PngEncoder::with_png_metadata`] could not do faithfully with a payload it was given.
@@ -365,12 +344,12 @@ impl core::fmt::Display for MetadataNotice {
 /// trade encoding time for output size (issue #484).
 ///
 /// The knobs — [`with_compression`](PngEncoder::with_compression),
-/// [`with_effort`](PngEncoder::with_effort), [`with_filter`](PngEncoder::with_filter),
+/// [`with_deflate_passes`](PngEncoder::with_deflate_passes), [`with_filter`](PngEncoder::with_filter),
 /// [`with_optimal_parse_limit`](PngEncoder::with_optimal_parse_limit) and
 /// [`with_auto_reduce`](PngEncoder::with_auto_reduce) — are independent, and nothing mapped one
 /// choice onto a sensible combination of them: a caller wanting the smallest file had to know that
 /// it means [`Level::Best`] *and* [`FilterStrategy::BruteForce`] *and* auto-reduce. A rung is that
-/// knowledge, named. [`with_preset`](PngEncoder::with_preset) applies one.
+/// knowledge, named. [`with_effort`](PngEncoder::with_effort) applies one.
 ///
 /// # What a rung does not touch
 ///
@@ -383,7 +362,7 @@ impl core::fmt::Display for MetadataNotice {
 /// # Choosing a rung, not a setting
 ///
 /// The rungs are the contract; which knob values each one selects is not, and may be re-tuned as
-/// this crate's corpus grows. Two things are fixed. [`Preset::Balanced`] encodes byte-identically
+/// this crate's corpus grows. Two things are fixed. [`Effort::Balanced`] encodes byte-identically
 /// to a default [`PngEncoder`]; and every rung is strictly smaller than the rung above it **summed
 /// over this crate's corpus** — which is deliberately not a per-row promise, because per row it is
 /// false. A rung that fixes one filter can beat a rung that searches per row on a picture that
@@ -397,7 +376,7 @@ impl core::fmt::Display for MetadataNotice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 #[non_exhaustive]
-pub enum Preset {
+pub enum Effort {
     /// Level 0 — encode quickly and accept a larger file: greedy matching, and one fixed filter
     /// rather than a per-row filter search.
     Fast = 0,
@@ -406,7 +385,7 @@ pub enum Preset {
     Balanced = 1,
     /// Level 2 — the optimal parse and lossless reduction, still on one filter heuristic.
     Small = 2,
-    /// Level 3 — the whole-image filter search on top of [`Preset::Small`], plus zopfli's own
+    /// Level 3 — the whole-image filter search on top of [`Effort::Small`], plus zopfli's own
     /// refinement budget and an eight-times-wider optimal-parse span.
     ///
     /// Slowest by a wide margin, and the margin is the filter search: on this crate's corpus the
@@ -422,20 +401,20 @@ pub enum Preset {
     Smallest = 3,
 }
 
-/// The knob values one [`Preset`] rung selects.
+/// The knob values one [`Effort`] rung selects.
 ///
-/// Private, and exhaustively destructured by [`PngEncoder::with_preset`], so adding a knob to the
+/// Private, and exhaustively destructured by [`PngEncoder::with_effort`], so adding a knob to the
 /// ladder fails to compile until every rung says what it does with it.
 #[derive(Debug, Clone, Copy)]
-struct PresetKnobs {
+struct EffortKnobs {
     level: Level,
-    effort: u8,
+    deflate_passes: u8,
     filter: FilterStrategy,
     optimal_parse_limit: usize,
     auto_reduce: bool,
 }
 
-/// The optimal-parse span [`Preset::Smallest`] selects: **8 MiB**, eight times
+/// The optimal-parse span [`Effort::Smallest`] selects: **8 MiB**, eight times
 /// [`DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT`].
 ///
 /// Finite, and that is the point. The span is the only thing bounding the shortest-path parse's
@@ -475,16 +454,16 @@ struct PresetKnobs {
 /// filtered stream.
 const SMALLEST_OPTIMAL_PARSE_LIMIT: usize = 8 << 20;
 
-impl Preset {
+impl Effort {
     /// The ladder level (`0..=3`) this rung selects, lower being faster.
     #[must_use]
     pub const fn level(self) -> u8 {
         self as u8
     }
 
-    /// The [`Preset`] for a ladder level, or `None` if `level` is outside `0..=3`.
+    /// The [`Effort`] for a ladder level, or `None` if `level` is outside `0..=3`.
     ///
-    /// The inverse of [`Preset::level`]; handy for wiring up a numeric CLI flag.
+    /// The inverse of [`Effort::level`]; handy for wiring up a numeric CLI flag.
     #[must_use]
     pub const fn from_level(level: u8) -> Option<Self> {
         Some(match level {
@@ -497,7 +476,7 @@ impl Preset {
     }
 
     /// The knob values this rung composes — the ladder's one definition of itself.
-    const fn knobs(self) -> PresetKnobs {
+    const fn knobs(self) -> EffortKnobs {
         match self {
             // Greedy matching, and one fixed filter rather than a per-row search.
             //
@@ -508,9 +487,9 @@ impl Preset {
             // than the fixed Paeth predictor — a dominated candidate, not a trade. `Fixed(Paeth)`
             // in turn dominates `MinSumAbs` here (smaller *and* faster), and beats a fixed `Up`
             // on size; see `STATUS.md`.
-            Self::Fast => PresetKnobs {
+            Self::Fast => EffortKnobs {
                 level: Level::Fast,
-                effort: 0,
+                deflate_passes: 0,
                 filter: FilterStrategy::Fixed(FilterType::Paeth),
                 optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
                 auto_reduce: false,
@@ -518,18 +497,18 @@ impl Preset {
             // Deliberately spelled out rather than read back from `PngEncoder::new`: that the two
             // agree is a claim `the_balanced_rung_is_a_default_encoder` tests, not a tautology
             // this function arranges.
-            Self::Balanced => PresetKnobs {
+            Self::Balanced => EffortKnobs {
                 level: Level::Default,
-                effort: DeflateEncoder::DEFAULT_DEFLATE_PASSES,
+                deflate_passes: DeflateEncoder::DEFAULT_DEFLATE_PASSES,
                 filter: FilterStrategy::MinSumAbs,
                 optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
                 auto_reduce: false,
             },
             // The two structural wins — the optimal parse and lossless reduction — without the
             // whole-image filter search, which costs one full DEFLATE per candidate.
-            Self::Small => PresetKnobs {
+            Self::Small => EffortKnobs {
                 level: Level::Best,
-                effort: DeflateEncoder::DEFAULT_DEFLATE_PASSES,
+                deflate_passes: DeflateEncoder::DEFAULT_DEFLATE_PASSES,
                 filter: FilterStrategy::MinSumAbs,
                 optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
                 auto_reduce: true,
@@ -537,9 +516,9 @@ impl Preset {
             // `zopfli`'s own refinement budget of 15, the full brute-force filter search, and the
             // widest optimal-parse span this crate will spend memory on — see
             // `SMALLEST_OPTIMAL_PARSE_LIMIT` for why that span is finite and why it is this wide.
-            Self::Smallest => PresetKnobs {
+            Self::Smallest => EffortKnobs {
                 level: Level::Best,
-                effort: 15,
+                deflate_passes: 15,
                 filter: FilterStrategy::BruteForce,
                 optimal_parse_limit: SMALLEST_OPTIMAL_PARSE_LIMIT,
                 auto_reduce: true,
@@ -552,16 +531,16 @@ impl Preset {
 #[derive(Debug, Clone)]
 pub struct PngEncoder {
     level: Level,
-    effort: u8,
+    deflate_passes: u8,
     optimal_parse_limit: usize,
     filter: FilterStrategy,
     ancillary: Ancillary,
     auto_reduce: bool,
     clean_transparent: bool,
     palette_order: PaletteOrder,
-    backends: Registry<dyn IdatDeflater + Send>,
+    backends: Deflaters,
     /// What the last metadata carry could not take *as a whole payload*, in the order it was
-    /// found. Reset by each [`Self::with_metadata`] / [`Self::with_metadata_from`] call, so it
+    /// found. Reset by each [`Self::with_png_metadata`] call, so it
     /// describes that call. Per-annotation notices live with their annotation instead, so that a
     /// second carry replaces them exactly as it replaces the annotations themselves.
     carry_notices: Vec<MetadataNotice>,
@@ -580,41 +559,39 @@ impl PngEncoder {
     pub fn new() -> Self {
         Self {
             level: Level::Default,
-            effort: DeflateEncoder::DEFAULT_DEFLATE_PASSES,
+            deflate_passes: DeflateEncoder::DEFAULT_DEFLATE_PASSES,
             optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
             filter: FilterStrategy::MinSumAbs,
             ancillary: Ancillary::default(),
             auto_reduce: false,
             clean_transparent: false,
             palette_order: PaletteOrder::AsSupplied,
-            backends: Registry::default(),
+            backends: Deflaters::new(),
             carry_notices: Vec::new(),
         }
     }
 
-    /// Appends a pluggable [`IdatDeflater`] backend for the IDAT zlib stream (issue #278).
+    /// Appends a pluggable [`ZlibDeflater`] backend for the IDAT zlib stream (issue #278).
     ///
     /// Backends are tried in **push order**; the built-in [`gamut_deflate`] encoder is the implicit
     /// tail, so pushing nothing keeps today's behaviour byte for byte. A backend that returns
-    /// `false` from [`IdatDeflater::supports`] (or an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error from
-    /// [`IdatDeflater::deflate`]) is skipped; one that accepts and then fails propagates its error
-    /// rather than falling back — see the [`backend`](crate::backend) module docs for the full
-    /// contract.
+    /// `false` from [`ZlibDeflater::supports`] is skipped — the only fall-through; one that accepts
+    /// and then fails, with any error, propagates it rather than falling back.
     ///
     /// # Interaction with [`with_compression`](Self::with_compression)
     ///
     /// A pushed deflater **bypasses the configured [`Level`]** (and the
-    /// [`with_effort`](Self::with_effort) budget) for every stream it accepts: `Level` is a
+    /// [`with_deflate_passes`](Self::with_deflate_passes) budget) for every stream it accepts: `Level` is a
     /// `gamut-deflate` concept that a foreign backend knows nothing about, and the seam datum is
     /// only the byte stream. The `Level` still governs the built-in tail, i.e. any stream every
     /// pushed backend declines.
     ///
     /// # Cloning shares backends
     ///
-    /// [`PngEncoder`] is [`Clone`], and cloning copies the registry *handles*: the clone and the
-    /// original drive the **same** backend instances (they are held behind `Arc<Mutex<…>>`, since
-    /// encoding takes `&self`). Push a fresh backend instance if you need independent state.
+    /// [`PngEncoder`] is [`Clone`], and cloning copies the registry's list of *handles*: the clone
+    /// and the original drive the **same** backend instances (they are held behind
+    /// `Arc<Mutex<…>>`, since encoding takes `&self`), while a backend pushed to one afterwards is
+    /// not seen by the other. Push a fresh backend instance if you need independent state.
     ///
     /// # Concurrent calls under [`FilterStrategy::BruteForce`]
     ///
@@ -626,40 +603,40 @@ impl PngEncoder {
     ///
     /// Takes `&mut self` and returns `&mut Self` — unlike the `with_*` builder setters — because a
     /// registry accumulates rather than replaces.
-    pub fn push_backend(&mut self, backend: impl IdatDeflater + 'static) -> &mut Self {
+    pub fn push_backend(&mut self, backend: impl ZlibDeflater + Send + 'static) -> &mut Self {
         self.backends
             .push(std::sync::Arc::new(std::sync::Mutex::new(backend)));
         self
     }
 
-    /// Sets all five size/time knobs at once from a [`Preset`] rung — the composed effort dial
+    /// Sets all five size/time knobs at once from a [`Effort`] rung — the composed effort dial
     /// (issue #484).
     ///
     /// A plain setter, not a mode: it assigns the same fields the individual `with_*` knobs do, so
-    /// a later call overrides the rung and an earlier one is overridden by it. `with_preset` last
+    /// a later call overrides the rung and an earlier one is overridden by it. `with_effort` last
     /// is "this rung"; a knob after it is "this rung, except". It leaves everything the rung does
     /// not name — ancillary chunks, metadata, pushed backends and
     /// [`with_transparent_cleanup`](Self::with_transparent_cleanup) — exactly as it found them.
     ///
     /// ```
-    /// use gamut_png::{PngEncoder, Preset};
+    /// use gamut_png::{PngEncoder, Effort};
     ///
     /// // The smallest file this crate can produce, with the one lossy knob added on top.
     /// let encoder = PngEncoder::new()
-    ///     .with_preset(Preset::Smallest)
+    ///     .with_effort(Effort::Smallest)
     ///     .with_transparent_cleanup(true);
     /// ```
     #[must_use]
-    pub fn with_preset(mut self, preset: Preset) -> Self {
-        let PresetKnobs {
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        let EffortKnobs {
             level,
-            effort,
+            deflate_passes,
             filter,
             optimal_parse_limit,
             auto_reduce,
-        } = preset.knobs();
+        } = effort.knobs();
         self.level = level;
-        self.effort = effort;
+        self.deflate_passes = deflate_passes;
         self.filter = filter;
         self.optimal_parse_limit = optimal_parse_limit;
         self.auto_reduce = auto_reduce;
@@ -674,16 +651,16 @@ impl PngEncoder {
         self
     }
 
-    /// Sets the [`Level::Best`] effort budget: the maximum number of optimal-parse refinement
+    /// Sets the [`Level::Best`] refinement budget: the maximum number of optimal-parse refinement
     /// passes (see [`DeflateEncoder::with_deflate_passes`]) applied to every zlib stream this
     /// encoder emits — the IDAT image data and compressed ancillary payloads (`iCCP`, `zTXt`).
     ///
     /// Defaults to [`DeflateEncoder::DEFAULT_DEFLATE_PASSES`]; `0` keeps the lazy seed parse only,
     /// and `zopfli`'s default budget is 15. Ignored at every other [`Level`] and by any pushed
-    /// [`IdatDeflater`] backend that accepts a stream.
+    /// [`ZlibDeflater`] backend that accepts a stream.
     #[must_use]
-    pub fn with_effort(mut self, effort: u8) -> Self {
-        self.effort = effort;
+    pub fn with_deflate_passes(mut self, passes: u8) -> Self {
+        self.deflate_passes = passes;
         self
     }
 
@@ -694,7 +671,7 @@ impl PngEncoder {
     /// A filtered PNG scanline stream longer than the limit is parsed as consecutive spans of this
     /// size, so raising it lets one cost model span more of the image. A limit below the 32 KiB
     /// LZ77 window is raised to it. Ignored at every other [`Level`], and by any pushed
-    /// [`IdatDeflater`] backend that accepts a stream.
+    /// [`ZlibDeflater`] backend that accepts a stream.
     ///
     /// # What raising it costs: memory, linearly, with no bound of its own
     ///
@@ -722,7 +699,7 @@ impl PngEncoder {
     /// is homogeneous and you have measured that it helps; the crate's own top rung takes a
     /// finite, bounded 8 MiB for exactly this reason.
     ///
-    /// Unlike [`with_effort`](Self::with_effort), which governs every zlib stream this encoder
+    /// Unlike [`with_deflate_passes`](Self::with_deflate_passes), which governs every zlib stream this encoder
     /// emits, this limit governs the **`IDAT` image data only**. It is the one stream whose length
     /// grows with the image, so it is the one a caller can need to re-span; a compressed ancillary
     /// payload (`iCCP`, `zTXt`) is whatever the caller handed over and keeps the default.
@@ -789,7 +766,7 @@ impl PngEncoder {
     /// that survive are renumbered, and every pixel index and the `bKGD` index are rewritten to
     /// follow them. The palette's length, and so the index bit depth, does not change.
     ///
-    /// Not part of any [`Preset`] rung, and not applied to the palette
+    /// Not part of any [`Effort`] rung, and not applied to the palette
     /// [`with_auto_reduce`](Self::with_auto_reduce) derives, which has its own fixed order. A rung
     /// is a dial for effort, and this changes which number names which colour in a palette you
     /// chose — see [`PaletteOrder`] for when that matters.
@@ -799,10 +776,12 @@ impl PngEncoder {
         self
     }
 
-    /// Records an image gamma (gAMA chunk). `gamma` is the encoding gamma, e.g. `1.0 / 2.2`.
+    /// Records an image gamma (gAMA chunk, §11.3.2.2) in the unit the chunk stores: the encoding
+    /// gamma × 100 000, so `45_455` for `1 / 2.2` — the value [`PngMetadata::gamma`] reads back,
+    /// written byte for byte.
     #[must_use]
-    pub fn with_gamma(mut self, gamma: f64) -> Self {
-        self.ancillary.gamma = Some((gamma * 100_000.0).round().max(0.0) as u32);
+    pub fn with_gamma(mut self, gamma: u32) -> Self {
+        self.ancillary.gamma = Some(gamma);
         self
     }
 
@@ -822,44 +801,41 @@ impl PngEncoder {
 
     /// Records the video-signal colour space by its ITU-T H.273 code points (cICP chunk,
     /// §11.3.2.6): the colour primaries, the transfer function, and whether the samples use the
-    /// full value range.
+    /// full value range — the value [`PngMetadata::cicp`] reads back.
     ///
-    /// There is no matrix-coefficients parameter because §11.3.2.6 fixes it: "RGB is currently
-    /// the only supported color model in PNG, and as such Matrix Coefficients shall be set to 0."
+    /// §11.3.2.6 fixes the matrix coefficients: "RGB is currently the only supported color model
+    /// in PNG, and as such Matrix Coefficients shall be set to 0." [`Cicp::new`] builds code
+    /// points with that 0. Code points with any other matrix — as a non-conforming file may carry
+    /// them — are **not written**: the chunk is omitted and [`MetadataNotice::NonRgbCicp`] is
+    /// reported through [`metadata_notices`](Self::metadata_notices). Calling this again replaces
+    /// both the code points and their notice.
     ///
     /// cICP is the **highest-precedence** colour chunk (§4.3 Table 1, priority 1), so a reader
     /// that understands it ignores any `iCCP`, `sRGB`, `gAMA` and `cHRM` in the same file. Those
     /// are worth keeping alongside it as a fallback for readers that do not.
+    ///
+    /// [`Cicp::new`]: crate::Cicp::new
     #[must_use]
-    pub fn with_cicp(
-        mut self,
-        color_primaries: u8,
-        transfer_function: u8,
-        full_range: bool,
-    ) -> Self {
-        self.ancillary.cicp = Some((color_primaries, transfer_function, full_range));
+    pub fn with_cicp(mut self, cicp: Cicp) -> Self {
+        self.ancillary.set_cicp(cicp);
         self
     }
 
-    /// Records the white point and RGB primary chromaticities (cHRM chunk), each as `(x, y)`.
+    /// Records the white point and RGB primary chromaticities (cHRM chunk, §11.3.2.1), each
+    /// coordinate × 100 000 as the chunk stores it — the value [`PngMetadata::chromaticities`]
+    /// reads back, written byte for byte. Build one with [`Chromaticities::new`].
+    ///
+    /// [`Chromaticities::new`]: crate::Chromaticities::new
     #[must_use]
-    pub fn with_chromaticities(
-        mut self,
-        white: (f64, f64),
-        red: (f64, f64),
-        green: (f64, f64),
-        blue: (f64, f64),
-    ) -> Self {
-        let q = |v: f64| (v * 100_000.0).round().max(0.0) as u32;
+    pub fn with_chromaticities(mut self, chromaticities: Chromaticities) -> Self {
+        let Chromaticities {
+            white,
+            red,
+            green,
+            blue,
+        } = chromaticities;
         self.ancillary.chrm = Some([
-            q(white.0),
-            q(white.1),
-            q(red.0),
-            q(red.1),
-            q(green.0),
-            q(green.1),
-            q(blue.0),
-            q(blue.1),
+            white.0, white.1, red.0, red.1, green.0, green.1, blue.0, blue.1,
         ]);
         self
     }
@@ -879,73 +855,44 @@ impl PngEncoder {
         self
     }
 
-    /// Records a greyscale background colour (bKGD chunk) for greyscale images, as a sample at the
-    /// input's bit depth.
+    /// Records a default background colour (bKGD chunk, §11.3.4.1) in the form its
+    /// [`Background`] variant names — the value [`PngMetadata::background`] reads back. Samples
+    /// are at the input's bit depth.
     ///
-    /// Emitted for the colour type actually **written**, which under
-    /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
-    /// that is lossless (to an RGB triple, or to the palette entry holding the grey), rescaled
-    /// exactly as the pixels were where auto-reduce lowers the depth (16→8, sub-byte grey), and
-    /// **omitted, without error,** where the written colour type or depth cannot carry it. See
-    /// `STATUS.md`, "Chunks that follow the race".
+    /// A [`Background::Gray`] or [`Background::Rgb`] colour is emitted for the colour type
+    /// actually **written**, which under [`with_auto_reduce`](Self::with_auto_reduce) may differ
+    /// from the input's: converted where that is lossless (grey to an RGB triple, RGB to one grey
+    /// sample where the channels agree, either to the palette entry holding the colour — an opaque
+    /// one where a transparent twin exists), rescaled exactly as the pixels were where auto-reduce
+    /// lowers the depth (16→8, sub-byte grey), and **omitted, without error,** where the written
+    /// colour type or depth cannot carry it. See `STATUS.md`, "Chunks that follow the race".
     ///
-    /// Under [`encode_indexed8`](Self::encode_indexed8) the entry holding the grey is kept by the
-    /// palette cleaning even when no pixel names it, and the chunk becomes that entry's index.
-    #[must_use]
-    pub fn with_background_gray(mut self, gray: u16) -> Self {
-        self.ancillary.bkgd = Some(gray.to_be_bytes().to_vec());
-        self
-    }
-
-    /// Records an RGB background colour (bKGD chunk) for truecolour images, as samples at the
-    /// input's bit depth.
-    ///
-    /// Emitted for the colour type actually **written**, which under
-    /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
-    /// that is lossless (to one grey sample where the channels agree, or to the palette entry
-    /// holding the colour — an opaque one where a transparent twin exists), rescaled exactly as the
-    /// pixels were where auto-reduce lowers the depth, and **omitted, without error,** where the
-    /// written colour type or depth cannot carry it. See `STATUS.md`, "Chunks
-    /// that follow the race".
-    ///
-    /// Under [`encode_indexed8`](Self::encode_indexed8) the entry holding the colour is kept by the
-    /// palette cleaning even when no pixel names it, and the chunk becomes that entry's index — so
-    /// the opaque entry a transparent twin would otherwise outlive is the one you keep.
-    #[must_use]
-    pub fn with_background_rgb(mut self, red: u16, green: u16, blue: u16) -> Self {
-        let mut data = Vec::with_capacity(6);
-        data.extend_from_slice(&red.to_be_bytes());
-        data.extend_from_slice(&green.to_be_bytes());
-        data.extend_from_slice(&blue.to_be_bytes());
-        self.ancillary.bkgd = Some(data);
-        self
-    }
-
-    /// Records a palette-index background colour (bKGD chunk) for indexed images.
-    ///
-    /// The index names an entry of the palette **you** supply to
+    /// A [`Background::Index`] names an entry of the palette **you** supply to
     /// [`encode_indexed8`](Self::encode_indexed8), and is emitted only there (and only in range).
-    /// It keeps naming that entry: cleaning the palette keeps the entry and may renumber it, and
-    /// the chunk is renumbered with it, so the background written is the colour you pointed at.
     /// Under [`with_auto_reduce`](Self::with_auto_reduce) the palette, if one is written, is the
-    /// encoder's own, in an order this index never referred to, so the chunk is **omitted,
-    /// without error** — set the background as a colour ([`with_background_rgb`](Self::with_background_rgb))
-    /// to have it resolved against whatever is written. See `STATUS.md`, "Chunks that follow the
-    /// race".
+    /// encoder's own, in an order the index never referred to, so the chunk is **omitted, without
+    /// error** — set the background as a colour to have it resolved against whatever is written.
+    ///
+    /// Under [`encode_indexed8`](Self::encode_indexed8), whichever form it takes, the entry the
+    /// background names is kept by the palette cleaning even when no pixel names it, and the chunk
+    /// becomes that entry's index in the cleaned palette — so the opaque entry a transparent twin
+    /// would otherwise outlive is the one you keep.
     #[must_use]
-    pub fn with_background_index(mut self, index: u8) -> Self {
-        self.ancillary.bkgd = Some(vec![index]);
+    pub fn with_background(mut self, background: Background) -> Self {
+        self.ancillary.set_background(background);
         self
     }
 
-    /// Records the intended physical pixel dimensions (pHYs chunk).
+    /// Records the intended physical pixel dimensions (pHYs chunk, §11.3.4.3) — the value
+    /// [`PngMetadata::physical_dimensions`] reads back.
     #[must_use]
-    pub fn with_physical_dimensions(mut self, x_ppu: u32, y_ppu: u32, unit: PhysicalUnit) -> Self {
-        self.ancillary.set_physical(x_ppu, y_ppu, unit);
+    pub fn with_physical_dimensions(mut self, dimensions: PhysicalDimensions) -> Self {
+        self.ancillary.set_physical(dimensions);
         self
     }
 
-    /// Records the last-modification time (tIME chunk), in UTC.
+    /// Records the last-modification time (tIME chunk), in UTC — the value
+    /// [`PngMetadata::modification_time`] reads back.
     ///
     /// Each field must lie within the range §11.3.5.1's Table 26 gives it — month 1–12, day 1–31,
     /// hour 0–23, minute 0–59, second 0–60 (a leap second); the year is any value. A time outside
@@ -954,17 +901,8 @@ impl PngEncoder {
     /// [`metadata_notices`](Self::metadata_notices). The day is not checked against the month.
     /// Calling this again replaces both the time and its notice.
     #[must_use]
-    pub fn with_time(
-        mut self,
-        year: u16,
-        month: u8,
-        day: u8,
-        hour: u8,
-        minute: u8,
-        second: u8,
-    ) -> Self {
-        self.ancillary
-            .set_time(year, month, day, hour, minute, second);
+    pub fn with_time(mut self, time: ModificationTime) -> Self {
+        self.ancillary.set_time(time);
         self
     }
 
@@ -1022,33 +960,54 @@ impl PngEncoder {
     /// family the profile's header names; otherwise the colour type is the pixels' own, and
     /// matching the profile to them is the caller's.
     ///
+    /// The profile is written under the name
+    /// [`with_icc_profile_name`](Self::with_icc_profile_name) sets, or `"ICC profile"` when none
+    /// is set. Setting a profile again replaces it.
+    #[must_use]
+    pub fn with_icc_profile(mut self, profile: &[u8]) -> Self {
+        self.ancillary.set_icc_profile(profile);
+        self
+    }
+
+    /// Sets the name the [`with_icc_profile`](Self::with_icc_profile) profile is written under
+    /// (iCCP chunk, §11.3.2.3) — the [`IccProfile::name`](crate::IccProfile::name) a reader gets
+    /// back. Defaults to `"ICC profile"`; on its own, with no profile set, it writes nothing.
+    ///
     /// `name` is held to §11.3.2.3's rule, which is the text keyword's: 1–79 printable Latin-1
     /// characters, no leading, trailing or consecutive space. A name that cannot be stored so
     /// this crate's reader accepts it — outside Latin-1, empty or over 79 bytes, or holding a null
     /// — drops the profile (it does not constrain auto-reduce either); one that only breaks the
     /// repertoire or spacing rule is written verbatim. Either way
     /// [`metadata_notices`](Self::metadata_notices) names it, and the encode proceeds. Setting a
-    /// profile again replaces both the profile and its notice.
+    /// name again replaces both the name and its notice.
     #[must_use]
-    pub fn with_icc_profile(mut self, name: &str, profile: &[u8]) -> Self {
-        self.ancillary.set_icc_profile(name, profile);
+    pub fn with_icc_profile_name(mut self, name: &str) -> Self {
+        self.ancillary.set_icc_profile_name(name);
         self
     }
 
-    /// Embeds an XMP packet (an iTXt chunk with the standard `XML:com.adobe.xmp` keyword). `xmp` is
-    /// the XMP/RDF document — for example the bytes produced by `gamut-xmp`.
+    /// Embeds an XMP packet (an iTXt chunk with the standard `XML:com.adobe.xmp` keyword).
+    /// `packet` is the XMP/RDF document — for example the bytes produced by `gamut-xmp`.
     ///
     /// A PNG carries one packet, so this replaces any packet already set — by an earlier call or
     /// carried in by [`with_png_metadata`](Self::with_png_metadata) — rather than adding a
     /// second; it reads back through [`PngMetadata::xmp`].
-    #[must_use]
-    pub fn with_xmp(mut self, xmp: &str) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when `packet` is
+    /// not UTF-8, which the `iTXt` text field must be (§11.3.3.4). The check is made here rather
+    /// than at encode time so a packet is never accepted that no chunk could hold.
+    pub fn with_xmp(mut self, packet: &[u8]) -> Result<Self> {
+        let packet = core::str::from_utf8(packet).map_err(|_| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: XMP packet is not UTF-8")
+        })?;
         // §11.3.3.1 Table 21: "The use of iTXt, with Compression Flag set to 0, and both Language
         // Tag and Translated Keyword set to the null string, are recommended for XMP compliance."
         // A packet read out of a file that framed it otherwise keeps its framing; this entry
         // point has no framing to keep, so it takes the recommended one.
-        self.ancillary.add_xmp(xmp);
-        self
+        self.ancillary.add_xmp(packet);
+        Ok(self)
     }
 
     /// Carries every metadata chunk a [`PngMetadata`] holds into this encoder, so that
@@ -1058,8 +1017,8 @@ impl PngEncoder {
     ///
     /// This is the write-side counterpart of [`metadata`](crate::metadata): read a file's
     /// metadata without touching its pixels, then hand it to the encoder that rewrites them.
-    /// [`with_metadata_from`](Self::with_metadata_from) is the same thing for a full
-    /// [`DecodedPng`].
+    /// A full decode carries the same value as [`DecodedPng::metadata`](crate::DecodedPng::metadata),
+    /// so a re-encode of decoded pixels passes `&decoded.metadata` here.
     ///
     /// Calling it twice with the same metadata is the same as calling it once: a later carry
     /// replaces what an earlier one contributed rather than appending a second copy of every
@@ -1096,7 +1055,7 @@ impl PngEncoder {
     /// the chunk would be read back as a *different* annotation, which no notice can undo.
     ///
     /// The ICC profile's name answers to the same rule (§11.3.2.3); see
-    /// [`with_icc_profile`](Self::with_icc_profile). A name read out of a file is already Latin-1,
+    /// [`with_icc_profile_name`](Self::with_icc_profile_name). A name read out of a file is already Latin-1,
     /// 1–79 bytes and null-free, so a carried profile is always written, with a notice if its
     /// name breaks the repertoire or spacing rule.
     ///
@@ -1106,167 +1065,67 @@ impl PngEncoder {
     ///
     /// `sBIT` and `bKGD` are shaped by the colour type, so they go through the same conversion
     /// as their setters ([`with_significant_bits`](Self::with_significant_bits),
-    /// [`with_background_gray`](Self::with_background_gray) and its siblings): emitted for the
+    /// [`with_background`](Self::with_background)): emitted for the
     /// colour type and depth actually written, and omitted, without a notice, where that header
     /// cannot carry them — the omission is decided at encode time, after the notices are read.
     /// A palette-index background ([`Background::Index`](crate::Background::Index)) names an
     /// entry of the source's palette, so it is carried only by
     /// [`encode_indexed8`](Self::encode_indexed8) with that palette.
     #[must_use]
-    pub fn with_png_metadata(self, metadata: &PngMetadata) -> Self {
-        self.with_metadata_view(MetadataView {
-            exif: metadata.exif.as_deref(),
-            icc_profile: metadata.icc_profile.as_ref(),
-            texts: &metadata.texts,
-            gamma: metadata.gamma,
-            chromaticities: metadata.chromaticities,
-            srgb: metadata.srgb,
-            cicp: metadata.cicp,
-            significant_bits: metadata.significant_bits.as_deref(),
-            background: metadata.background,
-            physical_dimensions: metadata.physical_dimensions,
-            modification_time: metadata.modification_time,
-            c2pa: metadata.c2pa.is_some(),
-        })
-    }
-
-    /// Carries the metadata of a decoded file into this encoder: the [`DecodedPng`] twin of
-    /// [`with_png_metadata`](Self::with_png_metadata), which documents exactly what is and is not carried.
-    ///
-    /// Use this when you already decoded the pixels; use `with_png_metadata` when
-    /// [`metadata`](crate::metadata) read the file without them.
-    #[must_use]
-    pub fn with_metadata_from(self, decoded: &DecodedPng) -> Self {
-        self.with_metadata_view(MetadataView {
-            exif: decoded.exif.as_deref(),
-            icc_profile: decoded.icc_profile.as_ref(),
-            texts: &decoded.texts,
-            gamma: decoded.gamma,
-            chromaticities: decoded.chromaticities,
-            srgb: decoded.srgb,
-            cicp: decoded.cicp,
-            significant_bits: decoded.significant_bits.as_deref(),
-            background: decoded.background,
-            physical_dimensions: decoded.physical_dimensions,
-            modification_time: decoded.modification_time,
-            c2pa: decoded.c2pa.is_some(),
-        })
-    }
-
-    /// What this encoder could not carry faithfully: whole payloads left behind, then the
-    /// per-annotation notices, in the order they were found — empty when everything came along
-    /// intact.
-    ///
-    /// Surface this to whoever asked for the re-encode. Losing metadata without saying so is the
-    /// defect the preservation path exists to remove; losing it — or bending it — *with* an
-    /// explanation is a choice the spec forces. Use
-    /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
-    ///
-    /// The payload-level notices describe the last [`with_png_metadata`](Self::with_png_metadata) /
-    /// [`with_metadata_from`](Self::with_metadata_from) call and are reset by each; the
-    /// per-annotation notices belong to the annotations still accumulated, so they follow the
-    /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
-    /// (§11.3.2.3) sits between the two and belongs to the profile last set, by
-    /// [`with_icc_profile`](Self::with_icc_profile) or a carry; the modification time's
-    /// (§11.3.5.1) follows it and belongs to the time last given to [`with_time`](Self::with_time).
-    #[must_use]
-    pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
-        let mut notices = self.carry_notices.clone();
-        notices.extend(self.ancillary.iccp_notice());
-        notices.extend(self.ancillary.time_notice());
-        notices.extend(self.ancillary.text_notices());
-        notices
-    }
-
-    /// The one implementation behind [`with_png_metadata`](Self::with_png_metadata) and
-    /// [`with_metadata_from`](Self::with_metadata_from).
-    fn with_metadata_view(mut self, meta: MetadataView<'_>) -> Self {
+    pub fn with_png_metadata(mut self, metadata: &PngMetadata) -> Self {
         self.carry_notices.clear();
         self.ancillary.begin_carry();
-        if let Some(exif) = meta.exif {
+        if let Some(exif) = &metadata.exif {
             self = self.with_exif(exif);
         }
         // Both colour statements are carried. §5.6 Table 5 and §11.3.2.5 only *recommend* against
         // the pair, and §4.3 Table 1 exists to resolve it: `iCCP` outranks `sRGB`, so the profile
         // is what a reader applies and the intent is what a reader without a CMM falls back on.
         // Dropping either would throw away colour information the source carried.
-        if let Some(icc) = meta.icc_profile {
-            self = self.with_icc_profile(&icc.name, &icc.profile);
+        if let Some(icc) = &metadata.icc_profile {
+            self = self
+                .with_icc_profile_name(&icc.name)
+                .with_icc_profile(&icc.profile);
         }
-        if let Some(intent) = meta.srgb {
+        if let Some(intent) = metadata.srgb {
             self = self.with_srgb(intent);
         }
-        match meta.cicp {
-            // §11.3.2.6: "Matrix Coefficients shall be set to 0". A source chunk that says
-            // otherwise is not a conforming cICP; carrying it forward would put the same defect
-            // in the output.
-            Some(cicp) if cicp.matrix_coefficients != 0 => {
-                self.carry_notices.push(MetadataNotice::NonRgbCicp);
-            }
-            Some(cicp) => {
-                self = self.with_cicp(
-                    cicp.color_primaries,
-                    cicp.transfer_function,
-                    cicp.full_range,
-                );
-            }
-            None => {}
+        // A source chunk whose matrix coefficients are not 0 is not a conforming cICP (§11.3.2.6);
+        // `with_cicp` leaves it behind with a notice rather than carry the defect forward.
+        if let Some(cicp) = metadata.cicp {
+            self = self.with_cicp(cicp);
         }
-        if meta.c2pa {
+        if metadata.c2pa.is_some() {
             self.carry_notices.push(MetadataNotice::C2paManifestStore);
         }
-        // Set in the stored ×100 000 fixed-point units rather than through `with_gamma` /
-        // `with_chromaticities`, whose `f64` arguments would round-trip the value through a
-        // division and a `round()`: preservation must be byte-exact.
-        if let Some(gamma) = meta.gamma {
-            self.ancillary.gamma = Some(gamma);
+        if let Some(gamma) = metadata.gamma {
+            self = self.with_gamma(gamma);
         }
-        if let Some(chrm) = meta.chromaticities {
-            self.ancillary.chrm = Some([
-                chrm.white.0,
-                chrm.white.1,
-                chrm.red.0,
-                chrm.red.1,
-                chrm.green.0,
-                chrm.green.1,
-                chrm.blue.0,
-                chrm.blue.1,
-            ]);
+        if let Some(chromaticities) = metadata.chromaticities {
+            self = self.with_chromaticities(chromaticities);
         }
         // Through the same setters a caller uses, so each is emitted for the header actually
         // written exactly as a caller-set one is (`ancillary::sbit_for` / `bkgd_for`). The read
         // side surfaces the background in the decoded pixels' units, which are the units the
-        // `with_background_*` setters take.
-        if let Some(bits) = meta.significant_bits {
+        // `with_background` takes.
+        if let Some(bits) = &metadata.significant_bits {
             self = self.with_significant_bits(bits);
         }
-        match meta.background {
-            Some(Background::Gray(gray)) => self = self.with_background_gray(gray),
-            Some(Background::Rgb(red, green, blue)) => {
-                self = self.with_background_rgb(red, green, blue);
-            }
-            Some(Background::Index(index)) => self = self.with_background_index(index),
-            None => {}
+        if let Some(background) = metadata.background {
+            self = self.with_background(background);
         }
-        if let Some(phys) = meta.physical_dimensions {
-            self = self.with_physical_dimensions(phys.x_ppu, phys.y_ppu, phys.unit);
+        if let Some(phys) = metadata.physical_dimensions {
+            self = self.with_physical_dimensions(phys);
         }
-        if let Some(time) = meta.modification_time {
-            self = self.with_time(
-                time.year,
-                time.month,
-                time.day,
-                time.hour,
-                time.minute,
-                time.second,
-            );
+        if let Some(time) = metadata.modification_time {
+            self = self.with_time(time);
         }
         // The XMP packet is an ordinary annotation and goes back through the loop below, in its
         // file position and with its own chunk's framing. A packet set directly with `with_xmp`
         // is displaced by a carried one, as one carry's packet is by the next: the encoder
         // writes the packet it was last handed, and a source that holds none leaves it alone.
         // `end_carry` decides that on the entries as written, so a promoted packet counts too.
-        for text in meta.texts {
+        for text in &metadata.texts {
             let (language, translated) = (
                 text.language.as_deref().unwrap_or_default(),
                 text.translated_keyword.as_deref().unwrap_or_default(),
@@ -1297,6 +1156,34 @@ impl PngEncoder {
         }
         self.ancillary.end_carry();
         self
+    }
+
+    /// What this encoder could not carry faithfully: whole payloads left behind, then the
+    /// per-annotation notices, in the order they were found — empty when everything came along
+    /// intact.
+    ///
+    /// Surface this to whoever asked for the re-encode. Losing metadata without saying so is the
+    /// defect the preservation path exists to remove; losing it — or bending it — *with* an
+    /// explanation is a choice the spec forces. Use
+    /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
+    ///
+    /// The `cICP` notice (§11.3.2.6) comes first and belongs to the code points last given to
+    /// [`with_cicp`](Self::with_cicp), directly or by a carry. The payload-level notices describe
+    /// the last [`with_png_metadata`](Self::with_png_metadata) call and are reset by each; the
+    /// per-annotation notices belong to the annotations still accumulated, so they follow the
+    /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
+    /// (§11.3.2.3) sits between the two and belongs to the profile and name last set, by
+    /// [`with_icc_profile`](Self::with_icc_profile) / [`with_icc_profile_name`](Self::with_icc_profile_name)
+    /// or a carry; the modification time's (§11.3.5.1) follows it and belongs to the time last
+    /// given to [`with_time`](Self::with_time).
+    #[must_use]
+    pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
+        let mut notices: Vec<MetadataNotice> = self.ancillary.cicp_notice().into_iter().collect();
+        notices.extend(self.carry_notices.iter().copied());
+        notices.extend(self.ancillary.iccp_notice());
+        notices.extend(self.ancillary.time_notice());
+        notices.extend(self.ancillary.text_notices());
+        notices
     }
 
     /// Embeds a C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2), verbatim and
@@ -1348,33 +1235,38 @@ impl PngEncoder {
     /// is why the in-place fill is the documented step 3.
     ///
     /// The reservation is `len` bytes exactly — no slack is added — so ask for what the signer
-    /// says it needs (`c2pa-rs` reports a `reserve_size`). It is bounded like any chunk payload
-    /// by PNG §5.3 to 2^31 − 1 bytes: an encode with a larger `len` fails with
-    /// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than
-    /// writing a chunk no reader accepts.
+    /// says it needs (`c2pa-rs` reports a `reserve_size`).
     ///
     /// The offsets hold for the file as this encoder wrote it. A PNG editor may lawfully insert
     /// another ancillary chunk after the store (PNG §14.3.2), so reserve, hash and fill without
     /// passing the file through one.
     ///
     /// The last of `with_c2pa` / `with_c2pa_reserved` wins; a file carries exactly one store.
-    #[must_use]
-    pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when `len`
+    /// exceeds the 2^31 − 1 bytes PNG §5.3 bounds any chunk payload to, refused here rather than
+    /// at encode time so no reservation is accepted that no chunk could hold. Nothing is
+    /// allocated for the reservation until the encode writes it.
+    pub fn with_c2pa_reserved(mut self, len: usize) -> Result<Self> {
+        chunk::check_data_len(len)?;
         self.ancillary.c2pa = Some(C2paStore::Reserved(len));
-        self
+        Ok(self)
     }
 
-    /// Encodes `image` as [`EncodeImage::encode_to_vec`] does and reports where the C2PA
-    /// manifest-store chunk landed, for the reserve-then-fill flow described at
-    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved).
+    /// Encodes `image`, appending it to `out` as [`EncodeImage::encode_image`] does, and reports
+    /// how many bytes the PNG took and where the C2PA manifest-store chunk landed, for the
+    /// reserve-then-fill flow described at [`with_c2pa_reserved`](Self::with_c2pa_reserved).
     ///
-    /// The report is read back from the bytes written — the same walk
+    /// The span is read back from the bytes written — the same walk
     /// [`PngReport::c2pa`](crate::PngReport::c2pa) performs, over the same rule (the first
     /// CRC-valid `caBX` before the first `IDAT`) — so it cannot disagree with what a later
-    /// [`deconstruct`](crate::deconstruct) of the same bytes reports. There is deliberately no
-    /// indexed twin of this method: [`encode_indexed8`](Self::encode_indexed8) needs a palette and
-    /// does not fit this shape, and `deconstruct(&png)?.c2pa()` gives an indexed caller the same
-    /// span, which [`fill_c2pa`](crate::fill_c2pa) then fills.
+    /// [`deconstruct`](crate::deconstruct) of the same bytes reports. Its offsets count from the
+    /// first byte of this PNG, not of `out`. There is deliberately no indexed twin of this method:
+    /// [`encode_indexed8`](Self::encode_indexed8) needs a palette and does not fit this shape, and
+    /// `deconstruct(&png)?.c2pa()` gives an indexed caller the same span, which
+    /// [`fill_c2pa`](crate::fill_c2pa) then fills.
     ///
     /// # Errors
     ///
@@ -1384,13 +1276,15 @@ impl PngEncoder {
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
-    ) -> Result<(Vec<u8>, PngEncodeReport)>
+        out: &mut Vec<u8>,
+    ) -> Result<PngEncodeReport>
     where
         Self: EncodeImage<P>,
     {
-        let png = self.encode_to_vec(image)?;
-        let c2pa = chunk::find_c2pa(&png);
-        Ok((png, PngEncodeReport { c2pa }))
+        let start = out.len();
+        let len = self.encode_image(image, out)?;
+        let c2pa = chunk::find_c2pa(&out[start..]);
+        Ok(PngEncodeReport { len, c2pa })
     }
 
     /// Encodes an 8-bit indexed (palette) image. Indexed colour does not fit the single-buffer
@@ -1400,16 +1294,15 @@ impl PngEncoder {
     /// the file names is dropped, a second entry holding the same RGB *and* alpha as an earlier one
     /// is merged into it, the trailing opaque `tRNS` bytes §11.3.1.1 lets a chunk omit are omitted,
     /// the index bit depth is derived from what survives, and the image's indices are renumbered to
-    /// match (`PngPalette::cleaned`). The colour every pixel resolves to is unchanged, which is
-    /// why this reports nothing: a merged entry did not fail to come along, it arrived under
+    /// match (the crate-private `Plte::cleaned`). The colour every pixel resolves to is unchanged,
+    /// which is why this reports nothing: a merged entry did not fail to come along, it arrived under
     /// another index. Surviving entries keep the order you gave them unless
     /// [`with_palette_order`](Self::with_palette_order) asks for another, in which case they are
     /// renumbered after cleaning and the indices follow.
     ///
-    /// "Nothing in the file names it" includes the `bKGD` background, in **whichever** of its three
-    /// forms you set it — [`with_background_index`](Self::with_background_index),
-    /// [`with_background_gray`](Self::with_background_gray) or
-    /// [`with_background_rgb`](Self::with_background_rgb). Each names an entry of the palette you
+    /// "Nothing in the file names it" includes the `bKGD` background, in **whichever** of the three
+    /// [`Background`] forms you set it in with [`with_background`](Self::with_background) — an
+    /// index, a grey level or an RGB triple. Each names an entry of the palette you
     /// supply, so that entry survives even when no pixel names it, and the chunk is written as its
     /// index in the cleaned palette. Your background keeps its colour *and* its alpha: a triple
     /// that appears both opaque and transparent resolves to the opaque entry, and it is that entry
@@ -1426,17 +1319,18 @@ impl PngEncoder {
     pub fn encode_indexed8(
         &self,
         image: ImageRef<'_, Indexed8>,
-        palette: &PngPalette,
+        palette: &Palette,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         let indices = image.as_samples();
         let max_index = indices.iter().copied().max().unwrap_or(0);
-        if usize::from(max_index) >= palette.len() {
+        if usize::from(max_index) >= palette.rgb_entries().len() {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "PNG: palette index out of range",
             ));
         }
+        let palette = Plte::from(palette);
         // Every entry the finished file still has to name. A pixel names one; so does the `bKGD`
         // background, in whichever of its three forms it was set — an index into this palette, a
         // grey sample, an RGB triple. Which entry each form names is `ancillary::background_entry`
@@ -1492,7 +1386,7 @@ impl PngEncoder {
             Some(index) => {
                 renumbered = self
                     .clone()
-                    .with_background_index(remap[usize::from(index)]);
+                    .with_background(Background::Index(remap[usize::from(index)]));
                 &renumbered
             }
             None => self,
@@ -1674,8 +1568,7 @@ impl PngEncoder {
     /// The colour family the embedded ICC profile, if any, pins a reduction to (§11.3.2.3).
     fn profile_family(&self) -> Family {
         self.ancillary
-            .iccp
-            .as_ref()
+            .iccp()
             .map_or(Family::Any, |(_, profile)| Family::of_profile(profile))
     }
 
@@ -1738,10 +1631,12 @@ impl PngEncoder {
         out.extend_from_slice(&SIGNATURE);
         ihdr::write(out, width, height, bit_depth, color);
         // Colour-space chunks precede PLTE.
-        self.ancillary.write_pre_plte(out, self.effort, written);
+        self.ancillary
+            .write_pre_plte(out, self.deflate_passes, written);
         pre_idat(out); // PLTE + tRNS (indexed only)
         // Background / physical / timing / text, and the C2PA store last: immediately before IDAT.
-        self.ancillary.write_post_plte(out, self.effort, written);
+        self.ancillary
+            .write_post_plte(out, self.deflate_passes, written);
 
         let idat = self.compress_scanlines(
             sample_bytes,
@@ -1775,7 +1670,7 @@ impl PngEncoder {
     ) -> Result<Vec<u8>> {
         let deflate = DeflateEncoder::new()
             .with_level(self.level)
-            .with_deflate_passes(self.effort)
+            .with_deflate_passes(self.deflate_passes)
             .with_optimal_parse_limit(self.optimal_parse_limit);
         // Every candidate stream goes through the same seam: a pushed backend that accepts sees
         // each brute-force candidate, and the smallest result still wins.
@@ -2260,11 +2155,12 @@ mod tests {
         None
     }
 
-    /// The background builders reach the bKGD chunk, in the width the colour type requires.
+    /// The background builder reaches the bKGD chunk, in the width the colour type requires.
     ///
-    /// Both `with_background_gray` and `with_background_index` could return `Self::default()` --
-    /// discarding the caller's colour *and* every other setting made before them -- and no test
-    /// noticed (#110). `with_background_rgb` was covered; these two were not.
+    /// The grey and index forms once had setters of their own that could return
+    /// `Self::default()` -- discarding the caller's colour *and* every other setting made before
+    /// them -- and no test noticed (#110); one `with_background` now carries all three forms, and
+    /// the RGB form is pinned by `tests/ancillary_colour_type.rs`.
     ///
     /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.4.1): two bytes for
     /// greyscale, one for indexed. Asserting the bytes rather than mere presence is what
@@ -2280,7 +2176,7 @@ mod tests {
         let img = ImageRef::<Gray8>::new(&gray, Dimensions::new(4, 4).unwrap()).unwrap();
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_background_gray(0x34)
+            .with_background(Background::Gray(0x34))
             .encode_image(img, &mut png)
             .unwrap();
         assert_eq!(
@@ -2291,12 +2187,12 @@ mod tests {
 
         // Indexed: one byte, the palette index.
         let entries: Vec<[u8; 3]> = (0..8u8).map(|i| [i, i.wrapping_add(70), 90]).collect();
-        let palette = PngPalette::new(&entries).unwrap();
+        let palette = Palette::new(&entries).unwrap();
         let indices: Vec<u8> = (0..200u8).map(|i| i % 8).collect();
         let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(200, 1).unwrap()).unwrap();
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_background_index(7)
+            .with_background(Background::Index(7))
             .encode_indexed8(img, &palette, &mut png)
             .unwrap();
         assert_eq!(find_chunk(&png, b"bKGD"), Some(vec![7]));
@@ -2318,7 +2214,7 @@ mod tests {
         for distinct in [1usize, 2, 3, 4, 5, 16] {
             // 256 entries, of which the image names the first `distinct`.
             let entries: Vec<[u8; 3]> = (0..256u32).map(|i| [i as u8, 0, 0]).collect();
-            let palette = PngPalette::new(&entries).unwrap();
+            let palette = Palette::new(&entries).unwrap();
             let indices: Vec<u8> = (0..64usize).map(|i| (i % distinct) as u8).collect();
             let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(64, 1).unwrap()).unwrap();
             let mut png = Vec::new();
@@ -2356,13 +2252,13 @@ mod tests {
         // 256 entries holding those four colours, 64 times over.
         let padded: Vec<[u8; 3]> = (0..256).map(|i| colours[i % 4]).collect();
         let padded_alpha: Vec<u8> = (0..256).map(|i| alphas[i % 4]).collect();
-        let padded = PngPalette::with_transparency(&padded, &padded_alpha).unwrap();
-        let tight = PngPalette::with_transparency(&colours, &alphas).unwrap();
+        let padded = Palette::with_alpha(&padded, &padded_alpha).unwrap();
+        let tight = Palette::with_alpha(&colours, &alphas).unwrap();
 
         let indices: Vec<u8> = (0..(w * h) as usize)
             .map(|i| (((i as u32 % w) / 7 + (i as u32 / w) / 5) % 4) as u8)
             .collect();
-        let encode = |palette: &PngPalette| {
+        let encode = |palette: &Palette| {
             let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(w, h).unwrap()).unwrap();
             let mut png = Vec::new();
             PngEncoder::new()
@@ -2386,13 +2282,13 @@ mod tests {
     #[test]
     fn a_background_index_names_a_surviving_entry_after_cleaning() {
         let palette =
-            PngPalette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]]).unwrap();
+            Palette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]]).unwrap();
         // Only entry 1 is painted; entry 3 is named by the background alone.
         let indices = vec![1u8; 8];
         let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(8, 1).unwrap()).unwrap();
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_background_index(3)
+            .with_background(Background::Index(3))
             .encode_indexed8(img, &palette, &mut png)
             .unwrap();
 
@@ -2419,12 +2315,12 @@ mod tests {
     #[test]
     fn a_reordered_palette_carries_its_pixels_and_background_along() {
         let entries: Vec<[u8; 3]> = (0..6).map(|i| [i * 10, i * 10, i * 10]).collect();
-        let palette = PngPalette::new(&entries).unwrap();
+        let palette = Palette::new(&entries).unwrap();
         let indices = [1u8, 3, 1, 3, 1, 3, 4, 3, 4, 2];
         let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(10, 1).unwrap()).unwrap();
         let mut reordered = Vec::new();
         PngEncoder::new()
-            .with_background_index(0)
+            .with_background(Background::Index(0))
             .with_palette_order(PaletteOrder::ModifiedZeng)
             .encode_indexed8(img, &palette, &mut reordered)
             .unwrap();
@@ -2506,12 +2402,12 @@ mod tests {
                 background: [r, g, b],
                 alpha,
             } = case;
-            let palette = PngPalette::with_transparency(entries, alphas).unwrap();
+            let palette = Palette::with_alpha(entries, alphas).unwrap();
             let dims = Dimensions::new(painted.len() as u32, 1).unwrap();
             let img = ImageRef::<Indexed8>::new(painted, dims).unwrap();
             let mut png = Vec::new();
             PngEncoder::new()
-                .with_background_rgb(r.into(), g.into(), b.into())
+                .with_background(Background::Rgb(r.into(), g.into(), b.into()))
                 .encode_indexed8(img, &palette, &mut png)
                 .unwrap();
 
@@ -2540,13 +2436,13 @@ mod tests {
     /// out.
     #[test]
     fn a_background_index_past_the_palette_stays_omitted() {
-        let palette = PngPalette::new(&[[9, 8, 7], [6, 5, 4], [3, 2, 1]]).unwrap();
+        let palette = Palette::new(&[[9, 8, 7], [6, 5, 4], [3, 2, 1]]).unwrap();
         for index in [3u8, 4, 200, 255] {
             let indices = vec![0u8, 1, 2, 1];
             let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(4, 1).unwrap()).unwrap();
             let mut png = Vec::new();
             PngEncoder::new()
-                .with_background_index(index)
+                .with_background(Background::Index(index))
                 .encode_indexed8(img, &palette, &mut png)
                 .unwrap();
 
@@ -2741,7 +2637,7 @@ mod tests {
         configure(PngEncoder::new().with_compression(Level::Best))
             // The optimal parse is the only consumer of the limit, and refinement passes are the
             // expensive part of `Level::Best`; the seed parse alone already spans.
-            .with_effort(0)
+            .with_deflate_passes(0)
             .encode_image(img, &mut png)
             .unwrap();
         png
@@ -2762,16 +2658,16 @@ mod tests {
     }
 
     #[test]
-    fn every_preset_level_round_trips_and_the_ladder_is_contiguous() {
+    fn every_effort_level_round_trips_and_the_ladder_is_contiguous() {
         // `from_level` is the mechanical enumeration of the ladder — `tests/effort.rs` walks it
         // from 0 until it yields `None`, so the rungs must be contiguous from 0 and the first
         // gap must be the end. Extending the ladder without extending this range fails here.
         for level in 0..=3u8 {
-            let preset = Preset::from_level(level).expect("0..=3 is in range");
+            let preset = Effort::from_level(level).expect("0..=3 is in range");
             assert_eq!(preset.level(), level, "level {level} does not round trip");
         }
-        assert_eq!(Preset::from_level(4), None, "the ladder ends at 3");
-        assert_eq!(Preset::from_level(u8::MAX), None);
+        assert_eq!(Effort::from_level(4), None, "the ladder ends at 3");
+        assert_eq!(Effort::from_level(u8::MAX), None);
     }
 
     #[test]
@@ -2782,7 +2678,7 @@ mod tests {
         // it is not observable through one: this crate's corpus filters to less than the 32 KiB
         // span floor, so every candidate span already covers the whole stream and every rung
         // emits the same bytes whatever the limit says.
-        let span = Preset::Smallest.knobs().optimal_parse_limit;
+        let span = Effort::Smallest.knobs().optimal_parse_limit;
         assert!(
             span > DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT && span < usize::MAX,
             "the top rung's parse span is {span}, not between the {} default and no bound at all",
@@ -2791,10 +2687,10 @@ mod tests {
     }
 
     #[test]
-    fn the_default_preset_is_the_balanced_rung() {
-        // `Preset::default()` is what a `#[derive(Default)]` config struct or an unset FFI field
+    fn the_default_effort_is_the_balanced_rung() {
+        // `Effort::default()` is what a `#[derive(Default)]` config struct or an unset FFI field
         // lands on, and it must be the rung that changes nothing.
-        assert_eq!(Preset::default(), Preset::Balanced);
+        assert_eq!(Effort::default(), Effort::Balanced);
     }
 
     #[test]
@@ -2866,7 +2762,7 @@ mod tests {
         let dims = Dimensions::new(8, 8).unwrap();
         let mut encoder = PngEncoder::new().with_auto_reduce(true);
         if let Some(icc) = icc {
-            encoder = encoder.with_icc_profile("p", icc);
+            encoder = encoder.with_icc_profile_name("p").with_icc_profile(icc);
         }
         let png = encoder
             .encode_to_vec(ImageRef::<P>::new(samples, dims).unwrap())
@@ -2922,317 +2818,5 @@ mod tests {
             reduced_color_type::<Rgba8>(&greys, Some(&icc_profile(b"GRAY"))),
             ColorType::Grayscale.code()
         );
-    }
-}
-
-/// The `metadata` feature: the encoder half of the typed [`gamut_metadata`] wiring (the reader
-/// half is the `TypedMetadata` impl on [`PngMetadata`] and [`DecodedPng`]). A facade `Metadata` is
-/// serialized and each carrier routed to this encoder's raw setters.
-#[cfg(feature = "metadata")]
-mod typed {
-    use gamut_core::{Error, Result};
-    use gamut_metadata::{EncodedMetadata, Metadata, MetadataEmbedder};
-
-    use super::PngEncoder;
-
-    /// The `iCCP` profile name written for a profile that arrives as a facade block, which
-    /// carries no name of its own: 1–79 printable Latin-1 characters with no leading, trailing or
-    /// consecutive space, as §11.3.2.3 requires.
-    pub(super) const TYPED_ICC_PROFILE_NAME: &str = "ICC profile";
-
-    impl PngEncoder {
-        /// Embeds a unified [`Metadata`] model: serializes it with the default
-        /// [`MetadataEmbedder`] and routes each carrier to the matching raw setter
-        /// ([`with_exif`](Self::with_exif), [`with_xmp`](Self::with_xmp),
-        /// [`with_icc_profile`](Self::with_icc_profile)). Returns the updated encoder for
-        /// chaining.
-        ///
-        /// This is the facade builder every wired format crate spells `with_metadata`. Its
-        /// chunk-for-chunk sibling is [`with_png_metadata`](Self::with_png_metadata), which
-        /// carries a [`PngMetadata`](crate::PngMetadata) — every PNG chunk the read side
-        /// surfaces — whereas this method takes the facade's container-agnostic model, which
-        /// holds only the EXIF, XMP and ICC carriers.
-        ///
-        /// The default embedder emits no legacy IPTC-IIM block (IPTC lives inside the XMP packet)
-        /// and **drops** a C2PA manifest store — a store is signed over the file it came from and
-        /// can never be copied into a re-encoded one; see [`gamut_metadata::C2paPolicy`]. A caller
-        /// that must be told about either configures the embedder itself and calls
-        /// [`with_encoded_metadata`](Self::with_encoded_metadata). Carriers absent from the model
-        /// leave any earlier raw setting untouched.
-        ///
-        /// # Errors
-        ///
-        /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when
-        /// the model does not serialize (the facade's message is carried as [`Error::detail`]),
-        /// and whatever [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
-        pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
-            let encoded = MetadataEmbedder::new().embed(meta).map_err(|e| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: metadata does not serialize")
-                    .with_detail(e.to_string())
-            })?;
-            self.with_encoded_metadata(&encoded)
-        }
-
-        /// Embeds already-serialized facade blocks — the output of a [`MetadataEmbedder`]
-        /// configured by the caller — routing each present carrier to the matching raw setter.
-        /// Returns the updated encoder for chaining.
-        ///
-        /// EXIF goes to [`with_exif`](Self::with_exif) with the facade's `Exif\0\0` signature
-        /// stripped (an `eXIf` chunk holds the bare TIFF stream, §11.3.4.5), XMP to
-        /// [`with_xmp`](Self::with_xmp) and ICC to [`with_icc_profile`](Self::with_icc_profile)
-        /// under the name `"ICC profile"`, since a facade block carries no profile name. Fields
-        /// that are `None` leave any earlier raw setting untouched.
-        ///
-        /// # Errors
-        ///
-        /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the
-        /// blocks carry a legacy IPTC-IIM stream (PNG defines no IPTC-IIM chunk) or a C2PA
-        /// manifest store. A store is never embedded from metadata blocks: it is signed over the
-        /// bytes of the one file it was made for, so a store computed for this output goes through
-        /// [`with_c2pa`](Self::with_c2pa) / [`with_c2pa_reserved`](Self::with_c2pa_reserved)
-        /// instead. Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
-        /// error when the XMP packet is not UTF-8, which an `iTXt` text field must be (§11.3.3.4).
-        /// Nothing is applied when an error is returned.
-        pub fn with_encoded_metadata(mut self, encoded: &EncodedMetadata) -> Result<Self> {
-            if encoded.iptc_iim.is_some() {
-                return Err(Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "PNG: IPTC-IIM has no chunk",
-                ));
-            }
-            if encoded.c2pa.is_some() {
-                return Err(Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "PNG: a C2PA manifest store is not embedded from metadata blocks",
-                ));
-            }
-            let xmp = encoded
-                .xmp
-                .as_deref()
-                .map(core::str::from_utf8)
-                .transpose()
-                .map_err(|_| {
-                    Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: XMP packet is not UTF-8")
-                })?;
-            if let Some(exif) = &encoded.exif {
-                self = self.with_exif(exif.strip_prefix(b"Exif\0\0").unwrap_or(exif));
-            }
-            if let Some(xmp) = xmp {
-                self = self.with_xmp(xmp);
-            }
-            if let Some(icc) = &encoded.icc {
-                self = self.with_icc_profile(TYPED_ICC_PROFILE_NAME, icc);
-            }
-            Ok(self)
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef};
-        use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
-        use gamut_metadata::icc::{
-            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Tag, TagData,
-        };
-        use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
-        use gamut_metadata::{MetadataBlock, TypedMetadata};
-
-        use super::*;
-
-        /// A typed model with the three facade-writable carriers populated, normalised through one
-        /// embed → extract pass so it is an *extracted* model (the ICC header's `size` is stamped
-        /// by the serializer). The profile is a greyscale one, matching the image `encode` writes
-        /// (§11.3.2.3).
-        fn typed() -> Metadata {
-            let mut exif = Exif::new(ByteOrder::BigEndian);
-            exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
-            let mut xmp = XmpMeta::new();
-            xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
-            let icc = IccProfile {
-                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
-                tags: Vec::new(),
-            };
-            let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
-                .to_blocks()
-                .unwrap();
-            Metadata::parse_blocks(&[
-                MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
-                MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
-                MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
-            ])
-            .unwrap()
-        }
-
-        /// Encodes an 8×8 grayscale image with `encoder`.
-        fn encode(encoder: &PngEncoder) -> Vec<u8> {
-            let pixels = vec![128u8; 64];
-            let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
-            encoder.encode_to_vec(image).unwrap()
-        }
-
-        #[test]
-        fn typed_metadata_round_trips_through_the_datastream() {
-            // The facade's keystone equality, extended through the `eXIf` / `iTXt` / `iCCP`
-            // chunks.
-            let typed = typed();
-            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
-            let read = crate::metadata(&png).unwrap();
-            assert!(read.exif.is_some() && read.xmp().is_some() && read.icc_profile.is_some());
-            assert_eq!(read.metadata().unwrap(), typed);
-        }
-
-        #[test]
-        fn exiv2_reads_what_with_metadata_embeds() {
-            // Container-level differential: exiv2's own PNG reader finds the `eXIf`, the XMP
-            // `iTXt` and the `iCCP` this encoder writes, not only this crate's reader.
-            let typed = typed();
-            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
-            assert_eq!(
-                exiv2_oracle::image_exif_get(&png, "Exif.Image.Make").unwrap(),
-                "gamut"
-            );
-            assert_eq!(
-                exiv2_oracle::image_xmp_get(&png, "Xmp.xmp.CreatorTool").unwrap(),
-                "gamut"
-            );
-            assert_eq!(
-                exiv2_oracle::image_icc(&png).unwrap(),
-                typed.to_blocks().unwrap().icc
-            );
-        }
-
-        #[test]
-        fn the_typed_reader_reads_what_exiv2_embeds() {
-            // The other direction: exiv2 writes an `eXIf` and an XMP `iTXt` into a file this
-            // crate encoded bare, and the typed reader finds both values.
-            let bare = encode(&PngEncoder::new());
-            let png = exiv2_oracle::image_set(
-                &bare,
-                Some(("Exif.Photo.ISOSpeedRatings", "400")),
-                Some(("Xmp.xmp.CreatorTool", "exiv2")),
-            )
-            .unwrap();
-            let read = crate::metadata(&png).unwrap().metadata().unwrap();
-            assert_eq!(
-                read.exif.unwrap().get_tag(ExifTag::PhotographicSensitivity),
-                Some(&Value::Short(vec![400]))
-            );
-            assert_eq!(
-                read.xmp
-                    .unwrap()
-                    .get_text(WellKnownNs::Xmp.uri(), "CreatorTool"),
-                Some("exiv2")
-            );
-        }
-
-        #[test]
-        fn a_manifest_store_is_never_copied_forward() {
-            let mut typed = typed();
-            typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());
-            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
-            let read = crate::metadata(&png).unwrap().metadata().unwrap();
-            assert_eq!(read.c2pa, None);
-            typed.c2pa = None;
-            assert_eq!(read, typed);
-        }
-
-        #[test]
-        fn encoded_blocks_route_to_the_raw_setters() {
-            // Each present field lands in its chunk — the EXIF one without the facade's
-            // signature, the profile under the fixed name — and an absent one leaves an earlier
-            // setting.
-            let encoded = typed().to_blocks().unwrap();
-            let png = encode(&PngEncoder::new().with_encoded_metadata(&encoded).unwrap());
-            let read = crate::metadata(&png).unwrap();
-            assert_eq!(
-                read.exif.as_deref(),
-                encoded
-                    .exif
-                    .as_deref()
-                    .and_then(|e| e.strip_prefix(b"Exif\0\0"))
-            );
-            assert_eq!(read.xmp(), encoded.xmp.as_deref());
-            let icc = read.icc_profile.unwrap();
-            assert_eq!(icc.name, TYPED_ICC_PROFILE_NAME);
-            assert_eq!(Some(icc.profile), encoded.icc);
-
-            let mut only_icc = EncodedMetadata::default();
-            only_icc.icc = encoded.icc.clone();
-            let png = encode(
-                &PngEncoder::new()
-                    .with_xmp("<x:xmpmeta/>")
-                    .with_encoded_metadata(&only_icc)
-                    .unwrap(),
-            );
-            let read = crate::metadata(&png).unwrap();
-            assert_eq!(read.xmp(), Some(&b"<x:xmpmeta/>"[..]));
-            assert_eq!(read.icc_profile.map(|icc| icc.profile), encoded.icc);
-            assert_eq!(read.exif, None);
-        }
-
-        #[test]
-        fn the_typed_profile_name_draws_no_notice() {
-            // The fixed name must itself satisfy §11.3.2.3, or every typed ICC embed would be
-            // reported as bent.
-            let mut only_icc = EncodedMetadata::default();
-            only_icc.icc = typed().to_blocks().unwrap().icc;
-            let encoder = PngEncoder::new().with_encoded_metadata(&only_icc).unwrap();
-            assert!(encoder.metadata_notices().is_empty());
-        }
-
-        #[test]
-        fn a_bare_exif_stream_is_written_unchanged() {
-            // `strip_prefix` must not eat a stream that never carried the signature.
-            let mut bare = EncodedMetadata::default();
-            bare.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
-            let png = encode(&PngEncoder::new().with_encoded_metadata(&bare).unwrap());
-            assert_eq!(crate::metadata(&png).unwrap().exif, bare.exif);
-        }
-
-        #[test]
-        fn unembeddable_carriers_are_typed_errors() {
-            let mut iim = EncodedMetadata::default();
-            iim.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
-            let err = PngEncoder::new().with_encoded_metadata(&iim).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Unsupported);
-            assert_eq!(err.static_message(), Some("PNG: IPTC-IIM has no chunk"));
-
-            let mut c2pa = EncodedMetadata::default();
-            c2pa.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
-            let err = PngEncoder::new().with_encoded_metadata(&c2pa).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Unsupported);
-            assert_eq!(
-                err.static_message(),
-                Some("PNG: a C2PA manifest store is not embedded from metadata blocks")
-            );
-
-            let mut latin1 = EncodedMetadata::default();
-            latin1.xmp = Some(vec![0xff, 0xfe]);
-            latin1.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
-            let err = PngEncoder::new()
-                .with_encoded_metadata(&latin1)
-                .unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::InvalidInput);
-            assert_eq!(err.static_message(), Some("PNG: XMP packet is not UTF-8"));
-        }
-
-        #[test]
-        fn a_model_that_does_not_serialize_is_invalid_input_with_the_facade_detail() {
-            // An ICC model with a duplicate tag signature is rejected by `gamut-icc`'s writer
-            // (ICC.1:2022 §7.3).
-            let duplicate = Tag::new(*b"wtpt", TagData::Xyz(Vec::new()));
-            let bad_icc = IccProfile {
-                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
-                tags: vec![duplicate.clone(), duplicate],
-            };
-            let model = Metadata::from_carriers(None, None, Some(bad_icc));
-            let err = PngEncoder::new().with_metadata(&model).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::InvalidInput);
-            assert_eq!(
-                err.static_message(),
-                Some("PNG: metadata does not serialize")
-            );
-            assert_eq!(err.detail(), Some("icc: duplicate tag signature"));
-        }
     }
 }

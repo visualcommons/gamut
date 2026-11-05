@@ -300,7 +300,7 @@ pub(crate) fn decode_native(path: &Path, bytes: &[u8]) -> Result<NativeImage, Cl
     }
 
     if is_png(bytes) {
-        let decoder = PngDecoder::new().convert_policy(lossy);
+        let decoder = PngDecoder::new().with_convert_policy(lossy);
         let decoded = decoder.decode(bytes)?;
         let color = decoded.header.color_type;
         let alpha = matches!(
@@ -430,7 +430,7 @@ pub(crate) fn decode_bytes(
 
     if is_png(bytes) {
         return Ok(decode_with!(
-            PngDecoder::new().convert_policy(lossy),
+            PngDecoder::new().with_convert_policy(lossy),
             bytes,
             want_alpha
         ));
@@ -737,10 +737,10 @@ mod tests {
     #[test]
     fn native_png_counts_a_trns_palette_as_alpha() {
         use gamut::core::Indexed8;
-        use gamut::png::{PngEncoder, PngPalette};
+        use gamut::png::{Palette, PngEncoder};
 
         let dims = Dimensions::new(2, 1).unwrap();
-        let encode = |palette: PngPalette| {
+        let encode = |palette: Palette| {
             let mut png = Vec::new();
             PngEncoder::new()
                 .encode_indexed8(
@@ -752,8 +752,8 @@ mod tests {
             png
         };
         let colours = [[0, 0, 0], [255, 255, 255]];
-        let opaque = PngPalette::new(&colours).unwrap();
-        let keyed = PngPalette::with_transparency(&colours, &[0]).unwrap();
+        let opaque = Palette::new(&colours).unwrap();
+        let keyed = Palette::with_alpha(&colours, &[0]).unwrap();
         assert_eq!(native_layout(&encode(opaque)), Layout::Rgb8);
         assert_eq!(native_layout(&encode(keyed)), Layout::Rgba8);
     }

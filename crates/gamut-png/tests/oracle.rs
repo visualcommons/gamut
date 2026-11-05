@@ -8,7 +8,10 @@ use gamut_core::{
     Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::Level;
-use gamut_png::{FilterStrategy, FilterType, PhysicalUnit, PngEncoder, PngPalette, SrgbIntent};
+use gamut_png::{
+    Background, FilterStrategy, FilterType, ModificationTime, Palette, PhysicalDimensions,
+    PhysicalUnit, PngEncoder, SrgbIntent,
+};
 
 const SIZES: &[(u32, u32)] = &[
     (1, 1),
@@ -199,7 +202,7 @@ fn indexed8_with_palette_and_transparency_round_trips() {
         [128, 128, 128],
     ];
     let alpha = vec![0u8, 255, 128]; // entries 0/1/2 have alpha; 3/4 are opaque
-    let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+    let palette = Palette::with_alpha(&rgb, &alpha).unwrap();
     let indices: Vec<u8> = (0..(w * h) as usize)
         .map(|i| (i % rgb.len()) as u8)
         .collect();
@@ -261,7 +264,7 @@ fn a_cleaned_palette_still_resolves_to_the_colours_the_caller_supplied() {
     ];
     let rgb: Vec<[u8; 3]> = (0..256).map(|i| colours[i % 3].0).collect();
     let alpha: Vec<u8> = (0..256).map(|i| colours[i % 3].1).collect();
-    let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+    let palette = Palette::with_alpha(&rgb, &alpha).unwrap();
 
     let (w, h) = (16u32, 16u32);
     let indices: Vec<u8> = (0..(w * h) as usize).map(|i| i as u8).collect();
@@ -319,7 +322,7 @@ fn a_colour_background_keeps_its_entry_in_the_palette_libpng_resolves() {
         [10, 10, 10],
     ];
     let alpha: [u8; 6] = [255, 255, 0, 255, 255, 255];
-    let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+    let palette = Palette::with_alpha(&rgb, &alpha).unwrap();
 
     let painted = [0u8, 2, 3, 4, 5];
     let (w, h) = (16u32, 16u32);
@@ -343,7 +346,7 @@ fn a_colour_background_keeps_its_entry_in_the_palette_libpng_resolves() {
         })
         .collect();
 
-    let with_background = encode(PngEncoder::new().with_background_rgb(200, 30, 40));
+    let with_background = encode(PngEncoder::new().with_background(Background::Rgb(200, 30, 40)));
     assert_eq!(
         libpng_oracle::decode_rgba8(&with_background),
         (w, h, expected.clone())
@@ -365,7 +368,7 @@ fn a_colour_background_keeps_its_entry_in_the_palette_libpng_resolves() {
 
 #[test]
 fn indexed8_rejects_out_of_range_index() {
-    let palette = PngPalette::new(&[[0, 0, 0], [255, 255, 255]]).unwrap();
+    let palette = Palette::new(&[[0, 0, 0], [255, 255, 255]]).unwrap();
     let indices = vec![0u8, 1, 2]; // 2 is out of range for a 2-entry palette
     let mut png = Vec::new();
     let result = PngEncoder::new().encode_indexed8(
@@ -382,7 +385,7 @@ fn indexed_uses_minimal_bit_depth() {
     // indices (png_set_packing unpacks sub-byte indices to one byte each).
     for (entries, depth) in [(2usize, 1u8), (4, 2), (16, 4), (17, 8)] {
         let rgb: Vec<[u8; 3]> = (0..entries).map(|i| [i as u8, 0, 0]).collect();
-        let palette = PngPalette::new(&rgb).unwrap();
+        let palette = Palette::new(&rgb).unwrap();
         let (w, h) = (20u32, 8u32);
         let indices: Vec<u8> = (0..(w * h) as usize).map(|i| (i % entries) as u8).collect();
         let mut png = Vec::new();
@@ -434,13 +437,18 @@ fn ancillary_chunks_are_accepted_by_libpng() {
     let mut png = Vec::new();
     PngEncoder::new()
         .with_compression(Level::Best)
-        .with_gamma(1.0 / 2.2)
+        .with_gamma(45_455)
         .with_srgb(SrgbIntent::Perceptual)
-        .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
+        .with_chromaticities(gamut_png::Chromaticities::new(
+            (31_270, 32_900),
+            (64_000, 33_000),
+            (30_000, 60_000),
+            (15_000, 6_000),
+        ))
         .with_significant_bits(&[8, 8, 8])
-        .with_background_rgb(0, 0, 0)
-        .with_physical_dimensions(2835, 2835, PhysicalUnit::Meter)
-        .with_time(2026, 6, 13, 1, 2, 3)
+        .with_background(Background::Rgb(0, 0, 0))
+        .with_physical_dimensions(PhysicalDimensions::new(2835, 2835, PhysicalUnit::Meter))
+        .with_time(ModificationTime::new(2026, 6, 13, 1, 2, 3))
         .with_text("Title", "gamut")
         .with_compressed_text("Comment", &comment)
         .with_international_text("Author", "gämut")
@@ -475,7 +483,8 @@ fn a_profile_beside_a_rendering_intent_is_accepted_by_libpng() {
 
     let mut png = Vec::new();
     PngEncoder::new()
-        .with_icc_profile("both", &icc)
+        .with_icc_profile_name("both")
+        .with_icc_profile(&icc)
         .with_srgb(SrgbIntent::Perceptual)
         .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
         .expect("encode");
@@ -514,8 +523,10 @@ fn metadata_chunks_embed_and_image_survives() {
     PngEncoder::new()
         .with_compression(Level::Best)
         .with_exif(&exif)
-        .with_icc_profile("test profile", &icc)
-        .with_xmp(xmp)
+        .with_icc_profile_name("test profile")
+        .with_icc_profile(&icc)
+        .with_xmp(xmp.as_bytes())
+        .unwrap()
         .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
         .expect("encode");
 

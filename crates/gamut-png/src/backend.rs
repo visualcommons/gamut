@@ -25,7 +25,7 @@
 //!
 //! # PNG-local by design
 //!
-//! [`IdatInflater`] / [`IdatDeflater`] are **PNG's own traits**, not a shared `gamut-deflate`
+//! [`ZlibInflater`] / [`ZlibDeflater`] are **PNG's own traits**, not a shared `gamut-deflate`
 //! abstraction. `gamut-deflate` is unchanged by this module and gains no plugin surface, and the
 //! TIFF/DNG Deflate code paths are deliberately **not** routed through this seam. The datum here
 //! carries PNG context ([`IdatInfo`]) that a general-purpose DEFLATE abstraction has no business
@@ -33,28 +33,32 @@
 //!
 //! # The fallback contract (#241)
 //!
-//! Identical in both directions and to every other gamut format crate:
+//! Identical in both directions and to every other gamut format crate, and implemented once, by
+//! [`gamut_codec_abi::Registry`]:
 //!
 //! 1. Backends are tried in **push order**.
-//! 2. [`supports`](IdatInflater::supports) returning `false` is the *only* signal that falls
-//!    through to the next backend. A backend that declines late does so by returning an
-//!    [`ErrorKind::Unsupported`] error — the C-ABI adapters map
-//!    [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) onto exactly that.
-//! 3. A backend that **accepts** and then **fails** propagates its error to the caller. The host
-//!    does not retry a later backend or the built-in tail, because a partially-produced result must
-//!    never be silently masked.
+//! 2. [`supports`](ZlibInflater::supports) returning `false` is the *only* signal that falls
+//!    through to the next backend.
+//! 3. A backend that **accepts** and then **fails** — with any error, an
+//!    [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) one included — propagates its
+//!    error to the caller. The host does not retry a later backend or the built-in tail, because a
+//!    partially-produced result must never be silently masked.
 //! 4. The built-in implementation is the implicit **tail**, tried last: [`gamut_deflate`] for
 //!    encode, [`gamut_deflate::inflate_zlib`] for decode. A different inflater behind that
 //!    function would slot into the decode tail with no change to this surface.
+//!
+//! `Send` is not a supertrait of either trait: the encoder and decoder bound it where they insert
+//! a backend (`push_backend`), because they hold their registry behind `Arc<Mutex<…>>`.
 //!
 //! # Security invariant: the host owns the zlib-bomb cap
 //!
 //! PNG input is attacker-controlled and a tiny IDAT can claim to inflate without bound. The output
 //! cap is therefore enforced **by the host, not by the backend**:
 //!
-//! - `max_out` is passed to [`IdatInflater::inflate`] so a cooperative backend can stop early, and
+//! - `max_out` is passed to [`ZlibInflater::inflate`] so a cooperative backend can stop early, and
 //! - the host **re-checks the returned length** afterwards. A backend that returns more than
-//!   `max_out` bytes is rejected with an [`ErrorKind::InvalidInput`] error — never truncated,
+//!   `max_out` bytes is rejected with an
+//!   [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error — never truncated,
 //!   never trusted.
 //!
 //! A third-party or FFI backend is untrusted code; the limit survives a backend that ignores or
@@ -64,11 +68,11 @@
 //!
 //! ```
 //! use gamut_core::Result;
-//! use gamut_png::{IdatDeflater, IdatInfo, PngEncoder};
+//! use gamut_png::{IdatInfo, PngEncoder, ZlibDeflater};
 //!
-//! /// A deflater that only handles 8-bit images and stores them uncompressed.
-//! struct Stored;
-//! impl IdatDeflater for Stored {
+//! /// A deflater that only handles 8-bit images.
+//! struct EightBitOnly;
+//! impl ZlibDeflater for EightBitOnly {
 //!     fn supports(&mut self, info: &IdatInfo) -> bool {
 //!         info.bit_depth() == 8
 //!     }
@@ -80,12 +84,11 @@
 //! }
 //!
 //! let mut encoder = PngEncoder::new();
-//! encoder.push_backend(Stored);
+//! encoder.push_backend(EightBitOnly);
 //! ```
 
-use std::sync::{Arc, Mutex};
-
-use gamut_core::{Error, ErrorKind, Result};
+use gamut_codec_abi::{Registry, RegistryError};
+use gamut_core::{Error, Result};
 
 use crate::color::ColorType;
 
@@ -109,7 +112,7 @@ impl IdatInfo {
     /// inflated form — which for PNG is always known ahead of time from IHDR.
     ///
     /// The codec normally builds this itself; it is public so a backend author can construct one
-    /// to unit-test an [`IdatInflater`] / [`IdatDeflater`] implementation directly.
+    /// to unit-test a [`ZlibInflater`] / [`ZlibDeflater`] implementation directly.
     #[must_use]
     pub fn new(
         width: u32,
@@ -164,10 +167,10 @@ impl IdatInfo {
 
 /// A pluggable **decode-side** backend: inflates the concatenated-IDAT zlib stream.
 ///
-/// See the [module docs](self) for the fallback contract and the security invariant. In short:
-/// [`supports`](Self::supports) is how you decline; the host re-checks `max_out` after you return,
-/// so you can never grow the host's memory past its budget.
-pub trait IdatInflater: Send {
+/// The fallback contract: [`supports`](Self::supports) is the only way to decline, and once it
+/// accepts, whatever [`inflate`](Self::inflate) returns is the decode's answer. The host re-checks
+/// `max_out` after you return, so you can never grow the host's memory past its budget.
+pub trait ZlibInflater {
     /// Reports whether this backend wants to inflate the stream described by `info`. Returning
     /// `false` makes the host try the next backend, and finally the built-in `miniz_oxide` tail.
     fn supports(&mut self, info: &IdatInfo) -> bool;
@@ -175,13 +178,12 @@ pub trait IdatInflater: Send {
     /// Inflates the zlib stream `zlib`, producing at most `max_out` bytes.
     ///
     /// Stopping at `max_out` is an optimisation, not the security boundary: the host rejects an
-    /// over-long result regardless. Return an [`ErrorKind::Unsupported`] error to decline the job
-    /// late (the host then falls through); any other error propagates to the caller.
+    /// over-long result regardless. Every error propagates to the caller: a job is declined only
+    /// through [`supports`](Self::supports).
     ///
     /// # Errors
     ///
-    /// Whatever the backend reports for a corrupt or truncated stream, or an
-    /// [`ErrorKind::Unsupported`] error to decline.
+    /// Whatever the backend reports for a corrupt or truncated stream.
     fn inflate(&mut self, info: &IdatInfo, zlib: &[u8], max_out: usize) -> Result<Vec<u8>>;
 }
 
@@ -190,7 +192,7 @@ pub trait IdatInflater: Send {
 /// The returned bytes must be a complete zlib stream (RFC 1950: header, DEFLATE data, Adler-32) of
 /// `raw`, which is the already-filtered scanline stream. Any DEFLATE encoding choice is the
 /// backend's — PNG only requires that the stream inflate back to `raw`.
-pub trait IdatDeflater: Send {
+pub trait ZlibDeflater {
     /// Reports whether this backend wants to compress the stream described by `info`. Returning
     /// `false` makes the host try the next backend, and finally the built-in [`gamut_deflate`]
     /// tail.
@@ -198,59 +200,20 @@ pub trait IdatDeflater: Send {
 
     /// Compresses the filtered scanline stream `raw` into a complete zlib stream.
     ///
-    /// Return an [`ErrorKind::Unsupported`] error to decline the job late (the host then falls
-    /// through); any other error propagates to the caller.
+    /// Every error propagates to the caller: a job is declined only through
+    /// [`supports`](Self::supports).
     ///
     /// # Errors
     ///
-    /// Whatever the backend reports on failure, or an [`ErrorKind::Unsupported`] error to decline.
+    /// Whatever the backend reports on failure.
     fn deflate(&mut self, info: &IdatInfo, raw: &[u8]) -> Result<Vec<u8>>;
 }
 
-/// The host-owned registry: backends in push order, behind `Arc<Mutex<…>>`.
-///
-/// `Arc` because [`crate::PngEncoder`] / [`crate::PngDecoder`] are `Clone` and their encode/decode
-/// methods take `&self`; `Mutex` because the trait methods take `&mut self` (a backend commonly
-/// owns a device handle or scratch arena).
-pub(crate) struct Registry<T: ?Sized>(Vec<Arc<Mutex<T>>>);
+/// The registry the decoder holds its pushed inflaters in; `Send` is bound here, at insertion.
+pub(crate) type Inflaters = Registry<dyn ZlibInflater + Send>;
 
-impl<T: ?Sized> Registry<T> {
-    /// Appends a backend to the end of the try order.
-    pub(crate) fn push(&mut self, backend: Arc<Mutex<T>>) {
-        self.0.push(backend);
-    }
-
-    /// The backends, in push order.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<Mutex<T>>> {
-        self.0.iter()
-    }
-
-    /// The number of registered backends.
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.0.len()
-    }
-}
-
-// Manual impls: `dyn Trait` is neither `Debug` nor `Clone`, but the outer builders must stay both.
-impl<T: ?Sized> core::fmt::Debug for Registry<T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Registry({} backend(s))", self.0.len())
-    }
-}
-
-impl<T: ?Sized> Clone for Registry<T> {
-    /// Clones the *handles*: a cloned encoder or decoder **shares** the same backend instances.
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<T: ?Sized> Default for Registry<T> {
-    fn default() -> Self {
-        Self(Vec::new())
-    }
-}
+/// The registry the encoder holds its pushed deflaters in; `Send` is bound here, at insertion.
+pub(crate) type Deflaters = Registry<dyn ZlibDeflater + Send>;
 
 /// The error a poisoned backend mutex produces: another thread panicked inside this backend, so its
 /// state is not trustworthy.
@@ -269,58 +232,68 @@ pub(crate) fn over_cap() -> Error {
     )
 }
 
+/// Folds a registry run's failure into this crate's error. A run with a tail never reports
+/// [`RegistryError::Unsupported`], so that arm and a backend's own error are the same outcome.
+fn registry_error(error: RegistryError<Error>) -> Error {
+    match error {
+        RegistryError::Poisoned => poisoned(),
+        RegistryError::Backend(error) => error,
+        RegistryError::Unsupported => Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "PNG: no IDAT backend took the stream",
+        ),
+    }
+}
+
 /// Runs the inflater registry, falling back to `tail` (the built-in `miniz_oxide` inflater).
 ///
 /// This is where the host **re-checks** `max_out` against what the backend actually returned.
 pub(crate) fn run_inflaters(
-    registry: &Registry<dyn IdatInflater + Send>,
+    registry: &Inflaters,
     info: &IdatInfo,
     zlib: &[u8],
     max_out: usize,
     tail: impl FnOnce(&[u8], usize) -> Result<Vec<u8>>,
 ) -> Result<Vec<u8>> {
-    for backend in registry.iter() {
-        let mut backend = backend.lock().map_err(|_| poisoned())?;
-        if !backend.supports(info) {
-            continue;
-        }
-        let out = match backend.inflate(info, zlib, max_out) {
-            // A late decline (the C-ABI `Status::UNSUPPORTED`) falls through, like `supports`.
-            Err(error) if error.kind() == ErrorKind::Unsupported => continue,
-            other => other?,
-        };
-        // SECURITY: the backend is untrusted with the limit. Reject, never truncate — a truncated
-        // stream would be silently wrong image data.
-        if out.len() > max_out {
-            return Err(over_cap());
-        }
-        return Ok(out);
-    }
-    tail(zlib, max_out)
+    registry
+        .run_or(
+            |backend| backend.supports(info),
+            |backend| {
+                let out = backend.inflate(info, zlib, max_out)?;
+                // SECURITY: the backend is untrusted with the limit. Reject, never truncate — a
+                // truncated stream would be silently wrong image data.
+                if out.len() > max_out {
+                    return Err(over_cap());
+                }
+                Ok(out)
+            },
+            || tail(zlib, max_out),
+        )
+        .map_err(registry_error)
 }
 
 /// Runs the deflater registry, falling back to `tail` (the built-in [`gamut_deflate`] encoder).
 pub(crate) fn run_deflaters(
-    registry: &Registry<dyn IdatDeflater + Send>,
+    registry: &Deflaters,
     info: &IdatInfo,
     raw: &[u8],
     tail: impl FnOnce(&[u8]) -> Vec<u8>,
 ) -> Result<Vec<u8>> {
-    for backend in registry.iter() {
-        let mut backend = backend.lock().map_err(|_| poisoned())?;
-        if !backend.supports(info) {
-            continue;
-        }
-        match backend.deflate(info, raw) {
-            Err(error) if error.kind() == ErrorKind::Unsupported => continue,
-            other => return other,
-        }
-    }
-    Ok(tail(raw))
+    registry
+        .run_or(
+            |backend| backend.supports(info),
+            |backend| backend.deflate(info, raw),
+            || Ok(tail(raw)),
+        )
+        .map_err(registry_error)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use gamut_core::ErrorKind;
+
     use super::*;
 
     /// `gamut_core::Error` is not `Clone` (it wraps `io::Error`), so the test doubles hold a
@@ -349,7 +322,7 @@ mod tests {
         outcome: Outcome,
     }
 
-    impl IdatInflater for Fixed {
+    impl ZlibInflater for Fixed {
         fn supports(&mut self, _info: &IdatInfo) -> bool {
             self.accepts
         }
@@ -362,10 +335,10 @@ mod tests {
         IdatInfo::new(4, 4, 8, ColorType::Truecolor, 52)
     }
 
-    fn reg(backends: Vec<Fixed>) -> Registry<dyn IdatInflater + Send> {
-        let mut r = Registry::default();
+    fn reg(backends: Vec<Fixed>) -> Inflaters {
+        let mut r = Registry::new();
         for b in backends {
-            r.push(Arc::new(Mutex::new(b)) as Arc<Mutex<dyn IdatInflater + Send>>);
+            r.push(Arc::new(Mutex::new(b)) as Arc<Mutex<dyn ZlibInflater + Send>>);
         }
         r
     }
@@ -381,19 +354,13 @@ mod tests {
     }
 
     #[test]
-    fn registry_debug_and_clone_report_and_share() {
-        let r = reg(vec![Fixed {
-            accepts: true,
-            outcome: Outcome::Produce(vec![1]),
-        }]);
-        assert_eq!(format!("{r:?}"), "Registry(1 backend(s))");
-        let c = r.clone();
-        assert_eq!(c.len(), 1);
-        assert!(Arc::ptr_eq(
-            r.iter().next().unwrap(),
-            c.iter().next().unwrap()
-        ));
-        assert_eq!(Registry::<dyn IdatInflater + Send>::default().len(), 0);
+    fn a_tailless_registry_failure_folds_into_an_unsupported_error() {
+        let err = registry_error(RegistryError::Unsupported);
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            err.static_message(),
+            Some("PNG: no IDAT backend took the stream")
+        );
     }
 
     #[test]
@@ -448,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn late_unsupported_declines_but_other_errors_propagate() {
+    fn every_error_after_acceptance_propagates_an_unsupported_one_included() {
         let late = reg(vec![
             Fixed {
                 accepts: true,
@@ -459,10 +426,9 @@ mod tests {
                 outcome: Outcome::Produce(vec![5]),
             },
         ]);
-        assert_eq!(
-            run_inflaters(&late, &info(), &[], 8, |_, _| unreachable!()).unwrap(),
-            vec![5]
-        );
+        let err = run_inflaters(&late, &info(), &[], 8, |_, _| unreachable!()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(err.static_message(), Some("late decline"));
         let failing = reg(vec![
             Fixed {
                 accepts: true,
@@ -487,7 +453,7 @@ mod tests {
         struct Spy {
             seen: Arc<Mutex<Vec<Call>>>,
         }
-        impl IdatInflater for Spy {
+        impl ZlibInflater for Spy {
             fn supports(&mut self, _info: &IdatInfo) -> bool {
                 true
             }
@@ -500,7 +466,7 @@ mod tests {
             }
         }
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut r: Registry<dyn IdatInflater + Send> = Registry::default();
+        let mut r: Inflaters = Registry::new();
         r.push(Arc::new(Mutex::new(Spy { seen: seen.clone() })));
         run_inflaters(&r, &info(), &[7, 7, 7], 1234, |_, _| unreachable!()).unwrap();
         let seen = seen.lock().expect("test mutex");
@@ -514,7 +480,7 @@ mod tests {
         accepts: bool,
         outcome: Outcome,
     }
-    impl IdatDeflater for FixedDeflater {
+    impl ZlibDeflater for FixedDeflater {
         fn supports(&mut self, _info: &IdatInfo) -> bool {
             self.accepts
         }
@@ -525,25 +491,33 @@ mod tests {
 
     #[test]
     fn deflater_registry_follows_the_same_contract() {
-        let mut r: Registry<dyn IdatDeflater + Send> = Registry::default();
+        let mut r: Deflaters = Registry::new();
         r.push(Arc::new(Mutex::new(FixedDeflater {
             accepts: false,
             outcome: Outcome::Produce(vec![1]),
         })));
         r.push(Arc::new(Mutex::new(FixedDeflater {
             accepts: true,
-            outcome: Outcome::DeclineLate,
+            outcome: Outcome::Produce(vec![42]),
         })));
         r.push(Arc::new(Mutex::new(FixedDeflater {
             accepts: true,
-            outcome: Outcome::Produce(vec![42]),
+            outcome: Outcome::Produce(vec![43]),
         })));
         assert_eq!(
             run_deflaters(&r, &info(), &[], |_| unreachable!()).unwrap(),
             vec![42]
         );
 
-        let mut empty: Registry<dyn IdatDeflater + Send> = Registry::default();
+        let mut late: Deflaters = Registry::new();
+        late.push(Arc::new(Mutex::new(FixedDeflater {
+            accepts: true,
+            outcome: Outcome::DeclineLate,
+        })));
+        let err = run_deflaters(&late, &info(), &[], |_| unreachable!()).unwrap_err();
+        assert_eq!(err.static_message(), Some("late decline"));
+
+        let mut empty: Deflaters = Registry::new();
         assert_eq!(
             run_deflaters(&empty, &info(), &[1, 2], |raw| raw.to_vec()).unwrap(),
             vec![1, 2]
@@ -561,7 +535,7 @@ mod tests {
 
     #[test]
     fn a_poisoned_backend_is_an_error_not_a_fall_through() {
-        let backend: Arc<Mutex<dyn IdatInflater + Send>> = Arc::new(Mutex::new(Fixed {
+        let backend: Arc<Mutex<dyn ZlibInflater + Send>> = Arc::new(Mutex::new(Fixed {
             accepts: true,
             outcome: Outcome::Produce(vec![1]),
         }));
@@ -573,7 +547,7 @@ mod tests {
         })
         .join()
         .expect_err("the thread must panic");
-        let mut r: Registry<dyn IdatInflater + Send> = Registry::default();
+        let mut r: Inflaters = Registry::new();
         r.push(backend);
         let err = run_inflaters(&r, &info(), &[], 8, |_, _| unreachable!());
         assert_eq!(err.unwrap_err().to_string(), poisoned().to_string());

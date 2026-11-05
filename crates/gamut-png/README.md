@@ -32,7 +32,7 @@ Graphics, W3C 3rd edition) images:
 
 ```rust
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
-use gamut_png::{PngDecoder, PngEncoder, Preset};
+use gamut_png::{DecodeLimits, Effort, PngDecoder, PngEncoder};
 
 # let (w, h) = (4, 3);
 # let rgb: Vec<u8> = (0..w * h * 3).map(|i| (i * 7) as u8).collect();
@@ -41,17 +41,18 @@ let mut png = Vec::new();
 PngEncoder::new().encode_image(image, &mut png)?;
 
 // Or pick a point on the size/time ladder instead of setting five knobs by hand.
-// `Preset::Balanced` is the default above, byte for byte.
+// `Effort::Balanced` is the default above, byte for byte.
 let mut small = Vec::new();
 PngEncoder::new()
-    .with_preset(Preset::Smallest)
+    .with_effort(Effort::Smallest)
     .encode_image(image, &mut small)?;
 
 // Typed decode: lossless widening only (e.g. greyscale or palette as RGBA).
 let decoded: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&png)?;
 
 // Rich decode: native layout + palette/tRNS + raw metadata payloads.
-let rich = PngDecoder::new().with_max_dimensions(8192, 8192).decode(&png)?;
+let limits = DecodeLimits::new().with_max_width(8192).with_max_height(8192);
+let rich = PngDecoder::new().with_limits(limits).decode(&png)?;
 # assert_eq!(decoded.as_samples(), rgb.as_slice());
 # let _ = rich;
 # Ok::<(), gamut_core::Error>(())
@@ -73,7 +74,7 @@ cleaned losslessly, and optionally reordered by modified-Zeng adjacency with
 lossless reductions over every input layout (palette, grey, alpha drop, sub-byte grey packing,
 16→8 demotion), the standard colour/text ancillary chunks, and embedded metadata
 (eXIf/iCCP/iTXt, and the C2PA manifest store with a reserve-then-fill slot). Encoding effort is
-either five independent knobs or one `Preset` rung composing them — `Fast`, `Balanced`, `Small`,
+either five independent knobs or one `Effort` rung composing them — `Fast`, `Balanced`, `Small`,
 `Smallest` — measured in [STATUS.md](STATUS.md#the-effort-ladder-issue-484); the ladder is steep in
 time and shallow in size, so the rung is a real choice rather than a formality. Decoder scope:
 everything above plus Adam7 **decoding** and decode limits.

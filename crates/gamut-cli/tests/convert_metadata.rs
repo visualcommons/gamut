@@ -225,7 +225,8 @@ fn grey_content_under_an_rgb_profile_is_not_reduced_to_greyscale() {
     let mut icc = vec![0u8; 128];
     icc[16..20].copy_from_slice(b"RGB ");
     let png = PngEncoder::new()
-        .with_icc_profile("rgb", &icc)
+        .with_icc_profile_name("rgb")
+        .with_icc_profile(&icc)
         .encode_to_vec(image)
         .unwrap();
 
@@ -589,7 +590,8 @@ fn a_profile_libjxl_refuses_does_not_fail_the_conversion() {
     icc[36..40].copy_from_slice(b"acsp");
     let rgba = vec![255u8; 4 * 4];
     let png = PngEncoder::new()
-        .with_icc_profile("header-only", &icc)
+        .with_icc_profile_name("header-only")
+        .with_icc_profile(&icc)
         .encode_to_vec(ImageRef::<Rgba8>::new(&rgba, Dimensions::new(2, 2).unwrap()).unwrap())
         .unwrap();
 

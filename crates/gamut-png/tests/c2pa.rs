@@ -15,9 +15,40 @@ use common::{
 };
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Indexed8, Rgb8, Rgba8};
 use gamut_png::{
-    PhysicalUnit, PngDecoder, PngEncoder, PngPalette, SegmentKind, SrgbIntent, deconstruct,
-    fill_c2pa,
+    Background, ModificationTime, Palette, PhysicalDimensions, PhysicalUnit, PngDecoder,
+    PngEncodeReport, PngEncoder, SegmentKind, SrgbIntent, deconstruct, fill_c2pa,
 };
+
+/// [`PngEncoder::encode_with_report`] into a fresh buffer, returning the PNG beside its report.
+trait Reported {
+    fn reported(&self, image: ImageRef<'_, Rgb8>) -> (Vec<u8>, PngEncodeReport);
+}
+
+impl Reported for PngEncoder {
+    fn reported(&self, image: ImageRef<'_, Rgb8>) -> (Vec<u8>, PngEncodeReport) {
+        let mut png = Vec::new();
+        let report = self.encode_with_report(image, &mut png).expect("encode");
+        (png, report)
+    }
+}
+
+/// The report counts the bytes this PNG took and spans the store from this PNG's first byte,
+/// not the buffer's: appended after other bytes, it is the report a fresh buffer gets.
+#[test]
+fn the_report_counts_and_spans_from_this_png_not_the_buffer() {
+    let (pixels, dims) = rgb_source();
+    let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
+    let encoder = PngEncoder::new()
+        .with_c2pa_reserved(16)
+        .expect("a reservable length");
+    let (alone, fresh) = encoder.reported(image);
+    assert_eq!(fresh.len, alone.len());
+
+    let mut out = b"prefix".to_vec();
+    let appended = encoder.encode_with_report(image, &mut out).expect("encode");
+    assert_eq!(appended, fresh);
+    assert_eq!(&out[6..], alone.as_slice());
+}
 
 /// A stand-in manifest store of `len` bytes: not all zero, no two runs alike, so a fill is
 /// visible byte for byte. Opaque here, as every store is.
@@ -64,19 +95,26 @@ fn rgb_source() -> (Vec<u8>, Dimensions) {
 /// placement is asserted against all of them at once.
 fn everything_else() -> PngEncoder {
     PngEncoder::new()
-        .with_gamma(1.0 / 2.2)
+        .with_gamma(45_455)
         .with_srgb(SrgbIntent::Perceptual)
-        .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
-        .with_icc_profile("Tiny", &tiny_icc_profile())
+        .with_chromaticities(gamut_png::Chromaticities::new(
+            (31_270, 32_900),
+            (64_000, 33_000),
+            (30_000, 60_000),
+            (15_000, 6_000),
+        ))
+        .with_icc_profile_name("Tiny")
+        .with_icc_profile(&tiny_icc_profile())
         .with_significant_bits(&[8, 8, 8, 8])
-        .with_background_rgb(0, 0, 0)
-        .with_physical_dimensions(2835, 2835, PhysicalUnit::Meter)
-        .with_time(2026, 9, 6, 1, 2, 3)
+        .with_background(Background::Rgb(0, 0, 0))
+        .with_physical_dimensions(PhysicalDimensions::new(2835, 2835, PhysicalUnit::Meter))
+        .with_time(ModificationTime::new(2026, 9, 6, 1, 2, 3))
         .with_text("Title", "placement")
         .with_compressed_text("Comment", "zlib body")
         .with_international_text("Note", "utf-8")
         .with_exif(&tiny_exif())
-        .with_xmp("<x:xmpmeta/>")
+        .with_xmp("<x:xmpmeta/>".as_bytes())
+        .unwrap()
 }
 
 /// C2PA §A.3.2 asks that `caBX` precede `IDAT`; the encoder puts it *immediately* before the first
@@ -111,7 +149,7 @@ fn cabx_is_the_chunk_immediately_before_idat_after_every_other_chunk() {
     assert_eq!(types.last(), Some(b"IEND"));
 
     // The indexed path, whose PLTE and tRNS the caller supplies, orders the same way.
-    let palette = PngPalette::with_transparency(&[[1, 2, 3], [4, 5, 6]], &[9]).expect("palette");
+    let palette = Palette::with_alpha(&[[1, 2, 3], [4, 5, 6]], &[9]).expect("palette");
     let indices = [0u8, 1, 1, 0, 1, 0];
     let image =
         ImageRef::<Indexed8>::new(&indices, Dimensions::new(3, 2).expect("valid")).expect("image");
@@ -142,8 +180,8 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
     let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
     let (png, report) = PngEncoder::new()
         .with_c2pa_reserved(40)
-        .encode_with_report(image)
-        .expect("encode");
+        .expect("a reservable length")
+        .reported(image);
     let span = report.c2pa.expect("a reservation is reported");
     assert_eq!(span.payload.len(), 40);
     assert_eq!(span.chunk.len(), 40 + 12);
@@ -162,30 +200,31 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
 
     let (empty, report) = PngEncoder::new()
         .with_c2pa_reserved(0)
-        .encode_with_report(image)
-        .expect("encode");
+        .expect("a reservable length")
+        .reported(image);
     let span = report.c2pa.expect("an empty reservation is still a chunk");
     assert_eq!(span.payload.len(), 0);
     assert_eq!(&empty[span.chunk.clone()][..8], b"\0\0\0\0caBX");
 }
 
-/// A reservation past PNG §5.3's 2^31 − 1-byte payload bound fails the encode with the documented
-/// `InvalidInput`. `usize::MAX` is the case that pins the order: were the zero run allocated at
-/// the setter, as it once was, this would abort on allocation before the check could answer.
+/// A reservation past PNG §5.3's 2^31 − 1-byte payload bound is refused at the setter with the
+/// documented `InvalidInput`, and one at the bound is accepted. `usize::MAX` is the case that pins
+/// the order: were the zero run allocated at the setter, as it once was, this would abort on
+/// allocation before the check could answer.
 #[test]
-fn an_oversized_reservation_fails_the_encode_without_allocating_it() {
-    let (src, dims) = rgb_source();
-    let image = ImageRef::<Rgb8>::new(&src, dims).expect("matches");
-    let error = PngEncoder::new()
-        .with_c2pa_reserved(usize::MAX)
-        .encode_with_report(image)
-        .expect_err("no chunk carries usize::MAX bytes");
-    assert!(
-        error
-            .to_string()
-            .contains("chunk payload exceeds 2^31 - 1 bytes"),
-        "{error}"
-    );
+fn an_oversized_reservation_is_refused_at_the_setter_without_allocating_it() {
+    for len in [(1 << 31) as usize, usize::MAX] {
+        let error = PngEncoder::new()
+            .with_c2pa_reserved(len)
+            .expect_err("no chunk carries more than 2^31 - 1 bytes");
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("PNG: chunk payload exceeds 2^31 - 1 bytes"),
+            "len {len}"
+        );
+    }
+    assert!(PngEncoder::new().with_c2pa_reserved((1 << 31) - 1).is_ok());
 }
 
 /// The reserve-then-fill contract: encoding again with a store of the reserved length changes
@@ -199,8 +238,8 @@ fn filling_a_reservation_changes_only_the_chunk_span() {
     let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
     let (reserved, report) = everything_else()
         .with_c2pa_reserved(64)
-        .encode_with_report(image)
-        .expect("encode");
+        .expect("a reservable length")
+        .reported(image);
     let span = report.c2pa.expect("span");
     let first = store(64);
     let second: Vec<u8> = first.iter().map(|b| !b).collect();
@@ -294,13 +333,13 @@ fn the_exclusion_span_is_the_whole_chunk_at_known_offsets() {
 fn without_a_store_there_is_no_chunk_and_no_span() {
     let (pixels, dims) = rgb_source();
     let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
-    let (png, report) = everything_else().encode_with_report(image).expect("encode");
+    let (png, report) = everything_else().reported(image);
     assert_eq!(report.c2pa, None);
     assert!(!chunk_types(&png).contains(b"caBX"));
     assert_eq!(deconstruct(&png).expect("deconstruct").c2pa(), None);
     let decoded = PngDecoder::new().decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa, None);
-    assert_eq!(decoded.c2pa_ignored, 0);
+    assert_eq!(decoded.metadata.c2pa, None);
+    assert_eq!(decoded.metadata.c2pa_ignored, 0);
 }
 
 /// Both read entry points surface the store byte for byte, and the last of the two setters
@@ -318,12 +357,13 @@ fn decode_and_metadata_surface_the_store_verbatim_and_the_last_setter_wins() {
     assert_eq!(meta.c2pa.as_deref(), Some(&store[..]));
     assert_eq!(meta.c2pa_ignored, 0);
     let decoded = PngDecoder::new().decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa, meta.c2pa);
-    assert_eq!(decoded.c2pa_ignored, 0);
+    assert_eq!(decoded.metadata.c2pa, meta.c2pa);
+    assert_eq!(decoded.metadata.c2pa_ignored, 0);
 
     let reserved_last = PngEncoder::new()
         .with_c2pa(&store)
         .with_c2pa_reserved(5)
+        .expect("a reservable length")
         .encode_to_vec(image)
         .expect("encode");
     assert_eq!(
@@ -332,6 +372,7 @@ fn decode_and_metadata_surface_the_store_verbatim_and_the_last_setter_wins() {
     );
     let store_last = PngEncoder::new()
         .with_c2pa_reserved(5)
+        .expect("a reservable length")
         .with_c2pa(&store)
         .encode_to_vec(image)
         .expect("encode");
@@ -356,8 +397,8 @@ fn the_first_store_wins_and_a_second_is_counted_not_merged() {
     assert_eq!(meta.c2pa.as_deref(), Some(&b"first"[..]));
     assert_eq!(meta.c2pa_ignored, 1);
     let decoded = PngDecoder::new().decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa.as_deref(), Some(&b"first"[..]));
-    assert_eq!(decoded.c2pa_ignored, 1);
+    assert_eq!(decoded.metadata.c2pa.as_deref(), Some(&b"first"[..]));
+    assert_eq!(decoded.metadata.c2pa_ignored, 1);
 
     let report = deconstruct(&png).expect("deconstruct");
     let span = report.c2pa().expect("span");
@@ -382,8 +423,8 @@ fn a_cabx_after_idat_is_never_the_store_but_is_still_visible() {
     assert_eq!(meta.c2pa, None, "an appended chunk is not the file's store");
     assert_eq!(meta.c2pa_ignored, 1, "but it is counted, not hidden");
     let decoded = PngDecoder::new().decode(&appended).expect("decode");
-    assert_eq!(decoded.c2pa, None);
-    assert_eq!(decoded.c2pa_ignored, 1);
+    assert_eq!(decoded.metadata.c2pa, None);
+    assert_eq!(decoded.metadata.c2pa_ignored, 1);
 
     // The byte accounting still sees the chunk; it just does not call it the store.
     let report = deconstruct(&appended).expect("deconstruct");
@@ -426,7 +467,10 @@ fn ignored_stores_before_and_after_idat_are_counted_together() {
     assert_eq!(meta.c2pa.as_deref(), Some(&b"the store"[..]));
     assert_eq!(meta.c2pa_ignored, 3, "one duplicate plus two appended");
     let decoded = PngDecoder::new().decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa_ignored, 3, "decode agrees with metadata");
+    assert_eq!(
+        decoded.metadata.c2pa_ignored, 3,
+        "decode agrees with metadata"
+    );
 }
 
 /// The reserve-then-fill flow end to end, the way a signer runs it: reserve, take the span,
@@ -441,8 +485,8 @@ fn a_reserved_store_is_filled_in_place_to_the_same_bytes_as_a_second_encode() {
 
     let (mut reserved, report) = everything_else()
         .with_c2pa_reserved(64)
-        .encode_with_report(image)
-        .expect("encode");
+        .expect("a reservable length")
+        .reported(image);
     let span = report.c2pa.expect("span");
     let outside_before: Vec<u8> = (0..reserved.len())
         .filter(|i| !span.chunk.contains(i))
@@ -482,13 +526,14 @@ fn a_reserved_store_is_filled_in_place_to_the_same_bytes_as_a_second_encode() {
 /// accounting, fill in place, read it back.
 #[test]
 fn an_indexed_encode_reserves_and_fills_through_the_report() {
-    let palette = PngPalette::new(&[[1, 2, 3], [4, 5, 6]]).expect("palette");
+    let palette = Palette::new(&[[1, 2, 3], [4, 5, 6]]).expect("palette");
     let indices = [0u8, 1, 1, 0, 1, 0];
     let image =
         ImageRef::<Indexed8>::new(&indices, Dimensions::new(3, 2).expect("valid")).expect("image");
     let mut png = Vec::new();
     PngEncoder::new()
         .with_c2pa_reserved(24)
+        .expect("a reservable length")
         .encode_indexed8(image, &palette, &mut png)
         .expect("encode");
 
@@ -529,7 +574,10 @@ fn a_store_past_the_budget_is_counted_among_the_ignored() {
         "the store the budget skipped is counted"
     );
     let decoded = tight.decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa_ignored, 1, "decode agrees with metadata");
+    assert_eq!(
+        decoded.metadata.c2pa_ignored, 1,
+        "decode agrees with metadata"
+    );
 }
 
 /// What the count deliberately does **not** see: a `caBX` after `IEND` is a trailer, not part of
@@ -610,7 +658,7 @@ fn a_store_past_the_metadata_budget_is_skipped_not_an_error() {
     let tight = PngDecoder::new().with_max_metadata_bytes(999);
     assert_eq!(tight.metadata(&png).expect("metadata").c2pa, None);
     let decoded = tight.decode(&png).expect("decode still succeeds");
-    assert_eq!(decoded.c2pa, None);
+    assert_eq!(decoded.metadata.c2pa, None);
     let typed: ImageBuf<Rgb8> = tight.decode_image(&png).expect("typed decode");
     assert_eq!(typed.as_samples(), pixels);
 }

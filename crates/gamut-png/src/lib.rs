@@ -20,16 +20,17 @@
 //!
 //! With the optional **`metadata`** Cargo feature the EXIF/XMP/ICC/C2PA payloads are wired to the
 //! `gamut-metadata` facade's typed models through its `TypedMetadata` trait, implemented by
-//! [`PngMetadata`] and [`DecodedPng`] (`blocks` / `metadata`); `PngEncoder::with_metadata` /
-//! `PngEncoder::with_encoded_metadata` embed a unified `Metadata`, routing each carrier to the raw
-//! setters. The chunk-for-chunk carry of a [`PngMetadata`] is [`PngEncoder::with_png_metadata`].
+//! [`PngMetadata`] (`blocks` / `metadata`; a full decode holds one as [`DecodedPng::metadata`]),
+//! and its `MetadataSink` trait, implemented by [`PngEncoder`]: `with_metadata` /
+//! `with_encoded_metadata` embed a unified `Metadata`, routing each carrier to the raw setters.
+//! The chunk-for-chunk carry of a [`PngMetadata`] is [`PngEncoder::with_png_metadata`].
 //!
 //! # C2PA manifest store
 //!
 //! A C2PA manifest store travels in the `caBX` chunk (C2PA 2.4 §A.3.2: ancillary, private,
 //! **unsafe to copy**), raw and uncompressed. gamut locates, bounds, carries and reserves it and
 //! never judges it: the store is opaque bytes here, and validation is `c2pa-rs`'s. On read it is
-//! [`DecodedPng::c2pa`] / [`PngMetadata::c2pa`], the first CRC-valid `caBX` before the first
+//! [`PngMetadata::c2pa`] (also [`DecodedPng::metadata`]), the first CRC-valid `caBX` before the first
 //! `IDAT`, under the same metadata budget as every other ancillary payload. On write, [`PngEncoder::with_c2pa`] embeds a
 //! store computed for this file and [`PngEncoder::with_c2pa_reserved`] reserves its place, as the
 //! last chunk before `IDAT`; [`PngEncoder::encode_with_report`] and [`PngReport::c2pa`] name the
@@ -43,11 +44,17 @@
 //! # Pluggable IDAT backends
 //!
 //! The PNG codestream is the concatenated-IDAT **zlib stream**, and it is where PNG spends its
-//! time. The [`backend`] module opens that one seam: push an [`IdatDeflater`] or [`IdatInflater`]
-//! to route it through a hardware DEFLATE engine (Intel QAT/IAA, IBM zEDC, POWER nx-gzip) or a
-//! faster software library (zlib-ng, libdeflate), with [`AbiDeflater`] / [`AbiInflater`] adapting a
-//! [`gamut_codec_abi`] backend. The built-ins ([`gamut_deflate`] and `miniz_oxide`) stay the
+//! time. One seam opens it: push a [`ZlibDeflater`] or [`ZlibInflater`] with
+//! [`PngEncoder::push_backend`] / [`PngDecoder::push_backend`] to route it through a hardware
+//! DEFLATE engine (Intel QAT/IAA, IBM zEDC, POWER nx-gzip) or a faster software library (zlib-ng,
+//! libdeflate), with [`AbiZlibDeflater`] / [`AbiZlibInflater`] adapting a [`gamut_codec_abi`]
+//! backend under [`ZLIB_CODEC_ID`]. The built-ins ([`gamut_deflate`] and `miniz_oxide`) stay the
 //! implicit tail, so an encoder or decoder with nothing pushed behaves exactly as before.
+//!
+//! Backends are tried in push order. [`ZlibInflater::supports`] returning `false` is the only
+//! fall-through; a backend that accepts and then fails ends the job with its error. The decoder
+//! re-checks every inflater's output length against its own budget, so an untrusted backend
+//! cannot turn a zlib bomb into an out-of-memory.
 //!
 //! # Example
 //!
@@ -77,7 +84,7 @@ struct ReadmeDoctests;
 mod abi;
 mod adam7;
 mod ancillary;
-pub mod backend;
+mod backend;
 mod chunk;
 mod color;
 mod crc32;
@@ -96,10 +103,12 @@ mod reduce;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod stages;
+#[cfg(feature = "metadata")]
+mod typed;
 
-pub use abi::{AbiDeflater, AbiInflater, CODEC_ID_ZLIB, PIXEL_FORMAT_FILTERED_BYTES};
+pub use abi::{AbiZlibDeflater, AbiZlibInflater, PIXEL_FORMAT_FILTERED_BYTES, ZLIB_CODEC_ID};
 pub use ancillary::{PhysicalUnit, SrgbIntent};
-pub use backend::{IdatDeflater, IdatInflater, IdatInfo};
+pub use backend::{IdatInfo, ZlibDeflater, ZlibInflater};
 pub use chunk::{
     C2PA_NOT_VALIDATED, C2paSpan, C2paSummary, C2paUnreadChunk, C2paUnreadReason, c2pa_summary,
     fill_c2pa,
@@ -114,12 +123,17 @@ pub use deconstruct::{
     ChunkStats, DEFAULT_MAX_CHUNKS, DeconstructLimits, FilterHistogram, FilterScan, PassStats,
     PngReport, Segment, SegmentKind, SkippedFilterScan, deconstruct, deconstruct_with_limits,
 };
-pub use encoder::{MetadataNotice, PngEncodeReport, PngEncoder, Preset};
+pub use encoder::{Effort, MetadataNotice, PngEncodeReport, PngEncoder};
 pub use filter::{FilterStrategy, FilterType};
+/// The workspace's shared vocabulary, accepted by [`PngDecoder::with_limits`],
+/// [`PngDecoder::with_convert_policy`] and [`PngEncoder::encode_indexed8`] (and returned in
+/// [`DecodedPng::palette`]), re-exported so a caller needs no direct `gamut-core`
+/// dependency to spell them.
+pub use gamut_core::{DecodeLimits, Palette, convert::ConvertPolicy};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
 pub use gamut_deflate::Level;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `PngMetadata::metadata` / `PngEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
-pub use palette::{PaletteOrder, PngPalette};
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataSink, TypedMetadata};
+pub use palette::PaletteOrder;
