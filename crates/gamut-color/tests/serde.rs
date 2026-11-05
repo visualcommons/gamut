@@ -59,6 +59,7 @@ fn public_enums_round_trip_by_variant_name() {
         ChromaSubsampling::Cs422,
         ChromaSubsampling::Cs420,
         ChromaSubsampling::Cs400,
+        ChromaSubsampling::Cs440,
     ]);
 
     assert_eq!(
