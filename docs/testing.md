@@ -238,10 +238,10 @@ The authority and primary technique for each crate are decided **here, once**. A
 in a pull request that says why. "Authority" is the **in-crate** authority — several crates are
 additionally covered by a consuming codec's oracle, which their own `STATUS.md` records. "Fuzz
 entry point" names the untrusted-input surface a fuzz target takes; ☑ marks one a target in
-`tooling/gamut-fuzz` drives today, ☐ one not yet wired (#264). Every entry point listed is wired
-(#311); a crate that gains one adds it here as ☐ until its target lands. A "—" is a crate with no
-untrusted-input surface: `gamut-deflate` is encoder-only (the workspace inflates through
-`miniz_oxide`), and the rest take caller-built values, or a model another row's parser built,
+`tooling/gamut-fuzz` drives today, ☐ one not yet wired (#264). Every entry point #311 found is
+wired; a crate that gains one adds it here as ☐ until its target lands — `gamut-deflate`'s
+`inflate_zlib` (zlib bytes from PNG, TIFF and DNG files) is ☐ until #1144. A "—" is a crate with
+no untrusted-input surface: they take caller-built values, or a model another row's parser built,
 rather than file bytes. The binary, binding
 and stub crates (`gamut`, `gamut-cli`, `gamut-wasm`, `gamut-ffi`, `gamut-jxl-sys`, `gamut-av2`,
 `gamut-vvc`) have no row: they are excluded from the coverage and mutation gates, and the stubs
@@ -258,7 +258,7 @@ carry no function bodies.
 | gamut-color | Little-CMS | differential | — |
 | gamut-icc | Little-CMS | differential | `IccProfile::parse` ☑ |
 | gamut-cmm | Little-CMS | differential | — |
-| gamut-deflate | zlib | differential | — |
+| gamut-deflate | zlib | differential | `inflate_zlib` (`inflate` feature) ☐ |
 | gamut-png | libpng (both directions) | differential + conformance + size contract | `PngDecoder` ☑ |
 | gamut-jpeg | libjpeg-turbo; jpegli (XYB mode) with Little-CMS applying the profile | differential + exact-byte | `JpegDecoder` ☑ |
 | gamut-tiff | libtiff | differential | `TiffDecoder` ☑ |

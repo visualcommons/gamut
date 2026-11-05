@@ -346,10 +346,12 @@ separate path (below).
 
 ## Deflate codec choice (#196)
 
-Encode uses `gamut-deflate` at `Level::Default`; decode uses `miniz_oxide`, bounded to the packed
-length the chunk geometry implies. `gamut-deflate` is deliberately encoder-only (inflating is
-solved and security-sensitive), so the split is permanent, not a staging post — the same one
-`gamut-tiff` and `gamut-png` make.
+Encode uses `gamut-deflate` at `Level::Default`; decode uses `gamut_deflate::inflate_zlib` (its
+`inflate` feature), bounded to the packed length the chunk geometry implies. That inflate is a thin
+bounded wrapper over `miniz_oxide`: `gamut-deflate` deliberately writes no inflater of its own
+(inflating is solved and security-sensitive), so the split between an in-house encoder and a
+`miniz_oxide` decoder is permanent, not a staging post — the same one `gamut-tiff` and
+`gamut-png` make, through the same function (#1064).
 
 Measured by `cargo bench -p gamut-dng --bench compression`, against the `miniz_oxide` level 6 this
 crate encoded with before:
@@ -430,13 +432,14 @@ removed or measured; none is left as an adjective.
   figure for what the export path costs. Earlier revisions of this section quoted 0.3–1.9 % as
   though it were the cost; it was two samples of a quantity at the noise floor.
 - **On the Deflate rows neither arm's inflate is gamut-authored, and both are now pinned.**
-  `gamut-deflate` is deliberately encoder-only, so this crate inflates with `miniz_oxide`, and the
-  SDK includes `<zlib.h>` unconditionally. A `*/deflate` row is therefore **`miniz_oxide` against
-  stock zlib** — not gamut's own codec against the SDK's. The distinction that decides whether the
-  row is reproducible is **pinning**, not authorship: `miniz_oxide` is pinned by `Cargo.lock`, and
-  since #618 the oracle's zlib is pinned by the `third_party/zlib` submodule commit (see "The
-  reference implementation's zlib" below). The rest of this bullet records the state the
-  measurements below were taken in, which is why the pin was taken.
+  This crate inflates through `gamut_deflate::inflate_zlib`, a bounded wrapper over `miniz_oxide`
+  (`gamut-deflate` writes no inflater of its own), and the SDK includes `<zlib.h>`
+  unconditionally. A `*/deflate` row is therefore **`miniz_oxide` against stock zlib** — not
+  gamut's own codec against the SDK's. The distinction that decides whether the row is reproducible
+  is **pinning**, not authorship: `miniz_oxide` is pinned by `Cargo.lock`, and since #618 the
+  oracle's zlib is pinned by the `third_party/zlib` submodule commit (see "The reference
+  implementation's zlib" below). The rest of this bullet records the state the measurements below
+  were taken in, which is why the pin was taken.
 
   Until #618 the oracle's `build.rs` linked the **system** libz dynamically (`-lz`), and that was
   pinned by nothing. Not by a version: the

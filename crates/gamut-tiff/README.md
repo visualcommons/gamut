@@ -17,8 +17,8 @@ is:
   [`gamut-webp`](../gamut-webp) (RIFF) — there is no separate box/chunk container. That IFD core
   is the shared [`gamut-ifd`](../gamut-ifd) primitive (also the basis for EXIF and DNG), consumed
   with its `bigtiff` feature; codec primitives come from [`gamut-core`](../gamut-core),
-  [`gamut-bitstream`](../gamut-bitstream), [`gamut-deflate`](../gamut-deflate), and the bounded
-  pure-Rust `miniz_oxide` inflater.
+  [`gamut-bitstream`](../gamut-bitstream), and [`gamut-deflate`](../gamut-deflate) — its encoder,
+  and its bounded `inflate_zlib` over the pure-Rust `miniz_oxide` inflater.
 - **Permissively licensed**, matching the royalty-free TIFF format.
 
 Unlike the video-derived still-image codecs in the workspace, TIFF is **natively a still-image
