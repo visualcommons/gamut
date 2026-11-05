@@ -184,8 +184,12 @@ pub enum C2paBoxPosition {
 }
 
 impl C2paBoxPosition {
-    /// The clause a report adds to this box's line, or `None` when the box sits where §A.5.3 puts
-    /// one.
+    /// The clause a report adds to this box's line, or `None` when the box was reached before any
+    /// `mdat`.
+    ///
+    /// `None` is not a §A.5.3 conformance verdict: a box after a top-level `moov` and before the
+    /// first `mdat` also reports [`BeforeMediaData`](Self::BeforeMediaData) and so gets `None`,
+    /// although §A.5.3 forbids that placement.
     #[must_use]
     pub const fn note(self) -> Option<&'static str> {
         match self {
