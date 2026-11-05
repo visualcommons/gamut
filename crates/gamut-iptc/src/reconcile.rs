@@ -238,7 +238,7 @@ mod tests {
     fn datetime_splits_and_joins() {
         let mut pm = PhotoMetadata::new();
         pm.set_simple(
-            crate::schema::ns::PHOTOSHOP,
+            gamut_xmp::WellKnownNs::Photoshop.uri(),
             "DateCreated",
             "1990-01-27T13:30:15+01:00",
         );
@@ -248,7 +248,7 @@ mod tests {
         // ...and back the other way.
         let merged = merge(ConflictPolicy::default(), Some(&block), None).unwrap();
         assert_eq!(
-            merged.simple(crate::schema::ns::PHOTOSHOP, "DateCreated"),
+            merged.simple(gamut_xmp::WellKnownNs::Photoshop.uri(), "DateCreated"),
             Some("1990-01-27T13:30:15+01:00")
         );
     }

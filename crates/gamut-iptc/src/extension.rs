@@ -217,10 +217,9 @@
 
 use std::borrow::Borrow;
 
-use gamut_xmp::{XML_NAMESPACE, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
+use gamut_xmp::{WellKnownNs, XML_NAMESPACE, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
 use crate::photo_metadata::PhotoMetadata;
-use crate::schema::ns;
 
 // --- Reading a structure's field list, keeping only what the writer can reproduce -------------
 
@@ -706,14 +705,14 @@ impl CreatorContactInfo {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            address: r.text(ns::IPTC_CORE, "CiAdrExtadr"),
-            city: r.text(ns::IPTC_CORE, "CiAdrCity"),
-            country: r.text(ns::IPTC_CORE, "CiAdrCtry"),
-            postal_code: r.text(ns::IPTC_CORE, "CiAdrPcode"),
-            region: r.text(ns::IPTC_CORE, "CiAdrRegion"),
-            email: r.text(ns::IPTC_CORE, "CiEmailWork"),
-            phone: r.text(ns::IPTC_CORE, "CiTelWork"),
-            web_url: r.text(ns::IPTC_CORE, "CiUrlWork"),
+            address: r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiAdrExtadr"),
+            city: r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiAdrCity"),
+            country: r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiAdrCtry"),
+            postal_code: r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiAdrPcode"),
+            region: r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiAdrRegion"),
+            email: r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiEmailWork"),
+            phone: r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiTelWork"),
+            web_url: r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiUrlWork"),
             other: r.other(),
         }
     }
@@ -723,19 +722,54 @@ impl CreatorContactInfo {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_text(&mut f, ns::IPTC_CORE, "CiAdrExtadr", self.address.as_ref());
-        put_text(&mut f, ns::IPTC_CORE, "CiAdrCity", self.city.as_ref());
-        put_text(&mut f, ns::IPTC_CORE, "CiAdrCtry", self.country.as_ref());
         put_text(
             &mut f,
-            ns::IPTC_CORE,
+            WellKnownNs::Iptc4XmpCore.uri(),
+            "CiAdrExtadr",
+            self.address.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpCore.uri(),
+            "CiAdrCity",
+            self.city.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpCore.uri(),
+            "CiAdrCtry",
+            self.country.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpCore.uri(),
             "CiAdrPcode",
             self.postal_code.as_ref(),
         );
-        put_text(&mut f, ns::IPTC_CORE, "CiAdrRegion", self.region.as_ref());
-        put_text(&mut f, ns::IPTC_CORE, "CiEmailWork", self.email.as_ref());
-        put_text(&mut f, ns::IPTC_CORE, "CiTelWork", self.phone.as_ref());
-        put_text(&mut f, ns::IPTC_CORE, "CiUrlWork", self.web_url.as_ref());
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpCore.uri(),
+            "CiAdrRegion",
+            self.region.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpCore.uri(),
+            "CiEmailWork",
+            self.email.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpCore.uri(),
+            "CiTelWork",
+            self.phone.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpCore.uri(),
+            "CiUrlWork",
+            self.web_url.as_ref(),
+        );
         put_other(&mut f, &self.other);
         XmpValue::Structured(f)
     }
@@ -805,23 +839,30 @@ impl ArtworkOrObject {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            title: r.lang_alt(ns::IPTC_EXT, "AOTitle"),
-            creator_names: r.list(ns::IPTC_EXT, "AOCreator", true),
-            creator_identifiers: r.list(ns::IPTC_EXT, "AOCreatorId", true),
-            date_created: r.text(ns::IPTC_EXT, "AODateCreated"),
-            circa_date_created: r.text(ns::IPTC_EXT, "AOCircaDateCreated"),
-            copyright_notice: r.text(ns::IPTC_EXT, "AOCopyrightNotice"),
-            current_copyright_owner_name: r.text(ns::IPTC_EXT, "AOCurrentCopyrightOwnerName"),
-            current_copyright_owner_identifier: r.text(ns::IPTC_EXT, "AOCurrentCopyrightOwnerId"),
-            current_licensor_name: r.text(ns::IPTC_EXT, "AOCurrentLicensorName"),
-            current_licensor_identifier: r.text(ns::IPTC_EXT, "AOCurrentLicensorId"),
-            content_description: r.lang_alt(ns::IPTC_EXT, "AOContentDescription"),
-            contribution_description: r.lang_alt(ns::IPTC_EXT, "AOContributionDescription"),
-            physical_description: r.lang_alt(ns::IPTC_EXT, "AOPhysicalDescription"),
-            source: r.text(ns::IPTC_EXT, "AOSource"),
-            source_inventory_number: r.text(ns::IPTC_EXT, "AOSourceInvNo"),
-            source_inventory_url: r.text(ns::IPTC_EXT, "AOSourceInvURL"),
-            style_periods: r.list(ns::IPTC_EXT, "AOStylePeriod", false),
+            title: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "AOTitle"),
+            creator_names: r.list(WellKnownNs::Iptc4XmpExt.uri(), "AOCreator", true),
+            creator_identifiers: r.list(WellKnownNs::Iptc4XmpExt.uri(), "AOCreatorId", true),
+            date_created: r.text(WellKnownNs::Iptc4XmpExt.uri(), "AODateCreated"),
+            circa_date_created: r.text(WellKnownNs::Iptc4XmpExt.uri(), "AOCircaDateCreated"),
+            copyright_notice: r.text(WellKnownNs::Iptc4XmpExt.uri(), "AOCopyrightNotice"),
+            current_copyright_owner_name: r.text(
+                WellKnownNs::Iptc4XmpExt.uri(),
+                "AOCurrentCopyrightOwnerName",
+            ),
+            current_copyright_owner_identifier: r
+                .text(WellKnownNs::Iptc4XmpExt.uri(), "AOCurrentCopyrightOwnerId"),
+            current_licensor_name: r.text(WellKnownNs::Iptc4XmpExt.uri(), "AOCurrentLicensorName"),
+            current_licensor_identifier: r
+                .text(WellKnownNs::Iptc4XmpExt.uri(), "AOCurrentLicensorId"),
+            content_description: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "AOContentDescription"),
+            contribution_description: r
+                .lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "AOContributionDescription"),
+            physical_description: r
+                .lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "AOPhysicalDescription"),
+            source: r.text(WellKnownNs::Iptc4XmpExt.uri(), "AOSource"),
+            source_inventory_number: r.text(WellKnownNs::Iptc4XmpExt.uri(), "AOSourceInvNo"),
+            source_inventory_url: r.text(WellKnownNs::Iptc4XmpExt.uri(), "AOSourceInvURL"),
+            style_periods: r.list(WellKnownNs::Iptc4XmpExt.uri(), "AOStylePeriod", false),
             other: r.other(),
         }
     }
@@ -835,91 +876,107 @@ impl ArtworkOrObject {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_lang_alt(&mut f, ns::IPTC_EXT, "AOTitle", self.title.as_ref());
-        put_list(&mut f, ns::IPTC_EXT, "AOCreator", true, &self.creator_names);
+        put_lang_alt(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "AOTitle",
+            self.title.as_ref(),
+        );
         put_list(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "AOCreator",
+            true,
+            &self.creator_names,
+        );
+        put_list(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOCreatorId",
             true,
             &self.creator_identifiers,
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AODateCreated",
             self.date_created.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOCircaDateCreated",
             self.circa_date_created.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOCopyrightNotice",
             self.copyright_notice.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOCurrentCopyrightOwnerName",
             self.current_copyright_owner_name.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOCurrentCopyrightOwnerId",
             self.current_copyright_owner_identifier.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOCurrentLicensorName",
             self.current_licensor_name.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOCurrentLicensorId",
             self.current_licensor_identifier.as_ref(),
         );
         put_lang_alt(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOContentDescription",
             self.content_description.as_ref(),
         );
         put_lang_alt(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOContributionDescription",
             self.contribution_description.as_ref(),
         );
         put_lang_alt(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOPhysicalDescription",
             self.physical_description.as_ref(),
         );
-        put_text(&mut f, ns::IPTC_EXT, "AOSource", self.source.as_ref());
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "AOSource",
+            self.source.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOSourceInvNo",
             self.source_inventory_number.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOSourceInvURL",
             self.source_inventory_url.as_ref(),
         );
         put_list(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOStylePeriod",
             false,
             &self.style_periods,
@@ -988,20 +1045,20 @@ impl Licensor {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifier: r.text(ns::PLUS, "LicensorID"),
-            name: r.text(ns::PLUS, "LicensorName"),
-            address: r.text(ns::PLUS, "LicensorStreetAddress"),
-            address_detail: r.text(ns::PLUS, "LicensorExtendedAddress"),
-            city: r.text(ns::PLUS, "LicensorCity"),
-            region: r.text(ns::PLUS, "LicensorRegion"),
-            postal_code: r.text(ns::PLUS, "LicensorPostalCode"),
-            country: r.text(ns::PLUS, "LicensorCountry"),
-            telephone_type1: r.text(ns::PLUS, "LicensorTelephoneType1"),
-            telephone1: r.text(ns::PLUS, "LicensorTelephone1"),
-            telephone_type2: r.text(ns::PLUS, "LicensorTelephoneType2"),
-            telephone2: r.text(ns::PLUS, "LicensorTelephone2"),
-            email: r.text(ns::PLUS, "LicensorEmail"),
-            web_url: r.text(ns::PLUS, "LicensorURL"),
+            identifier: r.text(WellKnownNs::Plus.uri(), "LicensorID"),
+            name: r.text(WellKnownNs::Plus.uri(), "LicensorName"),
+            address: r.text(WellKnownNs::Plus.uri(), "LicensorStreetAddress"),
+            address_detail: r.text(WellKnownNs::Plus.uri(), "LicensorExtendedAddress"),
+            city: r.text(WellKnownNs::Plus.uri(), "LicensorCity"),
+            region: r.text(WellKnownNs::Plus.uri(), "LicensorRegion"),
+            postal_code: r.text(WellKnownNs::Plus.uri(), "LicensorPostalCode"),
+            country: r.text(WellKnownNs::Plus.uri(), "LicensorCountry"),
+            telephone_type1: r.text(WellKnownNs::Plus.uri(), "LicensorTelephoneType1"),
+            telephone1: r.text(WellKnownNs::Plus.uri(), "LicensorTelephone1"),
+            telephone_type2: r.text(WellKnownNs::Plus.uri(), "LicensorTelephoneType2"),
+            telephone2: r.text(WellKnownNs::Plus.uri(), "LicensorTelephone2"),
+            email: r.text(WellKnownNs::Plus.uri(), "LicensorEmail"),
+            web_url: r.text(WellKnownNs::Plus.uri(), "LicensorURL"),
             other: r.other(),
         }
     }
@@ -1011,55 +1068,90 @@ impl Licensor {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_text(&mut f, ns::PLUS, "LicensorID", self.identifier.as_ref());
-        put_text(&mut f, ns::PLUS, "LicensorName", self.name.as_ref());
         put_text(
             &mut f,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
+            "LicensorID",
+            self.identifier.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
+            "LicensorName",
+            self.name.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
             "LicensorStreetAddress",
             self.address.as_ref(),
         );
         put_text(
             &mut f,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "LicensorExtendedAddress",
             self.address_detail.as_ref(),
         );
-        put_text(&mut f, ns::PLUS, "LicensorCity", self.city.as_ref());
-        put_text(&mut f, ns::PLUS, "LicensorRegion", self.region.as_ref());
         put_text(
             &mut f,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
+            "LicensorCity",
+            self.city.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
+            "LicensorRegion",
+            self.region.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
             "LicensorPostalCode",
             self.postal_code.as_ref(),
         );
-        put_text(&mut f, ns::PLUS, "LicensorCountry", self.country.as_ref());
         put_text(
             &mut f,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
+            "LicensorCountry",
+            self.country.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
             "LicensorTelephoneType1",
             self.telephone_type1.as_ref(),
         );
         put_text(
             &mut f,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "LicensorTelephone1",
             self.telephone1.as_ref(),
         );
         put_text(
             &mut f,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "LicensorTelephoneType2",
             self.telephone_type2.as_ref(),
         );
         put_text(
             &mut f,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "LicensorTelephone2",
             self.telephone2.as_ref(),
         );
-        put_text(&mut f, ns::PLUS, "LicensorEmail", self.email.as_ref());
-        put_text(&mut f, ns::PLUS, "LicensorURL", self.web_url.as_ref());
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
+            "LicensorEmail",
+            self.email.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
+            "LicensorURL",
+            self.web_url.as_ref(),
+        );
         put_other(&mut f, &self.other);
         XmpValue::Structured(f)
     }
@@ -1097,8 +1189,8 @@ impl Entity {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifiers: r.list(ns::XMP, "Identifier", false),
-            name: r.lang_alt(ns::IPTC_EXT, "Name"),
+            identifiers: r.list(WellKnownNs::Xmp.uri(), "Identifier", false),
+            name: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "Name"),
             other: r.other(),
         }
     }
@@ -1108,8 +1200,19 @@ impl Entity {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_list(&mut f, ns::XMP, "Identifier", false, &self.identifiers);
-        put_lang_alt(&mut f, ns::IPTC_EXT, "Name", self.name.as_ref());
+        put_list(
+            &mut f,
+            WellKnownNs::Xmp.uri(),
+            "Identifier",
+            false,
+            &self.identifiers,
+        );
+        put_lang_alt(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "Name",
+            self.name.as_ref(),
+        );
         put_other(&mut f, &self.other);
         XmpValue::Structured(f)
     }
@@ -1141,8 +1244,8 @@ impl RegionBoundaryPoint {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            x: r.number(ns::IPTC_EXT, "rbX"),
-            y: r.number(ns::IPTC_EXT, "rbY"),
+            x: r.number(WellKnownNs::Iptc4XmpExt.uri(), "rbX"),
+            y: r.number(WellKnownNs::Iptc4XmpExt.uri(), "rbY"),
             other: r.other(),
         }
     }
@@ -1155,8 +1258,8 @@ impl RegionBoundaryPoint {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_number(&mut f, ns::IPTC_EXT, "rbX", self.x);
-        put_number(&mut f, ns::IPTC_EXT, "rbY", self.y);
+        put_number(&mut f, WellKnownNs::Iptc4XmpExt.uri(), "rbX", self.x);
+        put_number(&mut f, WellKnownNs::Iptc4XmpExt.uri(), "rbY", self.y);
         put_other(&mut f, &self.other);
         XmpValue::Structured(f)
     }
@@ -1204,15 +1307,15 @@ impl RegionBoundary {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            shape: r.text(ns::IPTC_EXT, "rbShape"),
-            unit: r.text(ns::IPTC_EXT, "rbUnit"),
-            x: r.number(ns::IPTC_EXT, "rbX"),
-            y: r.number(ns::IPTC_EXT, "rbY"),
-            width: r.number(ns::IPTC_EXT, "rbW"),
-            height: r.number(ns::IPTC_EXT, "rbH"),
-            radius: r.number(ns::IPTC_EXT, "rbRx"),
+            shape: r.text(WellKnownNs::Iptc4XmpExt.uri(), "rbShape"),
+            unit: r.text(WellKnownNs::Iptc4XmpExt.uri(), "rbUnit"),
+            x: r.number(WellKnownNs::Iptc4XmpExt.uri(), "rbX"),
+            y: r.number(WellKnownNs::Iptc4XmpExt.uri(), "rbY"),
+            width: r.number(WellKnownNs::Iptc4XmpExt.uri(), "rbW"),
+            height: r.number(WellKnownNs::Iptc4XmpExt.uri(), "rbH"),
+            radius: r.number(WellKnownNs::Iptc4XmpExt.uri(), "rbRx"),
             vertices: r.nested_array(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "rbVertices",
                 true,
                 RegionBoundaryPoint::from_fields,
@@ -1232,16 +1335,26 @@ impl RegionBoundary {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_text(&mut f, ns::IPTC_EXT, "rbShape", self.shape.as_ref());
-        put_text(&mut f, ns::IPTC_EXT, "rbUnit", self.unit.as_ref());
-        put_number(&mut f, ns::IPTC_EXT, "rbX", self.x);
-        put_number(&mut f, ns::IPTC_EXT, "rbY", self.y);
-        put_number(&mut f, ns::IPTC_EXT, "rbW", self.width);
-        put_number(&mut f, ns::IPTC_EXT, "rbH", self.height);
-        put_number(&mut f, ns::IPTC_EXT, "rbRx", self.radius);
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "rbShape",
+            self.shape.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "rbUnit",
+            self.unit.as_ref(),
+        );
+        put_number(&mut f, WellKnownNs::Iptc4XmpExt.uri(), "rbX", self.x);
+        put_number(&mut f, WellKnownNs::Iptc4XmpExt.uri(), "rbY", self.y);
+        put_number(&mut f, WellKnownNs::Iptc4XmpExt.uri(), "rbW", self.width);
+        put_number(&mut f, WellKnownNs::Iptc4XmpExt.uri(), "rbH", self.height);
+        put_number(&mut f, WellKnownNs::Iptc4XmpExt.uri(), "rbRx", self.radius);
         put_nested_array(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "rbVertices",
             true,
             self.vertices
@@ -1294,22 +1407,22 @@ impl ImageRegion {
         let mut r = Reader::new(f);
         Self {
             boundary: r.nested(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "RegionBoundary",
                 RegionBoundary::from_fields,
                 RegionBoundary::to_xmp,
             ),
-            identifier: r.text(ns::IPTC_EXT, "rId"),
-            name: r.lang_alt(ns::IPTC_EXT, "Name"),
+            identifier: r.text(WellKnownNs::Iptc4XmpExt.uri(), "rId"),
+            name: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "Name"),
             content_types: r.nested_array(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "rCtype",
                 false,
                 Entity::from_fields,
                 Entity::to_xmp,
             ),
             roles: r.nested_array(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "rRole",
                 false,
                 Entity::from_fields,
@@ -1326,22 +1439,32 @@ impl ImageRegion {
         let mut f = Vec::new();
         put_nested(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "RegionBoundary",
             self.boundary.as_ref().map(RegionBoundary::to_xmp),
         );
-        put_text(&mut f, ns::IPTC_EXT, "rId", self.identifier.as_ref());
-        put_lang_alt(&mut f, ns::IPTC_EXT, "Name", self.name.as_ref());
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "rId",
+            self.identifier.as_ref(),
+        );
+        put_lang_alt(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "Name",
+            self.name.as_ref(),
+        );
         put_nested_array(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "rCtype",
             false,
             self.content_types.iter().map(Entity::to_xmp).collect(),
         );
         put_nested_array(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "rRole",
             false,
             self.roles.iter().map(Entity::to_xmp).collect(),
@@ -1412,18 +1535,18 @@ impl Location {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifiers: r.list(ns::IPTC_EXT, "LocationId", false),
-            name: r.lang_alt(ns::IPTC_EXT, "LocationName"),
-            sublocation: r.text(ns::IPTC_EXT, "Sublocation"),
-            city: r.text(ns::IPTC_EXT, "City"),
-            province_state: r.text(ns::IPTC_EXT, "ProvinceState"),
-            country_name: r.text(ns::IPTC_EXT, "CountryName"),
-            country_code: r.text(ns::IPTC_EXT, "CountryCode"),
-            world_region: r.text(ns::IPTC_EXT, "WorldRegion"),
-            gps_latitude: r.text(ns::EXIF, "GPSLatitude"),
-            gps_longitude: r.text(ns::EXIF, "GPSLongitude"),
-            gps_altitude: r.text(ns::EXIF, "GPSAltitude"),
-            gps_altitude_ref: r.text(ns::EXIF, "GPSAltitudeRef"),
+            identifiers: r.list(WellKnownNs::Iptc4XmpExt.uri(), "LocationId", false),
+            name: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "LocationName"),
+            sublocation: r.text(WellKnownNs::Iptc4XmpExt.uri(), "Sublocation"),
+            city: r.text(WellKnownNs::Iptc4XmpExt.uri(), "City"),
+            province_state: r.text(WellKnownNs::Iptc4XmpExt.uri(), "ProvinceState"),
+            country_name: r.text(WellKnownNs::Iptc4XmpExt.uri(), "CountryName"),
+            country_code: r.text(WellKnownNs::Iptc4XmpExt.uri(), "CountryCode"),
+            world_region: r.text(WellKnownNs::Iptc4XmpExt.uri(), "WorldRegion"),
+            gps_latitude: r.text(WellKnownNs::Exif.uri(), "GPSLatitude"),
+            gps_longitude: r.text(WellKnownNs::Exif.uri(), "GPSLongitude"),
+            gps_altitude: r.text(WellKnownNs::Exif.uri(), "GPSAltitude"),
+            gps_altitude_ref: r.text(WellKnownNs::Exif.uri(), "GPSAltitudeRef"),
             other: r.other(),
         }
     }
@@ -1433,50 +1556,76 @@ impl Location {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_list(&mut f, ns::IPTC_EXT, "LocationId", false, &self.identifiers);
-        put_lang_alt(&mut f, ns::IPTC_EXT, "LocationName", self.name.as_ref());
+        put_list(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "LocationId",
+            false,
+            &self.identifiers,
+        );
+        put_lang_alt(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "LocationName",
+            self.name.as_ref(),
+        );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "Sublocation",
             self.sublocation.as_ref(),
         );
-        put_text(&mut f, ns::IPTC_EXT, "City", self.city.as_ref());
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "City",
+            self.city.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "ProvinceState",
             self.province_state.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "CountryName",
             self.country_name.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "CountryCode",
             self.country_code.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "WorldRegion",
             self.world_region.as_ref(),
         );
-        put_text(&mut f, ns::EXIF, "GPSLatitude", self.gps_latitude.as_ref());
         put_text(
             &mut f,
-            ns::EXIF,
+            WellKnownNs::Exif.uri(),
+            "GPSLatitude",
+            self.gps_latitude.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Exif.uri(),
             "GPSLongitude",
             self.gps_longitude.as_ref(),
         );
-        put_text(&mut f, ns::EXIF, "GPSAltitude", self.gps_altitude.as_ref());
         put_text(
             &mut f,
-            ns::EXIF,
+            WellKnownNs::Exif.uri(),
+            "GPSAltitude",
+            self.gps_altitude.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Exif.uri(),
             "GPSAltitudeRef",
             self.gps_altitude_ref.as_ref(),
         );
@@ -1521,10 +1670,10 @@ impl CvTerm {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            vocabulary_identifier: r.text(ns::IPTC_EXT, "CvId"),
-            identifier: r.text(ns::IPTC_EXT, "CvTermId"),
-            name: r.lang_alt(ns::IPTC_EXT, "CvTermName"),
-            refined_about: r.text(ns::IPTC_EXT, "CvTermRefinedAbout"),
+            vocabulary_identifier: r.text(WellKnownNs::Iptc4XmpExt.uri(), "CvId"),
+            identifier: r.text(WellKnownNs::Iptc4XmpExt.uri(), "CvTermId"),
+            name: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "CvTermName"),
+            refined_about: r.text(WellKnownNs::Iptc4XmpExt.uri(), "CvTermRefinedAbout"),
             other: r.other(),
         }
     }
@@ -1536,15 +1685,25 @@ impl CvTerm {
         let mut f = Vec::new();
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "CvId",
             self.vocabulary_identifier.as_ref(),
         );
-        put_text(&mut f, ns::IPTC_EXT, "CvTermId", self.identifier.as_ref());
-        put_lang_alt(&mut f, ns::IPTC_EXT, "CvTermName", self.name.as_ref());
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "CvTermId",
+            self.identifier.as_ref(),
+        );
+        put_lang_alt(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "CvTermName",
+            self.name.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "CvTermRefinedAbout",
             self.refined_about.as_ref(),
         );
@@ -1589,16 +1748,16 @@ impl Person {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifiers: r.list(ns::IPTC_EXT, "PersonId", false),
-            name: r.lang_alt(ns::IPTC_EXT, "PersonName"),
+            identifiers: r.list(WellKnownNs::Iptc4XmpExt.uri(), "PersonId", false),
+            name: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "PersonName"),
             characteristics: r.nested_array(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "PersonCharacteristic",
                 false,
                 CvTerm::from_fields,
                 CvTerm::to_xmp,
             ),
-            description: r.lang_alt(ns::IPTC_EXT, "PersonDescription"),
+            description: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "PersonDescription"),
             other: r.other(),
         }
     }
@@ -1609,18 +1768,29 @@ impl Person {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_list(&mut f, ns::IPTC_EXT, "PersonId", false, &self.identifiers);
-        put_lang_alt(&mut f, ns::IPTC_EXT, "PersonName", self.name.as_ref());
+        put_list(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "PersonId",
+            false,
+            &self.identifiers,
+        );
+        put_lang_alt(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "PersonName",
+            self.name.as_ref(),
+        );
         put_nested_array(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "PersonCharacteristic",
             false,
             self.characteristics.iter().map(CvTerm::to_xmp).collect(),
         );
         put_lang_alt(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "PersonDescription",
             self.description.as_ref(),
         );
@@ -1664,9 +1834,9 @@ impl EntityWithRole {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifiers: r.list(ns::XMP, "Identifier", false),
-            name: r.lang_alt(ns::IPTC_EXT, "Name"),
-            roles: r.list(ns::IPTC_EXT, "Role", false),
+            identifiers: r.list(WellKnownNs::Xmp.uri(), "Identifier", false),
+            name: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "Name"),
+            roles: r.list(WellKnownNs::Iptc4XmpExt.uri(), "Role", false),
             other: r.other(),
         }
     }
@@ -1676,9 +1846,26 @@ impl EntityWithRole {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_list(&mut f, ns::XMP, "Identifier", false, &self.identifiers);
-        put_lang_alt(&mut f, ns::IPTC_EXT, "Name", self.name.as_ref());
-        put_list(&mut f, ns::IPTC_EXT, "Role", false, &self.roles);
+        put_list(
+            &mut f,
+            WellKnownNs::Xmp.uri(),
+            "Identifier",
+            false,
+            &self.identifiers,
+        );
+        put_lang_alt(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "Name",
+            self.name.as_ref(),
+        );
+        put_list(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "Role",
+            false,
+            &self.roles,
+        );
         put_other(&mut f, &self.other);
         XmpValue::Structured(f)
     }
@@ -1719,10 +1906,10 @@ impl Product {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifiers: r.list(ns::IPTC_EXT, "ProductId", false),
-            name: r.lang_alt(ns::IPTC_EXT, "ProductName"),
-            gtin: r.text(ns::IPTC_EXT, "ProductGTIN"),
-            description: r.lang_alt(ns::IPTC_EXT, "ProductDescription"),
+            identifiers: r.list(WellKnownNs::Iptc4XmpExt.uri(), "ProductId", false),
+            name: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "ProductName"),
+            gtin: r.text(WellKnownNs::Iptc4XmpExt.uri(), "ProductGTIN"),
+            description: r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "ProductDescription"),
             other: r.other(),
         }
     }
@@ -1732,12 +1919,28 @@ impl Product {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_list(&mut f, ns::IPTC_EXT, "ProductId", false, &self.identifiers);
-        put_lang_alt(&mut f, ns::IPTC_EXT, "ProductName", self.name.as_ref());
-        put_text(&mut f, ns::IPTC_EXT, "ProductGTIN", self.gtin.as_ref());
+        put_list(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "ProductId",
+            false,
+            &self.identifiers,
+        );
         put_lang_alt(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "ProductName",
+            self.name.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "ProductGTIN",
+            self.gtin.as_ref(),
+        );
+        put_lang_alt(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "ProductDescription",
             self.description.as_ref(),
         );
@@ -1779,9 +1982,9 @@ impl RegistryEntry {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            item_identifier: r.text(ns::IPTC_EXT, "RegItemId"),
-            organisation_identifier: r.text(ns::IPTC_EXT, "RegOrgId"),
-            role: r.text(ns::IPTC_EXT, "RegEntryRole"),
+            item_identifier: r.text(WellKnownNs::Iptc4XmpExt.uri(), "RegItemId"),
+            organisation_identifier: r.text(WellKnownNs::Iptc4XmpExt.uri(), "RegOrgId"),
+            role: r.text(WellKnownNs::Iptc4XmpExt.uri(), "RegEntryRole"),
             other: r.other(),
         }
     }
@@ -1793,17 +1996,22 @@ impl RegistryEntry {
         let mut f = Vec::new();
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "RegItemId",
             self.item_identifier.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "RegOrgId",
             self.organisation_identifier.as_ref(),
         );
-        put_text(&mut f, ns::IPTC_EXT, "RegEntryRole", self.role.as_ref());
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "RegEntryRole",
+            self.role.as_ref(),
+        );
         put_other(&mut f, &self.other);
         XmpValue::Structured(f)
     }
@@ -1842,9 +2050,9 @@ impl EmbeddedRightsExpression {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            expression: r.text(ns::IPTC_EXT, "EncRightsExpr"),
-            encoding_type: r.text(ns::IPTC_EXT, "RightsExprEncType"),
-            language_identifier: r.text(ns::IPTC_EXT, "RightsExprLangId"),
+            expression: r.text(WellKnownNs::Iptc4XmpExt.uri(), "EncRightsExpr"),
+            encoding_type: r.text(WellKnownNs::Iptc4XmpExt.uri(), "RightsExprEncType"),
+            language_identifier: r.text(WellKnownNs::Iptc4XmpExt.uri(), "RightsExprLangId"),
             other: r.other(),
         }
     }
@@ -1856,19 +2064,19 @@ impl EmbeddedRightsExpression {
         let mut f = Vec::new();
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "EncRightsExpr",
             self.expression.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "RightsExprEncType",
             self.encoding_type.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "RightsExprLangId",
             self.language_identifier.as_ref(),
         );
@@ -1910,9 +2118,9 @@ impl LinkedRightsExpression {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            url: r.text(ns::IPTC_EXT, "LinkedRightsExpr"),
-            encoding_type: r.text(ns::IPTC_EXT, "RightsExprEncType"),
-            language_identifier: r.text(ns::IPTC_EXT, "RightsExprLangId"),
+            url: r.text(WellKnownNs::Iptc4XmpExt.uri(), "LinkedRightsExpr"),
+            encoding_type: r.text(WellKnownNs::Iptc4XmpExt.uri(), "RightsExprEncType"),
+            language_identifier: r.text(WellKnownNs::Iptc4XmpExt.uri(), "RightsExprLangId"),
             other: r.other(),
         }
     }
@@ -1922,16 +2130,21 @@ impl LinkedRightsExpression {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_text(&mut f, ns::IPTC_EXT, "LinkedRightsExpr", self.url.as_ref());
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "LinkedRightsExpr",
+            self.url.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "RightsExprEncType",
             self.encoding_type.as_ref(),
         );
         put_text(
             &mut f,
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "RightsExprLangId",
             self.language_identifier.as_ref(),
         );
@@ -1975,8 +2188,8 @@ impl CopyrightOwner {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifier: r.text(ns::PLUS, "CopyrightOwnerID"),
-            name: r.text(ns::PLUS, "CopyrightOwnerName"),
+            identifier: r.text(WellKnownNs::Plus.uri(), "CopyrightOwnerID"),
+            name: r.text(WellKnownNs::Plus.uri(), "CopyrightOwnerName"),
             other: r.other(),
         }
     }
@@ -1988,11 +2201,16 @@ impl CopyrightOwner {
         let mut f = Vec::new();
         put_text(
             &mut f,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "CopyrightOwnerID",
             self.identifier.as_ref(),
         );
-        put_text(&mut f, ns::PLUS, "CopyrightOwnerName", self.name.as_ref());
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
+            "CopyrightOwnerName",
+            self.name.as_ref(),
+        );
         put_other(&mut f, &self.other);
         XmpValue::Structured(f)
     }
@@ -2031,8 +2249,8 @@ impl ImageCreator {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifier: r.text(ns::PLUS, "ImageCreatorID"),
-            name: r.text(ns::PLUS, "ImageCreatorName"),
+            identifier: r.text(WellKnownNs::Plus.uri(), "ImageCreatorID"),
+            name: r.text(WellKnownNs::Plus.uri(), "ImageCreatorName"),
             other: r.other(),
         }
     }
@@ -2042,8 +2260,18 @@ impl ImageCreator {
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
-        put_text(&mut f, ns::PLUS, "ImageCreatorID", self.identifier.as_ref());
-        put_text(&mut f, ns::PLUS, "ImageCreatorName", self.name.as_ref());
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
+            "ImageCreatorID",
+            self.identifier.as_ref(),
+        );
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
+            "ImageCreatorName",
+            self.name.as_ref(),
+        );
         put_other(&mut f, &self.other);
         XmpValue::Structured(f)
     }
@@ -2082,8 +2310,8 @@ impl ImageSupplier {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifier: r.text(ns::PLUS, "ImageSupplierID"),
-            name: r.text(ns::PLUS, "ImageSupplierName"),
+            identifier: r.text(WellKnownNs::Plus.uri(), "ImageSupplierID"),
+            name: r.text(WellKnownNs::Plus.uri(), "ImageSupplierName"),
             other: r.other(),
         }
     }
@@ -2095,11 +2323,16 @@ impl ImageSupplier {
         let mut f = Vec::new();
         put_text(
             &mut f,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "ImageSupplierID",
             self.identifier.as_ref(),
         );
-        put_text(&mut f, ns::PLUS, "ImageSupplierName", self.name.as_ref());
+        put_text(
+            &mut f,
+            WellKnownNs::Plus.uri(),
+            "ImageSupplierName",
+            self.name.as_ref(),
+        );
         put_other(&mut f, &self.other);
         XmpValue::Structured(f)
     }
@@ -2246,7 +2479,7 @@ fn emit_structures<T>(
 
 /// The `Iptc4xmpCore:CreatorContactInfo` projection: a single structure, so no container applies.
 const CONTACT_INFO: Projection<CreatorContactInfo, CreatorContactInfo> = Projection {
-    ns: ns::IPTC_CORE,
+    ns: WellKnownNs::Iptc4XmpCore.uri(),
     name: "CreatorContactInfo",
     parse: |value| structure(value).map(CreatorContactInfo::from_fields),
     emit: |info, _| {
@@ -2258,7 +2491,7 @@ const CONTACT_INFO: Projection<CreatorContactInfo, CreatorContactInfo> = Project
 
 /// The `Iptc4xmpExt:ImageRegion` projection.
 const IMAGE_REGIONS: Projection<Vec<ImageRegion>, [ImageRegion]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "ImageRegion",
     parse: |value| parse_structures(value, ImageRegion::from_fields),
     emit: |values, container| emit_structures(values, container, ImageRegion::to_xmp),
@@ -2267,7 +2500,7 @@ const IMAGE_REGIONS: Projection<Vec<ImageRegion>, [ImageRegion]> = Projection {
 
 /// The `Iptc4xmpExt:ArtworkOrObject` projection.
 const ARTWORK_OR_OBJECTS: Projection<Vec<ArtworkOrObject>, [ArtworkOrObject]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "ArtworkOrObject",
     parse: |value| parse_structures(value, ArtworkOrObject::from_fields),
     emit: |values, container| emit_structures(values, container, ArtworkOrObject::to_xmp),
@@ -2276,7 +2509,7 @@ const ARTWORK_OR_OBJECTS: Projection<Vec<ArtworkOrObject>, [ArtworkOrObject]> = 
 
 /// The `plus:Licensor` projection.
 const LICENSORS: Projection<Vec<Licensor>, [Licensor]> = Projection {
-    ns: ns::PLUS,
+    ns: WellKnownNs::Plus.uri(),
     name: "Licensor",
     parse: |value| parse_structures(value, Licensor::from_fields),
     emit: |values, container| emit_structures(values, container, Licensor::to_xmp),
@@ -2285,7 +2518,7 @@ const LICENSORS: Projection<Vec<Licensor>, [Licensor]> = Projection {
 
 /// The `Iptc4xmpExt:LocationCreated` projection.
 const LOCATIONS_CREATED: Projection<Vec<Location>, [Location]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "LocationCreated",
     parse: |value| parse_structures(value, Location::from_fields),
     emit: |values, container| emit_structures(values, container, Location::to_xmp),
@@ -2294,7 +2527,7 @@ const LOCATIONS_CREATED: Projection<Vec<Location>, [Location]> = Projection {
 
 /// The `Iptc4xmpExt:LocationShown` projection.
 const LOCATIONS_SHOWN: Projection<Vec<Location>, [Location]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "LocationShown",
     parse: |value| parse_structures(value, Location::from_fields),
     emit: |values, container| emit_structures(values, container, Location::to_xmp),
@@ -2303,7 +2536,7 @@ const LOCATIONS_SHOWN: Projection<Vec<Location>, [Location]> = Projection {
 
 /// The `Iptc4xmpExt:PersonInImageWDetails` projection.
 const PERSONS_SHOWN: Projection<Vec<Person>, [Person]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "PersonInImageWDetails",
     parse: |value| parse_structures(value, Person::from_fields),
     emit: |values, container| emit_structures(values, container, Person::to_xmp),
@@ -2312,7 +2545,7 @@ const PERSONS_SHOWN: Projection<Vec<Person>, [Person]> = Projection {
 
 /// The `Iptc4xmpExt:AboutCvTerm` projection.
 const ABOUT_CV_TERMS: Projection<Vec<CvTerm>, [CvTerm]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "AboutCvTerm",
     parse: |value| parse_structures(value, CvTerm::from_fields),
     emit: |values, container| emit_structures(values, container, CvTerm::to_xmp),
@@ -2321,7 +2554,7 @@ const ABOUT_CV_TERMS: Projection<Vec<CvTerm>, [CvTerm]> = Projection {
 
 /// The `Iptc4xmpExt:Genre` projection.
 const GENRES: Projection<Vec<CvTerm>, [CvTerm]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "Genre",
     parse: |value| parse_structures(value, CvTerm::from_fields),
     emit: |values, container| emit_structures(values, container, CvTerm::to_xmp),
@@ -2330,7 +2563,7 @@ const GENRES: Projection<Vec<CvTerm>, [CvTerm]> = Projection {
 
 /// The `Iptc4xmpExt:Contributor` projection.
 const CONTRIBUTORS: Projection<Vec<EntityWithRole>, [EntityWithRole]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "Contributor",
     parse: |value| parse_structures(value, EntityWithRole::from_fields),
     emit: |values, container| emit_structures(values, container, EntityWithRole::to_xmp),
@@ -2339,7 +2572,7 @@ const CONTRIBUTORS: Projection<Vec<EntityWithRole>, [EntityWithRole]> = Projecti
 
 /// The `Iptc4xmpExt:ProductInImage` projection.
 const PRODUCTS_SHOWN: Projection<Vec<Product>, [Product]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "ProductInImage",
     parse: |value| parse_structures(value, Product::from_fields),
     emit: |values, container| emit_structures(values, container, Product::to_xmp),
@@ -2348,7 +2581,7 @@ const PRODUCTS_SHOWN: Projection<Vec<Product>, [Product]> = Projection {
 
 /// The `Iptc4xmpExt:RegistryId` projection.
 const REGISTRY_ENTRIES: Projection<Vec<RegistryEntry>, [RegistryEntry]> = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "RegistryId",
     parse: |value| parse_structures(value, RegistryEntry::from_fields),
     emit: |values, container| emit_structures(values, container, RegistryEntry::to_xmp),
@@ -2360,7 +2593,7 @@ const EMBEDDED_RIGHTS_EXPRESSIONS: Projection<
     Vec<EmbeddedRightsExpression>,
     [EmbeddedRightsExpression],
 > = Projection {
-    ns: ns::IPTC_EXT,
+    ns: WellKnownNs::Iptc4XmpExt.uri(),
     name: "EmbdEncRightsExpr",
     parse: |value| parse_structures(value, EmbeddedRightsExpression::from_fields),
     emit: |values, container| emit_structures(values, container, EmbeddedRightsExpression::to_xmp),
@@ -2370,7 +2603,7 @@ const EMBEDDED_RIGHTS_EXPRESSIONS: Projection<
 /// The `Iptc4xmpExt:LinkedEncRightsExpr` projection.
 const LINKED_RIGHTS_EXPRESSIONS: Projection<Vec<LinkedRightsExpression>, [LinkedRightsExpression]> =
     Projection {
-        ns: ns::IPTC_EXT,
+        ns: WellKnownNs::Iptc4XmpExt.uri(),
         name: "LinkedEncRightsExpr",
         parse: |value| parse_structures(value, LinkedRightsExpression::from_fields),
         emit: |values, container| {
@@ -2381,7 +2614,7 @@ const LINKED_RIGHTS_EXPRESSIONS: Projection<Vec<LinkedRightsExpression>, [Linked
 
 /// The `plus:CopyrightOwner` projection: an ordered `rdf:Seq`.
 const COPYRIGHT_OWNERS: Projection<Vec<CopyrightOwner>, [CopyrightOwner]> = Projection {
-    ns: ns::PLUS,
+    ns: WellKnownNs::Plus.uri(),
     name: "CopyrightOwner",
     parse: |value| parse_structures(value, CopyrightOwner::from_fields),
     emit: |values, container| emit_structures(values, container, CopyrightOwner::to_xmp),
@@ -2390,7 +2623,7 @@ const COPYRIGHT_OWNERS: Projection<Vec<CopyrightOwner>, [CopyrightOwner]> = Proj
 
 /// The `plus:ImageCreator` projection: an ordered `rdf:Seq`.
 const IMAGE_CREATORS: Projection<Vec<ImageCreator>, [ImageCreator]> = Projection {
-    ns: ns::PLUS,
+    ns: WellKnownNs::Plus.uri(),
     name: "ImageCreator",
     parse: |value| parse_structures(value, ImageCreator::from_fields),
     emit: |values, container| emit_structures(values, container, ImageCreator::to_xmp),
@@ -2399,7 +2632,7 @@ const IMAGE_CREATORS: Projection<Vec<ImageCreator>, [ImageCreator]> = Projection
 
 /// The `plus:ImageSupplier` projection: an ordered `rdf:Seq`.
 const IMAGE_SUPPLIERS: Projection<Vec<ImageSupplier>, [ImageSupplier]> = Projection {
-    ns: ns::PLUS,
+    ns: WellKnownNs::Plus.uri(),
     name: "ImageSupplier",
     parse: |value| parse_structures(value, ImageSupplier::from_fields),
     emit: |values, container| emit_structures(values, container, ImageSupplier::to_xmp),
@@ -2688,9 +2921,13 @@ mod tests {
         // Each field is its own `Iptc4xmpCore:Ci*` property; absent fields are not written.
         let fields = structure(&value).unwrap();
         assert_eq!(fields.len(), 8);
-        assert!(fields.iter().all(|p| p.namespace == ns::IPTC_CORE));
+        assert!(
+            fields
+                .iter()
+                .all(|p| p.namespace == WellKnownNs::Iptc4XmpCore.uri())
+        );
         assert_eq!(
-            Reader::new(fields).text(ns::IPTC_CORE, "CiAdrPcode"),
+            Reader::new(fields).text(WellKnownNs::Iptc4XmpCore.uri(), "CiAdrPcode"),
             Some("69000".to_owned())
         );
         let sparse = CreatorContactInfo {
@@ -2941,7 +3178,7 @@ mod tests {
             ("GPSAltitudeRef", "0"),
         ] {
             assert_eq!(
-                field(fields, ns::EXIF, name).map(|p| &p.value),
+                field(fields, WellKnownNs::Exif.uri(), name).map(|p| &p.value),
                 Some(&text_value(text)),
                 "exif:{name}"
             );
@@ -2950,7 +3187,7 @@ mod tests {
         assert_eq!(
             fields
                 .iter()
-                .filter(|p| p.namespace == ns::IPTC_EXT)
+                .filter(|p| p.namespace == WellKnownNs::Iptc4XmpExt.uri())
                 .count(),
             8
         );
@@ -2961,27 +3198,42 @@ mod tests {
         // Every multi-valued field the eleven structures define is a `Bag` in the standard's XMP
         // Specs rows, and every `AltLang` field a language alternative.
         let bags: [(&str, XmpValue, &str, &str); 6] = [
-            ("Location", location().to_xmp(), ns::IPTC_EXT, "LocationId"),
-            ("Person", person().to_xmp(), ns::IPTC_EXT, "PersonId"),
+            (
+                "Location",
+                location().to_xmp(),
+                WellKnownNs::Iptc4XmpExt.uri(),
+                "LocationId",
+            ),
             (
                 "Person",
                 person().to_xmp(),
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
+                "PersonId",
+            ),
+            (
+                "Person",
+                person().to_xmp(),
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "PersonCharacteristic",
             ),
             (
                 "EntityWithRole",
                 contributor().to_xmp(),
-                ns::XMP,
+                WellKnownNs::Xmp.uri(),
                 "Identifier",
             ),
             (
                 "EntityWithRole",
                 contributor().to_xmp(),
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "Role",
             ),
-            ("Product", product().to_xmp(), ns::IPTC_EXT, "ProductId"),
+            (
+                "Product",
+                product().to_xmp(),
+                WellKnownNs::Iptc4XmpExt.uri(),
+                "ProductId",
+            ),
         ];
         for (label, value, namespace, name) in &bags {
             assert!(
@@ -3006,9 +3258,13 @@ mod tests {
         for (label, value, name) in &alternatives {
             assert!(
                 matches!(
-                    field(structure(value).unwrap(), ns::IPTC_EXT, name)
-                        .unwrap()
-                        .value,
+                    field(
+                        structure(value).unwrap(),
+                        WellKnownNs::Iptc4XmpExt.uri(),
+                        name
+                    )
+                    .unwrap()
+                    .value,
                     XmpValue::Array(XmpArray::Alt(_))
                 ),
                 "{label}: {name} must be a language alternative"
@@ -3046,15 +3302,21 @@ mod tests {
         // Creator names and identifiers are ordered (they correspond pairwise); style periods are
         // an unordered bag.
         assert!(matches!(
-            field(fields, ns::IPTC_EXT, "AOCreator").unwrap().value,
+            field(fields, WellKnownNs::Iptc4XmpExt.uri(), "AOCreator")
+                .unwrap()
+                .value,
             XmpValue::Array(XmpArray::Seq(_))
         ));
         assert!(matches!(
-            field(fields, ns::IPTC_EXT, "AOCreatorId").unwrap().value,
+            field(fields, WellKnownNs::Iptc4XmpExt.uri(), "AOCreatorId")
+                .unwrap()
+                .value,
             XmpValue::Array(XmpArray::Seq(_))
         ));
         assert!(matches!(
-            field(fields, ns::IPTC_EXT, "AOStylePeriod").unwrap().value,
+            field(fields, WellKnownNs::Iptc4XmpExt.uri(), "AOStylePeriod")
+                .unwrap()
+                .value,
             XmpValue::Array(XmpArray::Bag(_))
         ));
         // The four descriptive fields are language alternatives, not plain text.
@@ -3066,7 +3328,9 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    field(fields, ns::IPTC_EXT, name).unwrap().value,
+                    field(fields, WellKnownNs::Iptc4XmpExt.uri(), name)
+                        .unwrap()
+                        .value,
                     XmpValue::Array(XmpArray::Alt(_))
                 ),
                 "{name} must be a language alternative"
@@ -3098,7 +3362,11 @@ mod tests {
         let fields = structure(&value).unwrap();
         assert_eq!(fields.len(), 14);
         // Licensor is a PLUS structure, so every field lives in the PLUS namespace.
-        assert!(fields.iter().all(|p| p.namespace == ns::PLUS));
+        assert!(
+            fields
+                .iter()
+                .all(|p| p.namespace == WellKnownNs::Plus.uri())
+        );
     }
 
     #[test]
@@ -3130,7 +3398,7 @@ mod tests {
             }],
             // The standard lets a region carry any other property; this one must survive.
             other: vec![XmpProperty::new(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "PersonInImage",
                 XmpValue::Array(XmpArray::Bag(vec![XmpItem::simple("Ada")])),
             )],
@@ -3140,21 +3408,29 @@ mod tests {
 
         let fields = structure(&value).unwrap();
         assert_eq!(fields.len(), 6);
-        assert!(field(fields, ns::IPTC_EXT, "PersonInImage").is_some());
+        assert!(field(fields, WellKnownNs::Iptc4XmpExt.uri(), "PersonInImage").is_some());
         // The two Entity arrays are unordered bags; the boundary is a plain structure.
         for name in ["rCtype", "rRole"] {
             assert!(matches!(
-                field(fields, ns::IPTC_EXT, name).unwrap().value,
+                field(fields, WellKnownNs::Iptc4XmpExt.uri(), name)
+                    .unwrap()
+                    .value,
                 XmpValue::Array(XmpArray::Bag(_))
             ));
         }
         assert!(matches!(
-            field(fields, ns::IPTC_EXT, "RegionBoundary").unwrap().value,
+            field(fields, WellKnownNs::Iptc4XmpExt.uri(), "RegionBoundary")
+                .unwrap()
+                .value,
             XmpValue::Structured(_)
         ));
         // The entity identifier is `xmp:Identifier`, not an IPTC-namespaced property.
-        let entity = structures(&field(fields, ns::IPTC_EXT, "rCtype").unwrap().value)[0];
-        assert!(field(entity, ns::XMP, "Identifier").is_some());
+        let entity = structures(
+            &field(fields, WellKnownNs::Iptc4XmpExt.uri(), "rCtype")
+                .unwrap()
+                .value,
+        )[0];
+        assert!(field(entity, WellKnownNs::Xmp.uri(), "Identifier").is_some());
     }
 
     #[test]
@@ -3193,7 +3469,9 @@ mod tests {
         // A polygon's edges follow the vertex sequence, so the array must be a Seq.
         let fields = structure(&value).unwrap();
         assert!(matches!(
-            field(fields, ns::IPTC_EXT, "rbVertices").unwrap().value,
+            field(fields, WellKnownNs::Iptc4XmpExt.uri(), "rbVertices")
+                .unwrap()
+                .value,
             XmpValue::Array(XmpArray::Seq(_))
         ));
     }
@@ -3203,8 +3481,8 @@ mod tests {
         // Honest read: the typed view does not invent a number it cannot parse. Where the raw
         // value goes instead is `a_field_the_model_cannot_read_is_kept_verbatim`.
         let value = XmpValue::Structured(vec![
-            XmpProperty::new(ns::IPTC_EXT, "rbX", text_value("halfway")),
-            XmpProperty::new(ns::IPTC_EXT, "rbY", text_value(" 4.5 ")),
+            XmpProperty::new(WellKnownNs::Iptc4XmpExt.uri(), "rbX", text_value("halfway")),
+            XmpProperty::new(WellKnownNs::Iptc4XmpExt.uri(), "rbY", text_value(" 4.5 ")),
         ]);
         let point = RegionBoundaryPoint::from_xmp(&value).unwrap();
         assert_eq!(point.x, None);
@@ -3216,7 +3494,7 @@ mod tests {
         // `X-Default` and `x-default` are one tag (XMP Part 1 §8.2.2.4), so the entry is read and
         // written back in the canonical case rather than kept as a language of its own.
         let value = XmpValue::Structured(vec![XmpProperty::new(
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOTitle",
             XmpValue::Array(XmpArray::Alt(vec![XmpItem::lang_text(
                 "X-Default",
@@ -3228,7 +3506,7 @@ mod tests {
         assert_eq!(
             art.to_xmp(),
             XmpValue::Structured(vec![XmpProperty::new(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "AOTitle",
                 lang_alt_value("Sunflowers"),
             )])
@@ -3286,7 +3564,7 @@ mod tests {
         }]);
         let mut graph = pm.to_xmp();
         graph.set(XmpProperty::new(
-            ns::XMP,
+            WellKnownNs::Xmp.uri(),
             "CreatorTool",
             text_value("something else"),
         ));
@@ -3412,7 +3690,11 @@ mod tests {
         // only one of them.
         let region = ImageRegion {
             identifier: Some("r1".to_owned()),
-            other: vec![XmpProperty::new(ns::IPTC_EXT, "rId", text_value("r2"))],
+            other: vec![XmpProperty::new(
+                WellKnownNs::Iptc4XmpExt.uri(),
+                "rId",
+                text_value("r2"),
+            )],
             ..ImageRegion::default()
         };
         let value = region.to_xmp();
@@ -3420,7 +3702,7 @@ mod tests {
         assert_eq!(fields.iter().filter(|p| p.name == "rId").count(), 1);
         // The modelled value is the authority, and the output is a fixed point.
         assert_eq!(
-            Reader::new(fields).text(ns::IPTC_EXT, "rId"),
+            Reader::new(fields).text(WellKnownNs::Iptc4XmpExt.uri(), "rId"),
             Some("r1".to_owned())
         );
         assert_eq!(
@@ -3433,7 +3715,8 @@ mod tests {
     fn reproduction_is_equality_apart_from_the_two_re_spellings() {
         // The relation the retention rule is built on, stated on its own: the same value spelled
         // another way reproduces a field, and nothing else does.
-        let coordinate = |text: &str| XmpProperty::new(ns::IPTC_EXT, "rbX", text_value(text));
+        let coordinate =
+            |text: &str| XmpProperty::new(WellKnownNs::Iptc4XmpExt.uri(), "rbX", text_value(text));
         assert!(reproduces(&coordinate(" 0.50 "), &coordinate("0.5")));
         assert!(!reproduces(&coordinate("0.5"), &coordinate("0.25")));
         // A double that formats to another decimal is another value, not another spelling.
@@ -3445,15 +3728,19 @@ mod tests {
         // A value of another kind is another value, and a field of another name is another field.
         assert!(!reproduces(
             &coordinate("0.5"),
-            &XmpProperty::new(ns::IPTC_EXT, "rbX", XmpValue::Uri("0.5".to_owned()))
+            &XmpProperty::new(
+                WellKnownNs::Iptc4XmpExt.uri(),
+                "rbX",
+                XmpValue::Uri("0.5".to_owned())
+            )
         ));
         assert!(!reproduces(
             &coordinate("0.5"),
-            &XmpProperty::new(ns::IPTC_EXT, "rbY", text_value("0.5"))
+            &XmpProperty::new(WellKnownNs::Iptc4XmpExt.uri(), "rbY", text_value("0.5"))
         ));
         assert!(!reproduces(
             &coordinate("0.5"),
-            &XmpProperty::new(ns::XMP, "rbX", text_value("0.5"))
+            &XmpProperty::new(WellKnownNs::Xmp.uri(), "rbX", text_value("0.5"))
         ));
     }
 
@@ -3501,7 +3788,7 @@ mod tests {
         // consumable at all rather than retained.
         let url = |target: &str| {
             XmpProperty::new(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "AOSourceInvURL",
                 XmpValue::Uri(target.to_owned()),
             )
@@ -3522,10 +3809,10 @@ mod tests {
         // in the other structure; counting them is not enough.
         let creator = |name: &str| {
             XmpProperty::new(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "AOCreator",
                 structured(vec![XmpProperty::new(
-                    ns::IPTC_EXT,
+                    WellKnownNs::Iptc4XmpExt.uri(),
                     "Name",
                     text_value(name),
                 )]),
@@ -3540,7 +3827,13 @@ mod tests {
         // The writer builds its properties with no qualifiers at all, so a qualified field is
         // reproduced only by a field carrying the same qualifier — matching them pairwise, not
         // by count.
-        let city = || XmpProperty::new(ns::IPTC_EXT, "CiAdrCity", text_value("Paris"));
+        let city = || {
+            XmpProperty::new(
+                WellKnownNs::Iptc4XmpExt.uri(),
+                "CiAdrCity",
+                text_value("Paris"),
+            )
+        };
         assert!(reproduces(
             &qualified(city(), "fr"),
             &qualified(city(), "fr")
@@ -3557,7 +3850,13 @@ mod tests {
         // XMP Part 1 §8.2.2.4 matches language tags case-insensitively. No other qualifier is
         // matched that way: neither the `xml:` namespace on its own nor the name `lang` on its
         // own makes one, and an ordinary qualifier is compared by value.
-        let city = || XmpProperty::new(ns::IPTC_EXT, "CiAdrCity", text_value("Paris"));
+        let city = || {
+            XmpProperty::new(
+                WellKnownNs::Iptc4XmpExt.uri(),
+                "CiAdrCity",
+                text_value("Paris"),
+            )
+        };
         let with = |namespace: &str, name: &str, text: &str| {
             let mut property = city();
             property
@@ -3574,12 +3873,12 @@ mod tests {
             &with(XML_NAMESPACE, "space", "PRESERVE")
         ));
         assert!(!reproduces(
-            &with(ns::IPTC_EXT, "lang", "fr"),
-            &with(ns::IPTC_EXT, "lang", "FR")
+            &with(WellKnownNs::Iptc4XmpExt.uri(), "lang", "fr"),
+            &with(WellKnownNs::Iptc4XmpExt.uri(), "lang", "FR")
         ));
         assert!(!reproduces(
-            &with(ns::IPTC_EXT, "role", "editor"),
-            &with(ns::IPTC_EXT, "role", "author")
+            &with(WellKnownNs::Iptc4XmpExt.uri(), "role", "editor"),
+            &with(WellKnownNs::Iptc4XmpExt.uri(), "role", "author")
         ));
     }
 
@@ -3644,27 +3943,27 @@ mod tests {
             |v| Some(RegionBoundary::from_xmp(v)?.to_xmp());
 
         let text: fn(&mut Reader<'_>) = |r| {
-            r.text(ns::IPTC_CORE, "CiUrlWork");
+            r.text(WellKnownNs::Iptc4XmpCore.uri(), "CiUrlWork");
         };
         let text_parses: fn(&XmpValue) -> bool = |v| parse_text(v).is_some();
         let lang_alt: fn(&mut Reader<'_>) = |r| {
-            r.lang_alt(ns::IPTC_EXT, "AOTitle");
+            r.lang_alt(WellKnownNs::Iptc4XmpExt.uri(), "AOTitle");
         };
         let lang_alt_parses: fn(&XmpValue) -> bool = |v| parse_lang_alt(v).is_some();
         let bag: fn(&mut Reader<'_>) = |r| {
-            r.list(ns::IPTC_EXT, "AOStylePeriod", false);
+            r.list(WellKnownNs::Iptc4XmpExt.uri(), "AOStylePeriod", false);
         };
         let seq: fn(&mut Reader<'_>) = |r| {
-            r.list(ns::IPTC_EXT, "AOCreator", true);
+            r.list(WellKnownNs::Iptc4XmpExt.uri(), "AOCreator", true);
         };
         let list_parses: fn(&XmpValue) -> bool = |v| parse_list(v).is_some();
         let number: fn(&mut Reader<'_>) = |r| {
-            r.number(ns::IPTC_EXT, "rbX");
+            r.number(WellKnownNs::Iptc4XmpExt.uri(), "rbX");
         };
         let number_parses: fn(&XmpValue) -> bool = |v| parse_number(v).is_some();
         let nested: fn(&mut Reader<'_>) = |r| {
             r.nested(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "RegionBoundary",
                 RegionBoundary::from_fields,
                 RegionBoundary::to_xmp,
@@ -3673,7 +3972,7 @@ mod tests {
         let nested_parses: fn(&XmpValue) -> bool = |v| structure(v).is_some();
         let nested_bag: fn(&mut Reader<'_>) = |r| {
             r.nested_array(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "rCtype",
                 false,
                 Entity::from_fields,
@@ -3682,7 +3981,7 @@ mod tests {
         };
         let nested_seq: fn(&mut Reader<'_>) = |r| {
             r.nested_array(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "rbVertices",
                 true,
                 RegionBoundaryPoint::from_fields,
@@ -3698,13 +3997,13 @@ mod tests {
             parses,
             trip,
         };
-        let ext = |name, value| XmpProperty::new(ns::IPTC_EXT, name, value);
+        let ext = |name, value| XmpProperty::new(WellKnownNs::Iptc4XmpExt.uri(), name, value);
         vec![
             // --- the canonical form of each field kind: read, and written back unchanged --------
             shape(
                 "text: element text",
                 XmpProperty::new(
-                    ns::IPTC_CORE,
+                    WellKnownNs::Iptc4XmpCore.uri(),
                     "CiUrlWork",
                     text_value("https://example.org/"),
                 ),
@@ -3780,7 +4079,7 @@ mod tests {
             shape(
                 "text: a URL held as rdf:resource",
                 XmpProperty::new(
-                    ns::IPTC_CORE,
+                    WellKnownNs::Iptc4XmpCore.uri(),
                     "CiUrlWork",
                     XmpValue::Uri("https://example.org/".to_owned()),
                 ),
@@ -3792,7 +4091,7 @@ mod tests {
                 "text: a value carrying a qualifier",
                 qualified(
                     XmpProperty::new(
-                        ns::IPTC_CORE,
+                        WellKnownNs::Iptc4XmpCore.uri(),
                         "CiUrlWork",
                         text_value("https://example.org/"),
                     ),
@@ -4002,17 +4301,20 @@ mod tests {
             .to_xmp();
             let fields = structure(&value).unwrap();
             assert!(
-                field(fields, ns::IPTC_EXT, "rbX").is_none(),
+                field(fields, WellKnownNs::Iptc4XmpExt.uri(), "rbX").is_none(),
                 "{bad} was written to the graph"
             );
             // The finite sibling is still written, so the skip is per value, not per structure.
-            assert_eq!(Reader::new(fields).number(ns::IPTC_EXT, "rbY"), Some(1.5));
+            assert_eq!(
+                Reader::new(fields).number(WellKnownNs::Iptc4XmpExt.uri(), "rbY"),
+                Some(1.5)
+            );
         }
         // The same values arriving *from the graph* must not be destroyed either: the read parses
         // them, so a rule that consumed whatever it could read would drop them on the way out.
         for stated in ["NaN", "inf", "-inf", "1e400"] {
             let input = XmpValue::Structured(vec![XmpProperty::new(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "rbX",
                 text_value(stated),
             )]);
@@ -4027,7 +4329,7 @@ mod tests {
         // The one lexical change the writer makes to a number it consumed: ` 0.50 ` comes back as
         // `0.5`, the same value, and doing it again changes nothing more.
         let input = XmpValue::Structured(vec![XmpProperty::new(
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "rbX",
             text_value(" 0.50 "),
         )]);
@@ -4037,7 +4339,7 @@ mod tests {
         assert_eq!(
             written,
             XmpValue::Structured(vec![XmpProperty::new(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "rbX",
                 text_value("0.5"),
             )])
@@ -4053,8 +4355,8 @@ mod tests {
         // Only one of them could be written back, so neither is read and both are retained: the
         // structure is ill-formed, and silently halving it would be a loss the caller cannot see.
         let input = XmpValue::Structured(vec![
-            XmpProperty::new(ns::IPTC_EXT, "rId", text_value("r1")),
-            XmpProperty::new(ns::IPTC_EXT, "rId", text_value("r2")),
+            XmpProperty::new(WellKnownNs::Iptc4XmpExt.uri(), "rId", text_value("r1")),
+            XmpProperty::new(WellKnownNs::Iptc4XmpExt.uri(), "rId", text_value("r2")),
         ]);
         let region = ImageRegion::from_xmp(&input).expect("a structure value");
         assert_eq!(region.identifier, None);
@@ -4067,7 +4369,7 @@ mod tests {
         // read rejects used to be neither parsed nor retained, so it vanished from the graph. It
         // reads as absent — and is written back unchanged, because the read consumed nothing.
         let structured = XmpValue::Structured(vec![XmpProperty::new(
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "Nested",
             text_value("v"),
         )]);
@@ -4076,7 +4378,7 @@ mod tests {
             (
                 "rId",
                 XmpValue::Structured(vec![XmpProperty::new(
-                    ns::IPTC_EXT,
+                    WellKnownNs::Iptc4XmpExt.uri(),
                     "rId",
                     structured.clone(),
                 )]),
@@ -4086,7 +4388,7 @@ mod tests {
             (
                 "rbX",
                 XmpValue::Structured(vec![XmpProperty::new(
-                    ns::IPTC_EXT,
+                    WellKnownNs::Iptc4XmpExt.uri(),
                     "rbX",
                     text_value("halfway"),
                 )]),
@@ -4097,7 +4399,7 @@ mod tests {
             (
                 "AOTitle",
                 XmpValue::Structured(vec![XmpProperty::new(
-                    ns::IPTC_EXT,
+                    WellKnownNs::Iptc4XmpExt.uri(),
                     "AOTitle",
                     XmpValue::Array(XmpArray::Alt(vec![XmpItem::lang_text("fr", "Tournesols")])),
                 )]),
@@ -4113,7 +4415,7 @@ mod tests {
         }
         // ...and the typed field reads as absent rather than as an invented value.
         let region = ImageRegion::from_xmp(&XmpValue::Structured(vec![XmpProperty::new(
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "rId",
             structured,
         )]));
@@ -4125,7 +4427,7 @@ mod tests {
         // The model holds one string, so writing this field back would keep the default and
         // destroy the French entry. It is therefore not read, and the whole alternative survives.
         let value = XmpValue::Structured(vec![XmpProperty::new(
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "AOTitle",
             XmpValue::Array(XmpArray::Alt(vec![
                 XmpItem::lang_text(X_DEFAULT, "Sunflowers"),
@@ -4143,13 +4445,17 @@ mod tests {
         // would destroy it: there is no duplicate to avoid.
         let region = ImageRegion {
             identifier: None,
-            other: vec![XmpProperty::new(ns::IPTC_EXT, "rId", text_value("r2"))],
+            other: vec![XmpProperty::new(
+                WellKnownNs::Iptc4XmpExt.uri(),
+                "rId",
+                text_value("r2"),
+            )],
             ..ImageRegion::default()
         };
         let value = region.to_xmp();
         let fields = structure(&value).expect("a structure value");
         assert_eq!(
-            Reader::new(fields).text(ns::IPTC_EXT, "rId"),
+            Reader::new(fields).text(WellKnownNs::Iptc4XmpExt.uri(), "rId"),
             Some("r2".to_owned())
         );
     }
@@ -4168,14 +4474,14 @@ mod tests {
         for kind in kinds {
             let mut pm = PhotoMetadata::new();
             pm.xmp.set(XmpProperty::new(
-                ns::IPTC_EXT,
+                WellKnownNs::Iptc4XmpExt.uri(),
                 "ImageRegion",
                 XmpValue::Array(kind(vec![XmpItem::new(region.to_xmp())])),
             ));
             pm.set_image_regions(std::slice::from_ref(&region));
             assert_eq!(
                 pm.xmp
-                    .get(ns::IPTC_EXT, "ImageRegion")
+                    .get(WellKnownNs::Iptc4XmpExt.uri(), "ImageRegion")
                     .expect("the property")
                     .value,
                 XmpValue::Array(kind(vec![XmpItem::new(region.to_xmp())]))
@@ -4186,7 +4492,7 @@ mod tests {
         pm.set_image_regions(std::slice::from_ref(&region));
         assert!(matches!(
             pm.xmp
-                .get(ns::IPTC_EXT, "ImageRegion")
+                .get(WellKnownNs::Iptc4XmpExt.uri(), "ImageRegion")
                 .expect("the property")
                 .value,
             XmpValue::Array(XmpArray::Bag(_))
@@ -4231,13 +4537,16 @@ mod tests {
             ..Licensor::default()
         };
         let mut pm = PhotoMetadata::new();
-        pm.xmp
-            .set(XmpProperty::new(ns::PLUS, "Licensor", licensor.to_xmp()));
+        pm.xmp.set(XmpProperty::new(
+            WellKnownNs::Plus.uri(),
+            "Licensor",
+            licensor.to_xmp(),
+        ));
         assert_eq!(pm.licensors(), Vec::new());
 
         // Inside a structure the same shape reads the same way: `rCtype` reads as nothing.
         let region = XmpValue::Structured(vec![XmpProperty::new(
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "rCtype",
             Entity {
                 name: Some("Human".to_owned()),
@@ -4256,7 +4565,7 @@ mod tests {
         // so the property reads as absent instead — and it is not fatal.
         let mut pm = PhotoMetadata::new();
         pm.xmp.set(XmpProperty::new(
-            ns::IPTC_EXT,
+            WellKnownNs::Iptc4XmpExt.uri(),
             "ImageRegion",
             XmpValue::Array(XmpArray::Bag(vec![
                 XmpItem::simple("not a region"),
@@ -4272,7 +4581,7 @@ mod tests {
         assert_eq!(pm.image_regions(), Vec::new());
         // A non-array property yields nothing at all rather than a bogus entry.
         pm.xmp.set(XmpProperty::new(
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "Licensor",
             text_value("not an array"),
         ));
@@ -4285,7 +4594,7 @@ mod tests {
         // already takes inside a structure — and the setter therefore has nothing to remove.
         let named = |name: &str| {
             XmpProperty::new(
-                ns::PLUS,
+                WellKnownNs::Plus.uri(),
                 "Licensor",
                 XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(
                     Licensor {
@@ -4315,12 +4624,13 @@ mod tests {
         };
         let named = |name: &str| {
             XmpProperty::new(
-                ns::PLUS,
+                WellKnownNs::Plus.uri(),
                 "Licensor",
                 XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(licensor(name).to_xmp())])),
             )
         };
-        let neighbour = |name: &str| XmpProperty::new(ns::XMP, name, text_value(name));
+        let neighbour =
+            |name: &str| XmpProperty::new(WellKnownNs::Xmp.uri(), name, text_value(name));
         let mut pm = PhotoMetadata::new();
         pm.xmp.properties = vec![
             neighbour("Before"),
@@ -4361,7 +4671,7 @@ mod tests {
         vec![
             TopProperty {
                 label: "creator_contact_info",
-                ns: ns::IPTC_CORE,
+                ns: WellKnownNs::Iptc4XmpCore.uri(),
                 name: "CreatorContactInfo",
                 member: || contact().to_xmp(),
                 trip: |pm| {
@@ -4371,7 +4681,7 @@ mod tests {
             },
             TopProperty {
                 label: "image_regions",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "ImageRegion",
                 member: || {
                     ImageRegion {
@@ -4384,7 +4694,7 @@ mod tests {
             },
             TopProperty {
                 label: "artwork_or_objects",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "ArtworkOrObject",
                 member: || {
                     ArtworkOrObject {
@@ -4397,7 +4707,7 @@ mod tests {
             },
             TopProperty {
                 label: "licensors",
-                ns: ns::PLUS,
+                ns: WellKnownNs::Plus.uri(),
                 name: "Licensor",
                 member: || {
                     Licensor {
@@ -4410,91 +4720,91 @@ mod tests {
             },
             TopProperty {
                 label: "locations_created",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "LocationCreated",
                 member: || location().to_xmp(),
                 trip: |pm| pm.set_locations_created(&pm.locations_created()),
             },
             TopProperty {
                 label: "locations_shown",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "LocationShown",
                 member: || location().to_xmp(),
                 trip: |pm| pm.set_locations_shown(&pm.locations_shown()),
             },
             TopProperty {
                 label: "persons_shown",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "PersonInImageWDetails",
                 member: || person().to_xmp(),
                 trip: |pm| pm.set_persons_shown(&pm.persons_shown()),
             },
             TopProperty {
                 label: "about_cv_terms",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "AboutCvTerm",
                 member: || cv_term("outdoors").to_xmp(),
                 trip: |pm| pm.set_about_cv_terms(&pm.about_cv_terms()),
             },
             TopProperty {
                 label: "genres",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "Genre",
                 member: || cv_term("portrait").to_xmp(),
                 trip: |pm| pm.set_genres(&pm.genres()),
             },
             TopProperty {
                 label: "contributors",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "Contributor",
                 member: || contributor().to_xmp(),
                 trip: |pm| pm.set_contributors(&pm.contributors()),
             },
             TopProperty {
                 label: "products_shown",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "ProductInImage",
                 member: || product().to_xmp(),
                 trip: |pm| pm.set_products_shown(&pm.products_shown()),
             },
             TopProperty {
                 label: "registry_entries",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "RegistryId",
                 member: || registry_entry().to_xmp(),
                 trip: |pm| pm.set_registry_entries(&pm.registry_entries()),
             },
             TopProperty {
                 label: "embedded_rights_expressions",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "EmbdEncRightsExpr",
                 member: || embedded_rights().to_xmp(),
                 trip: |pm| pm.set_embedded_rights_expressions(&pm.embedded_rights_expressions()),
             },
             TopProperty {
                 label: "linked_rights_expressions",
-                ns: ns::IPTC_EXT,
+                ns: WellKnownNs::Iptc4XmpExt.uri(),
                 name: "LinkedEncRightsExpr",
                 member: || linked_rights().to_xmp(),
                 trip: |pm| pm.set_linked_rights_expressions(&pm.linked_rights_expressions()),
             },
             TopProperty {
                 label: "copyright_owners",
-                ns: ns::PLUS,
+                ns: WellKnownNs::Plus.uri(),
                 name: "CopyrightOwner",
                 member: || copyright_owner("Owner").to_xmp(),
                 trip: |pm| pm.set_copyright_owners(&pm.copyright_owners()),
             },
             TopProperty {
                 label: "image_creators",
-                ns: ns::PLUS,
+                ns: WellKnownNs::Plus.uri(),
                 name: "ImageCreator",
                 member: || image_creator("Creator").to_xmp(),
                 trip: |pm| pm.set_image_creators(&pm.image_creators()),
             },
             TopProperty {
                 label: "image_suppliers",
-                ns: ns::PLUS,
+                ns: WellKnownNs::Plus.uri(),
                 name: "ImageSupplier",
                 member: || image_supplier("Supplier").to_xmp(),
                 trip: |pm| pm.set_image_suppliers(&pm.image_suppliers()),
@@ -4521,7 +4831,7 @@ mod tests {
             assert_eq!(pm.xmp.properties.len(), 1, "{label}");
             assert!(pm.xmp.get(ns, name).is_some(), "{label}: {name}");
         }
-        let ext = ns::IPTC_EXT;
+        let ext = WellKnownNs::Iptc4XmpExt.uri();
         let locations = [location(), Location::default()];
         pair(
             "locations_created",
@@ -4608,7 +4918,7 @@ mod tests {
             &[copyright_owner("First"), copyright_owner("Second")],
             PhotoMetadata::set_copyright_owners,
             PhotoMetadata::copyright_owners,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "CopyrightOwner",
         );
         pair(
@@ -4616,7 +4926,7 @@ mod tests {
             &[image_creator("First"), image_creator("Second")],
             PhotoMetadata::set_image_creators,
             PhotoMetadata::image_creators,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "ImageCreator",
         );
         pair(
@@ -4624,7 +4934,7 @@ mod tests {
             &[image_supplier("First"), image_supplier("Second")],
             PhotoMetadata::set_image_suppliers,
             PhotoMetadata::image_suppliers,
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "ImageSupplier",
         );
     }
@@ -4641,21 +4951,24 @@ mod tests {
         pm.set_image_suppliers(&[image_supplier("Supplier")]);
         pm.set_locations_created(&[location()]);
         let kind = container_kind;
-        assert_eq!(kind(&pm, ns::PLUS, "CopyrightOwner"), "Seq");
-        assert_eq!(kind(&pm, ns::PLUS, "ImageCreator"), "Seq");
-        assert_eq!(kind(&pm, ns::PLUS, "ImageSupplier"), "Seq");
-        assert_eq!(kind(&pm, ns::IPTC_EXT, "LocationCreated"), "Bag");
+        assert_eq!(kind(&pm, WellKnownNs::Plus.uri(), "CopyrightOwner"), "Seq");
+        assert_eq!(kind(&pm, WellKnownNs::Plus.uri(), "ImageCreator"), "Seq");
+        assert_eq!(kind(&pm, WellKnownNs::Plus.uri(), "ImageSupplier"), "Seq");
+        assert_eq!(
+            kind(&pm, WellKnownNs::Iptc4XmpExt.uri(), "LocationCreated"),
+            "Bag"
+        );
 
         let mut pm = PhotoMetadata::new();
         pm.xmp.set(XmpProperty::new(
-            ns::PLUS,
+            WellKnownNs::Plus.uri(),
             "CopyrightOwner",
             XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(
                 copyright_owner("Owner").to_xmp(),
             )])),
         ));
         pm.set_copyright_owners(&[copyright_owner("Another")]);
-        assert_eq!(kind(&pm, ns::PLUS, "CopyrightOwner"), "Bag");
+        assert_eq!(kind(&pm, WellKnownNs::Plus.uri(), "CopyrightOwner"), "Bag");
     }
 
     /// The container kind of the top-level property `ns`/`name`: `"Seq"`, `"Bag"` or `"other"`.
@@ -4672,7 +4985,7 @@ mod tests {
         // Every structured `Iptc4xmpExt` list this module added is a Bag in the standard's XMP
         // Specs rows. The `standard` field of each projection is a literal the mutation gate
         // cannot alter, so each one is asserted here, written fresh into an empty graph.
-        let ext = ns::IPTC_EXT;
+        let ext = WellKnownNs::Iptc4XmpExt.uri();
         let fresh = |set: &dyn Fn(&mut PhotoMetadata), name: &str| {
             let mut pm = PhotoMetadata::new();
             set(&mut pm);
@@ -4791,7 +5104,11 @@ mod tests {
         // every qualifier list. A shape the setter reproduces goes back out as the model's own
         // output; one it cannot is left where it lies. Either way the graph that comes out — the
         // property under test and the unrelated one beside it — is the graph that went in.
-        let neighbour = XmpProperty::new(ns::PHOTOSHOP, "Headline", text_value("Breaking"));
+        let neighbour = XmpProperty::new(
+            WellKnownNs::Photoshop.uri(),
+            "Headline",
+            text_value("Breaking"),
+        );
         let mut crossed = 0_usize;
         for property in top_properties() {
             let member = (property.member)();

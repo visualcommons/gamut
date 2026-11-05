@@ -129,7 +129,7 @@ mod tests {
     fn xmp_with_city(city: &str) -> XmpMeta {
         XmpMeta {
             properties: vec![XmpProperty {
-                namespace: crate::schema::ns::PHOTOSHOP.to_owned(),
+                namespace: gamut_xmp::WellKnownNs::Photoshop.uri().to_owned(),
                 name: "City".to_owned(),
                 value: XmpValue::Simple(city.to_owned()),
                 qualifiers: Vec::new(),

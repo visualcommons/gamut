@@ -7,57 +7,27 @@
 //! `IIMid`). The map drives the IIM↔XMP reconciliation; the per-dataset octet limits are not
 //! duplicated here — they come from [`crate::iim::IimTagInfo::lookup`].
 
-/// XMP namespace URIs used by IPTC Photo Metadata (verified against the IPTC Photo Metadata
-/// Standard 2025.1).
-///
-/// The URIs come from the shared [`gamut_xmp::WellKnownNs`] registry rather than being
-/// re-declared; the tests pin them against the standard's literal strings.
-pub mod ns {
-    use gamut_xmp::WellKnownNs;
-
-    /// Dublin Core — `dc:` (title, creator, description, subject, rights).
-    pub const DC: &str = WellKnownNs::DublinCore.uri();
-    /// Adobe Photoshop — `photoshop:` (City, Country, Headline, Credit, …).
-    pub const PHOTOSHOP: &str = WellKnownNs::Photoshop.uri();
-    /// XMP Rights Management — `xmpRights:` (UsageTerms, WebStatement).
-    pub const XMP_RIGHTS: &str = WellKnownNs::XmpRights.uri();
-    /// IPTC Photo Metadata Core — `Iptc4xmpCore:`.
-    pub const IPTC_CORE: &str = WellKnownNs::Iptc4XmpCore.uri();
-    /// IPTC Photo Metadata Extension — `Iptc4xmpExt:`.
-    pub const IPTC_EXT: &str = WellKnownNs::Iptc4XmpExt.uri();
-    /// PLUS (Picture Licensing Universal System) Licensing Data Format — `plus:`.
-    ///
-    /// The IPTC Extension schema embeds PLUS 1.2 properties under their own namespace rather than
-    /// re-declaring them; `plus:Licensor` (see [`crate::extension::Licensor`]) is the one gamut
-    /// models. The same URI as [`gamut_xmp::WellKnownNs::Plus`].
-    pub const PLUS: &str = "http://ns.useplus.org/ldf/xmp/1.0/";
-    /// XMP basic — `xmp:`.
-    ///
-    /// Not an IPTC namespace, and deliberately absent from [`IPTC_NAMESPACES`](super::IPTC_NAMESPACES); it appears only
-    /// *inside* IPTC Extension structures, as the `xmp:Identifier` field of an
-    /// [`Entity`](crate::extension::Entity).
-    pub const XMP: &str = WellKnownNs::Xmp.uri();
-    /// EXIF tags mirrored into XMP — `exif:`.
-    ///
-    /// Not an IPTC namespace, and deliberately absent from [`IPTC_NAMESPACES`](super::IPTC_NAMESPACES); it appears only
-    /// *inside* IPTC Extension structures, as the four `exif:GPS*` fields of a
-    /// [`Location`](crate::extension::Location).
-    pub const EXIF: &str = WellKnownNs::Exif.uri();
-}
+use gamut_xmp::WellKnownNs;
 
 /// The namespaces gamut treats as IPTC-relevant when extracting [`crate::PhotoMetadata`] from a full
 /// XMP graph (see [`crate::PhotoMetadata::from_xmp`]).
 ///
-/// [`ns::PLUS`] is included because the IPTC Extension schema defines several of its own properties
-/// — `plus:Licensor` among them — in the PLUS namespace; [`ns::XMP`] is not, because `xmp:` is a
-/// general-purpose namespace whose properties are not IPTC's.
+/// Each URI is named once, by the shared [`gamut_xmp::WellKnownNs`] registry; the tests pin the
+/// ones IPTC uses against the IPTC Photo Metadata Standard 2025.1's literal strings.
+///
+/// [`WellKnownNs::Plus`] is included because the IPTC Extension schema embeds PLUS 1.2 properties
+/// — `plus:Licensor` among them — under their own namespace rather than re-declaring them.
+/// [`WellKnownNs::Xmp`] and [`WellKnownNs::Exif`] are not: they are general-purpose namespaces
+/// whose properties are not IPTC's, and appear only *inside* IPTC Extension structures (the
+/// `xmp:Identifier` of an [`Entity`](crate::extension::Entity), the `exif:GPS*` fields of a
+/// [`Location`](crate::extension::Location)).
 pub const IPTC_NAMESPACES: &[&str] = &[
-    ns::DC,
-    ns::PHOTOSHOP,
-    ns::XMP_RIGHTS,
-    ns::IPTC_CORE,
-    ns::IPTC_EXT,
-    ns::PLUS,
+    WellKnownNs::DublinCore.uri(),
+    WellKnownNs::Photoshop.uri(),
+    WellKnownNs::XmpRights.uri(),
+    WellKnownNs::Iptc4XmpCore.uri(),
+    WellKnownNs::Iptc4XmpExt.uri(),
+    WellKnownNs::Plus.uri(),
 ];
 
 /// How an IPTC field is shaped as an XMP value.
@@ -82,7 +52,7 @@ pub enum XmpShape {
 /// One XMP property's identity and shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XmpField {
-    /// The namespace URI (one of [`ns`]).
+    /// The namespace URI (a [`WellKnownNs::uri`]).
     pub ns: &'static str,
     /// The local property name.
     pub name: &'static str,
@@ -130,83 +100,91 @@ const fn field(ns: &'static str, name: &'static str, shape: XmpShape) -> XmpFiel
 pub const FIELD_MAP: &[FieldMap] = &[
     FieldMap {
         iim: &[(2, 4)],
-        xmp: field(ns::IPTC_CORE, "IntellectualGenre", SimpleText),
+        xmp: field(
+            WellKnownNs::Iptc4XmpCore.uri(),
+            "IntellectualGenre",
+            SimpleText,
+        ),
     },
     FieldMap {
         iim: &[(2, 5)],
-        xmp: field(ns::DC, "title", LangAlt),
+        xmp: field(WellKnownNs::DublinCore.uri(), "title", LangAlt),
     },
     FieldMap {
         iim: &[(2, 12)],
-        xmp: field(ns::IPTC_CORE, "SubjectCode", Bag),
+        xmp: field(WellKnownNs::Iptc4XmpCore.uri(), "SubjectCode", Bag),
     },
     FieldMap {
         iim: &[(2, 25)],
-        xmp: field(ns::DC, "subject", Bag),
+        xmp: field(WellKnownNs::DublinCore.uri(), "subject", Bag),
     },
     FieldMap {
         iim: &[(2, 40)],
-        xmp: field(ns::PHOTOSHOP, "Instructions", SimpleText),
+        xmp: field(WellKnownNs::Photoshop.uri(), "Instructions", SimpleText),
     },
     FieldMap {
         iim: &[(2, 55), (2, 60)],
-        xmp: field(ns::PHOTOSHOP, "DateCreated", DateTime),
+        xmp: field(WellKnownNs::Photoshop.uri(), "DateCreated", DateTime),
     },
     FieldMap {
         iim: &[(2, 80)],
-        xmp: field(ns::DC, "creator", Seq),
+        xmp: field(WellKnownNs::DublinCore.uri(), "creator", Seq),
     },
     FieldMap {
         iim: &[(2, 85)],
-        xmp: field(ns::PHOTOSHOP, "AuthorsPosition", SimpleText),
+        xmp: field(WellKnownNs::Photoshop.uri(), "AuthorsPosition", SimpleText),
     },
     FieldMap {
         iim: &[(2, 90)],
-        xmp: field(ns::PHOTOSHOP, "City", SimpleText),
+        xmp: field(WellKnownNs::Photoshop.uri(), "City", SimpleText),
     },
     FieldMap {
         iim: &[(2, 92)],
-        xmp: field(ns::IPTC_CORE, "Location", SimpleText),
+        xmp: field(WellKnownNs::Iptc4XmpCore.uri(), "Location", SimpleText),
     },
     FieldMap {
         iim: &[(2, 95)],
-        xmp: field(ns::PHOTOSHOP, "State", SimpleText),
+        xmp: field(WellKnownNs::Photoshop.uri(), "State", SimpleText),
     },
     FieldMap {
         iim: &[(2, 100)],
-        xmp: field(ns::IPTC_CORE, "CountryCode", SimpleText),
+        xmp: field(WellKnownNs::Iptc4XmpCore.uri(), "CountryCode", SimpleText),
     },
     FieldMap {
         iim: &[(2, 101)],
-        xmp: field(ns::PHOTOSHOP, "Country", SimpleText),
+        xmp: field(WellKnownNs::Photoshop.uri(), "Country", SimpleText),
     },
     FieldMap {
         iim: &[(2, 103)],
-        xmp: field(ns::PHOTOSHOP, "TransmissionReference", SimpleText),
+        xmp: field(
+            WellKnownNs::Photoshop.uri(),
+            "TransmissionReference",
+            SimpleText,
+        ),
     },
     FieldMap {
         iim: &[(2, 105)],
-        xmp: field(ns::PHOTOSHOP, "Headline", SimpleText),
+        xmp: field(WellKnownNs::Photoshop.uri(), "Headline", SimpleText),
     },
     FieldMap {
         iim: &[(2, 110)],
-        xmp: field(ns::PHOTOSHOP, "Credit", SimpleText),
+        xmp: field(WellKnownNs::Photoshop.uri(), "Credit", SimpleText),
     },
     FieldMap {
         iim: &[(2, 115)],
-        xmp: field(ns::PHOTOSHOP, "Source", SimpleText),
+        xmp: field(WellKnownNs::Photoshop.uri(), "Source", SimpleText),
     },
     FieldMap {
         iim: &[(2, 116)],
-        xmp: field(ns::DC, "rights", LangAlt),
+        xmp: field(WellKnownNs::DublinCore.uri(), "rights", LangAlt),
     },
     FieldMap {
         iim: &[(2, 120)],
-        xmp: field(ns::DC, "description", LangAlt),
+        xmp: field(WellKnownNs::DublinCore.uri(), "description", LangAlt),
     },
     FieldMap {
         iim: &[(2, 122)],
-        xmp: field(ns::PHOTOSHOP, "CaptionWriter", SimpleText),
+        xmp: field(WellKnownNs::Photoshop.uri(), "CaptionWriter", SimpleText),
     },
 ];
 
@@ -248,17 +226,35 @@ mod tests {
 
     #[test]
     fn namespace_uris_match_the_iptc_standard() {
-        // The consts are derived from gamut_xmp::WellKnownNs; pin them against the literal
-        // strings of the IPTC Photo Metadata Standard 2025.1 so a change in the shared registry
-        // cannot silently retarget the IPTC schema.
-        assert_eq!(ns::DC, "http://purl.org/dc/elements/1.1/");
-        assert_eq!(ns::PHOTOSHOP, "http://ns.adobe.com/photoshop/1.0/");
-        assert_eq!(ns::XMP_RIGHTS, "http://ns.adobe.com/xap/1.0/rights/");
-        assert_eq!(ns::IPTC_CORE, "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/");
-        assert_eq!(ns::IPTC_EXT, "http://iptc.org/std/Iptc4xmpExt/2008-02-29/");
-        assert_eq!(ns::PLUS, "http://ns.useplus.org/ldf/xmp/1.0/");
-        assert_eq!(ns::XMP, "http://ns.adobe.com/xap/1.0/");
-        assert_eq!(ns::EXIF, "http://ns.adobe.com/exif/1.0/");
+        // The schema names its namespaces through gamut_xmp::WellKnownNs; pin the ones it uses
+        // against the literal strings of the IPTC Photo Metadata Standard 2025.1 so a change in
+        // the shared registry cannot silently retarget the IPTC schema.
+        assert_eq!(
+            WellKnownNs::DublinCore.uri(),
+            "http://purl.org/dc/elements/1.1/"
+        );
+        assert_eq!(
+            WellKnownNs::Photoshop.uri(),
+            "http://ns.adobe.com/photoshop/1.0/"
+        );
+        assert_eq!(
+            WellKnownNs::XmpRights.uri(),
+            "http://ns.adobe.com/xap/1.0/rights/"
+        );
+        assert_eq!(
+            WellKnownNs::Iptc4XmpCore.uri(),
+            "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
+        );
+        assert_eq!(
+            WellKnownNs::Iptc4XmpExt.uri(),
+            "http://iptc.org/std/Iptc4xmpExt/2008-02-29/"
+        );
+        assert_eq!(
+            WellKnownNs::Plus.uri(),
+            "http://ns.useplus.org/ldf/xmp/1.0/"
+        );
+        assert_eq!(WellKnownNs::Xmp.uri(), "http://ns.adobe.com/xap/1.0/");
+        assert_eq!(WellKnownNs::Exif.uri(), "http://ns.adobe.com/exif/1.0/");
     }
 
     #[test]
@@ -266,8 +262,8 @@ mod tests {
         // The IPTC Extension defines properties in the PLUS namespace, so a graph filtered by
         // IPTC_NAMESPACES must keep them; xmp: and exif: are general-purpose and must not be
         // swept in — they appear only inside IPTC structures.
-        assert!(IPTC_NAMESPACES.contains(&ns::PLUS));
-        assert!(!IPTC_NAMESPACES.contains(&ns::XMP));
-        assert!(!IPTC_NAMESPACES.contains(&ns::EXIF));
+        assert!(IPTC_NAMESPACES.contains(&WellKnownNs::Plus.uri()));
+        assert!(!IPTC_NAMESPACES.contains(&WellKnownNs::Xmp.uri()));
+        assert!(!IPTC_NAMESPACES.contains(&WellKnownNs::Exif.uri()));
     }
 }

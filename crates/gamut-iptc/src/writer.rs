@@ -166,12 +166,16 @@ mod tests {
     fn write_iim_rejects_unparseable_date_created() {
         // Strict write: an un-projectable DateCreated is an error, never a silent drop.
         let mut pm = PhotoMetadata::new();
-        pm.set_simple(crate::schema::ns::PHOTOSHOP, "DateCreated", "yesterday");
+        pm.set_simple(
+            gamut_xmp::WellKnownNs::Photoshop.uri(),
+            "DateCreated",
+            "yesterday",
+        );
         assert!(IptcWriter::new().write_iim(&pm).is_err());
 
         // A missing-seconds time is not IIM-expressible either (2:60 is HHMMSS±HHMM).
         pm.set_simple(
-            crate::schema::ns::PHOTOSHOP,
+            gamut_xmp::WellKnownNs::Photoshop.uri(),
             "DateCreated",
             "2024-06-15T12:00",
         );
@@ -179,7 +183,7 @@ mod tests {
 
         // ...while a plain date, a partial date, and a full date-time all project fine.
         for ok in ["2024-06-15", "2024", "2024-06-15T12:00:00Z"] {
-            pm.set_simple(crate::schema::ns::PHOTOSHOP, "DateCreated", ok);
+            pm.set_simple(gamut_xmp::WellKnownNs::Photoshop.uri(), "DateCreated", ok);
             assert!(IptcWriter::new().write_iim(&pm).is_ok(), "{ok}");
         }
     }

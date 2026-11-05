@@ -15,8 +15,8 @@ use gamut_iptc::extension::{
     EntityWithRole, ImageCreator, ImageRegion, ImageSupplier, Licensor, LinkedRightsExpression,
     Location, Person, Product, RegionBoundary, RegionBoundaryPoint, RegistryEntry,
 };
-use gamut_iptc::schema::{FIELD_MAP, XmpShape, ns};
-use gamut_iptc::xmp::{XmpProperty, XmpValue};
+use gamut_iptc::schema::{FIELD_MAP, XmpShape};
+use gamut_iptc::xmp::{WellKnownNs, XmpProperty, XmpValue};
 use gamut_iptc::{IimTagInfo, PhotoMetadata};
 use serde_json::Value;
 
@@ -60,14 +60,14 @@ fn iim_mapped_entries(doc: &Value) -> BTreeMap<(u8, u8), &Value> {
 /// gamut's namespace URI -> the prefix the tech reference uses in `XMPid`.
 fn ns_prefix(uri: &str) -> &'static str {
     match uri {
-        _ if uri == ns::DC => "dc",
-        _ if uri == ns::PHOTOSHOP => "photoshop",
-        _ if uri == ns::XMP_RIGHTS => "xmpRights",
-        _ if uri == ns::IPTC_CORE => "Iptc4xmpCore",
-        _ if uri == ns::IPTC_EXT => "Iptc4xmpExt",
-        _ if uri == ns::PLUS => "plus",
-        _ if uri == ns::XMP => "xmp",
-        _ if uri == ns::EXIF => "exif",
+        _ if uri == WellKnownNs::DublinCore.uri() => "dc",
+        _ if uri == WellKnownNs::Photoshop.uri() => "photoshop",
+        _ if uri == WellKnownNs::XmpRights.uri() => "xmpRights",
+        _ if uri == WellKnownNs::Iptc4XmpCore.uri() => "Iptc4xmpCore",
+        _ if uri == WellKnownNs::Iptc4XmpExt.uri() => "Iptc4xmpExt",
+        _ if uri == WellKnownNs::Plus.uri() => "plus",
+        _ if uri == WellKnownNs::Xmp.uri() => "xmp",
+        _ if uri == WellKnownNs::Exif.uri() => "exif",
         _ => panic!("gamut references a namespace outside the IPTC set: {uri}"),
     }
 }
