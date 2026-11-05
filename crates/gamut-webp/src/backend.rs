@@ -711,6 +711,18 @@ mod tests {
     }
 
     #[test]
+    fn adapters_expose_and_return_the_wrapped_backend() {
+        let mut dec = AbiWebpDecoder::new(3u8);
+        *dec.get_mut() += 1;
+        assert_eq!(*dec.get_ref(), 4);
+        assert_eq!(dec.into_inner(), 4);
+        let mut enc = AbiWebpEncoder::new(5u8);
+        *enc.get_mut() += 1;
+        assert_eq!(*enc.get_ref(), 6);
+        assert_eq!(enc.into_inner(), 6);
+    }
+
+    #[test]
     fn info_and_request_expose_their_fields() {
         let info = WebpStreamInfo::new(WebpCodestream::Vp8l, dims(7, 5));
         assert_eq!(info.codestream(), WebpCodestream::Vp8l);

@@ -910,6 +910,10 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::Unsupported);
     }
 
+    fn chunk(fourcc: FourCc, payload: &[u8]) -> Chunk<'_> {
+        Chunk { fourcc, payload }
+    }
+
     /// Every FourCC `gamut-riff` classifies is refused, so the mistake is caught at the call that
     /// made it rather than resolved silently in favour of the pass-through copy.
     ///
@@ -917,10 +921,6 @@ mod tests {
     /// own setter" left them out, and the encoder then accepted an `ANIM` chunk and wrote a file
     /// `WebpLayout::parse` refuses as having its reconstruction chunks out of order — an encoder
     /// steered into producing a file it cannot read back.
-    fn chunk(fourcc: FourCc, payload: &[u8]) -> Chunk<'_> {
-        Chunk { fourcc, payload }
-    }
-
     #[test]
     fn with_unknown_chunks_refuses_every_chunk_the_container_defines() {
         let classified = [
