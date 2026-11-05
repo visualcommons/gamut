@@ -86,6 +86,7 @@ mod audit;
 mod byte_order;
 pub mod c2pa;
 mod entry;
+mod extent;
 // Executable laws over this crate's own types, shared by the property tests and the fuzz tier
 // (`docs/testing.md`). Always available to the crate's own tests; `test-support` exposes it to an
 // out-of-tree fuzz driver. Never enabled by the `gamut` umbrella, so it stays out of the shipped
@@ -110,6 +111,7 @@ pub use audit::{
 };
 pub use byte_order::ByteOrder;
 pub use entry::{Field, Ifd, SubIfd, Variant};
+pub use extent::{ZeroRowsPerStrip, extent_slices, rows_per_strip};
 pub use reader::{
     SubtreeScope, TiffFile, read, read_audited, read_header, read_ifd_at, read_tree,
     resolve_subtree,
