@@ -1,4 +1,4 @@
-//! `PngEncoder::with_png_metadata` / `with_metadata_from` (issue #483): what a re-encode carries
+//! `PngEncoder::with_png_metadata` (issue #483): what a re-encode carries
 //! forward from the file it rewrites, and what it deliberately does not.
 //!
 //! Example and drift-guard level, over gamut's own read→write seam. The source files are built
@@ -299,12 +299,12 @@ fn a_sub_byte_grey_background_names_the_same_grey_after_a_re_encode() {
         panic!("two-bit grey decodes to Gray8");
     };
     assert_eq!(pixels.as_samples(), [170; 4]);
-    assert_eq!(decoded.background, Some(Background::Gray(170)));
+    assert_eq!(decoded.metadata.background, Some(Background::Gray(170)));
 
     let encode = |reduce: bool| {
         PngEncoder::new()
             .with_auto_reduce(reduce)
-            .with_metadata_from(&decoded)
+            .with_png_metadata(&decoded.metadata)
             .encode_to_vec(pixels.as_ref())
             .expect("re-encode")
     };
@@ -340,13 +340,16 @@ fn a_palette_index_background_is_carried_onto_the_same_palette() {
     let palette = decoded.palette.as_ref().expect("palette");
     let mut out = Vec::new();
     PngEncoder::new()
-        .with_metadata_from(&decoded)
+        .with_png_metadata(&decoded.metadata)
         .encode_indexed8(indices.as_ref(), palette, &mut out)
         .expect("re-encode");
 
     let re = PngDecoder::new().decode(&out).unwrap();
-    let Some(Background::Index(index)) = re.background else {
-        panic!("background carried as an index, got {:?}", re.background);
+    let Some(Background::Index(index)) = re.metadata.background else {
+        panic!(
+            "background carried as an index, got {:?}",
+            re.metadata.background
+        );
     };
     let re_palette = re.palette.as_ref().expect("palette");
     assert_eq!(re_palette.rgb(index), Some([40, 50, 60]));
@@ -516,31 +519,6 @@ fn the_c2pa_manifest_store_is_never_carried_forward() {
         encoder.metadata_notices(),
         [MetadataNotice::C2paManifestStore]
     );
-}
-
-/// The two entry points differ only in which read surface they take, so a field wired into one
-/// and not the other is a bug this catches — the same anti-drift shape `tests/metadata.rs` uses
-/// for the two *read* walks.
-#[test]
-fn with_metadata_from_agrees_with_with_png_metadata() {
-    let png = source(&[
-        chunk(b"cICP", &[9, 16, 0, 1]),
-        chunk(b"sBIT", &[5, 6, 5]),
-        chunk(b"bKGD", &[0, 10, 0, 20, 0, 30]),
-        chunk(b"pHYs", &[0, 0, 0x0E, 0xC4, 0, 0, 0x0E, 0xC4, 1]),
-        chunk(b"tIME", &[0x07, 0xEA, 10, 16, 12, 34, 56]),
-    ]);
-    let decoded = PngDecoder::new().decode(&png).unwrap();
-    let meta = gamut_png::metadata(&png).unwrap();
-
-    let from_decoded = re_encoded(|e| e.with_metadata_from(&decoded));
-    let from_metadata = re_encoded(|e| e.with_png_metadata(&meta));
-    assert_eq!(from_decoded, from_metadata);
-    // A pair of empty results would satisfy the comparison above.
-    assert!(from_decoded.icc_profile.is_some() && from_decoded.cicp.is_some());
-    assert!(!from_decoded.texts.is_empty() && from_decoded.exif.is_some());
-    assert!(from_decoded.significant_bits.is_some() && from_decoded.background.is_some());
-    assert!(from_decoded.physical_dimensions.is_some() && from_decoded.modification_time.is_some());
 }
 
 /// §11.3.3.3 makes a `zTXt` "semantically equivalent" to a `tEXt`, so a decode that keeps only the

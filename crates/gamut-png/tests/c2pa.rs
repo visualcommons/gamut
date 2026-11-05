@@ -299,8 +299,8 @@ fn without_a_store_there_is_no_chunk_and_no_span() {
     assert!(!chunk_types(&png).contains(b"caBX"));
     assert_eq!(deconstruct(&png).expect("deconstruct").c2pa(), None);
     let decoded = PngDecoder::new().decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa, None);
-    assert_eq!(decoded.c2pa_ignored, 0);
+    assert_eq!(decoded.metadata.c2pa, None);
+    assert_eq!(decoded.metadata.c2pa_ignored, 0);
 }
 
 /// Both read entry points surface the store byte for byte, and the last of the two setters
@@ -318,8 +318,8 @@ fn decode_and_metadata_surface_the_store_verbatim_and_the_last_setter_wins() {
     assert_eq!(meta.c2pa.as_deref(), Some(&store[..]));
     assert_eq!(meta.c2pa_ignored, 0);
     let decoded = PngDecoder::new().decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa, meta.c2pa);
-    assert_eq!(decoded.c2pa_ignored, 0);
+    assert_eq!(decoded.metadata.c2pa, meta.c2pa);
+    assert_eq!(decoded.metadata.c2pa_ignored, 0);
 
     let reserved_last = PngEncoder::new()
         .with_c2pa(&store)
@@ -356,8 +356,8 @@ fn the_first_store_wins_and_a_second_is_counted_not_merged() {
     assert_eq!(meta.c2pa.as_deref(), Some(&b"first"[..]));
     assert_eq!(meta.c2pa_ignored, 1);
     let decoded = PngDecoder::new().decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa.as_deref(), Some(&b"first"[..]));
-    assert_eq!(decoded.c2pa_ignored, 1);
+    assert_eq!(decoded.metadata.c2pa.as_deref(), Some(&b"first"[..]));
+    assert_eq!(decoded.metadata.c2pa_ignored, 1);
 
     let report = deconstruct(&png).expect("deconstruct");
     let span = report.c2pa().expect("span");
@@ -382,8 +382,8 @@ fn a_cabx_after_idat_is_never_the_store_but_is_still_visible() {
     assert_eq!(meta.c2pa, None, "an appended chunk is not the file's store");
     assert_eq!(meta.c2pa_ignored, 1, "but it is counted, not hidden");
     let decoded = PngDecoder::new().decode(&appended).expect("decode");
-    assert_eq!(decoded.c2pa, None);
-    assert_eq!(decoded.c2pa_ignored, 1);
+    assert_eq!(decoded.metadata.c2pa, None);
+    assert_eq!(decoded.metadata.c2pa_ignored, 1);
 
     // The byte accounting still sees the chunk; it just does not call it the store.
     let report = deconstruct(&appended).expect("deconstruct");
@@ -426,7 +426,10 @@ fn ignored_stores_before_and_after_idat_are_counted_together() {
     assert_eq!(meta.c2pa.as_deref(), Some(&b"the store"[..]));
     assert_eq!(meta.c2pa_ignored, 3, "one duplicate plus two appended");
     let decoded = PngDecoder::new().decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa_ignored, 3, "decode agrees with metadata");
+    assert_eq!(
+        decoded.metadata.c2pa_ignored, 3,
+        "decode agrees with metadata"
+    );
 }
 
 /// The reserve-then-fill flow end to end, the way a signer runs it: reserve, take the span,
@@ -529,7 +532,10 @@ fn a_store_past_the_budget_is_counted_among_the_ignored() {
         "the store the budget skipped is counted"
     );
     let decoded = tight.decode(&png).expect("decode");
-    assert_eq!(decoded.c2pa_ignored, 1, "decode agrees with metadata");
+    assert_eq!(
+        decoded.metadata.c2pa_ignored, 1,
+        "decode agrees with metadata"
+    );
 }
 
 /// What the count deliberately does **not** see: a `caBX` after `IEND` is a trailer, not part of
@@ -610,7 +616,7 @@ fn a_store_past_the_metadata_budget_is_skipped_not_an_error() {
     let tight = PngDecoder::new().with_max_metadata_bytes(999);
     assert_eq!(tight.metadata(&png).expect("metadata").c2pa, None);
     let decoded = tight.decode(&png).expect("decode still succeeds");
-    assert_eq!(decoded.c2pa, None);
+    assert_eq!(decoded.metadata.c2pa, None);
     let typed: ImageBuf<Rgb8> = tight.decode_image(&png).expect("typed decode");
     assert_eq!(typed.as_samples(), pixels);
 }

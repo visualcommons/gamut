@@ -192,8 +192,8 @@ pub enum TextChunkKind {
 ///
 /// The XMP packet is one of these too: the `iTXt` under the keyword §11.3.3.1 Table 21 reserves
 /// for it (`XML:com.adobe.xmp`), with its compression flag, language tag, translated keyword and
-/// file position held exactly as any other annotation's are. [`DecodedPng::xmp`] and
-/// [`PngMetadata::xmp`] find it in the list.
+/// file position held exactly as any other annotation's are. [`PngMetadata::xmp`] finds it in the
+/// list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TextChunk {
@@ -211,8 +211,12 @@ pub struct TextChunk {
 
 /// Everything a PNG carries: the pixels in their native layout plus the ancillary payloads.
 ///
-/// Metadata is exposed as raw bytes so a caller can borrow it straight into
-/// `gamut_metadata::MetadataBlock`, e.g. `decoded.exif.as_deref().map(MetadataBlock::Exif)`.
+/// The ancillary payloads are a [`PngMetadata`] — the same value the pixel-free
+/// [`metadata`](crate::metadata) walk returns for the same file — so a caller reads them, and
+/// hands them to [`PngEncoder::with_png_metadata`](crate::PngEncoder::with_png_metadata), the same
+/// way whichever entry point read the file. Metadata is exposed as raw bytes so a caller can
+/// borrow it straight into `gamut_metadata::MetadataBlock`, e.g.
+/// `decoded.metadata.exif.as_deref().map(MetadataBlock::Exif)`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct DecodedPng {
@@ -225,50 +229,9 @@ pub struct DecodedPng {
     pub palette: Option<PngPalette>,
     /// The tRNS colour key of a greyscale/truecolour image, in native (unscaled) sample units.
     pub transparency: Option<TransparencyKey>,
-    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.5). Feed as
-    /// `gamut_metadata::MetadataBlock::Exif`.
-    pub exif: Option<Vec<u8>>,
-    /// The embedded ICC profile (iCCP), inflated. Feed as `MetadataBlock::Icc`.
-    pub icc_profile: Option<IccProfile>,
-    /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim: the JUMBF bytes,
-    /// uncompressed, exactly as the chunk carries them — opaque here, never parsed or judged.
-    /// Feed as `MetadataBlock::C2pa`. The first CRC-valid `caBX` before the first `IDAT`, and
-    /// only when it fits the metadata budget; see [`c2pa_ignored`](Self::c2pa_ignored).
-    pub c2pa: Option<Vec<u8>>,
-    /// How many CRC-valid `caBX` chunks **in the datastream** were not surfaced as the store:
-    /// a chunk later than the first, a chunk positioned after `IDAT`, and the store-position
-    /// chunk itself when it did not fit the metadata budget.
-    ///
-    /// A file carries exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's
-    /// APP11 run — so a non-zero count marks a file whose extra chunks were ignored rather than
-    /// concatenated. It does **not** identify why: a store past the budget and a chunk appended
-    /// after `IDAT` both land here, and `c2pa == None` with a non-zero count is either.
-    ///
-    /// A `caBX` after `IEND` is **not** counted. Bytes after `IEND` are a trailer rather than
-    /// part of the datastream (§13.2), and neither metadata walk reads them. To see one — the
-    /// shape of a chunk appended to a finished file — use
-    /// [`deconstruct`](crate::deconstruct), whose report accounts the trailer as a segment.
-    pub c2pa_ignored: usize,
-    /// tEXt/zTXt/iTXt annotations in file order, the XMP packet among them — see
-    /// [`xmp`](Self::xmp).
-    pub texts: Vec<TextChunk>,
-    /// gAMA: image gamma × 100 000 (§11.3.2.2) — the unit the encoder's `with_gamma` writes.
-    pub gamma: Option<u32>,
-    /// cHRM chromaticities, each coordinate × 100 000.
-    pub chromaticities: Option<Chromaticities>,
-    /// sRGB rendering intent (§11.3.2.5).
-    pub srgb: Option<SrgbIntent>,
-    /// cICP video-signal code points.
-    pub cicp: Option<Cicp>,
-    /// sBIT: the original number of significant bits per channel (§11.3.2.4, Table 14), one
-    /// entry per channel in the order Table 14 lists them — three for a palette image.
-    pub significant_bits: Option<Vec<u8>>,
-    /// bKGD: the default background colour (§11.3.4.1), in the decoded pixels' units.
-    pub background: Option<Background>,
-    /// pHYs: the intended pixel size or aspect ratio (§11.3.4.3).
-    pub physical_dimensions: Option<PhysicalDimensions>,
-    /// tIME: the time of the last image modification (§11.3.5.1).
-    pub modification_time: Option<ModificationTime>,
+    /// The ancillary metadata, as [`metadata`](crate::metadata) reads it. Its `bKGD`
+    /// [`background`](PngMetadata::background) is in the units of [`Self::image`]'s samples.
+    pub metadata: PngMetadata,
 }
 
 /// The ancillary metadata a PNG carries, read without decoding any pixels by
@@ -277,8 +240,8 @@ pub struct DecodedPng {
 /// Each payload is in the form the dedicated metadata crates parse (and
 /// [`gamut-metadata`](https://crates.io/crates/gamut-metadata)'s `MetadataBlock` borrows)
 /// directly, e.g. `meta.exif.as_deref().map(MetadataBlock::Exif)`. These are exactly the fields
-/// [`DecodedPng`] exposes alongside its pixels, so the two entry points agree field for field on
-/// the same file.
+/// [`DecodedPng::metadata`] holds beside its pixels, so the two entry points agree field for field
+/// on the same file.
 ///
 /// Unlike `gamut_jpeg::JpegMetadata` and `gamut_webp::WebpMetadata`, which carry only
 /// EXIF/XMP/ICC, this also surfaces PNG's parsed colour chunks — `cICP`, `sRGB`, `gAMA`, `cHRM` —
@@ -369,32 +332,6 @@ impl TextChunk {
     }
 }
 
-/// The first XMP packet among `texts`, as the bytes `MetadataBlock::Xmp` takes.
-///
-/// The first, because a file carries one packet and a reader that meets a second has to pick:
-/// this one keeps the first, as it keeps the first of every other once-only chunk. Every packet
-/// stays in the list either way, so a carry writes back exactly what the file held.
-fn first_xmp(texts: &[TextChunk]) -> Option<&[u8]> {
-    texts
-        .iter()
-        .find(|text| text.is_xmp_packet())
-        .map(|text| text.text.as_bytes())
-}
-
-impl DecodedPng {
-    /// The XMP packet: the text of the first `iTXt` in [`texts`](Self::texts) under the keyword
-    /// §11.3.3.1 Table 21 reserves for it (`XML:com.adobe.xmp`), decompressed if it was stored
-    /// compressed. Feed as `gamut_metadata::MetadataBlock::Xmp`.
-    ///
-    /// The packet is an ordinary entry of `texts`, so its compression flag, language tag,
-    /// translated keyword and position in the file travel with it like any annotation's; this
-    /// is the convenience read, a scan of that list.
-    #[must_use]
-    pub fn xmp(&self) -> Option<&[u8]> {
-        first_xmp(&self.texts)
-    }
-}
-
 impl PngMetadata {
     /// The XMP packet: the text of the first `iTXt` in [`texts`](Self::texts) under the keyword
     /// §11.3.3.1 Table 21 reserves for it (`XML:com.adobe.xmp`), decompressed if it was stored
@@ -402,10 +339,16 @@ impl PngMetadata {
     ///
     /// The packet is an ordinary entry of `texts`, so its compression flag, language tag,
     /// translated keyword and position in the file travel with it like any annotation's; this
-    /// is the convenience read, a scan of that list.
+    /// is the convenience read, a scan of that list. The first, because a file carries one packet
+    /// and a reader that meets a second has to pick: this one keeps the first, as it keeps the
+    /// first of every other once-only chunk. Every packet stays in the list either way, so a
+    /// carry writes back exactly what the file held.
     #[must_use]
     pub fn xmp(&self) -> Option<&[u8]> {
-        first_xmp(&self.texts)
+        self.texts
+            .iter()
+            .find(|text| text.is_xmp_packet())
+            .map(|text| text.text.as_bytes())
     }
 }
 
@@ -778,12 +721,7 @@ mod typed {
         ///
         /// Never; see [`PngMetadata`]'s impl.
         fn blocks(&self) -> gamut_metadata::Result<Vec<MetadataBlock<'_>>> {
-            Ok(blocks(
-                self.exif.as_deref(),
-                self.xmp(),
-                self.icc_profile.as_ref(),
-                self.c2pa.as_deref(),
-            ))
+            self.metadata.blocks()
         }
     }
 
@@ -1158,7 +1096,7 @@ mod tests {
     /// back what the file held.
     ///
     /// Kills [`TextChunk::is_xmp_packet`] (each operand of its `&&`, and its `International`
-    /// alternative) and [`first_xmp`].
+    /// alternative) and [`PngMetadata::xmp`].
     #[test]
     fn xmp_reads_the_first_itxt_under_the_reserved_keyword() {
         let meta = collect(

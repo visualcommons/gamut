@@ -40,7 +40,7 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ✅ done |
 | E1 | #224 | **Efficiency:** `deconstruct` byte accounting; divan size/bpp + per-stage bench; libpng-9 size contract; opt-in transparent cleanup; palette-vs-native race; `crc32fast` and restructured filter kernels (see [Efficiency](#efficiency-issue-224)) | ✅ done |
 | C1 | C2PA 2.4 §A.3.2, §18.5.4 | **C2PA carriage** (#440): the `caBX` manifest store — raw decode surface (`c2pa`; first CRC-valid chunk before `IDAT` wins, ignored ones counted, under the metadata budget); `with_c2pa` / `with_c2pa_reserved` as the last chunk before `IDAT`; the whole-chunk exclusion span from `encode_with_report` and `PngReport::c2pa`, filled in place by `fill_c2pa` (see [C2PA](#c2pa-manifest-store-issue-440)) | ✅ done |
-| M1 | §4.3, §11.3.2.6, §11.3.3 | **Metadata preservation** (#483): `with_metadata` / `with_metadata_from` carry a read file's eXIf/iCCP/sRGB/cICP/gAMA/cHRM/XMP/text chunks into a re-encode, each annotation back into the chunk it came from and the XMP packet back into the framing its `iTXt` gave it (`gamut convert` uses it; `--strip-metadata` opts out; what could not be carried faithfully is named by `metadata_notices`); `with_cicp`; a null in a keyword refuses the encode, a null in the length-delimited text string drops the annotation, and §11.3.3.1's advisory keyword rules — and §11.3.2.3's identical ones for the `iCCP` profile name (#619) — report through the notice channel, with promotion to `iTXt` for text outside Latin-1 (see [Metadata preservation](#metadata-preservation-issue-483)) | ✅ done |
+| M1 | §4.3, §11.3.2.6, §11.3.3 | **Metadata preservation** (#483): `with_png_metadata` carries a read file's eXIf/iCCP/sRGB/cICP/gAMA/cHRM/XMP/text chunks into a re-encode, each annotation back into the chunk it came from and the XMP packet back into the framing its `iTXt` gave it (`gamut convert` uses it; `--strip-metadata` opts out; what could not be carried faithfully is named by `metadata_notices`); `with_cicp`; a null in a keyword refuses the encode, a null in the length-delimited text string drops the annotation, and §11.3.3.1's advisory keyword rules — and §11.3.2.3's identical ones for the `iCCP` profile name (#619) — report through the notice channel, with promotion to `iTXt` for text outside Latin-1 (see [Metadata preservation](#metadata-preservation-issue-483)) | ✅ done |
 
 ## Decoder phases (issue #249)
 
@@ -154,9 +154,9 @@ The read side has surfaced every metadata payload since D5, and the write side h
 one since P8, but nothing joined them: a re-encode dropped all of it, so `gamut convert`'s PNG
 path round-tripped 0% of a file's metadata.
 
-`PngEncoder::with_metadata(&PngMetadata)` and `with_metadata_from(&DecodedPng)` are that join —
-one private borrowed view behind two entry points, so the pixel-free `metadata()` walk and a full
-`decode()` reach it without copying a large ICC profile twice. `gamut convert` uses it on the PNG
+`PngEncoder::with_png_metadata(&PngMetadata)` is that join — and `DecodedPng::metadata` is the
+same `PngMetadata` the pixel-free `metadata()` walk returns, so a full `decode()` reaches it by
+reference without copying a large ICC profile. `gamut convert` uses it on the PNG
 output path; `--strip-metadata` is the opt-out. **Preserve is the default**: a stripped file is
 smaller, but dropping an ICC profile silently changes what a viewer paints, so the loss is the
 thing that has to be asked for. Carrying the same metadata twice carries it once — the text list

@@ -430,19 +430,7 @@ impl PngDecoder {
             image,
             palette: native.palette,
             transparency: native.trns_key,
-            exif: meta.exif,
-            icc_profile: meta.icc_profile,
-            c2pa: meta.c2pa,
-            c2pa_ignored: meta.c2pa_ignored,
-            texts: meta.texts,
-            gamma: meta.gamma,
-            chromaticities: meta.chromaticities,
-            srgb: meta.srgb,
-            cicp: meta.cicp,
-            significant_bits: meta.significant_bits,
-            background: meta.background,
-            physical_dimensions: meta.physical_dimensions,
-            modification_time: meta.modification_time,
+            metadata: meta,
         })
     }
 
@@ -1685,29 +1673,29 @@ mod tests {
             PngImage::Rgb8(img) => assert_eq!(img.as_samples(), src),
             other => panic!("expected Rgb8, got {other:?}"),
         }
-        assert_eq!(decoded.gamma, Some(45455));
-        assert_eq!(decoded.srgb, Some(SrgbIntent::Perceptual));
-        let chrm = decoded.chromaticities.unwrap();
+        assert_eq!(decoded.metadata.gamma, Some(45455));
+        assert_eq!(decoded.metadata.srgb, Some(SrgbIntent::Perceptual));
+        let chrm = decoded.metadata.chromaticities.unwrap();
         assert_eq!(chrm.white, (31270, 32900));
         assert_eq!(chrm.blue, (15000, 6000));
-        assert_eq!(decoded.exif.as_deref(), Some(&exif[..]));
-        let icc = decoded.icc_profile.as_ref().unwrap();
+        assert_eq!(decoded.metadata.exif.as_deref(), Some(&exif[..]));
+        let icc = decoded.metadata.icc_profile.as_ref().unwrap();
         assert_eq!(icc.name, "prof");
         assert_eq!(icc.profile, b"not-a-real-profile-but-bytes");
-        assert_eq!(decoded.xmp(), Some(xmp.as_bytes()));
+        assert_eq!(decoded.metadata.xmp(), Some(xmp.as_bytes()));
         // The packet is the first annotation, in the order the setters ran.
-        assert_eq!(decoded.texts.len(), 3);
+        assert_eq!(decoded.metadata.texts.len(), 3);
         assert_eq!(
             (
-                decoded.texts[1].keyword.as_str(),
-                decoded.texts[1].text.as_str()
+                decoded.metadata.texts[1].keyword.as_str(),
+                decoded.metadata.texts[1].text.as_str()
             ),
             ("Title", "gamut")
         );
-        assert_eq!(decoded.texts[2].text, comment);
+        assert_eq!(decoded.metadata.texts[2].text, comment);
         assert!(decoded.palette.is_none());
         assert!(decoded.transparency.is_none());
-        let cicp = decoded.cicp.expect("cICP present");
+        let cicp = decoded.metadata.cicp.expect("cICP present");
         assert_eq!(
             (
                 cicp.color_primaries,

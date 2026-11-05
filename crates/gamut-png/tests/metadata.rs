@@ -129,21 +129,8 @@ fn metadata_agrees_with_decode_field_for_field() {
     let meta = gamut_png::metadata(&png).unwrap();
     let decoded = PngDecoder::new().decode(&png).unwrap();
 
-    assert_eq!(meta.exif, decoded.exif);
-    assert_eq!(meta.icc_profile, decoded.icc_profile);
-    assert_eq!(meta.xmp(), decoded.xmp());
-    assert_eq!(meta.c2pa, decoded.c2pa);
-    assert_eq!(meta.c2pa_ignored, decoded.c2pa_ignored);
-    assert_eq!(meta.texts, decoded.texts);
-    assert_eq!(meta.gamma, decoded.gamma);
-    assert_eq!(meta.chromaticities, decoded.chromaticities);
-    assert_eq!(meta.srgb, decoded.srgb);
-    assert_eq!(meta.cicp, decoded.cicp);
-    assert_eq!(meta.significant_bits, decoded.significant_bits);
-    assert_eq!(meta.background, decoded.background);
-    assert_eq!(meta.physical_dimensions, decoded.physical_dimensions);
-    assert_eq!(meta.modification_time, decoded.modification_time);
-    // A `None` on both sides would pass every comparison above, so pin that the file really did
+    assert_eq!(meta, decoded.metadata);
+    // A `None` on both sides would pass the comparison above, so pin that the file really did
     // carry each field.
     assert!(meta.exif.is_some() && meta.icc_profile.is_some() && meta.xmp().is_some());
     assert!(meta.c2pa.is_some() && !meta.texts.is_empty());

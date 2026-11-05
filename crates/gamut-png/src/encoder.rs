@@ -32,10 +32,7 @@ use crate::ancillary::{
 use crate::backend::{Deflaters, IdatInfo, ZlibDeflater, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
-use crate::decoded::{
-    Background, Chromaticities, Cicp, DecodedPng, IccProfile, ModificationTime, PhysicalDimensions,
-    PngMetadata, TextChunk, TextChunkKind,
-};
+use crate::decoded::{Background, PngMetadata, TextChunkKind};
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::{PaletteOrder, PngPalette};
 use crate::reduce::{self, Family, Reduced, Reductions};
@@ -142,30 +139,6 @@ pub struct PngEncodeReport {
     /// [`with_c2pa`]: PngEncoder::with_c2pa
     /// [`with_c2pa_reserved`]: PngEncoder::with_c2pa_reserved
     pub c2pa: Option<C2paSpan>,
-}
-
-/// The metadata fields [`PngMetadata`] and [`DecodedPng`] both carry, borrowed.
-///
-/// The two read surfaces agree field for field on purpose (one reads the pixels, one does not),
-/// so [`PngEncoder::with_metadata`] and [`PngEncoder::with_metadata_from`] are the same function
-/// over two shapes. Borrowing rather than cloning into a `PngMetadata` keeps a large ICC profile
-/// or EXIF block from being copied twice on the way into the encoder.
-struct MetadataView<'a> {
-    exif: Option<&'a [u8]>,
-    icc_profile: Option<&'a IccProfile>,
-    /// The text annotations, the XMP packet among them.
-    texts: &'a [TextChunk],
-    gamma: Option<u32>,
-    chromaticities: Option<Chromaticities>,
-    srgb: Option<SrgbIntent>,
-    cicp: Option<Cicp>,
-    significant_bits: Option<&'a [u8]>,
-    background: Option<Background>,
-    physical_dimensions: Option<PhysicalDimensions>,
-    modification_time: Option<ModificationTime>,
-    /// Whether the source carried a C2PA manifest store. Only the presence is needed: a store is
-    /// never carried, but a caller has to be told it was left behind.
-    c2pa: bool,
 }
 
 /// Something [`PngEncoder::with_png_metadata`] could not do faithfully with a payload it was given.
@@ -561,7 +534,7 @@ pub struct PngEncoder {
     palette_order: PaletteOrder,
     backends: Deflaters,
     /// What the last metadata carry could not take *as a whole payload*, in the order it was
-    /// found. Reset by each [`Self::with_metadata`] / [`Self::with_metadata_from`] call, so it
+    /// found. Reset by each [`Self::with_png_metadata`] call, so it
     /// describes that call. Per-annotation notices live with their annotation instead, so that a
     /// second carry replaces them exactly as it replaces the annotations themselves.
     carry_notices: Vec<MetadataNotice>,
@@ -1056,8 +1029,8 @@ impl PngEncoder {
     ///
     /// This is the write-side counterpart of [`metadata`](crate::metadata): read a file's
     /// metadata without touching its pixels, then hand it to the encoder that rewrites them.
-    /// [`with_metadata_from`](Self::with_metadata_from) is the same thing for a full
-    /// [`DecodedPng`].
+    /// A full decode carries the same value as [`DecodedPng::metadata`](crate::DecodedPng::metadata),
+    /// so a re-encode of decoded pixels passes `&decoded.metadata` here.
     ///
     /// Calling it twice with the same metadata is the same as calling it once: a later carry
     /// replaces what an earlier one contributed rather than appending a second copy of every
@@ -1111,90 +1084,23 @@ impl PngEncoder {
     /// entry of the source's palette, so it is carried only by
     /// [`encode_indexed8`](Self::encode_indexed8) with that palette.
     #[must_use]
-    pub fn with_png_metadata(self, metadata: &PngMetadata) -> Self {
-        self.with_metadata_view(MetadataView {
-            exif: metadata.exif.as_deref(),
-            icc_profile: metadata.icc_profile.as_ref(),
-            texts: &metadata.texts,
-            gamma: metadata.gamma,
-            chromaticities: metadata.chromaticities,
-            srgb: metadata.srgb,
-            cicp: metadata.cicp,
-            significant_bits: metadata.significant_bits.as_deref(),
-            background: metadata.background,
-            physical_dimensions: metadata.physical_dimensions,
-            modification_time: metadata.modification_time,
-            c2pa: metadata.c2pa.is_some(),
-        })
-    }
-
-    /// Carries the metadata of a decoded file into this encoder: the [`DecodedPng`] twin of
-    /// [`with_png_metadata`](Self::with_png_metadata), which documents exactly what is and is not carried.
-    ///
-    /// Use this when you already decoded the pixels; use `with_png_metadata` when
-    /// [`metadata`](crate::metadata) read the file without them.
-    #[must_use]
-    pub fn with_metadata_from(self, decoded: &DecodedPng) -> Self {
-        self.with_metadata_view(MetadataView {
-            exif: decoded.exif.as_deref(),
-            icc_profile: decoded.icc_profile.as_ref(),
-            texts: &decoded.texts,
-            gamma: decoded.gamma,
-            chromaticities: decoded.chromaticities,
-            srgb: decoded.srgb,
-            cicp: decoded.cicp,
-            significant_bits: decoded.significant_bits.as_deref(),
-            background: decoded.background,
-            physical_dimensions: decoded.physical_dimensions,
-            modification_time: decoded.modification_time,
-            c2pa: decoded.c2pa.is_some(),
-        })
-    }
-
-    /// What this encoder could not carry faithfully: whole payloads left behind, then the
-    /// per-annotation notices, in the order they were found — empty when everything came along
-    /// intact.
-    ///
-    /// Surface this to whoever asked for the re-encode. Losing metadata without saying so is the
-    /// defect the preservation path exists to remove; losing it — or bending it — *with* an
-    /// explanation is a choice the spec forces. Use
-    /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
-    ///
-    /// The payload-level notices describe the last [`with_png_metadata`](Self::with_png_metadata) /
-    /// [`with_metadata_from`](Self::with_metadata_from) call and are reset by each; the
-    /// per-annotation notices belong to the annotations still accumulated, so they follow the
-    /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
-    /// (§11.3.2.3) sits between the two and belongs to the profile last set, by
-    /// [`with_icc_profile`](Self::with_icc_profile) or a carry; the modification time's
-    /// (§11.3.5.1) follows it and belongs to the time last given to [`with_time`](Self::with_time).
-    #[must_use]
-    pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
-        let mut notices = self.carry_notices.clone();
-        notices.extend(self.ancillary.iccp_notice());
-        notices.extend(self.ancillary.time_notice());
-        notices.extend(self.ancillary.text_notices());
-        notices
-    }
-
-    /// The one implementation behind [`with_png_metadata`](Self::with_png_metadata) and
-    /// [`with_metadata_from`](Self::with_metadata_from).
-    fn with_metadata_view(mut self, meta: MetadataView<'_>) -> Self {
+    pub fn with_png_metadata(mut self, metadata: &PngMetadata) -> Self {
         self.carry_notices.clear();
         self.ancillary.begin_carry();
-        if let Some(exif) = meta.exif {
+        if let Some(exif) = &metadata.exif {
             self = self.with_exif(exif);
         }
         // Both colour statements are carried. §5.6 Table 5 and §11.3.2.5 only *recommend* against
         // the pair, and §4.3 Table 1 exists to resolve it: `iCCP` outranks `sRGB`, so the profile
         // is what a reader applies and the intent is what a reader without a CMM falls back on.
         // Dropping either would throw away colour information the source carried.
-        if let Some(icc) = meta.icc_profile {
+        if let Some(icc) = &metadata.icc_profile {
             self = self.with_icc_profile(&icc.name, &icc.profile);
         }
-        if let Some(intent) = meta.srgb {
+        if let Some(intent) = metadata.srgb {
             self = self.with_srgb(intent);
         }
-        match meta.cicp {
+        match metadata.cicp {
             // §11.3.2.6: "Matrix Coefficients shall be set to 0". A source chunk that says
             // otherwise is not a conforming cICP; carrying it forward would put the same defect
             // in the output.
@@ -1210,16 +1116,16 @@ impl PngEncoder {
             }
             None => {}
         }
-        if meta.c2pa {
+        if metadata.c2pa.is_some() {
             self.carry_notices.push(MetadataNotice::C2paManifestStore);
         }
         // Set in the stored ×100 000 fixed-point units rather than through `with_gamma` /
         // `with_chromaticities`, whose `f64` arguments would round-trip the value through a
         // division and a `round()`: preservation must be byte-exact.
-        if let Some(gamma) = meta.gamma {
+        if let Some(gamma) = metadata.gamma {
             self.ancillary.gamma = Some(gamma);
         }
-        if let Some(chrm) = meta.chromaticities {
+        if let Some(chrm) = metadata.chromaticities {
             self.ancillary.chrm = Some([
                 chrm.white.0,
                 chrm.white.1,
@@ -1235,10 +1141,10 @@ impl PngEncoder {
         // written exactly as a caller-set one is (`ancillary::sbit_for` / `bkgd_for`). The read
         // side surfaces the background in the decoded pixels' units, which are the units the
         // `with_background_*` setters take.
-        if let Some(bits) = meta.significant_bits {
+        if let Some(bits) = &metadata.significant_bits {
             self = self.with_significant_bits(bits);
         }
-        match meta.background {
+        match metadata.background {
             Some(Background::Gray(gray)) => self = self.with_background_gray(gray),
             Some(Background::Rgb(red, green, blue)) => {
                 self = self.with_background_rgb(red, green, blue);
@@ -1246,10 +1152,10 @@ impl PngEncoder {
             Some(Background::Index(index)) => self = self.with_background_index(index),
             None => {}
         }
-        if let Some(phys) = meta.physical_dimensions {
+        if let Some(phys) = metadata.physical_dimensions {
             self = self.with_physical_dimensions(phys.x_ppu, phys.y_ppu, phys.unit);
         }
-        if let Some(time) = meta.modification_time {
+        if let Some(time) = metadata.modification_time {
             self = self.with_time(
                 time.year,
                 time.month,
@@ -1264,7 +1170,7 @@ impl PngEncoder {
         // is displaced by a carried one, as one carry's packet is by the next: the encoder
         // writes the packet it was last handed, and a source that holds none leaves it alone.
         // `end_carry` decides that on the entries as written, so a promoted packet counts too.
-        for text in meta.texts {
+        for text in &metadata.texts {
             let (language, translated) = (
                 text.language.as_deref().unwrap_or_default(),
                 text.translated_keyword.as_deref().unwrap_or_default(),
@@ -1295,6 +1201,31 @@ impl PngEncoder {
         }
         self.ancillary.end_carry();
         self
+    }
+
+    /// What this encoder could not carry faithfully: whole payloads left behind, then the
+    /// per-annotation notices, in the order they were found — empty when everything came along
+    /// intact.
+    ///
+    /// Surface this to whoever asked for the re-encode. Losing metadata without saying so is the
+    /// defect the preservation path exists to remove; losing it — or bending it — *with* an
+    /// explanation is a choice the spec forces. Use
+    /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
+    ///
+    /// The payload-level notices describe the last [`with_png_metadata`](Self::with_png_metadata)
+    /// call and are reset by each; the
+    /// per-annotation notices belong to the annotations still accumulated, so they follow the
+    /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
+    /// (§11.3.2.3) sits between the two and belongs to the profile last set, by
+    /// [`with_icc_profile`](Self::with_icc_profile) or a carry; the modification time's
+    /// (§11.3.5.1) follows it and belongs to the time last given to [`with_time`](Self::with_time).
+    #[must_use]
+    pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
+        let mut notices = self.carry_notices.clone();
+        notices.extend(self.ancillary.iccp_notice());
+        notices.extend(self.ancillary.time_notice());
+        notices.extend(self.ancillary.text_notices());
+        notices
     }
 
     /// Embeds a C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2), verbatim and

@@ -289,14 +289,17 @@ fn ancillary_pile_survives_decode() {
         panic!("expected Rgb8");
     };
     assert_eq!(img.as_samples(), src, "pixels survive the ancillary pile");
-    assert_eq!(decoded.gamma, Some(45455));
-    assert_eq!(decoded.srgb, Some(SrgbIntent::RelativeColorimetric));
-    assert!(decoded.chromaticities.is_some());
-    assert_eq!(decoded.exif.as_deref(), Some(exif.as_slice()));
-    assert_eq!(decoded.icc_profile.as_ref().unwrap().profile, icc);
-    assert_eq!(decoded.xmp(), Some(xmp.as_bytes()));
+    assert_eq!(decoded.metadata.gamma, Some(45455));
     assert_eq!(
-        decoded.texts.len(),
+        decoded.metadata.srgb,
+        Some(SrgbIntent::RelativeColorimetric)
+    );
+    assert!(decoded.metadata.chromaticities.is_some());
+    assert_eq!(decoded.metadata.exif.as_deref(), Some(exif.as_slice()));
+    assert_eq!(decoded.metadata.icc_profile.as_ref().unwrap().profile, icc);
+    assert_eq!(decoded.metadata.xmp(), Some(xmp.as_bytes()));
+    assert_eq!(
+        decoded.metadata.texts.len(),
         4,
         "three annotations and the XMP packet"
     );

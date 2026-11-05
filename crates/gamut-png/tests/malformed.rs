@@ -143,7 +143,10 @@ fn critical_crc_damage_errors_ancillary_is_skipped() {
         chunk(b"IEND", &[]),
     ]);
     let decoded = decode(&corrupt_crc_of(&with_gama, b"gAMA")).expect("gAMA damage is skipped");
-    assert!(decoded.gamma.is_none(), "damaged gAMA must not surface");
+    assert!(
+        decoded.metadata.gamma.is_none(),
+        "damaged gAMA must not surface"
+    );
 
     let with_trns = png_from_chunks(&[
         chunk(b"IHDR", &ihdr_payload(2, 1, 8, 0, 0)),
@@ -256,7 +259,7 @@ fn ordering_violations_are_rejected() {
         chunk(b"IEND", &[]),
     ]);
     let decoded = decode(&gama_late).expect("late gAMA tolerated");
-    assert_eq!(decoded.gamma, Some(45455));
+    assert_eq!(decoded.metadata.gamma, Some(45455));
 }
 
 #[test]
@@ -392,7 +395,10 @@ fn bombs_and_limits_are_refused_before_allocation() {
         .with_max_metadata_bytes(1024)
         .decode(&ztxt_bomb)
         .expect("metadata bomb skipped, image intact");
-    assert!(decoded.texts.is_empty(), "busting zTXt is not surfaced");
+    assert!(
+        decoded.metadata.texts.is_empty(),
+        "busting zTXt is not surfaced"
+    );
 }
 
 #[test]
