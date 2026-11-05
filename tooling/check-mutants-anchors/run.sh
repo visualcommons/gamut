@@ -29,15 +29,16 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-config=.cargo/mutants.toml
+# The config to check; an argument exists so the check can be pointed at an edited copy.
+config=${1:-.cargo/mutants.toml}
 
 # Only the single-quoted lines inside the `exclude_re = [ ... ]` array. Literal strings are
 # required so that what is read here is byte-for-byte the regex cargo-mutants compiles.
-entries=$(awk '
+entries=$(awk -v q="'" '
     /^exclude_re = \[/ { inside = 1; next }
     inside && /^\]/ { inside = 0 }
     inside && /^[[:space:]]*"/ { printf "DOUBLE\t%d\t%s\n", NR, $0; next }
-    inside && /^[[:space:]]*\047/ { printf "ENTRY\t%d\t%s\n", NR, $0 }
+    inside && $0 ~ ("^[[:space:]]*" q) { printf "ENTRY\t%d\t%s\n", NR, $0 }
 ' "$config")
 
 if [ -z "$entries" ]; then
@@ -46,7 +47,7 @@ if [ -z "$entries" ]; then
 fi
 
 # The rest is one awk program: it reads each anchored file once and checks every site in it.
-printf '%s\n' "$entries" | awk -F '\t' '
+printf '%s\n' "$entries" | awk -F '\t' -v config="$config" -v q="'" '
 function fail(msg) {
     printf "  %s:%d: %s\n", config, lineno, msg
     bad++
@@ -94,7 +95,7 @@ function declares_fn(path, name,    n, i) {
         if (src[path, i] ~ ("(^|[^A-Za-z0-9_])fn[[:space:]]+" name "([^A-Za-z0-9_]|$)")) return 1
     return 0
 }
-BEGIN { config = ".cargo/mutants.toml"; bad = 0; count = 0 }
+BEGIN { bad = 0; count = 0 }
 $1 == "DOUBLE" {
     lineno = $2
     fail("entry is a double-quoted string; write it as a single-quoted literal")
@@ -104,8 +105,8 @@ $1 == "DOUBLE" {
     lineno = $2
     raw = $3
     count++
-    sub(/^[[:space:]]*\047/, "", raw)
-    sub(/\047,?[[:space:]]*(#.*)?$/, "", raw)
+    sub("^[[:space:]]*" q, "", raw)
+    sub(q ",?[[:space:]]*(#.*)?$", "", raw)
 
     # ^crates/<crate>/src/<path>:<sites>: <description>$
     if (!match(raw, /^\^crates\/[a-z0-9-]+\/src\/[^:]+:/)) {

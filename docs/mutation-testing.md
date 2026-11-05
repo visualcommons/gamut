@@ -187,6 +187,29 @@ the file to confirm the edit landed before believing the verdict. A test asserti
 cannot kill a guard-removal mutant when a later check rejects the same input for a different
 reason — assert the message.
 
+## Exclusion anchors
+
+A `.cargo/mutants.toml` exclusion is a regex over the mutant's name as `cargo mutants --list`
+prints it: `crates/<crate>/src/<path>:LINE:COLUMN: <description>`. Write each one as exactly that
+name, regex-escaped, single-quoted and anchored at both ends — the shapes the file's own header
+gives. Two things go wrong otherwise, and neither fails anything on its own. A bare function name
+reaches every same-named function in the workspace (`replace > with >= in decode` matched twenty
+comparisons in four crates, one of them argued for). And a line anchor goes stale the moment code
+above it moves: the mutant it argued for returns to the survey, or worse, a sibling nobody argued
+for slides under it. Issue #1054 found 29 of 44 line anchors in that state.
+
+```bash
+mise run check-mutants-anchors      # CI's Format & Metadata job runs it on every pull request
+```
+
+It is pure text, no cargo: for every entry it checks that the path exists, that the operator the
+description names (`<`, `+=`, `match guard r.start`, `match arm Predictor::None`, …) starts at
+LINE:COLUMN, and that the line sits inside the function the description names. So a change that
+moves an excluded site fails in the change that moved it, and the fix is to re-anchor the entry on
+the name `cargo mutants --list` now prints for it — after checking the comment's argument still
+holds for the code that moved. What it cannot check is the argument itself; that stays the
+survey's job.
+
 ## Tight debug loops
 
 When killing a specific survivor, narrow the selection and reuse the previous verdicts:

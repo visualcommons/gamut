@@ -340,6 +340,8 @@ exclude_re = [
     '^crates/gamut-webp/src/encoder\.rs:125:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `alpha::write_compressed_alph`: `0xff00_0000 | (u32::from(a) << 8)` ORs the opaque
     # alpha byte (bits 24-31) with the green byte (bits 8-15); the operands are disjoint, so `|` == `^`.
+    # Its ALPH header byte `method.code() << 2 | 0x01` is the same shape: the shift clears the two
+    # low bits the `0x01` occupies.
     '^crates/gamut-webp/src/alpha\.rs:(186:31|194:33): replace \| with \^ in write_compressed_alph$',
     # gamut-webp `transform::fwht4x4` negative-bias correction `x += i32::from(x < 0)`: the only value
     # where `<` and `<=` disagree is x == 0, where the extra +1 is absorbed by the subsequent
@@ -394,22 +396,11 @@ exclude_re = [
     '^crates/gamut-webp/src/vp8/frame\.rs:698:5: replace select_luma_mode -> usize with .*$',
     '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in select_chroma_mode$',
     '^crates/gamut-webp/src/vp8/frame\.rs:724:5: replace select_chroma_mode -> usize with .*$',
-    #   SEGMENT_QUANT_DELTAS (frame.rs:45) — the encoder's chosen per-segment quantizer spread; any
-    #   spread is valid and is faithfully signalled. Line-anchored: a bare const, no enclosing fn name.
-    'frame\.rs:45:40: delete -',
-    'frame\.rs:45:45: delete -',
     #   encode_bpred_luma — the submode tie-break (`sad < best`) and the running prediction-cost
     #   accumulator (`total_sad +=`, used only for the B_PRED-vs-whole-block decision); both pick
     #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
     '^crates/gamut-webp/src/vp8/frame\.rs:914:20: replace < with <= in encode_bpred_luma$',
     '^crates/gamut-webp/src/vp8/frame\.rs:920:19: replace \+= with \*= in encode_bpred_luma$',
-    #   encode_frame_filtered decision heuristics (line-anchored so the structural mutants on other
-    #   operators of the same kind in this large function stay tested): the per-macroblock segment
-    #   assignment from luma mean (1029), the segment-map index it reads back (1049, self-consistent —
-    #   the same id is signalled), and the B_PRED-vs-whole-block SAD threshold (1070).
-    'frame\.rs:1029:53: replace / with',
-    'frame\.rs:1049:44: replace \* with /',
-    'frame\.rs:1070:59: replace < with <=',
     # gamut-webp VP8L encoder — correctness-preserving free choices. The lossless encode->decode
     # round-trip and the libwebp oracle BOTH run on these paths, so any mutant that produced an invalid
     # prefix code, an out-of-range backward reference, or a residual the inverse transform cannot undo
@@ -489,16 +480,6 @@ exclude_re = [
     # Token::green_symbol is, per its doc, "a cheap per-block signature for grouping" — it feeds only
     # assign_groups, so any value just regroups blocks.
     '^crates/gamut-webp/src/vp8l/encoder\.rs:\d+:\d+: .* in Token::green_symbol$',
-    # tokenize :458 `if cache_bits > 0` chooses whether to use the optional colour cache; both
-    # branches emit a valid, self-consistently-signalled stream.
-    'encoder\.rs:458:35: replace > with',
-    # build_length_limited_lengths :348 `h > 0` counts used symbols; overcounting only yields a
-    # valid-but-suboptimal length-limited tree (a malformed tree fails the round-trip).
-    'prefix\.rs:348:48: replace > with >=',
-    # write_main_image meta-prefix signalling (:330 single-vs-multi group, :332 the block-size field):
-    # both paths round-trip self-consistently with the decoder; the grouping itself is free (issue #31).
-    'encoder\.rs:330:26: replace > with >=',
-    'encoder\.rs:332:41: replace - with /',
     # forward_predictor / forward_color block geometry (`1 << size_bits`, the sub-image index): a
     # mutated block size or write index just makes the encoder choose predictor/colour elements the
     # decoder reads back identically (the per-pixel residual/colour math is asymmetric and IS caught).
@@ -678,18 +659,6 @@ exclude_re = [
     # `(acc << 8) | usize::from(b)`: identical disjoint-byte shape as `Reader::u48`, so `| -> ^` is
     # equivalent.
     '^crates/gamut-heic/src/nal\.rs:195:48: replace \| with \^ in <impl Iterator for NalUnitIter<.a>>::next$',
-    # `walk_segments` (container.rs) is reached only from `HeifContainer::parse`, and only *after*
-    # `gamut_isobmff::read(data)?` has already succeeded — which requires both `ftyp` and `meta` to
-    # have been parsed. `walk_segments` replays the identical `BoxReader` walk, so by the time it
-    # reaches its malformed-box arm (the only place the `seen_ftyp && seen_meta` guard runs) both
-    # flags are necessarily true (had a malformed box preceded either, `read` itself would have
-    # errored and `parse` would never call `walk_segments`). With both operands always true at that
-    # point, `&&` and `||` are indistinguishable — the mutant is equivalent. Line-anchored (like the
-    # frame.rs entries above) because the *other* `&&` in the same function — the second-`ftyp`
-    # appended-stream detection at container.rs:253 — is observable and stays killed by the
-    # accounting tests. (The analogous tolerance guard in `read`, which *is* reachable with only one
-    # box seen, is killed by the exact-message tests in gamut-isobmff `tests/reader.rs`.)
-    'container\.rs:283:30: replace && with \|\|',
     # (The gamut-png typed-decoder bit-depth match guards are gone: `DecodeImage<P>` delegates the
     # layout change to gamut-core's `convert` module now, so the guards the entry argued about no
     # longer exist and it matched nothing.)
@@ -853,8 +822,8 @@ exclude_re = [
     # defends the parse cursor against a length `BackwardRefs::find` never returns, so `>` and
     # `>=` admit exactly the same candidates on every input. That is what makes the mutant
     # equivalent, and also what makes the guard worth keeping: what it prevents is a
-    # non-terminating loop, which produces no output to check. Named rather than line-anchored so
-    # it cannot also cover the observable `>` in the deferral probe, which the lazy-parse tests
+    # non-terminating loop, which produces no output to check. Isolated in its own function so it
+    # cannot be confused with the observable `>` in the deferral probe, which the lazy-parse tests
     # kill.
     '^crates/gamut-webp/src/vp8l/encoder\.rs:681:38: replace > with >= in nonempty_match$',
     # gamut-deflate `Matcher::walk` (lz77.rs) — the improvement test `len > best_len` relaxed to
@@ -903,7 +872,7 @@ exclude_re = [
     # The statement is written `*= 2` rather than `<<= 1` precisely so this entry can name it. The
     # `self.value <<= 1` on the line above is the same operator applied to a different field, and
     # reversing *that* one is caught -- so a `<<=`-shaped exclusion would have hidden real
-    # coverage, and a line-anchored one stops matching as soon as anything above it moves.
+    # coverage.
     '^crates/gamut-webp/src/vp8/bool_coder\.rs:257:24: replace \*= with /= in BoolDecoder<.a>::get_bool$',
     # gamut-webp hang-on-mutation timeouts: cursor advances and loop exits that stop making
     # progress. Each entry carries the paragraph directly above it.

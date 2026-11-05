@@ -473,6 +473,15 @@ run = "./tooling/mutants/run.sh --crate"
 description = "Enforce the mechanical test conventions in docs/testing.md"
 run = "./tooling/check-tests/run.sh"
 
+# A line-anchored mutation exclusion stops matching when code above it moves, and an exclusion that
+# matches nothing fails nowhere: 29 of 44 had drifted off their operator, and bare function names
+# reached same-named functions in other crates (issue #1054). This holds every `exclude_re` entry in
+# `.cargo/mutants.toml` to the source -- crate-qualified path, the named operator at LINE:COLUMN,
+# inside the named function. Pure text, no cargo; the script header lists what it does not check.
+[tasks.check-mutants-anchors]
+description = "Verify every .cargo/mutants.toml exclusion is crate-qualified and its LINE:COLUMN still carries the operator it names, inside the function it names"
+run = "./tooling/check-mutants-anchors/run.sh"
+
 # Nothing read the README crates table, so it drifted: fixing issue #425 meant correcting
 # twenty-three of its twenty-eight rows and adding four crates that had no row at all. `versions`
 # only lists `name version` and asserts nothing, and `check-msrv` greps the README for one number,

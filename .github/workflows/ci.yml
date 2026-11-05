@@ -88,6 +88,12 @@ jobs:
         # property depending on OS entropy would make cargo-mutants report CAUGHT or MISSED for the
         # same mutant on different runs.
         run: mise run check-tests
+      - name: Mutation-exclusion anchors
+        # Static, like the step above: awk over .cargo/mutants.toml and the files it names. Every
+        # exclusion must be crate-qualified and its LINE:COLUMN must still carry the operator it
+        # argues about. The mutation job itself runs only after merge, so an anchor that drifted
+        # would otherwise surface as a red or silently-weakened gate at an unrelated commit.
+        run: mise run check-mutants-anchors
       - name: Fuzz target lists in step
         # Three hand-maintained lists describe the same set of fuzz targets: the files under
         # tooling/gamut-fuzz/fuzz_targets, the [[bin]] entries in that crate's Cargo.toml, and the
