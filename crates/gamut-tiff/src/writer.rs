@@ -180,3 +180,92 @@ fn write_blocks(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tags;
+
+    /// A directory whose only field is a 9-byte `XMP` packet: out of line in both variants (past
+    /// classic's 4-byte and BigTIFF's 8-byte inline word) and odd, so the value pool ends on an
+    /// odd byte and the strip data needs the zero pad byte to start on a word boundary.
+    fn odd_pool_ifd() -> Ifd {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::XMP, Value::Byte(b"abcdefghi".to_vec()));
+        ifd
+    }
+
+    /// The classic layout `write_image` produces for [`odd_pool_ifd`] and one 3-byte strip.
+    #[rustfmt::skip]
+    const CLASSIC_ODD_POOL: &[u8] = &[
+        b'I', b'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD 0 at 8
+        0x03, 0x00, // three entries
+        // StripOffsets (273): LONG, 1, the strip at 60 — the even base after the 59-byte pool end.
+        0x11, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00,
+        // StripByteCounts (279): LONG, 1, 3.
+        0x17, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        // XMP (700): BYTE, 9, out of line at 50.
+        0xBC, 0x02, 0x01, 0x00, 0x09, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, // next IFD: none
+        b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h', b'i', // value pool, 50..59
+        0x00, // zero pad byte to the even base
+        0xAA, 0xBB, 0xCC, // the strip, at 60
+    ];
+
+    /// Classic TIFF: `StripByteCounts` is `LONG`, `StripOffsets` is `LONG`, and the strip starts
+    /// at the even base behind a zero pad byte.
+    #[test]
+    fn write_image_classic_lays_strips_at_the_even_base_after_an_odd_pool() {
+        let got = write_image(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            &odd_pool_ifd(),
+            &[vec![0xAA, 0xBB, 0xCC]],
+        )
+        .expect("write");
+        assert_eq!(got, CLASSIC_ODD_POOL);
+    }
+
+    /// BigTIFF: `StripByteCounts` stays `LONG` while `StripOffsets` widens to `LONG8`; the strip
+    /// again starts at the even base behind a zero pad byte.
+    #[test]
+    fn write_image_bigtiff_lays_strips_at_the_even_base_after_an_odd_pool() {
+        let got = write_image(
+            ByteOrder::LittleEndian,
+            Variant::Big,
+            &odd_pool_ifd(),
+            &[vec![0xAA, 0xBB, 0xCC]],
+        )
+        .expect("write");
+        #[rustfmt::skip]
+        let want: &[u8] = &[
+            // header: BigTIFF, 8-byte offsets, IFD 0 at 16
+            b'I', b'I', 0x2B, 0x00, 0x08, 0x00, 0x00, 0x00, 0x10, 0, 0, 0, 0, 0, 0, 0,
+            0x03, 0, 0, 0, 0, 0, 0, 0, // three entries
+            // StripOffsets (273): LONG8, 1, the strip at 102 — the even base after the pool end.
+            0x11, 0x01, 0x10, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x66, 0, 0, 0, 0, 0, 0, 0,
+            // StripByteCounts (279): LONG, 1, 3.
+            0x17, 0x01, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0, 0,
+            // XMP (700): BYTE, 9, out of line at 92.
+            0xBC, 0x02, 0x01, 0x00, 0x09, 0, 0, 0, 0, 0, 0, 0, 0x5C, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, // next IFD: none
+            b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h', b'i', // value pool, 92..101
+            0x00, // zero pad byte to the even base
+            0xAA, 0xBB, 0xCC, // the strip, at 102
+        ];
+        assert_eq!(got, want);
+    }
+
+    /// `write_multipage` carries its own copy of the layout (#1057 pins it before the move into
+    /// `gamut-ifd`): one page comes out byte-identical to [`write_image`]'s.
+    #[test]
+    fn write_multipage_single_page_matches_the_write_image_layout() {
+        let got = write_multipage(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            &[(odd_pool_ifd(), vec![vec![0xAA, 0xBB, 0xCC]])],
+        )
+        .expect("write");
+        assert_eq!(got, CLASSIC_ODD_POOL);
+    }
+}
