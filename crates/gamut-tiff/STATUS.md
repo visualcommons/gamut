@@ -218,7 +218,8 @@ The API was frozen after a full-surface review; the additions and breaks:
   `gamut_ifd::tags`). The per-scheme strip codecs (LZW/PackBits/Deflate/CCITT/predictor) are
   crate-internal: every scheme is reachable through `Compression` on the encoder/decoder.
 - **std conversions** — `Compression::{from_code, code}` and
-  `PhotometricInterpretation::{from_code, code}` became `TryFrom<u32>` / `From<_> for u16`
+  `PhotometricInterpretation::{from_code, code}` became `TryFrom<u32>` (`TryFrom<u16>` since
+  #1133, below) / `From<_> for u16`
   (the gamut-icc/gamut-isobmff precedent); `Predictor`, which had no conversions (inline `1|2`
   literals), gains the same symmetric pair.
 - **`#[non_exhaustive]`** on the open code sets (`Compression`, `PhotometricInterpretation`,
@@ -268,6 +269,21 @@ The API was frozen after a full-surface review; the additions and breaks:
   the pointer ignored — now fails `TiffDecoder::metadata`, as a dangling `ExifIFD` always has;
   and an IFD-0 `GPSInfo` array of two or more directories is refused as an `ExifIFD` one is.
   `exif_byte_order` is now `Some` when any of the three Exif carriers was read.
+- **Shared tag-value enums (#1133).** `Compression`, `PhotometricInterpretation`, `Predictor` and
+  `SampleFormat` are no longer this crate's own types: they are gamut-ifd's
+  `tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat}`, re-exported from
+  the crate root under the same paths. **Breaking:** the `TryFrom<u32>` conversions above become
+  `TryFrom<u16>` (the field's on-disk width), still paired with `From<_> for u16`; and the enums
+  gain the codes this crate never read — those DNG 1.7.1.0 adds (`Compression::{LossyJpeg,
+  JpegXl}`, the `Cfa`/`LinearRaw`/`Depth`/`PhotometricMask` photometries,
+  `Predictor::{HorizontalDifferencingX2, HorizontalDifferencingX4, FloatingPointX2,
+  FloatingPointX4}`) and TIFF's own
+  `Predictor::FloatingPoint`. All four stay `#[non_exhaustive]`. What this crate accepts is
+  unchanged: its readers admit only the codes it admitted before, so `TiffInfo` and
+  `Anomaly::UnknownCode` keep their verdicts and a TIFF page carrying `Compression = 52546` is
+  still flagged. **Behaviour change:** `TiffEncoder` now refuses, with `ErrorKind::Unsupported`,
+  a `with_predictor` value other than `None` or `HorizontalDifferencing`, which the shared type
+  can now express and which would otherwise be silently encoded unpredicted.
 - **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
   on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
   diagnostics whose wording is not contractual.

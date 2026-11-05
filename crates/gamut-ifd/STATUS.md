@@ -4,7 +4,10 @@
 `references/tiff/bigtiff.html` for BigTIFF) out as a shared primitive consumed by both
 [`gamut-tiff`](../gamut-tiff) (the TIFF codec, issue #107) and [`gamut-exif`](../gamut-exif) (EXIF
 metadata, issue #34). It models *structure only* — byte order, field types, values, the IFD chain,
-and the offset-driven read/write spine — never pixels, compression, or photometry.
+and the offset-driven read/write spine — never pixels, compression, or photometry. It names the
+codes those tags carry (`tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat}`,
+since #1133) so the codecs spell them alike; what a code does, and whether a codec supports it,
+stays the codec's.
 
 **Keystone:** the **two-pass offset layout** in the writer ([`write`](src/writer.rs)). Out-of-line
 values and following IFDs need absolute offsets that are only known after sizes are fixed, so the

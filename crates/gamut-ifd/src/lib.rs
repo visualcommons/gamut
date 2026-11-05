@@ -8,7 +8,9 @@
 //! [`gamut-exif`](https://crates.io/crates/gamut-exif) (issue #34) and
 //! [`gamut-tiff`](https://crates.io/crates/gamut-tiff) (issue #107) build on. It models only the
 //! structure (byte order, field types, values, IFD chains, offset layout) — never pixels,
-//! compression, or photometry, which stay in the codec.
+//! compression, or photometry, which stay in the codec. It names the codes those tags carry
+//! ([`tags::Compression`] and its three siblings) so the codecs spell them alike; what a code
+//! does to the pixels, and whether a codec supports it, is still the codec's.
 //!
 //! Structure follows **TIFF 6.0** (`references/tiff/tiff6.pdf`, Adobe/Aldus, Final — June 3 1992,
 //! §2). [`read`] / [`read_header`] parse a stream into a [`TiffFile`]; [`write()`] serialises one
@@ -20,7 +22,8 @@
 //! over **one** directory a caller already holds, scoped per level by a [`SubtreeScope`]. The
 //! same [`tags`] module holds the shared tag registry — each tag TIFF 6.0 and DNG 1.7.1.0 define,
 //! with its name, permitted field types and component count — that gamut-tiff, gamut-dng and
-//! gamut-exif read rather than each keeping a copy. The
+//! gamut-exif read rather than each keeping a copy, and the value codes of the `Compression`,
+//! `PhotometricInterpretation`, `Predictor` and `SampleFormat` tags. The
 //! one cross-format payload a TIFF-based file carries by tag — the C2PA manifest store — has its
 //! placement rule and exclusion ranges stated once, for every TIFF-based codec to share (see
 //! [C2PA](#c2pa-manifest-store) below). For strict archival decoding, [`audit`] classifies **every byte** of a stream into typed

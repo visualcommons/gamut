@@ -1,241 +1,153 @@
-//! Codec-specific interpretations of two IFD tag values: the photometric interpretation and the
-//! prediction scheme.
+//! TIFF's reading of three shared tag-value codes: the photometric interpretation, the sample
+//! format, and the prediction scheme.
 //!
-//! The structural IFD model — the byte-order header, [`gamut_ifd::FieldType`] / [`gamut_ifd::Value`],
-//! the [`gamut_ifd::Ifd`] chain, and the read/write spine — lives in the shared
-//! [`gamut_ifd`](https://crates.io/crates/gamut-ifd) crate (re-exported from this crate's root).
-//! What stays here is *codec semantics*: how a [`PhotometricInterpretation`] maps samples to colour
-//! and which [`Predictor`] is applied before compression. These are the meanings the encoder and
-//! decoder attach to the `PhotometricInterpretation` (262) and `Predictor` (317) tags, not part of
-//! the container structure.
+//! The codes themselves — [`PhotometricInterpretation`], [`SampleFormat`], [`Predictor`] — are
+//! gamut-ifd's, shared with gamut-dng and re-exported from this crate's root. Their union carries
+//! codes only DNG assigns (the CFA and LinearRaw photometries, the floating-point and `X2`/`X4`
+//! predictors); what stays here is which of them a TIFF page may declare. Each reader refuses the
+//! rest as unrecognised, so [`TiffInfo`](crate::TiffInfo) and [`deconstruct`](crate::deconstruct)
+//! keep the verdicts they had when this crate kept its own copies of the enums.
 
-/// How pixel samples map to colour, stored in the `PhotometricInterpretation` tag (262).
+use gamut_core::{Error, Result};
+pub(crate) use gamut_ifd::tags::{PhotometricInterpretation, Predictor, SampleFormat};
+
+/// Reads `code` as a `T` that `admits` accepts, or refuses it as unsupported with `message`.
 ///
-/// The set is non-exhaustive: TIFF extensions define further interpretations (LogL, LogLuv,
-/// the TIFF/EP CFA and LinearRaw values, …), so variants may be added without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PhotometricInterpretation {
-    /// `0` — bilevel/grayscale where `0` is white and the maximum value is black.
-    WhiteIsZero,
-    /// `1` — bilevel/grayscale where `0` is black and the maximum value is white.
-    BlackIsZero,
-    /// `2` — full-colour RGB.
-    Rgb,
-    /// `3` — palette colour: sample values index a `ColorMap`.
-    Palette,
-    /// `4` — a transparency mask (an auxiliary bilevel image for another image).
-    TransparencyMask,
-    /// `5` — CMYK separated colour (TIFF 6.0 §16).
-    Cmyk,
-    /// `6` — YCbCr colour (TIFF 6.0 §21).
-    YCbCr,
-    /// `8` — CIE L\*a\*b\* colour (TIFF 6.0 §23).
-    CieLab,
+/// A code past `u16` is refused like an unassigned one: every code these tags carry is a `SHORT`.
+pub(crate) fn read<T: TryFrom<u16>>(
+    code: u32,
+    admits: fn(&T) -> bool,
+    message: &'static str,
+) -> Result<T> {
+    u16::try_from(code)
+        .ok()
+        .and_then(|code| T::try_from(code).ok())
+        .filter(admits)
+        .ok_or_else(|| Error::unsupported(env!("CARGO_PKG_NAME"), message))
 }
 
-impl TryFrom<u32> for PhotometricInterpretation {
-    type Error = gamut_core::Error;
-
-    /// Maps an on-disk `PhotometricInterpretation` tag value (tag 262) to its interpretation.
-    ///
-    /// Code `7` is unassigned in TIFF 6.0 (it sits between `YCbCr = 6` and `CieLab = 8`);
-    /// it and every other unrecognised code fail with an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
-    fn try_from(code: u32) -> Result<Self, Self::Error> {
-        Ok(match code {
-            0 => PhotometricInterpretation::WhiteIsZero,
-            1 => PhotometricInterpretation::BlackIsZero,
-            2 => PhotometricInterpretation::Rgb,
-            3 => PhotometricInterpretation::Palette,
-            4 => PhotometricInterpretation::TransparencyMask,
-            5 => PhotometricInterpretation::Cmyk,
-            6 => PhotometricInterpretation::YCbCr,
-            8 => PhotometricInterpretation::CieLab,
-            _ => {
-                return Err(gamut_core::Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "TIFF: unrecognised PhotometricInterpretation tag value",
-                ));
-            }
-        })
-    }
-}
-
-impl From<PhotometricInterpretation> for u16 {
-    /// Returns the on-disk tag value (the `SHORT` written to tag 262).
-    fn from(photometric: PhotometricInterpretation) -> Self {
-        match photometric {
-            PhotometricInterpretation::WhiteIsZero => 0,
-            PhotometricInterpretation::BlackIsZero => 1,
-            PhotometricInterpretation::Rgb => 2,
-            PhotometricInterpretation::Palette => 3,
-            PhotometricInterpretation::TransparencyMask => 4,
-            PhotometricInterpretation::Cmyk => 5,
-            PhotometricInterpretation::YCbCr => 6,
-            PhotometricInterpretation::CieLab => 8,
-        }
-    }
-}
-
-/// How a sample's bits are interpreted, stored in the `SampleFormat` tag (339, TIFF 6.0 §19).
+/// Reads an on-disk `PhotometricInterpretation` code (tag 262) as one TIFF 6.0 assigns.
 ///
-/// When the tag is absent the format is unsigned integer — the TIFF 6.0 default, and the only
-/// encoding this crate's `u8`/`u16` sample model represents. The others are recognised so the
-/// decoder can name what it is refusing: an IEEE-float or two's-complement page read as unsigned
-/// would decode to plausible nonsense rather than fail.
+/// Code `7` is unassigned (it sits between `YCbCr = 6` and `CieLab = 8`), and the TIFF/EP and DNG
+/// raw photometries are not TIFF 6.0's.
 ///
-/// The set is non-exhaustive: the TIFF Technical Notes may register further codes, so variants may
-/// be added without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum SampleFormat {
-    /// `1` — unsigned integer (the default when the tag is absent).
-    #[default]
-    UnsignedInteger,
-    /// `2` — two's-complement signed integer.
-    SignedInteger,
-    /// `3` — IEEE floating point.
-    FloatingPoint,
-    /// `4` — undefined data format.
-    Undefined,
-}
-
-impl TryFrom<u32> for SampleFormat {
-    type Error = gamut_core::Error;
-
-    /// Maps an on-disk `SampleFormat` tag value (tag 339) to its interpretation.
-    ///
-    /// Unrecognised codes fail with an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error rather than falling back to
-    /// unsigned integer: guessing here is exactly the silent misdecode the typed error exists to
-    /// prevent.
-    fn try_from(code: u32) -> Result<Self, Self::Error> {
-        Ok(match code {
-            1 => SampleFormat::UnsignedInteger,
-            2 => SampleFormat::SignedInteger,
-            3 => SampleFormat::FloatingPoint,
-            4 => SampleFormat::Undefined,
-            _ => {
-                return Err(gamut_core::Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "TIFF: unrecognised SampleFormat tag value",
-                ));
-            }
-        })
-    }
-}
-
-impl From<SampleFormat> for u16 {
-    /// Returns the on-disk tag value (the `SHORT` written to tag 339).
-    fn from(format: SampleFormat) -> Self {
-        match format {
-            SampleFormat::UnsignedInteger => 1,
-            SampleFormat::SignedInteger => 2,
-            SampleFormat::FloatingPoint => 3,
-            SampleFormat::Undefined => 4,
-        }
-    }
-}
-
-/// The prediction scheme applied before compression, stored in the `Predictor` tag (317,
-/// TIFF 6.0 §14).
+/// # Errors
 ///
-/// [`Predictor::HorizontalDifferencing`] covers 8- and 16-bit samples; it differences sample
-/// *values*, so the two widths are distinct operations rather than one loop over a wider stride.
+/// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for any other code.
+pub(crate) fn tiff_photometric(code: u32) -> Result<PhotometricInterpretation> {
+    read(
+        code,
+        |p| {
+            matches!(
+                p,
+                PhotometricInterpretation::WhiteIsZero
+                    | PhotometricInterpretation::BlackIsZero
+                    | PhotometricInterpretation::Rgb
+                    | PhotometricInterpretation::Palette
+                    | PhotometricInterpretation::TransparencyMask
+                    | PhotometricInterpretation::Cmyk
+                    | PhotometricInterpretation::YCbCr
+                    | PhotometricInterpretation::CieLab
+            )
+        },
+        "TIFF: unrecognised PhotometricInterpretation tag value",
+    )
+}
+
+/// Reads an on-disk `SampleFormat` code (tag 339, TIFF 6.0 §19).
 ///
-/// The set is non-exhaustive: the TIFF Technical Notes define predictor `3` (floating-point
-/// horizontal differencing, deferred along with float samples themselves), so variants may be
-/// added without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum Predictor {
-    /// `1` — no prediction.
-    #[default]
-    None,
-    /// `2` — horizontal differencing: each sample is stored as its difference from the sample to
-    /// its left.
-    HorizontalDifferencing,
+/// Unrecognised codes fail rather than falling back to unsigned integer: guessing here is exactly
+/// the silent misdecode the typed error exists to prevent.
+///
+/// # Errors
+///
+/// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a code outside
+/// §19's four.
+pub(crate) fn tiff_sample_format(code: u32) -> Result<SampleFormat> {
+    // Every code gamut-ifd assigns to this tag is §19's own, so TIFF narrows nothing.
+    read(code, |_| true, "TIFF: unrecognised SampleFormat tag value")
 }
 
-impl TryFrom<u32> for Predictor {
-    type Error = gamut_core::Error;
-
-    /// Maps an on-disk `Predictor` tag value (tag 317) to its scheme.
-    ///
-    /// The TIFF Technical Notes also define `3` (floating-point horizontal differencing); it is
-    /// deferred along with float samples themselves (see `STATUS.md`) and, like every other
-    /// unrecognised code, fails with an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
-    fn try_from(code: u32) -> Result<Self, Self::Error> {
-        Ok(match code {
-            1 => Predictor::None,
-            2 => Predictor::HorizontalDifferencing,
-            _ => {
-                return Err(gamut_core::Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "TIFF: unrecognised Predictor tag value",
-                ));
-            }
-        })
-    }
-}
-
-impl From<Predictor> for u16 {
-    /// Returns the on-disk tag value (the `SHORT` written to tag 317).
-    fn from(predictor: Predictor) -> Self {
-        match predictor {
-            Predictor::None => 1,
-            Predictor::HorizontalDifferencing => 2,
-        }
-    }
+/// Reads an on-disk `Predictor` code (tag 317, TIFF 6.0 §14).
+///
+/// Only `1` and `2` are read: the floating-point predictor `3` is deferred along with float
+/// samples themselves (see `STATUS.md`), and the `X2`/`X4` predictors are DNG's.
+///
+/// # Errors
+///
+/// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for any other code.
+pub(crate) fn tiff_predictor(code: u32) -> Result<Predictor> {
+    read(
+        code,
+        |p| matches!(p, Predictor::None | Predictor::HorizontalDifferencing),
+        "TIFF: unrecognised Predictor tag value",
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use gamut_core::ErrorKind;
+
     use super::*;
 
-    #[test]
-    fn photometric_codes_round_trip() {
-        // Every recognised PhotometricInterpretation code maps back to itself; note `7` is
-        // unassigned (skipped between YCbCr=6 and CieLab=8) and unknown codes are rejected.
-        for code in [0u32, 1, 2, 3, 4, 5, 6, 8] {
-            let p = PhotometricInterpretation::try_from(code).expect("known photometric");
-            assert_eq!(u32::from(u16::from(p)), code);
+    /// Asserts each `bad` code is refused as unsupported by `reader`.
+    fn refuses<T: core::fmt::Debug>(reader: fn(u32) -> Result<T>, bad: &[u32]) {
+        for &code in bad {
+            assert_eq!(
+                reader(code).unwrap_err().kind(),
+                ErrorKind::Unsupported,
+                "{code}"
+            );
         }
-        assert!(PhotometricInterpretation::try_from(7).is_err());
-        assert!(PhotometricInterpretation::try_from(9).is_err());
     }
 
     #[test]
-    fn sample_format_codes_round_trip() {
-        assert_eq!(SampleFormat::default(), SampleFormat::UnsignedInteger);
-        for (format, code) in [
-            (SampleFormat::UnsignedInteger, 1u16),
-            (SampleFormat::SignedInteger, 2),
-            (SampleFormat::FloatingPoint, 3),
-            (SampleFormat::Undefined, 4),
+    fn tiff_photometric_reads_only_tiff6s_codes() {
+        for (code, p) in [
+            (0, PhotometricInterpretation::WhiteIsZero),
+            (1, PhotometricInterpretation::BlackIsZero),
+            (2, PhotometricInterpretation::Rgb),
+            (3, PhotometricInterpretation::Palette),
+            (4, PhotometricInterpretation::TransparencyMask),
+            (5, PhotometricInterpretation::Cmyk),
+            (6, PhotometricInterpretation::YCbCr),
+            (8, PhotometricInterpretation::CieLab),
         ] {
-            assert_eq!(u16::from(format), code);
-            assert_eq!(SampleFormat::try_from(u32::from(code)).unwrap(), format);
+            assert_eq!(tiff_photometric(code).unwrap(), p, "{code}");
+        }
+        // `7` is unassigned; the rest are the TIFF/EP and DNG raw photometries, and one past u16.
+        refuses(
+            tiff_photometric,
+            &[7, 9, 32803, 34892, 51177, 52527, 65536 + 1],
+        );
+    }
+
+    #[test]
+    fn tiff_sample_format_reads_section_19s_codes() {
+        for (code, f) in [
+            (1, SampleFormat::UnsignedInteger),
+            (2, SampleFormat::SignedInteger),
+            (3, SampleFormat::FloatingPoint),
+            (4, SampleFormat::Undefined),
+        ] {
+            assert_eq!(tiff_sample_format(code).unwrap(), f, "{code}");
         }
         // `0` and codes past the registered set are refused rather than defaulted to unsigned.
-        assert!(SampleFormat::try_from(0).is_err());
-        assert!(SampleFormat::try_from(5).is_err());
+        refuses(tiff_sample_format, &[0, 5, 65536 + 1]);
     }
 
     #[test]
-    fn predictor_codes_round_trip() {
-        assert_eq!(Predictor::default(), Predictor::None);
-        for (p, code) in [
-            (Predictor::None, 1u16),
-            (Predictor::HorizontalDifferencing, 2),
-        ] {
-            assert_eq!(u16::from(p), code);
-            assert_eq!(Predictor::try_from(u32::from(code)).unwrap(), p);
-        }
-        // Predictor 3 (floating-point differencing) is deferred with float samples.
-        assert!(Predictor::try_from(0).is_err());
-        assert!(Predictor::try_from(3).is_err());
+    fn tiff_predictor_reads_only_none_and_horizontal_differencing() {
+        assert_eq!(tiff_predictor(1).unwrap(), Predictor::None);
+        assert_eq!(
+            tiff_predictor(2).unwrap(),
+            Predictor::HorizontalDifferencing
+        );
+        // Predictor 3 (floating-point differencing) is deferred with float samples; the
+        // 34892..=34895 predictors are DNG's.
+        refuses(
+            tiff_predictor,
+            &[0, 3, 34892, 34893, 34894, 34895, 65536 + 2],
+        );
     }
 }

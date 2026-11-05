@@ -68,7 +68,7 @@ impl Default for DngEncoder {
             dng_version: None,
             backward_version: [1, 1, 0, 0],
             big_tiff: false,
-            compression: Compression::Uncompressed,
+            compression: Compression::None,
             tiling: None,
             // JPEG XL defaults: lossless (distance 0.0) at libjxl's default effort (7, squirrel).
             jxl_distance: 0.0,
@@ -132,10 +132,11 @@ impl DngEncoder {
 
     /// Returns a copy of this encoder that compresses the raw image with `compression`.
     ///
-    /// [`Uncompressed`](Compression::Uncompressed), [`Deflate`](Compression::Deflate) (8/16-bit),
-    /// [`LosslessJpeg`](Compression::LosslessJpeg), and — with the `jxl-encode` cargo feature —
-    /// [`JpegXl`](Compression::JpegXl) (full-range 16-bit samples) are supported. The preview is
-    /// always stored uncompressed.
+    /// [`None`](Compression::None), [`Deflate`](Compression::Deflate) (8/16-bit),
+    /// [`Jpeg`](Compression::Jpeg) (lossless JPEG, DNG's standard raw compression), and — with the
+    /// `jxl-encode` cargo feature — [`JpegXl`](Compression::JpegXl) (full-range 16-bit samples)
+    /// are supported; every other scheme is refused at encode time. The preview is always stored
+    /// uncompressed.
     #[must_use]
     pub fn with_compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
@@ -491,11 +492,11 @@ impl DngEncoder {
         ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8, 8, 8]));
         ifd.set(
             tags::COMPRESSION,
-            Value::Short(vec![Compression::Uncompressed.code()]),
+            Value::Short(vec![u16::from(Compression::None)]),
         );
         ifd.set(
             tags::PHOTOMETRIC_INTERPRETATION,
-            Value::Short(vec![PhotometricInterpretation::Rgb.code()]),
+            Value::Short(vec![u16::from(PhotometricInterpretation::Rgb)]),
         );
         ifd.set(tags::ORIENTATION, Value::Short(vec![1]));
         ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
@@ -693,7 +694,7 @@ impl DngEncoder {
         bits: u16,
     ) -> Result<Vec<u8>> {
         match self.compression {
-            Compression::LosslessJpeg => {
+            Compression::Jpeg => {
                 let (width, components) = lossless_jpeg_geometry(cols, spp, period);
                 lossless_jpeg::encode(samples, width, rows, components, bits)
             }
@@ -829,7 +830,10 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
         tags::BITS_PER_SAMPLE,
         Value::Short(vec![raw.bits_per_sample(); usize::from(spp)]),
     );
-    ifd.set(tags::COMPRESSION, Value::Short(vec![compression.code()]));
+    ifd.set(
+        tags::COMPRESSION,
+        Value::Short(vec![u16::from(compression)]),
+    );
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
     // A tiled image carries the tile geometry; a stripped one carries RowsPerStrip (a strip/tile
     // IFD must not mix the two families).
@@ -858,7 +862,7 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
     ifd.set(
         tags::SAMPLE_FORMAT,
         Value::Short(vec![
-            crate::values::SampleFormat::UnsignedInteger.code();
+            u16::from(crate::values::SampleFormat::UnsignedInteger);
             usize::from(spp)
         ]),
     );
@@ -871,7 +875,7 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
         } => {
             ifd.set(
                 tags::PHOTOMETRIC_INTERPRETATION,
-                Value::Short(vec![PhotometricInterpretation::Cfa.code()]),
+                Value::Short(vec![u16::from(PhotometricInterpretation::Cfa)]),
             );
             ifd.set(
                 tags::CFA_REPEAT_PATTERN_DIM,
@@ -884,7 +888,7 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
         RawPhotometry::LinearRaw { .. } => {
             ifd.set(
                 tags::PHOTOMETRIC_INTERPRETATION,
-                Value::Short(vec![PhotometricInterpretation::LinearRaw.code()]),
+                Value::Short(vec![u16::from(PhotometricInterpretation::LinearRaw)]),
             );
         }
     }
@@ -1362,7 +1366,7 @@ mod tests {
         let raw = sample_raw(8, 6, 16);
         let mut out = Vec::new();
         DngEncoder::new()
-            .with_compression(Compression::LosslessJpeg)
+            .with_compression(Compression::Jpeg)
             .encode(&raw, &sample_profile(), &mut out)
             .expect("encode");
         let file = gamut_ifd::read(&out).expect("parse DNG");
@@ -1389,7 +1393,7 @@ mod tests {
         let encode = |w: u32| {
             let mut out = Vec::new();
             DngEncoder::new()
-                .with_compression(Compression::LosslessJpeg)
+                .with_compression(Compression::Jpeg)
                 .encode(&sample_raw(w, 2, 16), &sample_profile(), &mut out)
                 .map(|_| out)
         };

@@ -197,11 +197,7 @@ fn tiled_roundtrips_through_gamut() {
     use gamut_dng::Compression;
     // 48x40 with 32x32 tiles: a 2x2 grid whose right/bottom tiles carry 16 padding columns and
     // 24 padding rows — the edge-crop path. Sub-byte depths exercise per-tile row alignment.
-    for compression in [
-        Compression::Uncompressed,
-        Compression::Deflate,
-        Compression::LosslessJpeg,
-    ] {
+    for compression in [Compression::None, Compression::Deflate, Compression::Jpeg] {
         for bits in [8u16, 10, 12, 16] {
             // Deflate is limited to whole-byte depths (the SDK reader's constraint, enforced at
             // encode).
@@ -500,7 +496,7 @@ fn lossless_jpeg_roundtrips_and_validates() {
     for raw in cases {
         let mut dng = Vec::new();
         DngEncoder::new()
-            .with_compression(Compression::LosslessJpeg)
+            .with_compression(Compression::Jpeg)
             .encode(&raw, &common::sample_profile(), &mut dng)
             .expect("encode");
         // gamut round-trips its own lossless JPEG...

@@ -94,10 +94,13 @@ mod metadata;
 mod palette;
 mod writer;
 
-pub use compression::Compression;
 pub use decoder::TiffDecoder;
 pub use deconstruct::deconstruct;
 pub use encoder::{TiffEncodeReport, TiffEncoder};
+// The tag-value codes are gamut-ifd's, shared with gamut-dng; they are reachable from
+// `TiffEncoder` and `TiffInfo`, so they are re-exported for the same reason as the IFD types below.
+// Which codes a TIFF page may carry is this crate's own (`ifd`, `compression`).
+pub use gamut_ifd::tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat};
 // The structural IFD core lives in gamut-ifd; re-export the types a gamut-tiff user can touch —
 // the read/write spine plus every type reachable from this crate's own public items
 // (`DeconstructReport` exposes `SegmentReport`, which exposes `Segment`/`SpanKind`/`DataLabel`/
@@ -123,7 +126,6 @@ pub use gamut_ifd::{
 // `TiffMetadata::metadata` / `TiffEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
 pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
-pub use ifd::{PhotometricInterpretation, Predictor, SampleFormat};
 pub use info::TiffInfo;
 pub use metadata::{IFD0_EXIF_TAGS, TiffMetadata, c2pa_exclusions, c2pa_summary};
 pub use palette::Palette8;

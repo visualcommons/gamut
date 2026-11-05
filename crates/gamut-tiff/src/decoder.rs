@@ -466,7 +466,9 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
                 "TIFF: floating-point samples not supported",
             ));
         }
-        SampleFormat::Undefined => {
+        // `Undefined` — the last of §19's four, and the only other one `tiff_sample_format`
+        // admits (`SampleFormat` is gamut-ifd's, and `#[non_exhaustive]`).
+        _ => {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "TIFF: undefined sample format not supported",
