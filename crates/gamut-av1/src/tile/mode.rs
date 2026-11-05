@@ -720,9 +720,10 @@ impl FrameEncoder<'_> {
     }
 
     /// The rate, in [`RATE_ONE`](super::coder::RATE_ONE) units, of signalling `cand` as the luma
-    /// mode of the lossy `bw × bh` block at MI `(r, c)` (no palette): `y_mode`, then `angle_delta_y` (directional,
-    /// ≥8×8), then for a `DC_PRED` block the `has_palette_y = 0` flag (8×8..64×64) and
-    /// `use_filter_intra` with its mode (≤32×32), each against its CDF as it stands.
+    /// mode of the lossy `bw × bh` block at MI `(r, c)` (no palette): `y_mode`, then
+    /// `angle_delta_y` (directional, ≥8×8), then for a `DC_PRED` block the `has_palette_y = 0` flag
+    /// (8×8..64×64) and `use_filter_intra` with its mode (≤32×32), each against its CDF as it
+    /// stands.
     fn luma_mode_rate(&self, r: usize, c: usize, bw: usize, bh: usize, cand: LumaMode) -> u32 {
         let (amode, lmode) = self.y_mode_ctx(r, c);
         let mut rate = symbol_rate(
@@ -914,10 +915,10 @@ impl FrameEncoder<'_> {
 
     /// The mode-info rate [`Self::select_cfl`] charges plain `DC_PRED` chroma in a lossy square
     /// `bw`-wide block under luma mode `y_mode`, in [`RATE_ONE`](super::coder::RATE_ONE) units:
-    /// `uv_mode = DC_PRED` under the CfL-allowed CDF, plus, for an 8×8..64×64 block (§5.11.46), the `has_palette_uv = 0`
-    /// that follows it, priced at context 0. A function of its own so that the palette flag's
-    /// share is assertable: inside `select_cfl` it only moves a close RD decision, and no fixture
-    /// told adding it from subtracting it (#920).
+    /// `uv_mode = DC_PRED` under the CfL-allowed CDF, plus, for an 8×8..64×64 block (§5.11.46), the
+    /// `has_palette_uv = 0` that follows it, priced at context 0. A function of its own so that the
+    /// palette flag's share is assertable: inside `select_cfl` it only moves a close RD decision,
+    /// and no fixture told adding it from subtracting it (#920).
     fn dc_chroma_rate(&self, y_mode: u8, bw: usize) -> u32 {
         let uv = self.cdfs.uv_mode_cfl_allowed[usize::from(y_mode)].probs();
         let mut rate = symbol_rate(uv, usize::from(DC_PRED));
