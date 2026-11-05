@@ -99,6 +99,7 @@ mod ihdr;
 mod inflate;
 mod pack;
 mod palette;
+mod present;
 mod reduce;
 /// The encoder's pipeline stages, re-exported for the out-of-tree benchmark driver (issue #224).
 /// Not part of the stable API; see `docs/benchmarking.md`.
@@ -108,6 +109,7 @@ pub mod stages;
 mod text;
 #[cfg(feature = "metadata")]
 mod typed;
+mod walk;
 mod written;
 
 pub use abi::{AbiZlibDeflater, AbiZlibInflater, PIXEL_FORMAT_FILTERED_BYTES, ZLIB_CODEC_ID};
@@ -123,7 +125,7 @@ pub use decoded::{
     Background, Chromaticities, Cicp, DecodedPng, IccProfile, ModificationTime, PhysicalDimensions,
     PngHeader, PngImage, PngMetadata, TextChunk, TextChunkKind,
 };
-pub use decoder::{PngDecoder, TransparencyKey, metadata};
+pub use decoder::{PngDecoder, TransparencyKey};
 pub use deconstruct::{
     ChunkStats, DEFAULT_MAX_CHUNKS, DeconstructLimits, FilterHistogram, FilterScan, PassStats,
     PngReport, Segment, SegmentKind, SkippedFilterScan, deconstruct, deconstruct_with_limits,
@@ -143,3 +145,4 @@ pub use gamut_deflate::Level;
 #[cfg(feature = "metadata")]
 pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataSink, TypedMetadata};
 pub use palette::PaletteOrder;
+pub use walk::metadata;
