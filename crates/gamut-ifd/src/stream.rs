@@ -107,7 +107,8 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the header is not valid, or [`Error::Io`] if the
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// header is not valid, or an [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the
     /// source fails.
     pub fn open(mut source: S) -> Result<Self> {
         // Read exactly the 8-byte classic header first; only a BigTIFF magic (43, in either
@@ -175,8 +176,9 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the directory is truncated, extends past the end of
-    /// the source, or its entry count overflows; [`Error::Io`] if the source fails.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// directory is truncated, extends past the end of the source, or its entry count overflows;
+    /// an [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
     pub fn read_ifd(&mut self, offset: u64) -> Result<RawIfd> {
         self.read_ifd_body(offset, true)
     }
@@ -194,8 +196,9 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the count or entries are truncated, extend past the
-    /// end of the source, or the entry count overflows; [`Error::Io`] if the source fails.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// count or entries are truncated, extend past the end of the source, or the entry count
+    /// overflows; an [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
     pub fn read_ifd_unterminated(&mut self, offset: u64) -> Result<RawIfd> {
         self.read_ifd_body(offset, false)
     }
@@ -289,8 +292,9 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for a count overflow or an out-of-bounds value offset,
-    /// or [`Error::Io`] if the source fails.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
+    /// count overflow or an out-of-bounds value offset, or an
+    /// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
     pub fn value(&mut self, entry: &RawEntry) -> Result<Value> {
         let Some(ty) = entry.field_type() else {
             return Ok(Value::Unknown(self.unknown_value(entry)?));
@@ -346,8 +350,9 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if a value is truncated or its offset is out of bounds,
-    /// or [`Error::Io`] if the source fails.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
+    /// value is truncated or its offset is out of bounds, or an
+    /// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
     pub fn decode_ifd(&mut self, raw: &RawIfd) -> Result<Ifd> {
         self.decode_ifd_inner(raw, None, None)
     }
@@ -393,9 +398,11 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Only a failure the bytes do not explain: an [`Error::Io`]-kind error from the source is
-    /// propagated unchanged, because skipping an entry over a transport failure would report a
-    /// readable file as damaged. An [`Error::InvalidInput`]-kind failure is always recovered.
+    /// Only a failure the bytes do not explain: an [`ErrorKind::Io`](gamut_core::ErrorKind::Io)
+    /// error from the source is propagated unchanged, because skipping an entry over a transport
+    /// failure would report a readable file as damaged. An
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) failure is always
+    /// recovered.
     pub fn decode_ifd_lenient(&mut self, raw: &RawIfd) -> Result<(Ifd, Vec<AuditFinding>)> {
         let mut skipped = Vec::new();
         let ifd = self.decode_ifd_inner(raw, None, Some(&mut skipped))?;
@@ -418,10 +425,10 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] under the same conditions as [`read`](crate::read)
-    /// (including "no IFD" for an empty chain — which a
-    /// [`with_layout`](Self::with_layout) reader always has), or [`Error::Io`] if the source
-    /// fails.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
+    /// same conditions as [`read`](crate::read) (including "no IFD" for an empty chain — which a
+    /// [`with_layout`](Self::with_layout) reader always has), or an
+    /// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
     pub fn read_file(&mut self) -> Result<TiffFile> {
         self.read_chain(None, None)
     }
@@ -432,8 +439,9 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] under the same conditions as
-    /// [`read_tree`](crate::read_tree), or [`Error::Io`] if the source fails.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
+    /// same conditions as [`read_tree`](crate::read_tree), or an
+    /// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
     pub fn read_tree(&mut self, pointer_tags: &[u16]) -> Result<TiffFile> {
         let mut file = self.read_file()?;
         // One visited set across every page, so two pages claiming one directory fail too.
@@ -458,7 +466,8 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] under the same conditions as [`read_file`](Self::read_file).
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error under the
+    /// same conditions as [`read_file`](Self::read_file).
     pub fn read_file_audited(&mut self, map: &mut SegmentMap) -> Result<TiffFile> {
         self.read_chain(Some(map), None)
     }
@@ -469,8 +478,9 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the directory or a value is out of bounds or
-    /// truncated, or [`Error::Io`] if the source fails.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// directory or a value is out of bounds or truncated, or an
+    /// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
     pub fn read_ifd_at_audited(&mut self, offset: u64, map: &mut SegmentMap) -> Result<(Ifd, u64)> {
         let raw = self.read_ifd(offset)?;
         let ifd = self.decode_ifd_inner(&raw, Some(map), None)?;
@@ -1092,7 +1102,7 @@ mod tests {
         impl ReadAt for FailsAt<'_> {
             fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
                 if offset == self.offset {
-                    return Err(Error::Io(std::io::Error::other("injected")));
+                    return Err(Error::from(std::io::Error::other("injected")));
                 }
                 self.bytes.read_exact_at(offset, buf)
             }

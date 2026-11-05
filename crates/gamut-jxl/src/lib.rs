@@ -37,7 +37,8 @@
 //! image back as grayscale. The codestream is decoded by a [`JxlCodestreamDecoder`] backend; the
 //! built-in jxl-rs wrapper is the implicit last one (see [Backends](#backends)).
 //!
-//! A truncated stream is an [`Error::InvalidInput`](gamut_core::Error::InvalidInput) on that path.
+//! A truncated stream is an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error
+//! on that path.
 //! [`DecodePartialImage`] is the opt-in alternative: it returns the best-effort image plus a
 //! [`JxlPartialReport`] carrying the completeness flag, for a partly-downloaded or damaged file.
 //! Read its documentation before relying on the pixels — "best effort" can legitimately mean a
@@ -54,7 +55,7 @@
 //! use gamut_jxl::{JxlDecoder, JxlEncoder};
 //!
 //! // A 4×4 8-bit RGB test image.
-//! let dims = Dimensions { width: 4, height: 4 };
+//! let dims = Dimensions::new(4, 4)?;
 //! let pixels: Vec<u8> = (0..4 * 4 * 3).map(|i| i as u8).collect();
 //! let image = ImageRef::<Rgb8>::new(&pixels, dims)?;
 //!
@@ -84,15 +85,16 @@
 //!
 //! - `encode` (default) includes the libjxl encode tail, where the target supports it. Without it,
 //!   [`JxlEncoder`] still exists and still encodes — through whatever backend was pushed. With
-//!   neither, encoding returns [`Error::Unsupported`](gamut_core::Error::Unsupported).
+//!   neither, encoding returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
+//!   error.
 //! - `decode` (default) includes the jxl-rs decode tail, and additionally provides the header-only
 //!   accessors ([`JxlDecoder::info`], [`JxlDecoder::embedded_icc_profile`], [`JxlInfo`]), the
 //!   metadata read-back ([`JxlDecoder::metadata`] → [`JxlMetadata`]: the container's `Exif` /
 //!   `xml ` boxes, located by this crate's own box walk, plus the codestream ICC profile; or
 //!   [`JxlDecoder::metadata_boxes`] for the boxes alone, which survives a damaged codestream) and the
 //!   best-effort [`DecodePartialImage`] surface, all of which are always answered by the built-in
-//!   parser. Without it, [`JxlDecoder`] decodes through a pushed backend, or returns
-//!   [`Error::Unsupported`](gamut_core::Error::Unsupported).
+//!   parser. Without it, [`JxlDecoder`] decodes through a pushed backend, or returns an
+//!   [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
 //!
 //! This is why the encode direction works on `wasm32-unknown-unknown` despite libjxl being
 //! unbuildable there: push a backend and the tail's absence stops mattering.

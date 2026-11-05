@@ -172,8 +172,9 @@ impl Av1StillDecoder for Dav1dDecoder {
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;
-        let picture = dav1d_oracle::decode_obu(&stream)
-            .map_err(|_| Error::InvalidInput("common: dav1d rejected the stream"))?;
+        let picture = dav1d_oracle::decode_obu(&stream).map_err(|_| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "common: dav1d rejected the stream")
+        })?;
         let [y, u, v] = picture.planes;
         // `DecodedFrame::new` validates the plane lengths against the av1C-derived chroma, so a
         // config/codestream mismatch fails loudly here rather than decoding to nonsense.

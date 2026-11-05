@@ -150,16 +150,11 @@ fn top_level_uuid_boxes<'a, 's>(
         })
 }
 
-/// What a report of a located manifest-store slot has to say beside it, because locating one is
-/// not validating it.
-///
-/// C2PA 2.4 §15.12 puts validation on a validator; this crate holds no COSE, X.509, RFC 3161 or
-/// trust-list code and never reports a validity verdict. To anyone who has seen a Content
-/// Credentials badge, "C2PA: present" printed beside EXIF and ICC reads as *verified*, so
-/// [`C2paSummary::summary_lines`] carries this text in the line that reports the slots, never as a
-/// footnote. The same sentence `gamut-heic` carries, so every container reports alike.
-pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
-     it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
+// What a report of a located manifest-store slot has to say beside it, because locating one is
+// not validating it: `C2paSummary::summary_lines` carries this text in the line that reports the
+// slots, never as a footnote. The sentence is defined once in `gamut-core`, so this crate and
+// `gamut-heic` report alike.
+pub use gamut_core::c2pa::NOT_VALIDATED as C2PA_NOT_VALIDATED;
 
 /// Where a top-level `uuid` box sits relative to the file's media data — a **positional fact about
 /// bytes**, never a verdict.
@@ -825,10 +820,7 @@ mod tests {
         let image = || {
             gamut_core::ImageRef::<gamut_core::Rgb8>::new(
                 &rgb,
-                gamut_core::Dimensions {
-                    width: 8,
-                    height: 8,
-                },
+                gamut_core::Dimensions::new(8, 8).unwrap(),
             )
             .expect("buffer matches dimensions")
         };

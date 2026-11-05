@@ -174,7 +174,7 @@ impl DngMetadata {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the Exif sub-IFD, or any directory nested in it,
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) errorif the Exif sub-IFD, or any directory nested in it,
     /// carries a pointer-typed field under a standard pointer tag, or stores one tag twice (a
     /// field and a sub-IFD group, or two groups).
     pub(crate) fn check(&self) -> Result<()> {
@@ -272,7 +272,7 @@ const TAG_STORED_TWICE_REFUSAL: &str = "DNG: an Exif sub-IFD may not store one t
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for either refusal, at the first offender.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) errorfor either refusal, at the first offender.
 fn check_exif_subtree(ifd: &Ifd) -> Result<()> {
     for &tag in EXIF_SUBTREE_POINTER_TAGS {
         if ifd

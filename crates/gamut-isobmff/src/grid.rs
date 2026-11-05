@@ -33,8 +33,10 @@ impl ImageGrid {
     /// Parses a `grid` item payload.
     ///
     /// # Errors
-    /// Returns [`Error::Unsupported`] for a non-zero `version` (only version 0 is defined), and
-    /// [`Error::InvalidInput`] if the payload is truncated or carries trailing bytes.
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a
+    /// non-zero `version` (only version 0 is defined), and an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the payload is
+    /// truncated or carries trailing bytes.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut r = BoxReader::new(data);
         let version = r.u8()?;
@@ -71,8 +73,8 @@ impl ImageGrid {
     /// when both dimensions fit and the 32-bit form otherwise.
     ///
     /// # Errors
-    /// Returns [`Error::InvalidInput`] if [`rows`](Self::rows) or [`columns`](Self::columns) is
-    /// outside `1..=256` — the wire format stores them as an 8-bit `minus_one`, so a larger count
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// [`rows`](Self::rows) or [`columns`](Self::columns) is outside `1..=256` — the wire format stores them as an 8-bit `minus_one`, so a larger count
     /// cannot be represented (rather than silently truncating it).
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         if !(1..=256).contains(&self.rows) || !(1..=256).contains(&self.columns) {

@@ -31,7 +31,7 @@ pub(crate) fn run(cmd: &Av1Command) -> Result<(), CliError> {
 /// Encodes `input` to a lossless AV1 temporal unit written to `output`.
 fn encode(input: &Path, output: &Path) -> Result<(), CliError> {
     let (rgb, dims) = decode_rgb8(input)?;
-    let planes = Planar8::from_rgb8_identity(&rgb, dims.width, dims.height)?;
+    let planes = Planar8::from_rgb8_identity(&rgb, dims.width(), dims.height())?;
     let still = encode_still_lossless_identity(&planes)?;
     tracing::info!(
         seq_profile = still.config.seq_profile,
@@ -48,8 +48,8 @@ fn encode(input: &Path, output: &Path) -> Result<(), CliError> {
     println!(
         "wrote {} ({}x{}, {} bytes, lossless AV1 OBU)",
         output.display(),
-        dims.width,
-        dims.height,
+        dims.width(),
+        dims.height(),
         still.obus.len(),
     );
     Ok(())

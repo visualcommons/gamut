@@ -57,9 +57,10 @@ impl ImageOverlay {
     /// carries — the payload stores exactly that many offset pairs and nothing else.
     ///
     /// # Errors
-    /// Returns [`Error::Unsupported`] for a non-zero `version` (only version 0 is defined), and
-    /// [`Error::InvalidInput`] if the payload is truncated (fewer than `reference_count` offset
-    /// pairs) or carries trailing bytes (more than `reference_count`).
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a
+    /// non-zero `version` (only version 0 is defined), and an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the payload is
+    /// truncated (fewer than `reference_count` offset pairs) or carries trailing bytes (more than `reference_count`).
     pub fn parse(data: &[u8], reference_count: usize) -> Result<Self> {
         let mut r = BoxReader::new(data);
         let version = r.u8()?;

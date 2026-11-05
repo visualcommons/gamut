@@ -578,13 +578,13 @@ impl JpegEncoder {
     /// Rejects dimensions the frame header cannot encode (`X`/`Y` are 16-bit). Zero is already
     /// excluded by [`Dimensions`].
     fn check_dimensions(dims: Dimensions) -> Result<(u16, u16)> {
-        if dims.width > MAX_DIMENSION || dims.height > MAX_DIMENSION {
+        if dims.width() > MAX_DIMENSION || dims.height() > MAX_DIMENSION {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: image exceeds 65535×65535",
             ));
         }
-        Ok((dims.width as u16, dims.height as u16))
+        Ok((dims.width() as u16, dims.height() as u16))
     }
 
     /// Rejects metadata payloads the APPn framing cannot carry (the caps in [`crate::appmeta`]),

@@ -24,7 +24,7 @@ fn all_efforts() -> Vec<Effort> {
 }
 
 fn dims(width: u32, height: u32) -> Dimensions {
-    Dimensions { width, height }
+    Dimensions::new(width, height).unwrap()
 }
 
 /// A smooth ramp — compressible, and the case the spatial transforms are for.

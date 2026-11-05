@@ -1,7 +1,7 @@
 //! Planar 8-bit image buffers and the RGB → plane mappings: identity (`mc = 0`) and the CICP
 //! luma–chroma matrices.
 
-use gamut_core::{Dimensions, Error, Gray8, ImageRef, Result, Rgb8, Rgba8};
+use gamut_core::{Error, Gray8, ImageRef, Result, Rgb8, Rgba8};
 
 use crate::format::ChromaSubsampling;
 use crate::ycbcr::RgbToYcbcr;
@@ -159,12 +159,14 @@ impl Planar8 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, or if that product
-    /// overflows `usize`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `rgb.len() != width * height * 3`, or if that product overflows `usize`.
     pub fn from_rgb8_identity(rgb: &[u8], width: u32, height: u32) -> Result<Self> {
-        let n = Dimensions { width, height }.num_pixels().ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
-        })?;
+        let n = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
+            })?;
         if n.checked_mul(3) != Some(rgb.len()) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -218,17 +220,19 @@ impl Planar8 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, or if that product
-    /// overflows `usize`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `rgb.len() != width * height * 3`, or if that product overflows `usize`.
     pub fn from_rgb8_matrix(
         rgb: &[u8],
         width: u32,
         height: u32,
         matrix: RgbToYcbcr,
     ) -> Result<Self> {
-        let n = Dimensions { width, height }.num_pixels().ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
-        })?;
+        let n = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
+            })?;
         if n.checked_mul(3) != Some(rgb.len()) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -347,7 +351,8 @@ impl Planar8 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] for [`ChromaSubsampling::Cs400`].
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for
+    /// [`ChromaSubsampling::Cs400`].
     pub fn from_rgb8_matrix_subsampled(
         img: ImageRef<'_, Rgb8>,
         matrix: RgbToYcbcr,
@@ -382,8 +387,8 @@ impl Planar8 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if any plane's length is not `width * height`, or if that
-    /// product overflows `usize`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
+    /// plane's length is not `width * height`, or if that product overflows `usize`.
     pub fn from_planes(width: u32, height: u32, planes: [Vec<u8>; 3]) -> Result<Self> {
         Self::from_planes_subsampled(width, height, ChromaSubsampling::Cs444, planes)
     }
@@ -397,17 +402,19 @@ impl Planar8 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if any plane's length does not match its own dimensions, or
-    /// if `width * height` overflows `usize`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
+    /// plane's length does not match its own dimensions, or if `width * height` overflows `usize`.
     pub fn from_planes_subsampled(
         width: u32,
         height: u32,
         subsampling: ChromaSubsampling,
         planes: [Vec<u8>; 3],
     ) -> Result<Self> {
-        let n = Dimensions { width, height }.num_pixels().ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
-        })?;
+        let n = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
+            })?;
         if planes[0].len() != n {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -537,6 +544,8 @@ impl Planar8 {
 
 #[cfg(test)]
 mod tests {
+    use gamut_core::Dimensions;
+
     use super::*;
 
     #[test]

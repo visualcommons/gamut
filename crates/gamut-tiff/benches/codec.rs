@@ -34,10 +34,7 @@ fn gradient_rgb() -> Vec<u8> {
 }
 
 fn dims() -> Dimensions {
-    Dimensions {
-        width: SIDE,
-        height: SIDE,
-    }
+    Dimensions::new(SIDE, SIDE).unwrap()
 }
 
 fn source_bytes() -> usize {

@@ -75,7 +75,7 @@ impl Av1StillDecoder for Mock {
         let frame = iter_obus(payload)
             .filter_map(|o| o.ok())
             .find(|o| o.header.obu_type == ObuType::Frame)
-            .ok_or(Error::InvalidInput("mock: no frame OBU"))?;
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "mock: no frame OBU"))?;
         let (base, w, h) = (
             frame.payload[0],
             u32::from(frame.payload[1]),
@@ -356,7 +356,7 @@ fn coded_planar_passes_exact_config_and_payload_and_gradient() {
     assert_eq!((frame.width(), frame.height()), (4, 4));
     assert_eq!(frame.chroma(), ChromaFormat::Yuv420);
     assert_eq!(frame.chroma_dimensions(), (2, 2));
-    assert_eq!(frame.dimensions().width, 4);
+    assert_eq!(frame.dimensions().width(), 4);
     for y in 0..4 {
         for x in 0..4 {
             assert_eq!(frame.y()[(y * 4 + x) as usize], ey(20, x, y, 8));

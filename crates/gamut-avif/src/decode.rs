@@ -44,13 +44,15 @@
 //!   caller could want is here, at full bit depth and native chroma; the caller drives
 //!   colour/transforms with the [`AvifItem`](crate::AvifItem) property accessors — the surface a
 //!   consumer with its own colour pipeline (rawshift) uses. `iovl` compositing is *not* on this
-//!   surface (it is defined over RGBA) — it returns [`Error::Unsupported`], directing callers to
+//!   surface (it is defined over RGBA) — it returns an
+//!   [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, directing callers to
 //!   the RGBA path.
 //! - [`AvifImage::decode_item_rgba8`] / [`AvifImage::decode_primary_rgba8`] — the
 //!   **presentation** surface. It planar-decodes (or `iovl`-composites), converts colour, merges
 //!   the alpha auxiliary, and applies the item's transformative properties in `ipma` order. It
-//!   presents **8-bit coded frames only**: a deeper frame is [`Error::Unsupported`] here rather
-//!   than silently narrowed.
+//!   presents **8-bit coded frames only**: a deeper frame is an
+//!   [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error here rather than
+//!   silently narrowed.
 //! - [`AvifImage::decode_item_rgba16`] / [`AvifImage::decode_primary_rgba16`] — the
 //!   **high-bit-depth presentation** surface (issue #303). The same pipeline over 16-bit samples:
 //!   it accepts every coded depth [`DecodedFrame`] admits (`8..=16`) and normalizes samples to the
@@ -58,8 +60,8 @@
 //!   surface or `av1C`.
 //!
 //! Both presentation surfaces share one colour policy, documented on
-//! [`AvifImage::decode_item_rgba8`]; anything outside it is [`Error::Unsupported`] on *those*
-//! surfaces while the planar surface still delivers the samples.
+//! [`AvifImage::decode_item_rgba8`]; anything outside it is an
+//! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error on *those* surfaces while the planar surface still delivers the samples.
 
 use gamut_av1::SequenceHeader;
 use gamut_color::upsample::{libavif, taps};
@@ -118,11 +120,13 @@ pub(crate) const DERIVED_ITEM_LIMIT: &str =
 ///
 /// The caps apply to the image *as decoded*, before `clap`/`irot`/`imir`; none of those can grow
 /// either measure (a rotation swaps the axes and both caps are axis-symmetric). Each refusal is
-/// [`Error::Unsupported`] — the file may be well-formed, it is this decoder's budget that declines
+/// an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error — the file may be
+/// well-formed, it is this decoder's budget that declines
 /// it, as in `gamut-png` — with a message naming the field that refused it.
 ///
 /// Separately from these caps, every full-image buffer the pipeline allocates is reserved
-/// fallibly: an allocation the system refuses is [`Error::Unsupported`] too, never an abort.
+/// fallibly: an allocation the system refuses is an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error too, never an abort.
 ///
 /// **Work.** The size caps bound each image, not how many a file makes the pipeline produce: a
 /// derivation may name one item many times (a `grid`'s `dimg` list may repeat a tile, and a `grid`
@@ -252,7 +256,8 @@ impl DecodeOptions {
 }
 
 /// A `len`-element buffer of `fill`, reserved fallibly: a request the allocator refuses (or one
-/// past `isize::MAX` bytes) is [`Error::Unsupported`] rather than an abort.
+/// past `isize::MAX` bytes) is an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
+/// error rather than an abort.
 fn try_filled<T: Clone>(len: usize, fill: T) -> Result<Vec<T>> {
     let mut buffer = Vec::new();
     buffer.try_reserve_exact(len).map_err(|_| {
@@ -312,8 +317,7 @@ pub trait Av1StillDecoder {
 /// the pipeline downstream can trust the plane sizes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedFrame {
-    width: u32,
-    height: u32,
+    dimensions: Dimensions,
     bit_depth: u8,
     chroma: ChromaFormat,
     y: Vec<u16>,
@@ -333,8 +337,8 @@ impl DecodedFrame {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if either dimension is zero, if `bit_depth` is outside
-    /// `8..=16`, or if any plane length does not match the dimensions for `chroma`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if either
+    /// dimension is zero, if `bit_depth` is outside `8..=16`, or if any plane length does not match the dimensions for `chroma`.
     pub fn new(
         width: u32,
         height: u32,
@@ -344,14 +348,13 @@ impl DecodedFrame {
         cb: Vec<u16>,
         cr: Vec<u16>,
     ) -> Result<Self> {
-        let luma = Dimensions::new(width, height)?
-            .num_pixels()
-            .ok_or_else(|| {
-                Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "AVIF: frame dimensions overflow usize",
-                )
-            })?;
+        let dimensions = Dimensions::new(width, height)?;
+        let luma = dimensions.num_pixels().ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: frame dimensions overflow usize",
+            )
+        })?;
         if !(8..=16).contains(&bit_depth) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -382,8 +385,7 @@ impl DecodedFrame {
             ));
         }
         Ok(Self {
-            width,
-            height,
+            dimensions,
             bit_depth,
             chroma,
             y,
@@ -395,22 +397,19 @@ impl DecodedFrame {
     /// The luma width in pixels (post superres).
     #[must_use]
     pub fn width(&self) -> u32 {
-        self.width
+        self.dimensions.width()
     }
 
     /// The luma height in pixels (post superres).
     #[must_use]
     pub fn height(&self) -> u32 {
-        self.height
+        self.dimensions.height()
     }
 
     /// The luma dimensions.
     #[must_use]
     pub fn dimensions(&self) -> Dimensions {
-        Dimensions {
-            width: self.width,
-            height: self.height,
-        }
+        self.dimensions
     }
 
     /// The per-sample bit depth (`8..=16`). Samples are stored in `u16` regardless.
@@ -428,7 +427,8 @@ impl DecodedFrame {
     /// The chroma-plane dimensions `(width, height)` — `(0, 0)` for [`ChromaFormat::Monochrome`].
     #[must_use]
     pub fn chroma_dimensions(&self) -> (u32, u32) {
-        self.chroma.chroma_dimensions(self.width, self.height)
+        self.chroma
+            .chroma_dimensions(self.dimensions.width(), self.dimensions.height())
     }
 
     /// The row-major luma plane (`width × height` samples).
@@ -466,9 +466,10 @@ impl AvifImage {
     /// - **`grid`**: every tile is decoded (row-major `dimg` order) and assembled in the plane
     ///   domain onto a `columns·tile_w × rows·tile_h` canvas, then cropped to the grid's output
     ///   size (ISO/IEC 23008-12 §6.6.2.3.2). All tiles must share chroma format, bit depth, and
-    ///   dimensions, else [`Error::Unsupported`]; the arithmetic is checked so a hostile grid
-    ///   cannot amplify allocation.
-    /// - **`iovl`**: [`Error::Unsupported`] — overlay compositing is defined over RGBA.
+    ///   dimensions, else an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error;
+    ///   the arithmetic is checked so a hostile grid cannot amplify allocation.
+    /// - **`iovl`**: an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error —
+    ///   overlay compositing is defined over RGBA.
     ///
     /// Transformative properties (`clap`/`irot`/`imir`) are **not** applied here — read them via
     /// [`AvifItem::transformative_properties`](crate::AvifItem::transformative_properties).
@@ -478,9 +479,10 @@ impl AvifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for a missing item, a malformed `av1C`, a payload
-    /// violating the still-image constraints, a derivation cycle, or a malformed derivation;
-    /// [`Error::Unsupported`] for an `iovl`, a non-AV1 coded item, an item with an unrecognised
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
+    /// missing item, a malformed `av1C`, a payload violating the still-image constraints, a
+    /// derivation cycle, or a malformed derivation; an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for an `iovl`, a non-AV1 coded item, an item with an unrecognised
     /// essential property, a non-uniform grid, a derivation nested past the internal depth
     /// limit, an image or a count of decodes/derivations past the [`DecodeLimits`], or an
     /// allocation the system refuses; and
@@ -514,7 +516,8 @@ impl AvifImage {
     ///
     /// **Colour policy.** Shared with [`decode_item_rgba16`](Self::decode_item_rgba16); this
     /// surface additionally presents **8-bit coded frames only**. Anything outside the policy is
-    /// [`Error::Unsupported`] *here* while [`decode_item_planar`](Self::decode_item_planar) still
+    /// an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error *here* while
+    /// [`decode_item_planar`](Self::decode_item_planar) still
     /// delivers the samples:
     ///
     /// - **nclx matrix 0 (identity / GBR)** — requires 4:4:4; samples are mapped directly
@@ -529,7 +532,8 @@ impl AvifImage {
     /// - **Missing `colr`** — the matrix and range come from the AV1 sequence header's
     ///   `color_config` (details below), then follow the rules above.
     /// - Anything else — YCgCo, the chromaticity-derived matrices (12/13/14), an ICC-only `colr`,
-    ///   or a coded depth CICP does not model — is [`Error::Unsupported`]. On *this* surface a
+    ///   or a coded depth CICP does not model — is an
+    ///   [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error. On *this* surface a
     ///   `bit_depth > 8` frame is too: narrowing it would trade an honest error for silent quality
     ///   loss, so use [`decode_item_rgba16`](Self::decode_item_rgba16) instead.
     ///
@@ -584,9 +588,10 @@ impl AvifImage {
     ///
     /// # Errors
     ///
-    /// As [`decode_item_planar`](Self::decode_item_planar), plus [`Error::Unsupported`] for an
-    /// unsupported colour configuration and [`Error::InvalidInput`] for a mismatched alpha
-    /// auxiliary or an out-of-range/non-integer `clap`.
+    /// As [`decode_item_planar`](Self::decode_item_planar), plus an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for an unsupported
+    /// colour configuration and an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
+    /// error for a mismatched alpha auxiliary or an out-of-range/non-integer `clap`.
     pub fn decode_item_rgba8(
         &self,
         id: u32,
@@ -836,11 +841,11 @@ impl AvifImage {
                 // the delivered one before anything is derived from it: a decoder need not honour
                 // `ispe` (or the file need not carry one), so the second check is not redundant.
                 if let Some(declared) = item.dimensions() {
-                    limits.check(declared.width, declared.height)?;
+                    limits.check(declared.width(), declared.height())?;
                 }
                 walk.charge_decode(limits)?;
                 let frame = decoder.decode_still(&config, payload)?;
-                limits.check(frame.width, frame.height)?;
+                limits.check(frame.width(), frame.height())?;
                 Ok(frame)
             }
             ItemKind::CodedImage { .. } => Err(Error::unsupported(
@@ -896,14 +901,17 @@ impl AvifImage {
         for &tile_id in item.derivation_target_ids() {
             let tile = self.decode_planar_inner(tile_id, decoder, walk, limits)?;
             match tiles.first() {
-                None => {
-                    check_grid_canvas((cols, rows), (tile.width, tile.height), (ow, oh), limits)?
-                }
+                None => check_grid_canvas(
+                    (cols, rows),
+                    (tile.width(), tile.height()),
+                    (ow, oh),
+                    limits,
+                )?,
                 Some(first)
                     if tile.chroma != first.chroma
                         || tile.bit_depth != first.bit_depth
-                        || tile.width != first.width
-                        || tile.height != first.height =>
+                        || tile.width() != first.width()
+                        || tile.height() != first.height() =>
                 {
                     return Err(Error::unsupported(
                         env!("CARGO_PKG_NAME"),
@@ -916,7 +924,7 @@ impl AvifImage {
         }
         let first = &tiles[0];
         let (chroma, bit_depth, tw, th) =
-            (first.chroma, first.bit_depth, first.width, first.height);
+            (first.chroma, first.bit_depth, first.width(), first.height());
 
         let y = assemble_plane(
             &tiles,
@@ -994,7 +1002,7 @@ impl AvifImage {
                 self.colour_params(&item)?,
                 options.chroma_upsampling,
             )?;
-            let (w, h) = (frame.width, frame.height);
+            let (w, h) = (frame.width(), frame.height());
             if let Some(alpha) = self.alpha_auxiliary_of(id) {
                 let alpha_frame = self.decode_planar_inner(alpha.id(), decoder, walk, limits)?;
                 apply_alpha(&mut rgba, w as usize, h as usize, &alpha_frame)?;
@@ -1049,7 +1057,7 @@ impl AvifImage {
                 &mut canvas,
                 (ow, oh),
                 &src,
-                (dims.width, dims.height),
+                (dims.width(), dims.height()),
                 (dx, dy),
             );
         }
@@ -1188,7 +1196,8 @@ trait RgbaSample: sample_sealed::Sealed + Copy + Default + Eq {
     const MAX: u32;
 
     /// The deepest coded frame this surface will present. The `u8` surface stops at 8 so that
-    /// narrowing a 10/12-bit frame is an explicit [`Error::Unsupported`] rather than silent
+    /// narrowing a 10/12-bit frame is an explicit
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error rather than silent
     /// quality loss; the `u16` surface accepts everything [`DecodedFrame`] can carry.
     const MAX_CODED_DEPTH: u8;
 
@@ -1321,7 +1330,8 @@ enum Converter {
 
 impl Converter {
     /// The converter for an nclx `matrix_coefficients` code point at `range` and `bit_depth`, or
-    /// [`Error::Unsupported`] if this surface does not present that combination.
+    /// an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if this surface does
+    /// not present that combination.
     ///
     /// Matrix 0 (identity / GBR) never reaches here — it is a plane permutation, handled inline.
     /// Matrix 2 (unspecified) resolves to BT.601, matching libavif's presentation default.
@@ -1334,8 +1344,9 @@ impl Converter {
     }
 
     /// The H.273 de-matrixing for an nclx `matrix_coefficients` code point at `range` and
-    /// `bit_depth`, whatever the depth, or [`Error::Unsupported`] if this surface does not present
-    /// that combination. Matrix 2 (unspecified) resolves to BT.601, as in [`select`](Self::select).
+    /// `bit_depth`, whatever the depth, or an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if this surface does
+    /// not present that combination. Matrix 2 (unspecified) resolves to BT.601, as in [`select`](Self::select).
     fn generic(matrix: u16, range: ColorRange, bit_depth: u8) -> Result<YcbcrMatrix> {
         let unsupported = || {
             Error::unsupported(
@@ -1382,7 +1393,7 @@ fn frame_to_rgba<T: RgbaSample>(
     if frame.bit_depth > T::MAX_CODED_DEPTH {
         return Err(Error::unsupported(env!("CARGO_PKG_NAME"), T::WIDER_SURFACE));
     }
-    let (w, h) = (frame.width as usize, frame.height as usize);
+    let (w, h) = (frame.width() as usize, frame.height() as usize);
     let max_in = (1u32 << frame.bit_depth) - 1;
     let opaque = T::narrow(T::MAX);
     let len = w
@@ -1424,7 +1435,7 @@ fn frame_to_rgba<T: RgbaSample>(
         return Ok(out);
     }
 
-    let (cw, ch) = frame.chroma.chroma_dimensions(frame.width, frame.height);
+    let (cw, ch) = frame.chroma_dimensions();
     let (cw, ch) = (cw as usize, ch as usize);
     if upsampling == ChromaUpsampling::Interpolated && frame.chroma != ChromaFormat::Yuv444 {
         // libavif's bilinear upsampling, kept in sixteenths through the conversion.
@@ -1520,7 +1531,7 @@ fn apply_alpha<T: RgbaSample>(
     h: usize,
     alpha: &DecodedFrame,
 ) -> Result<()> {
-    if alpha.width as usize != w || alpha.height as usize != h {
+    if alpha.width() as usize != w || alpha.height() as usize != h {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "AVIF: alpha auxiliary dimensions do not match the master image",
@@ -1623,8 +1634,8 @@ fn mirror<T: Copy + Default>(src: &[T], w: u32, h: u32, axis: u8) -> Result<Vec<
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if any denominator is zero, if the width/height or the
-/// computed top-left corner is not integer-valued, or if the crop window falls outside the image.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
+/// denominator is zero, if the width/height or the computed top-left corner is not integer-valued, or if the crop window falls outside the image.
 fn crop_clap<T: Copy + Default>(
     src: &[T],
     w: u32,
@@ -1694,7 +1705,8 @@ fn crop_clap<T: Copy + Default>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the offset is not integer-valued.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the offset
+/// is not integer-valued.
 fn clap_offset(dim: i64, crop: i64, off_n: u32, off_d: u32) -> Result<i64> {
     let num = (dim - crop) * i64::from(off_d) + 2 * i64::from(off_n as i32);
     let den = 2 * i64::from(off_d);

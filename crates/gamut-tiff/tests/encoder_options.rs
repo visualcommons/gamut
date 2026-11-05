@@ -8,14 +8,7 @@ fn rgb(w: u32, h: u32) -> Vec<u8> {
 }
 
 fn img<'a>(buf: &'a [u8], w: u32, h: u32) -> ImageRef<'a, Rgb8> {
-    ImageRef::<Rgb8>::new(
-        buf,
-        Dimensions {
-            width: w,
-            height: h,
-        },
-    )
-    .unwrap()
+    ImageRef::<Rgb8>::new(buf, Dimensions::new(w, h).unwrap()).unwrap()
 }
 
 #[test]

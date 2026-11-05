@@ -32,14 +32,8 @@ fn plain_avif() -> Vec<u8> {
     let rgb = source_rgb();
     AvifEncoder::new()
         .encode_to_vec(
-            ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: W,
-                    height: H,
-                },
-            )
-            .expect("buffer matches dimensions"),
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(W, H).expect("non-zero"))
+                .expect("buffer matches dimensions"),
         )
         .expect("encode")
 }
@@ -71,14 +65,8 @@ fn main() -> Result<()> {
         let (bytes, report) = AvifEncoder::new()
             .with_c2pa_reserved(len)
             .encode_with_report(
-                ImageRef::<Rgb8>::new(
-                    &rgb,
-                    Dimensions {
-                        width: W,
-                        height: H,
-                    },
-                )
-                .expect("buffer matches dimensions"),
+                ImageRef::<Rgb8>::new(&rgb, Dimensions::new(W, H).expect("non-zero"))
+                    .expect("buffer matches dimensions"),
             )
             .map_err(|e| OracleError::Asset(e.to_string()))?;
         let range = report

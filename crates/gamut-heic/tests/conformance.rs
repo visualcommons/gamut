@@ -61,7 +61,10 @@ impl HevcDecoder for De265Decoder {
         let pics = picture_nals(payload, config.nal_length_size())?;
         let yuv = libheif_oracle::decode_hevc_intra(&cfg, &pics).map_err(|e| {
             eprintln!("De265Decoder: libde265 decode failed: {e}");
-            Error::InvalidInput("De265Decoder: libde265 decode failed")
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "De265Decoder: libde265 decode failed",
+            )
         })?;
         let chroma = match yuv.chroma {
             OracleChroma::Mono => ChromaFormat::Monochrome,
@@ -328,11 +331,11 @@ fn t1_structure_conformance_matches_libheif() {
         .dimensions()
         .expect("primary has ispe dimensions");
     assert_eq!(
-        (dims.width, dims.height),
+        (dims.width(), dims.height()),
         (oracle_primary.width, oracle_primary.height),
         "ispe dims disagree with libheif"
     );
-    assert_eq!((dims.width, dims.height), (FULL_W, FULL_H));
+    assert_eq!((dims.width(), dims.height()), (FULL_W, FULL_H));
 
     // 1d. Alpha lens presence == oracle has_alpha.
     assert_eq!(
@@ -830,7 +833,8 @@ fn t6_hvcc_coherent_with_oracle_yuv() {
 
 /// The registry is a drop-in for a single `&mut dyn HevcDecoder`: pushing the libde265-backed
 /// `De265Decoder` as the only backend must decode the fixture *identically* to passing that backend
-/// directly, and an empty registry must decline with `Error::Unsupported(NO_BACKEND)` — gamut ships
+/// directly, and an empty registry must decline with an `ErrorKind::Unsupported` error carrying
+/// `NO_BACKEND` — gamut ships
 /// no in-tree software HEVC decoder (issue #18), so there is no implicit fallback tail.
 #[test]
 fn t7_registry_drives_the_reference_backend() {

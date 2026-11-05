@@ -191,21 +191,13 @@ impl<'a> HeifContainer<'a> {
     }
 }
 
-/// What a report of a located manifest store has to say beside it, because locating one is not
-/// validating it.
-///
-/// C2PA 2.4 §15.12 puts validation on a validator: the signature layer (§13) and the
-/// validation-side rules are outside this crate entirely, and `references/c2pa/README.md` records
-/// the boundary — gamut locates, bounds and carries a manifest store, holds no COSE, X.509,
-/// RFC 3161 or trust-list code, and never reports a validity verdict.
-///
-/// The sentence exists because the *absence* of a verdict does not read as one. To anyone who has
-/// seen a Content Credentials badge, "C2PA: present" printed beside EXIF and ICC reads as
-/// *verified*, so a report that lets a reader infer a verdict is a defect rather than a wording
-/// preference. [`C2paSummary::report_lines`] therefore carries this text in the line that reports
-/// the stores, never as a footnote a reader can skip.
-pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
-     it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
+// What a report of a located manifest store has to say beside it, because locating one is not
+// validating it. C2PA 2.4 §15.12 puts validation on a validator: the signature layer (§13) and the
+// validation-side rules are outside this crate entirely, and `references/c2pa/README.md` records
+// the boundary. A report that lets a reader infer a verdict is a defect rather than a wording
+// preference, so `C2paSummary::report_lines` carries this text in the line that reports the
+// stores, never as a footnote a reader can skip. The sentence is defined once in `gamut-core`.
+pub use gamut_core::c2pa::NOT_VALIDATED as C2PA_NOT_VALIDATED;
 
 /// Where a top-level `uuid` box sits relative to the file's media data — a **positional fact about
 /// bytes**, and never a verdict.

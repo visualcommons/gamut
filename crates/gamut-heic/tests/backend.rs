@@ -119,8 +119,13 @@ impl HevcDecoder for Probe {
         self.record("decode");
         match self.outcome {
             Outcome::Frame(v) => Ok(frame(v)),
-            Outcome::Fail => Err(Error::InvalidInput("probe: terminal backend failure")),
-            Outcome::LateDecline => Err(Error::Unsupported(BACKEND_DECLINED)),
+            Outcome::Fail => Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "probe: terminal backend failure",
+            )),
+            Outcome::LateDecline => {
+                Err(Error::unsupported(env!("CARGO_PKG_NAME"), BACKEND_DECLINED))
+            }
         }
     }
 }
@@ -200,7 +205,10 @@ fn accepted_then_failed_propagates_and_stops() {
     let err = decoders
         .decode_intra(&config(), &[])
         .expect_err("the accepting backend's error propagates");
-    assert!(matches!(err, Error::InvalidInput(m) if m == "probe: terminal backend failure"));
+    assert!(
+        err.kind() == ErrorKind::InvalidInput
+            && err.static_message() == Some("probe: terminal backend failure")
+    );
     // `rescue` must NOT have been consulted at all — not even `supports`.
     assert_eq!(entries(&log), ["failing:supports", "failing:decode"]);
 }
@@ -243,7 +251,7 @@ fn all_declining_backends_yield_unsupported() {
 }
 
 /// Only the exact [`BACKEND_DECLINED`] sentinel is a late decline: an accepting backend that fails
-/// with *some other* `Error::Unsupported` has still accepted the job, so its error propagates and
+/// with *some other* `ErrorKind::Unsupported` error has still accepted the job, so its error propagates and
 /// no later backend is consulted.
 #[test]
 fn other_unsupported_errors_are_terminal_not_a_late_decline() {
@@ -262,7 +270,7 @@ fn other_unsupported_errors_are_terminal_not_a_late_decline() {
                 .lock()
                 .expect("log lock")
                 .push("picky:decode".into());
-            Err(Error::Unsupported(OTHER))
+            Err(Error::unsupported(env!("CARGO_PKG_NAME"), OTHER))
         }
     }
 
@@ -277,7 +285,7 @@ fn other_unsupported_errors_are_terminal_not_a_late_decline() {
     let err = decoders
         .decode_intra(&config(), &[])
         .expect_err("a non-sentinel Unsupported is terminal");
-    assert!(matches!(err, Error::Unsupported(m) if m == OTHER));
+    assert!(err.kind() == ErrorKind::Unsupported && err.static_message() == Some(OTHER));
     assert_eq!(entries(&log), ["picky:decode"]);
 }
 

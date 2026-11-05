@@ -136,7 +136,8 @@ impl CodestreamInfo {
 /// The two are irreconcilable without a lossy conversion — VP8 reconstructs YCbCr 4:2:0 (limited
 /// range, BT.601) and VP8L reconstructs exact ARGB — so a backend returns whichever its codestream
 /// defines. Returning the variant that does not match the requested [`WebpCodestream`] is a
-/// contract violation, which the host rejects with an [`Error::InvalidInput`] rather than
+/// contract violation, which the host rejects with an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than
 /// converting between the two.
 #[derive(Debug, Clone)]
 pub enum DecodedRaster {
@@ -162,14 +163,16 @@ impl DecodedRaster {
     }
 
     /// The raster's dimensions.
-    #[must_use]
-    pub fn dimensions(&self) -> Dimensions {
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
+    /// [`Yuv420`](DecodedRaster::Yuv420) raster has a zero width or height, which no
+    /// [`Dimensions`] can describe.
+    pub fn dimensions(&self) -> Result<Dimensions> {
         match self {
-            DecodedRaster::Yuv420(yuv) => Dimensions {
-                width: yuv.width(),
-                height: yuv.height(),
-            },
-            DecodedRaster::Argb { dimensions, .. } => *dimensions,
+            DecodedRaster::Yuv420(yuv) => Dimensions::new(yuv.width(), yuv.height()),
+            DecodedRaster::Argb { dimensions, .. } => Ok(*dimensions),
         }
     }
 }
@@ -264,14 +267,16 @@ impl RasterRef<'_> {
     }
 
     /// The raster's dimensions.
-    #[must_use]
-    pub fn dimensions(&self) -> Dimensions {
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
+    /// [`Yuv420`](RasterRef::Yuv420) raster has a zero width or height, which no [`Dimensions`]
+    /// can describe.
+    pub fn dimensions(&self) -> Result<Dimensions> {
         match self {
-            RasterRef::Yuv420(yuv) => Dimensions {
-                width: yuv.width(),
-                height: yuv.height(),
-            },
-            RasterRef::Argb { dimensions, .. } => *dimensions,
+            RasterRef::Yuv420(yuv) => Dimensions::new(yuv.width(), yuv.height()),
+            RasterRef::Argb { dimensions, .. } => Ok(*dimensions),
         }
     }
 }
@@ -406,8 +411,10 @@ pub(crate) fn peek_dimensions(codestream: WebpCodestream, payload: &[u8]) -> Opt
 ///
 /// A late [`Status::UNSUPPORTED`](abi::Status::UNSUPPORTED) — returned from `decode`/`encode` after
 /// `supports` already accepted the job — cannot re-open the fallback (the contract forbids retrying
-/// a later backend once one has accepted), so it surfaces as [`Error::Unsupported`]; every other
-/// non-OK status is a backend failure and surfaces as [`Error::InvalidInput`].
+/// a later backend once one has accepted), so it surfaces as an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error; every other non-OK status
+/// is a backend failure and surfaces as an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error.
 fn status_error(status: abi::Status, unsupported: &'static str, failed: &'static str) -> Error {
     let classified = if status.is_unsupported() {
         Error::unsupported(env!("CARGO_PKG_NAME"), unsupported)
@@ -455,20 +462,20 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
     fn decode(&mut self, info: &CodestreamInfo, payload: &[u8]) -> Result<DecodedRaster> {
         let cfg = stream_config(info);
         let dims = info.dimensions();
-        let (w, h) = (dims.width as usize, dims.height as usize);
+        let (w, h) = (dims.width() as usize, dims.height() as usize);
         match info.codestream() {
             WebpCodestream::Vp8 => {
                 let (cw, ch) = (
-                    Yuv420::chroma_width(dims.width) as usize,
-                    Yuv420::chroma_height(dims.height) as usize,
+                    Yuv420::chroma_width(dims.width()) as usize,
+                    Yuv420::chroma_height(dims.height()) as usize,
                 );
                 let mut y = vec![0u8; w * h];
                 let mut u = vec![0u8; cw * ch];
                 let mut v = vec![0u8; cw * ch];
                 let desc = abi::ImageDesc::new(
                     PIXEL_FORMAT_YUV420,
-                    dims.width,
-                    dims.height,
+                    dims.width(),
+                    dims.height(),
                     8,
                     3,
                     [
@@ -488,8 +495,8 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
                     ));
                 }
                 Ok(DecodedRaster::Yuv420(Yuv420::new(
-                    dims.width,
-                    dims.height,
+                    dims.width(),
+                    dims.height(),
                     y,
                     u,
                     v,
@@ -499,8 +506,8 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
                 let mut bytes = vec![0u8; w * h * 4];
                 let desc = abi::ImageDesc::new(
                     PIXEL_FORMAT_ARGB,
-                    dims.width,
-                    dims.height,
+                    dims.width(),
+                    dims.height(),
                     8,
                     1,
                     [
@@ -565,16 +572,16 @@ impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
 
     fn encode(&mut self, req: &WebpEncodeRequest, raster: &RasterRef<'_>) -> Result<Vec<u8>> {
         let cfg = encode_config(req);
-        let dims = raster.dimensions();
+        let dims = raster.dimensions()?;
         // Owned byte staging for the ARGB case; the YUV case borrows the planes in place.
         let mut argb_bytes = Vec::new();
         let desc = match raster {
             RasterRef::Yuv420(yuv) => {
-                let cw = Yuv420::chroma_width(dims.width) as usize;
+                let cw = Yuv420::chroma_width(dims.width()) as usize;
                 abi::ImageDesc::new(
                     PIXEL_FORMAT_YUV420,
-                    dims.width,
-                    dims.height,
+                    dims.width(),
+                    dims.height(),
                     8,
                     3,
                     [
@@ -583,15 +590,15 @@ impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
                         yuv.v().as_ptr().cast_mut(),
                         core::ptr::null_mut(),
                     ],
-                    [dims.width as usize, cw, cw, 0],
+                    [dims.width() as usize, cw, cw, 0],
                 )
             }
             RasterRef::Argb { pixels, .. } => {
                 argb_bytes.extend(pixels.iter().flat_map(|p| p.to_le_bytes()));
                 abi::ImageDesc::new(
                     PIXEL_FORMAT_ARGB,
-                    dims.width,
-                    dims.height,
+                    dims.width(),
+                    dims.height(),
                     8,
                     1,
                     [
@@ -600,7 +607,7 @@ impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
                         core::ptr::null_mut(),
                         core::ptr::null_mut(),
                     ],
-                    [dims.width as usize * 4, 0, 0, 0],
+                    [dims.width() as usize * 4, 0, 0, 0],
                 )
             }
         };
@@ -625,7 +632,7 @@ impl<E: abi::Encoder + Send> WebpCodestreamEncoder for AbiEncoderBackend<E> {
 /// self-contained, with no out-of-band parameter sets).
 fn stream_config(info: &CodestreamInfo) -> abi::StreamConfig {
     let dims = info.dimensions();
-    abi::StreamConfig::new(info.codestream().codec_id(), dims.width, dims.height, 8)
+    abi::StreamConfig::new(info.codestream().codec_id(), dims.width(), dims.height(), 8)
 }
 
 /// Builds the ABI encode descriptor for an encode job (no options blob).
@@ -638,7 +645,7 @@ mod tests {
     use super::*;
 
     fn dims(width: u32, height: u32) -> Dimensions {
-        Dimensions { width, height }
+        Dimensions::new(width, height).unwrap()
     }
 
     #[test]
@@ -685,25 +692,25 @@ mod tests {
         let yuv = Yuv420::new(2, 2, vec![0; 4], vec![0; 1], vec![0; 1]).unwrap();
         let raster = DecodedRaster::Yuv420(yuv.clone());
         assert_eq!(raster.codestream(), WebpCodestream::Vp8);
-        assert_eq!(raster.dimensions(), dims(2, 2));
+        assert_eq!(raster.dimensions().unwrap(), dims(2, 2));
 
         let argb = DecodedRaster::Argb {
             dimensions: dims(3, 1),
             pixels: vec![1, 2, 3],
         };
         assert_eq!(argb.codestream(), WebpCodestream::Vp8l);
-        assert_eq!(argb.dimensions(), dims(3, 1));
+        assert_eq!(argb.dimensions().unwrap(), dims(3, 1));
 
         let yref = RasterRef::Yuv420(&yuv);
         assert_eq!(yref.codestream(), WebpCodestream::Vp8);
-        assert_eq!(yref.dimensions(), dims(2, 2));
+        assert_eq!(yref.dimensions().unwrap(), dims(2, 2));
         let pixels = [1u32, 2, 3];
         let aref = RasterRef::Argb {
             dimensions: dims(3, 1),
             pixels: &pixels,
         };
         assert_eq!(aref.codestream(), WebpCodestream::Vp8l);
-        assert_eq!(aref.dimensions(), dims(3, 1));
+        assert_eq!(aref.dimensions().unwrap(), dims(3, 1));
     }
 
     #[test]

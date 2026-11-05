@@ -28,14 +28,16 @@ use crate::model::{
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for a model that cannot round-trip: a `primary_item_id` naming
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a model
+/// that cannot round-trip: a `primary_item_id` naming
 /// no item, duplicate item ids, an interior NUL in a name/content-type/encoding/aux-type string,
 /// an empty `content_encoding`, a `content_type` on a non-`mime` item (or a `mime` item without
 /// one), an out-of-range `Rotation`/`Mirror` value, a top-level box whose type the writer
 /// emits from the model itself (`ftyp`/`meta`/`mdat`) or whose `user_type` does not pair with a
 /// `uuid` type, or a `top_level_boxes` list that interleaves positions (an `AfterFtyp` box after
 /// a `Trailing` one — the file cannot record that order, so `read` could not reproduce it; use
-/// [`IsoBmffImage::push_top_level_box`] to append). Returns [`Error::Unsupported`] for a model
+/// [`IsoBmffImage::push_top_level_box`] to append). Returns an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a model
 /// that does not fit the still-image box
 /// versions this crate writes: item ids above `u16::MAX`, `uri ` items, more than 255 properties or
 /// 65 535 reference targets per item, more than 32 767 distinct properties, more than 65 535

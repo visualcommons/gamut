@@ -31,14 +31,7 @@ fn packbits_rgb_roundtrips_in_gamut() {
         TiffEncoder::new()
             .with_compression(Compression::PackBits)
             .encode_image(
-                ImageRef::<Rgb8>::new(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut tiff,
             )
             .expect("encode");
@@ -55,14 +48,7 @@ fn gamut_packbits_is_decoded_by_libtiff() {
         TiffEncoder::new()
             .with_compression(Compression::PackBits)
             .encode_image(
-                ImageRef::<Rgb8>::new(
-                    &rgb,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut tiff,
             )
             .expect("encode");
@@ -75,14 +61,7 @@ fn gamut_packbits_is_decoded_by_libtiff() {
         TiffEncoder::new()
             .with_compression(Compression::PackBits)
             .encode_image(
-                ImageRef::<Gray8>::new(
-                    &gray,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Gray8>::new(&gray, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut gtiff,
             )
             .expect("encode");

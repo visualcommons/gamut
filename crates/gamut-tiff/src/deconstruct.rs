@@ -185,7 +185,8 @@ impl DeconstructReport {
 ///
 /// # Errors
 ///
-/// Returns [`gamut_core::Error::InvalidInput`] only when the container is unreadable (bad header,
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error only when the
+/// container is unreadable (bad header,
 /// truncated/looping IFD chain) — the same conditions under which [`gamut_ifd::read`] fails.
 /// Unknown tags, unknown field types, out-of-spec codes, and unclassified bytes are reported, not
 /// errored.
@@ -467,10 +468,7 @@ mod tests {
     #[test]
     fn encoded_gray_strip_image_is_accounted() {
         for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
-            let dims = Dimensions {
-                width: 5,
-                height: 3,
-            };
+            let dims = Dimensions::new(5, 3).unwrap();
             let pixels: Vec<u8> = (0..15).collect();
             let mut tiff = Vec::new();
             TiffEncoder::new()

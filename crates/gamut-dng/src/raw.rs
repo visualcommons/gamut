@@ -82,7 +82,7 @@ impl RawImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `bits_per_sample` is not in `1..=16`, the pattern length
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `bits_per_sample` is not in `1..=16`, the pattern length
     /// does not match `cfa_repeat`, or `samples.len()` is not `width * height`.
     pub fn new_cfa(
         dims: Dimensions,
@@ -125,7 +125,7 @@ impl RawImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `bits_per_sample` is not in `1..=16`, `planes` is zero,
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `bits_per_sample` is not in `1..=16`, `planes` is zero,
     /// or `samples.len()` is not `width * height * planes`.
     pub fn new_linear_raw(
         dims: Dimensions,
@@ -159,7 +159,7 @@ impl RawImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `levels` describes a different number of sample planes
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `levels` describes a different number of sample planes
     /// than this image has.
     pub fn with_levels(mut self, levels: RawLevels) -> Result<Self> {
         if levels.samples_per_pixel() != self.samples_per_pixel {
@@ -180,7 +180,7 @@ impl RawImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `black_level` is negative or not finite.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `black_level` is negative or not finite.
     pub fn with_black_level(mut self, black_level: f64) -> Result<Self> {
         let spp = usize::from(self.samples_per_pixel);
         let mut levels = RawLevels::new(
@@ -203,7 +203,7 @@ impl RawImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `white_level` is not finite and positive.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `white_level` is not finite and positive.
     pub fn with_white_level(mut self, white_level: f64) -> Result<Self> {
         let spp = usize::from(self.samples_per_pixel);
         let mut levels = RawLevels::new(
@@ -376,7 +376,7 @@ impl RawImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the active area is empty or out of bounds, a delta
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the active area is empty or out of bounds, a delta
     /// vector doesn't match the active area, the linearization table is empty, or a plane's
     /// white level does not exceed its maximum computed black level.
     pub fn to_linear(&self) -> Result<LinearImage> {

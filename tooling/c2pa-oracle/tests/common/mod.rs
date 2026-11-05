@@ -20,10 +20,7 @@ pub const PADDING: usize = 37;
 
 /// The fixture's dimensions.
 pub fn dims() -> Dimensions {
-    Dimensions {
-        width: W,
-        height: H,
-    }
+    Dimensions::new(W, H).expect("non-zero fixture dimensions")
 }
 
 /// A structured source: every channel varies along both axes, so a byte moved by a container bug

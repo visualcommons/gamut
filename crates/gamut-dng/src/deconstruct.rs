@@ -184,7 +184,8 @@ impl DeconstructReport {
 ///
 /// # Errors
 ///
-/// Returns [`gamut_core::Error::InvalidInput`] only when the container is unreadable (bad header,
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error only when the
+/// container is unreadable (bad header,
 /// truncated/looping IFD chain) — the same conditions under which [`gamut_ifd::read`] fails.
 /// Unknown tags, unknown field types, out-of-spec codes, malformed matrices, and unclassified
 /// bytes are reported, not errored.

@@ -95,8 +95,8 @@ pub struct TiffMetadata {
     /// **One directory, and an array of them is refused.** The field holds a single directory,
     /// and an `ExifIFD` entry names one (EXIF 2.32 §4.6.3 A fixes its `count` at 1). A source
     /// file whose `ExifIFD` entry instead carries an **array** of two or more offsets is refused
-    /// by [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) with
-    /// [`Error::InvalidInput`](gamut_core::Error::InvalidInput) rather than narrowed to its first
+    /// by [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) with an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than narrowed to its first
     /// directory, which would drop the rest without a report — use
     /// [`deconstruct`](crate::deconstruct) to see the whole array.
     ///
@@ -136,8 +136,8 @@ pub struct TiffMetadata {
     /// out. Every other tag of Table 4 (`ImageWidth`, `Compression`, `XResolution`,
     /// `StripOffsets`, `YCbCrPositioning`, `TransferFunction`, …) is one the encoder writes from the
     /// pixels it lays out, or one whose meaning depends on that layout, so a field under any tag
-    /// outside the list — or a sub-IFD group — is **refused** by the encode with
-    /// [`Error::InvalidInput`](gamut_core::Error::InvalidInput) rather than allowed to overwrite
+    /// outside the list — or a sub-IFD group — is **refused** by the encode with an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than allowed to overwrite
     /// or contradict the page's own entry. On read, IFD 0's fields under those tags come back here and nothing else does; `None`
     /// when the page carries none of them.
     ///
@@ -319,7 +319,8 @@ impl TiffMetadata {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the Exif or GPS sub-IFD
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the Exif
+    /// or GPS sub-IFD
     /// carries a pointer-typed field under a pointer tag, hangs a group off a tag the reader does
     /// not resolve, carries a field and a group under one tag, or nests deeper than the reader
     /// walks back; or if the 0th-IFD fields hold a tag outside [`IFD0_EXIF_TAGS`] or a group.
@@ -650,7 +651,8 @@ fn single_directory(ifd0: &Ifd, tag: u16, refusal: &'static str) -> Result<Optio
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) for any of the four refusals.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for any of the
+/// four refusals.
 fn check_exif_subtree(ifd: &Ifd, depth: usize) -> Result<()> {
     for &tag in EXIF_SUBTREE_POINTER_TAGS {
         if ifd.get(tag).is_some_and(is_pointer_typed) {
@@ -797,8 +799,8 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the container is
-/// unreadable (bad header, looping or runaway IFD chain, no IFD) or the store's declared extent
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// container is unreadable (bad header, looping or runaway IFD chain, no IFD) or the store's declared extent
 /// lies outside `file` or overlaps the entry's own count field.
 pub fn c2pa_exclusions(file: &[u8]) -> Result<Option<C2paExclusions>> {
     c2pa::locate(file)
@@ -815,8 +817,8 @@ pub fn c2pa_exclusions(file: &[u8]) -> Result<Option<C2paExclusions>> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the container is
-/// unreadable (bad header, looping or runaway IFD chain, no IFD). An unreadable store is not an
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// container is unreadable (bad header, looping or runaway IFD chain, no IFD). An unreadable store is not an
 /// error here; it is listed.
 pub fn c2pa_summary(file: &[u8]) -> Result<C2paSummary> {
     c2pa::summarize(file)
@@ -1791,7 +1793,7 @@ mod tests {
 /// resolves `InteroperabilityIFD` as a group inside `ExifIFD`, which the model holds as its own
 /// directory. The **thumbnail** (the 1st IFD) has no carrier: in a TIFF it would be a page of its
 /// own. Writing a model that holds one, or a 0th-IFD field outside the carried tags, is a typed
-/// [`Error::Unsupported`](gamut_core::Error::Unsupported) rather than a silent drop.
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error rather than a silent drop.
 #[cfg(feature = "metadata")]
 pub(crate) mod typed {
     use gamut_core::{Error, Result};
@@ -1856,7 +1858,8 @@ pub(crate) mod typed {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] when the model holds a thumbnail, a 0th-IFD field under a
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the
+    /// model holds a thumbnail, a 0th-IFD field under a
     /// tag outside [`IFD0_EXIF_TAGS`](super::IFD0_EXIF_TAGS), or a 0th-IFD sub-IFD group — what a
     /// `TiffMetadata` has no carrier for (see the module docs).
     pub(crate) fn exif_carriers(exif: &Exif) -> Result<ExifCarriers> {

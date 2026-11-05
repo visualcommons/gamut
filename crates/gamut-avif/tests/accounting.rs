@@ -125,14 +125,7 @@ fn encoder_output_accounts_totally() {
     // stream or trailer — the two halves of the crate agree on the container shape.
     use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
     let rgb = vec![200u8; 4 * 4 * 3];
-    let image = ImageRef::<Rgb8>::new(
-        &rgb,
-        Dimensions {
-            width: 4,
-            height: 4,
-        },
-    )
-    .unwrap();
+    let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(4, 4).unwrap()).unwrap();
     let mut data = Vec::new();
     gamut_avif::AvifEncoder::new()
         .encode_image(image, &mut data)
@@ -180,14 +173,7 @@ fn encode_with_report_sizes_are_the_colour_and_alpha_iloc_extents() {
             rgba.extend_from_slice(&[(x * 11) as u8, (y * 13) as u8, ((x ^ y) * 7) as u8, 255]);
         }
     }
-    let image = ImageRef::<Rgba8>::new(
-        &rgba,
-        Dimensions {
-            width: W,
-            height: H,
-        },
-    )
-    .unwrap();
+    let image = ImageRef::<Rgba8>::new(&rgba, Dimensions::new(W, H).unwrap()).unwrap();
     // The fixture's alpha is opaque, which by default codes no alpha auxiliary at all; keep it, so
     // there is an alpha extent to report.
     let encoder = gamut_avif::AvifEncoder::new().with_keep_opaque_alpha(true);
@@ -212,14 +198,7 @@ fn encode_with_report_sizes_are_the_colour_and_alpha_iloc_extents() {
 fn encode_with_report_alpha_bytes_is_zero_without_alpha() {
     use gamut_core::{Dimensions, ImageRef, Rgb8};
     let rgb: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 5) as u8).collect();
-    let image = ImageRef::<Rgb8>::new(
-        &rgb,
-        Dimensions {
-            width: 8,
-            height: 8,
-        },
-    )
-    .unwrap();
+    let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap();
     let (bytes, report) = gamut_avif::AvifEncoder::new()
         .encode_with_report(image)
         .unwrap();

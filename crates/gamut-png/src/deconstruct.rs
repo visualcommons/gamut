@@ -554,9 +554,10 @@ impl ChunkTally {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] when there is no header to report on — a bad signature, no
-/// first chunk, a first chunk that is not IHDR, or an IHDR whose payload is invalid — or when the
-/// input carries more chunks than [`DeconstructLimits::max_chunks`] allows. Everything else is
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when there is
+/// no header to report on — a bad signature, no first chunk, a first chunk that is not IHDR, or an
+/// IHDR whose payload is invalid — or when the input carries more chunks than
+/// [`DeconstructLimits::max_chunks`] allows. Everything else is
 /// **reported, not errored** — unknown ancillary *and critical* chunks, CRC mismatches, a missing
 /// IEND, trailing bytes after IEND, a truncated tail, and a corrupt IDAT stream.
 pub fn deconstruct(png: &[u8]) -> Result<PngReport> {

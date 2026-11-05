@@ -67,8 +67,8 @@ fuzz_target!(|data: &[u8]| {
     // Structure pin, not a check: both constructors enforce this count and no later stage touches
     // `samples` or `dims`, so no input can fail it while that holds (see the module docs).
     let dims = decoded.raw.dimensions();
-    let expected = (dims.width as usize)
-        .checked_mul(dims.height as usize)
+    let expected = (dims.width() as usize)
+        .checked_mul(dims.height() as usize)
         .and_then(|n| n.checked_mul(usize::from(decoded.raw.samples_per_pixel())));
     assert_eq!(
         Some(decoded.raw.samples().len()),

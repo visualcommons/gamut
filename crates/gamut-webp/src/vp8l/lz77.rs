@@ -148,8 +148,8 @@ pub const DISTANCE_MAP_LEN: u32 = 120;
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the prefix code implies an absurd number of extra bits or the
-/// stream is truncated.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the prefix
+/// code implies an absurd number of extra bits or the stream is truncated.
 pub fn read_lz77_value(r: &mut BitReader<'_>, prefix_code: u32) -> Result<u32> {
     if prefix_code < 4 {
         return Ok(prefix_code + 1);

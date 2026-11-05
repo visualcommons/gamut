@@ -10,8 +10,9 @@ use crate::fourcc::FourCc;
 ///
 /// Build one with [`RiffReader::new`], which validates the 12-byte WebP file header (`RIFF` + file
 /// size + `WEBP`) and bounds the chunk region to the declared file size. Each [`Iterator::next`]
-/// yields the next [`Chunk`], or an [`Error::InvalidInput`] (after which iteration ends) when the
-/// stream is truncated or a chunk's size runs past the available data.
+/// yields the next [`Chunk`], or an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error (after which iteration
+/// ends) when the stream is truncated or a chunk's size runs past the available data.
 #[derive(Debug, Clone)]
 pub struct RiffReader<'a> {
     /// Remaining bytes, positioned at the next chunk header. Emptied once exhausted or on error.
@@ -27,9 +28,9 @@ impl<'a> RiffReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `data` is shorter than the 12-byte header, does not begin
-    /// with the `RIFF` magic, has a form other than `WEBP`, or declares a file size that runs past
-    /// the end of `data`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data`
+    /// is shorter than the 12-byte header, does not begin with the `RIFF` magic, has a form other
+    /// than `WEBP`, or declares a file size that runs past the end of `data`.
     pub fn new(data: &'a [u8]) -> Result<Self> {
         // 12-byte header: 'RIFF' (4) + file size (4, little-endian) + form (4).
         if data.len() < 12 {

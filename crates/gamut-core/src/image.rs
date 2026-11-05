@@ -14,26 +14,24 @@ use core::marker::PhantomData;
 use crate::convert::RawImage;
 use crate::{Dimensions, Error, Pixel, Result};
 
-/// The required sample count for `dims` at `P`'s channel count, rejecting empty or overflowing
-/// dimensions. The single validation shared by every buffer constructor.
+/// The required sample count for `dims` at `P`'s channel count, rejecting overflowing
+/// dimensions (`dims` is never empty: [`Dimensions::new`] is its only constructor). The single
+/// validation shared by every buffer constructor.
 fn expected_len<P: Pixel>(dims: Dimensions) -> Result<usize> {
-    if dims.is_empty() {
-        return Err(Error::InvalidInput("zero-sized image").with_origin(env!("CARGO_PKG_NAME")));
-    }
     dims.sample_count(P::CHANNELS).ok_or_else(|| {
-        Error::InvalidInput("image dimensions overflow usize").with_origin(env!("CARGO_PKG_NAME"))
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
     })
 }
 
-/// Checks the length invariant `data_len == width * height * P::CHANNELS` (with non-empty,
-/// non-overflowing `dims`). The single source of truth both buffer constructors call, so the
-/// rejection messages never drift between the borrowed and owned paths.
+/// Checks the length invariant `data_len == width * height * P::CHANNELS` (with non-overflowing
+/// `dims`). The single source of truth both buffer constructors call, so the rejection messages
+/// never drift between the borrowed and owned paths.
 fn validate_len<P: Pixel>(data_len: usize, dims: Dimensions) -> Result<()> {
     if data_len != expected_len::<P>(dims)? {
-        return Err(
-            Error::InvalidInput("image buffer length does not match dimensions")
-                .with_origin(env!("CARGO_PKG_NAME")),
-        );
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "image buffer length does not match dimensions",
+        ));
     }
     Ok(())
 }
@@ -56,8 +54,9 @@ impl<'a, P: Pixel> ImageRef<'a, P> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `dims` is zero-sized, if `width * height * channels`
-    /// overflows `usize`, or if `data.len()` does not equal that product.
+    /// Returns an [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) error if
+    /// `width * height * channels` overflows `usize`, or if `data.len()` does not equal that
+    /// product.
     pub fn new(data: &'a [P::Sample], dims: Dimensions) -> Result<Self> {
         validate_len::<P>(data.len(), dims)?;
         Ok(Self {
@@ -159,8 +158,8 @@ impl<P: Pixel> ImageBuf<P> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `dims` is zero-sized, if the sample count overflows
-    /// `usize`, or if `data.len()` does not equal `width * height * P::CHANNELS`.
+    /// Returns an [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) error if the sample
+    /// count overflows `usize`, or if `data.len()` does not equal `width * height * P::CHANNELS`.
     pub fn new(data: Vec<P::Sample>, dims: Dimensions) -> Result<Self> {
         // Same length invariant as `ImageRef::new`, without building a throwaway borrowed view.
         validate_len::<P>(data.len(), dims)?;
@@ -175,7 +174,8 @@ impl<P: Pixel> ImageBuf<P> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `dims` is zero-sized or the sample count overflows `usize`.
+    /// Returns an [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) error if the sample
+    /// count overflows `usize`.
     pub fn zeroed(dims: Dimensions) -> Result<Self> {
         let want = expected_len::<P>(dims)?;
         Ok(Self {
@@ -255,10 +255,7 @@ mod tests {
     use crate::{Gray8, Rgb8, Rgb16};
 
     fn dims(w: u32, h: u32) -> Dimensions {
-        Dimensions {
-            width: w,
-            height: h,
-        }
+        Dimensions::new(w, h).unwrap()
     }
 
     #[test]
@@ -272,13 +269,6 @@ mod tests {
         assert!(ImageRef::<Rgb8>::new(&rgb[..11], dims(2, 2)).is_err());
         let long = vec![0u8; 13];
         assert!(ImageRef::<Rgb8>::new(&long, dims(2, 2)).is_err());
-    }
-
-    #[test]
-    fn new_rejects_zero_sized() {
-        let empty: [u8; 0] = [];
-        assert!(ImageRef::<Rgb8>::new(&empty, dims(0, 4)).is_err());
-        assert!(ImageRef::<Rgb8>::new(&empty, dims(4, 0)).is_err());
     }
 
     #[test]
@@ -370,8 +360,8 @@ mod tests {
         let buf = ImageBuf::<Rgb8>::zeroed(dims(4, 3)).unwrap();
         assert_eq!(buf.width(), 4);
         assert_eq!(buf.height(), 3);
-        assert_eq!(buf.width(), buf.dimensions().width);
-        assert_eq!(buf.height(), buf.dimensions().height);
+        assert_eq!(buf.width(), buf.dimensions().width());
+        assert_eq!(buf.height(), buf.dimensions().height());
     }
 
     #[test]
@@ -398,6 +388,5 @@ mod tests {
         let buf = ImageBuf::<Rgb8>::zeroed(dims(4, 3)).unwrap();
         assert_eq!(buf.as_samples().len(), 4 * 3 * 3);
         assert!(buf.as_samples().iter().all(|&s| s == 0));
-        assert!(ImageBuf::<Rgb8>::zeroed(dims(0, 3)).is_err());
     }
 }

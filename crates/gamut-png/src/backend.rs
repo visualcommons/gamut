@@ -36,8 +36,8 @@
 //!
 //! 1. Backends are tried in **push order**.
 //! 2. [`supports`](IdatInflater::supports) returning `false` is the *only* signal that falls
-//!    through to the next backend. A backend that declines late does so by returning
-//!    [`Error::Unsupported`] — the C-ABI adapters map
+//!    through to the next backend. A backend that declines late does so by returning an
+//!    [`ErrorKind::Unsupported`] error — the C-ABI adapters map
 //!    [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) onto exactly that.
 //! 3. A backend that **accepts** and then **fails** propagates its error to the caller. The host
 //!    does not retry a later backend or the built-in tail, because a partially-produced result must
@@ -53,7 +53,8 @@
 //!
 //! - `max_out` is passed to [`IdatInflater::inflate`] so a cooperative backend can stop early, and
 //! - the host **re-checks the returned length** afterwards. A backend that returns more than
-//!   `max_out` bytes is rejected with [`Error::InvalidInput`] — never truncated, never trusted.
+//!   `max_out` bytes is rejected with an [`ErrorKind::InvalidInput`] error — never truncated,
+//!   never trusted.
 //!
 //! A third-party or FFI backend is untrusted code; the limit survives a backend that ignores or
 //! misimplements it.
@@ -173,13 +174,13 @@ pub trait IdatInflater: Send {
     /// Inflates the zlib stream `zlib`, producing at most `max_out` bytes.
     ///
     /// Stopping at `max_out` is an optimisation, not the security boundary: the host rejects an
-    /// over-long result regardless. Return [`Error::Unsupported`] to decline the job late (the host
-    /// then falls through); any other error propagates to the caller.
+    /// over-long result regardless. Return an [`ErrorKind::Unsupported`] error to decline the job
+    /// late (the host then falls through); any other error propagates to the caller.
     ///
     /// # Errors
     ///
-    /// Whatever the backend reports for a corrupt or truncated stream, or
-    /// [`Error::Unsupported`] to decline.
+    /// Whatever the backend reports for a corrupt or truncated stream, or an
+    /// [`ErrorKind::Unsupported`] error to decline.
     fn inflate(&mut self, info: &IdatInfo, zlib: &[u8], max_out: usize) -> Result<Vec<u8>>;
 }
 
@@ -196,12 +197,12 @@ pub trait IdatDeflater: Send {
 
     /// Compresses the filtered scanline stream `raw` into a complete zlib stream.
     ///
-    /// Return [`Error::Unsupported`] to decline the job late (the host then falls through); any
-    /// other error propagates to the caller.
+    /// Return an [`ErrorKind::Unsupported`] error to decline the job late (the host then falls
+    /// through); any other error propagates to the caller.
     ///
     /// # Errors
     ///
-    /// Whatever the backend reports on failure, or [`Error::Unsupported`] to decline.
+    /// Whatever the backend reports on failure, or an [`ErrorKind::Unsupported`] error to decline.
     fn deflate(&mut self, info: &IdatInfo, raw: &[u8]) -> Result<Vec<u8>>;
 }
 
@@ -334,8 +335,10 @@ mod tests {
         fn to_result(&self) -> Result<Vec<u8>> {
             match self {
                 Outcome::Produce(bytes) => Ok(bytes.clone()),
-                Outcome::DeclineLate => Err(Error::Unsupported("late decline")),
-                Outcome::Fail => Err(Error::InvalidInput("boom")),
+                Outcome::DeclineLate => {
+                    Err(Error::unsupported(env!("CARGO_PKG_NAME"), "late decline"))
+                }
+                Outcome::Fail => Err(Error::invalid_input(env!("CARGO_PKG_NAME"), "boom")),
             }
         }
     }
@@ -470,7 +473,10 @@ mod tests {
             },
         ]);
         let err = run_inflaters(&failing, &info(), &[], 8, |_, _| unreachable!());
-        assert_eq!(err.unwrap_err().to_string(), "invalid input: boom");
+        assert_eq!(
+            err.unwrap_err().to_string(),
+            "invalid input: boom [origin: gamut-png]"
+        );
     }
 
     #[test]
@@ -546,7 +552,10 @@ mod tests {
             outcome: Outcome::Fail,
         })));
         let err = run_deflaters(&empty, &info(), &[], |_| unreachable!());
-        assert_eq!(err.unwrap_err().to_string(), "invalid input: boom");
+        assert_eq!(
+            err.unwrap_err().to_string(),
+            "invalid input: boom [origin: gamut-png]"
+        );
     }
 
     #[test]

@@ -403,8 +403,10 @@ impl DngDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the container is malformed or a required tag is missing,
-    /// or [`Error::Unsupported`] for a compression scheme or photometry not yet decodable.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// container is malformed or a required tag is missing, or an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a compression scheme
+    /// or photometry not yet decodable.
     pub fn decode(&self, data: &[u8]) -> Result<DecodedDng> {
         // `read` guarantees at least one IFD, so index 0 below is IFD 0.
         let file = read(data)?;
@@ -881,9 +883,10 @@ fn semantic_mask_info(ifd: &TrackedIfd, mask_dims: Dimensions) -> Option<Semanti
                 full_width: v[2],
                 full_height: v[3],
             };
-            let fits = u64::from(area.top) + u64::from(mask_dims.height)
+            let fits = u64::from(area.top) + u64::from(mask_dims.height())
                 <= u64::from(area.full_height)
-                && u64::from(area.left) + u64::from(mask_dims.width) <= u64::from(area.full_width);
+                && u64::from(area.left) + u64::from(mask_dims.width())
+                    <= u64::from(area.full_width);
             if !fits {
                 // Ignored per spec, but not dropped: the rejected value surfaces in the extras.
                 ifd.untouch(tags::MASK_SUB_AREA);
@@ -1192,7 +1195,7 @@ fn active_area_size(dims: Dimensions, active_area: Option<[u32; 4]>) -> (usize, 
             right.saturating_sub(left) as usize,
             bottom.saturating_sub(top) as usize,
         ),
-        None => (dims.width as usize, dims.height as usize),
+        None => (dims.width() as usize, dims.height() as usize),
     }
 }
 

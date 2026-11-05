@@ -87,8 +87,8 @@ impl Token {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `argb.len()` does not equal `width * height`, or the
-/// dimensions are out of the VP8L range.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+/// `argb.len()` does not equal `width * height`, or the dimensions are out of the VP8L range.
 pub fn encode(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Vec<u8>> {
     check_dimensions(argb, dims)?;
     let alpha_is_used = argb.iter().any(|&p| alpha(p) != 0xff);
@@ -110,7 +110,8 @@ pub fn encode(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Vec<u8>>
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `argb.len()` does not equal `width * height`.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+/// `argb.len()` does not equal `width * height`.
 pub fn encode_image(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Vec<u8>> {
     check_dimensions(argb, dims)?;
     Ok(best_body(argb, dims, effort))
@@ -141,7 +142,7 @@ fn best_body(argb: &[u32], dims: Dimensions, effort: Effort) -> Vec<u8> {
 
 /// Validates that `argb` holds exactly `width * height` pixels.
 fn check_dimensions(argb: &[u32], dims: Dimensions) -> Result<()> {
-    if (dims.width as usize).checked_mul(dims.height as usize) == Some(argb.len()) {
+    if (dims.width() as usize).checked_mul(dims.height() as usize) == Some(argb.len()) {
         Ok(())
     } else {
         Err(Error::invalid_input(
@@ -220,7 +221,7 @@ fn encode_spatial(
     chain: SpatialChain,
     plan: &Vp8lPlan,
 ) {
-    let (width, height) = (dims.width, dims.height);
+    let (width, height) = (dims.width(), dims.height());
     let mut pixels = argb.to_vec();
 
     if chain.subtract_green {
@@ -269,7 +270,8 @@ fn encode_palette(
     }
     write_sub_image(w, &palette_image);
 
-    let (bundled, bundled_width) = forward_color_indexing(argb, dims.width, dims.height, &palette);
+    let (bundled, bundled_width) =
+        forward_color_indexing(argb, dims.width(), dims.height(), &palette);
     w.write_bits(0, 1); // End of transforms.
     write_main_image(w, &bundled, bundled_width, plan);
 }
@@ -729,7 +731,7 @@ mod tests {
     use crate::vp8l::transform::make_argb;
 
     fn round_trip(argb: &[u32], width: u32, height: u32) {
-        let dims = Dimensions { width, height };
+        let dims = Dimensions::new(width, height).unwrap();
         let bitstream = encode(argb, dims, Effort::default()).expect("encode");
         let (decoded_dims, pixels) = decode(&bitstream).expect("decode");
         assert_eq!(decoded_dims, dims);
@@ -1137,15 +1139,7 @@ mod tests {
             .collect();
         round_trip(&img, 4, 4);
         // The header's alpha hint should be set when any pixel is non-opaque.
-        let bitstream = encode(
-            &img,
-            Dimensions {
-                width: 4,
-                height: 4,
-            },
-            Effort::default(),
-        )
-        .unwrap();
+        let bitstream = encode(&img, Dimensions::new(4, 4).unwrap(), Effort::default()).unwrap();
         let mut r = crate::vp8l::bit_io::BitReader::new(&bitstream);
         let header = Vp8lHeader::read(&mut r).unwrap();
         assert!(header.alpha_is_used);
@@ -1156,10 +1150,7 @@ mod tests {
         assert!(matches!(
             encode(
                 &[0, 0, 0],
-                Dimensions {
-                    width: 2,
-                    height: 2
-                },
+                Dimensions::new(2, 2).unwrap(),
                 Effort::default()
             ),
             Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput

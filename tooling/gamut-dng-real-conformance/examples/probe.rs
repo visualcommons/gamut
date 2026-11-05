@@ -79,8 +79,8 @@ fn report_decode(data: &[u8]) {
     let raw = &decoded.raw;
     println!(
         "  decode        : OK {}x{} bits={} spp={} photometry={:?}",
-        raw.dimensions().width,
-        raw.dimensions().height,
+        raw.dimensions().width(),
+        raw.dimensions().height(),
         raw.bits_per_sample(),
         raw.samples_per_pixel(),
         raw.photometry(),
@@ -134,8 +134,8 @@ fn report_decode(data: &[u8]) {
         println!(
             "      kind={:?} {}x{} photometric={} bits={} spp={} -> {payload}",
             s.kind,
-            s.dimensions.width,
-            s.dimensions.height,
+            s.dimensions.width(),
+            s.dimensions.height(),
             s.photometric,
             s.bits_per_sample,
             s.samples_per_pixel,

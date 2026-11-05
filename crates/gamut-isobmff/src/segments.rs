@@ -33,7 +33,8 @@
 //!
 //! They are deliberately **not** one function. [`read`] is strictly stricter: it requires a
 //! `meta` and parses it, and a file carrying a track but no `meta` is a sequence with no still
-//! item, which it refuses as [`Error::Unsupported`](gamut_core::Error::Unsupported) where this walk
+//! item, which it refuses with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
+//! error where this walk
 //! accounts it without complaint. Callers wanting both get both: parse with [`read`], account with
 //! [`walk_segments`].
 

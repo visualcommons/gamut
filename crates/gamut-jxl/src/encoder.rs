@@ -44,8 +44,8 @@ pub(crate) fn no_encode_backend() -> Error {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the override is `0` or wider than the storage width — neither
-/// can mean anything coherent.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// override is `0` or wider than the storage width — neither can mean anything coherent.
 pub(crate) fn resolve_coded_bits(cfg: &JxlEncoder, bits_per_sample: u32) -> Result<u32> {
     match cfg.bit_depth() {
         None => Ok(bits_per_sample),
@@ -301,7 +301,8 @@ impl JxlEncoder {
     /// it would replace a [`ColorSpec`] the caller chose through another API. A present profile
     /// therefore **refuses to override an explicit choice**: when [`with_color`](Self::with_color)
     /// was called earlier with anything other than this very profile, this returns
-    /// [`Error::InvalidInput`] instead of discarding the choice. Absent an explicit choice (the
+    /// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error instead of
+    /// discarding the choice. Absent an explicit choice (the
     /// sRGB default, or a profile an earlier metadata call routed in) the profile is applied. To
     /// encode with a colour encoding other than the model's profile, call
     /// [`with_color`](Self::with_color) *after* this method — the later explicit call wins — or
@@ -309,8 +310,8 @@ impl JxlEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message is
-    /// carried as [`Error::detail`]) or when its ICC profile conflicts with an explicit
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the
+    /// model does not serialize (the facade's message is carried as [`Error::detail`]) or when its ICC profile conflicts with an explicit
     /// [`ColorSpec`] (see Precedence), and whatever
     /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
     #[cfg(feature = "metadata")]
@@ -337,9 +338,11 @@ impl JxlEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (JPEG XL has
-    /// no carrier for it) or a C2PA manifest store (the `jumb` box is not written by this crate,
-    /// and a store must not be copied forward in any case), and [`Error::InvalidInput`] when the
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the
+    /// blocks carry a legacy IPTC-IIM stream (JPEG XL has no carrier for it) or a C2PA manifest
+    /// store (the `jumb` box is not written by this crate, and a store must not be copied forward
+    /// in any case), and an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error
+    /// when the
     /// XMP packet is not UTF-8 (the `xml ` box holds text) or when the ICC profile differs from a
     /// [`ColorSpec`] set explicitly through [`with_color`](Self::with_color). Nothing is applied
     /// when an error is returned.
@@ -503,7 +506,7 @@ impl JxlEncoder {
     ///
     /// On `wasm32` targets without emscripten there is no built-in tail, so a pushed backend is the
     /// **only** way to encode; with neither, encoding reports
-    /// [`Error::Unsupported`](gamut_core::Error::Unsupported).
+    /// an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
     pub fn push_backend(&mut self, backend: impl JxlCodestreamEncoder + 'static) -> &mut Self {
         self.backends.push(Box::new(backend));
         self
@@ -618,8 +621,9 @@ impl JxlEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`gamut_core::Error::InvalidInput`] on an empty or malformed JPEG codestream, and
-    /// [`gamut_core::Error::Unsupported`] if the JPEG uses features whose reconstruction metadata
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on an
+    /// empty or malformed JPEG codestream, and an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the JPEG uses features whose reconstruction metadata
     /// libjxl cannot represent — or if the built-in encoder is not compiled into this build, since
     /// jbrd recompression is **never** delegated to a pushed backend (the reconstruction metadata is
     /// a container box, outside the codestream seam).

@@ -73,7 +73,7 @@ impl HevcDecoder for Mock {
         let nal = iter_nal_units(payload, config.nal_length_size())
             .next()
             .transpose()?
-            .ok_or(Error::InvalidInput("mock: empty payload"))?;
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "mock: empty payload"))?;
         // Payload NAL = [header0, header1, base, width, height].
         let (base, w, h) = (nal[2], u32::from(nal[3]), u32::from(nal[4]));
         self.calls.push(Call {

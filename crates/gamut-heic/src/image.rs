@@ -53,8 +53,8 @@ impl HeifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the `pitm` primary-item id names no item, or if that item
-    /// is hidden (ISO/IEC 23008-12: the primary item shall not be hidden).
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// `pitm` primary-item id names no item, or if that item is hidden (ISO/IEC 23008-12: the primary item shall not be hidden).
     pub(crate) fn new(inner: IsoBmffImage) -> Result<Self> {
         let primary_index = inner
             .items
@@ -241,8 +241,8 @@ impl HeifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `item_id` names no item or the tile count does not match
-    /// `rows * columns`, and propagates [`ImageGrid::parse`] errors for a malformed payload.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `item_id` names no item or the tile count does not match `rows * columns`, and propagates [`ImageGrid::parse`] errors for a malformed payload.
     pub fn grid(&self, item_id: u32) -> Result<ImageGrid> {
         let item = self.item(item_id).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "HEIF: grid item not found")
@@ -263,8 +263,8 @@ impl HeifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `item_id` names no item, and propagates
-    /// [`ImageOverlay::parse`] errors for a payload that does not hold exactly that many offset pairs.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `item_id` names no item, and propagates [`ImageOverlay::parse`] errors for a payload that does not hold exactly that many offset pairs.
     pub fn overlay(&self, item_id: u32) -> Result<ImageOverlay> {
         let item = self.item(item_id).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "HEIF: overlay item not found")
@@ -314,9 +314,10 @@ impl gamut_metadata::TypedMetadata for HeifImage {
     /// # Errors
     ///
     /// Returns [`MetadataError::Container`](gamut_metadata::MetadataError::Container) carrying
-    /// this crate's [`Error::InvalidInput`] if the Exif item's payload is malformed — shorter than
-    /// its 4-byte `exif_tiff_header_offset`, or with the offset past the payload's end — and
-    /// carrying [`Error::Unsupported`] if the XMP `mime` item declares a `content_encoding` (the
+    /// this crate's [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// Exif item's payload is malformed — shorter than its 4-byte `exif_tiff_header_offset`, or
+    /// with the offset past the payload's end — and carrying an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the XMP `mime` item declares a `content_encoding` (the
     /// `infe` field of ISO/IEC 14496-12 §8.11.6, an HTTP content-coding such as `deflate`): its
     /// payload is then not the raw packet `references/heif` §9 describes, and this crate does not
     /// decode content codings. Any declared coding is refused, `identity` included, which RFC 9110
@@ -372,7 +373,8 @@ impl<'a> HeifItem<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] (raised by `gamut-isobmff`) if the item is not an `Exif`
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error (raised by
+    /// `gamut-isobmff`) if the item is not an `Exif`
     /// item, if the payload is shorter than the offset field, or if the offset points past the
     /// payload's end.
     pub fn exif_tiff_stream(&self) -> Result<&'a [u8]> {

@@ -101,7 +101,7 @@ fn init_table() -> Vec<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the stream is truncated, a code is out of range, or the
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream is truncated, a code is out of range, or the
 /// output is shorter than `expected`.
 pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
     let mut reader = BitReader { data, pos: 0 };

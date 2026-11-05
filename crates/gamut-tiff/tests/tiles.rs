@@ -39,19 +39,15 @@ fn tiled_roundtrips_in_gamut() {
                 .with_compression(comp)
                 .with_tiling(16, 16)
                 .encode_image(
-                    ImageRef::<Rgb8>::new(
-                        &src,
-                        Dimensions {
-                            width: w,
-                            height: h,
-                        },
-                    )
-                    .unwrap(),
+                    ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
             let got: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
-            assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+            assert_eq!(
+                (got.dimensions().width(), got.dimensions().height()),
+                (w, h)
+            );
             assert_eq!(got.as_samples(), src.as_slice(), "{comp:?} {w}x{h}");
 
             let gray = gray_pattern(w, h);
@@ -60,14 +56,7 @@ fn tiled_roundtrips_in_gamut() {
                 .with_compression(comp)
                 .with_tiling(32, 16)
                 .encode_image(
-                    ImageRef::<Gray8>::new(
-                        &gray,
-                        Dimensions {
-                            width: w,
-                            height: h,
-                        },
-                    )
-                    .unwrap(),
+                    ImageRef::<Gray8>::new(&gray, Dimensions::new(w, h).unwrap()).unwrap(),
                     &mut gtiff,
                 )
                 .expect("encode");
@@ -86,14 +75,7 @@ fn gamut_tiled_is_decoded_by_libtiff() {
             .with_compression(Compression::Lzw)
             .with_tiling(16, 16)
             .encode_image(
-                ImageRef::<Rgb8>::new(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut tiff,
             )
             .expect("encode");

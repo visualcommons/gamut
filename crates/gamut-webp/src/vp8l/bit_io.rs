@@ -19,8 +19,9 @@ const MAX_BITS_PER_OP: u32 = 32;
 /// An LSB-first bit reader over a VP8L bitstream (RFC 9649 §3.3).
 ///
 /// Bits are pulled a byte at a time into a small accumulator and handed out least-significant-bit
-/// first. Running past the end of the input is reported as [`Error::InvalidInput`] rather than
-/// panicking, so a truncated stream fails cleanly.
+/// first. Running past the end of the input is reported as an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than panicking, so
+/// a truncated stream fails cleanly.
 #[derive(Debug, Clone)]
 pub struct BitReader<'a> {
     /// The bytes backing the stream (the VP8L chunk payload, signature byte included).
@@ -52,7 +53,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if fewer than `n` bits remain, or if `n > 32`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if fewer
+    /// than `n` bits remain, or if `n > 32`.
     pub fn read_bits(&mut self, n: u32) -> Result<u32> {
         if n == 0 {
             return Ok(0);
@@ -87,7 +89,8 @@ impl<'a> BitReader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if no bits remain.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if no bits
+    /// remain.
     pub fn read_bit(&mut self) -> Result<u32> {
         self.read_bits(1)
     }

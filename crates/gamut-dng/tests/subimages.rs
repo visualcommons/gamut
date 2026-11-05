@@ -267,7 +267,7 @@ fn encoder_preview_is_surfaced_as_a_decoded_sub_image() {
     };
     assert_eq!(
         samples.len(),
-        preview.dimensions.width as usize * preview.dimensions.height as usize * 3
+        preview.dimensions.width() as usize * preview.dimensions.height() as usize * 3
     );
     assert!(decoded.depth_info.is_none());
 }

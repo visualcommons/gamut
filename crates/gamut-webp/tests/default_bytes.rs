@@ -38,7 +38,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 }
 
 fn dims(width: u32, height: u32) -> Dimensions {
-    Dimensions { width, height }
+    Dimensions::new(width, height).unwrap()
 }
 
 /// A deterministic RGB gradient.
@@ -191,10 +191,7 @@ fn effort_two_still_reproduces_the_historical_lossy_bytes() {
 /// setter would refuse both times.
 #[test]
 fn convert_policy_reaches_the_typed_decode() {
-    let dims = Dimensions {
-        width: 2,
-        height: 2,
-    };
+    let dims = Dimensions::new(2, 2).unwrap();
     // Alpha varies, so the file is genuinely transparent rather than opaque-and-therefore-lossless.
     #[rustfmt::skip]
     let rgba = [

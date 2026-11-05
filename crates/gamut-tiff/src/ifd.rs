@@ -40,7 +40,8 @@ impl TryFrom<u32> for PhotometricInterpretation {
     /// Maps an on-disk `PhotometricInterpretation` tag value (tag 262) to its interpretation.
     ///
     /// Code `7` is unassigned in TIFF 6.0 (it sits between `YCbCr = 6` and `CieLab = 8`);
-    /// it and every other unrecognised code fail with [`gamut_core::Error::Unsupported`].
+    /// it and every other unrecognised code fail with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
     fn try_from(code: u32) -> Result<Self, Self::Error> {
         Ok(match code {
             0 => PhotometricInterpretation::WhiteIsZero,
@@ -105,7 +106,8 @@ impl TryFrom<u32> for SampleFormat {
 
     /// Maps an on-disk `SampleFormat` tag value (tag 339) to its interpretation.
     ///
-    /// Unrecognised codes fail with [`gamut_core::Error::Unsupported`] rather than falling back to
+    /// Unrecognised codes fail with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error rather than falling back to
     /// unsigned integer: guessing here is exactly the silent misdecode the typed error exists to
     /// prevent.
     fn try_from(code: u32) -> Result<Self, Self::Error> {
@@ -163,7 +165,8 @@ impl TryFrom<u32> for Predictor {
     ///
     /// The TIFF Technical Notes also define `3` (floating-point horizontal differencing); it is
     /// deferred along with float samples themselves (see `STATUS.md`) and, like every other
-    /// unrecognised code, fails with [`gamut_core::Error::Unsupported`].
+    /// unrecognised code, fails with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
     fn try_from(code: u32) -> Result<Self, Self::Error> {
         Ok(match code {
             1 => Predictor::None,

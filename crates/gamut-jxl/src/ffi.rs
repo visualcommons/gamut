@@ -65,9 +65,10 @@ const OUTPUT_CHUNK_MAX: usize = 67_108_864;
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] on a null encoder/frame-settings handle, a byte-size overflow, or
-/// any libjxl error whose detail maps to invalid input; [`Error::Unsupported`] if libjxl reports the
-/// configuration is unsupported.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on a null
+/// encoder/frame-settings handle, a byte-size overflow, or any libjxl error whose detail maps to
+/// invalid input; an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if libjxl
+/// reports the configuration is unsupported.
 pub(crate) fn encode(
     cfg: &JxlEncoder,
     image: &JxlImageRef<'_>,
@@ -159,8 +160,8 @@ pub(crate) fn encode(
         sys_enc::JxlEncoderInitBasicInfo(info.as_mut_ptr());
         info.assume_init()
     };
-    info.xsize = dims.width;
-    info.ysize = dims.height;
+    info.xsize = dims.width();
+    info.ysize = dims.height();
     info.bits_per_sample = coded_bits;
     info.exponent_bits_per_sample = 0;
     info.num_color_channels = image.color_channels();
@@ -342,9 +343,11 @@ fn add_box(enc: &Encoder, box_type: &[u8; 4], contents: &[u8]) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] on an empty or rejected JPEG codestream (progressive features
-/// libjxl cannot represent reversibly surface as the JBRD-specific [`Error::Unsupported`]), and
-/// [`Error::Unsupported`] if reconstruction metadata cannot represent the input.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on an empty or
+/// rejected JPEG codestream (progressive features libjxl cannot represent reversibly surface as the
+/// JBRD-specific [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error), and an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if reconstruction metadata
+/// cannot represent the input.
 pub(crate) fn recompress(cfg: &JxlEncoder, jpeg: &[u8], out: &mut Vec<u8>) -> Result<usize> {
     if jpeg.is_empty() {
         return Err(Error::invalid_input(

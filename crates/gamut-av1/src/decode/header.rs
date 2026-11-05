@@ -334,8 +334,9 @@ impl FrameHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for a malformed or truncated header, or
-    /// [`Error::Unsupported`] for a frame this image decoder does not code — anything but an
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
+    /// malformed or truncated header, or an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a frame this image decoder does not code — anything but an
     /// intra key frame.
     pub(crate) fn parse(r: &mut BitReader<'_>, seq: &SequenceHeader) -> Result<Self> {
         if seq.decoder_model_info_present {
@@ -975,7 +976,8 @@ impl FrameHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] naming the first unimplemented tool the header signals.
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error naming the
+    /// first unimplemented tool the header signals.
     pub(crate) fn reject_unsupported_tools(&self, seq: &SequenceHeader) -> Result<()> {
         if self.allow_intrabc {
             return Err(Error::unsupported(

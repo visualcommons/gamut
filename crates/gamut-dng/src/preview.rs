@@ -7,15 +7,16 @@
 //! gamma, or size cap); a higher-quality / JPEG-compressed preview is a later phase (see
 //! `STATUS.md`).
 
-use gamut_core::Dimensions;
+use gamut_core::{Dimensions, Result};
 
 use crate::raw::{RawImage, RawPhotometry, cfa_color};
 
 /// Builds an 8-bit RGB preview from `raw`, returning its dimensions and interleaved `RGB8` samples.
 ///
 /// The preview is `floor(width / 2) × floor(height / 2)` pixels (at least `1 × 1`).
-#[must_use]
-pub(crate) fn raw_preview(raw: &RawImage) -> (Dimensions, Vec<u8>) {
+///
+/// Fallible only because [`Dimensions::new`] is; the `1 × 1` floor means it never fails.
+pub(crate) fn raw_preview(raw: &RawImage) -> Result<(Dimensions, Vec<u8>)> {
     match raw.photometry() {
         RawPhotometry::Cfa {
             repeat, pattern, ..
@@ -47,9 +48,13 @@ fn plane_scale(raw: &RawImage, plane: usize) -> (u32, u32) {
 }
 
 /// Collapses each CFA repeat tile into one RGB pixel by averaging each colour's sensels.
-fn cfa_preview(raw: &RawImage, repeat: (u16, u16), pattern: &[u8]) -> (Dimensions, Vec<u8>) {
-    let w = raw.dimensions().width as usize;
-    let h = raw.dimensions().height as usize;
+fn cfa_preview(
+    raw: &RawImage,
+    repeat: (u16, u16),
+    pattern: &[u8],
+) -> Result<(Dimensions, Vec<u8>)> {
+    let w = raw.dimensions().width() as usize;
+    let h = raw.dimensions().height() as usize;
     let (rr, rc) = (repeat.0 as usize, repeat.1 as usize);
     let samples = raw.samples();
     let pw = (w / rc).max(1);
@@ -88,19 +93,13 @@ fn cfa_preview(raw: &RawImage, repeat: (u16, u16), pattern: &[u8]) -> (Dimension
             }
         }
     }
-    (
-        Dimensions {
-            width: pw as u32,
-            height: ph as u32,
-        },
-        out,
-    )
+    Ok((Dimensions::new(pw as u32, ph as u32)?, out))
 }
 
 /// Box-averages each `2 × 2` block of a linear image into one RGB pixel.
-fn linear_preview(raw: &RawImage, planes: u16) -> (Dimensions, Vec<u8>) {
-    let w = raw.dimensions().width as usize;
-    let h = raw.dimensions().height as usize;
+fn linear_preview(raw: &RawImage, planes: u16) -> Result<(Dimensions, Vec<u8>)> {
+    let w = raw.dimensions().width() as usize;
+    let h = raw.dimensions().height() as usize;
     let p = usize::from(planes);
     let samples = raw.samples();
     let pw = (w / 2).max(1);
@@ -135,13 +134,7 @@ fn linear_preview(raw: &RawImage, planes: u16) -> (Dimensions, Vec<u8>) {
             }
         }
     }
-    (
-        Dimensions {
-            width: pw as u32,
-            height: ph as u32,
-        },
-        out,
-    )
+    Ok((Dimensions::new(pw as u32, ph as u32)?, out))
 }
 
 #[cfg(test)]
@@ -173,8 +166,8 @@ mod tests {
         }
         let raw =
             RawImage::new_cfa(Dimensions::new(4, 4).unwrap(), 8, (2, 2), pattern, samples).unwrap();
-        let (dims, rgb) = raw_preview(&raw);
-        assert_eq!((dims.width, dims.height), (2, 2));
+        let (dims, rgb) = raw_preview(&raw).unwrap();
+        assert_eq!((dims.width(), dims.height()), (2, 2));
         assert_eq!(&rgb[0..3], &[200, 100, 50]);
         assert_eq!(rgb.len(), 2 * 2 * 3);
     }
@@ -188,8 +181,8 @@ mod tests {
             0, 60, 0, 0, 100, 0, // row 1: two greens
         ];
         let raw = RawImage::new_linear_raw(Dimensions::new(2, 2).unwrap(), 8, 3, samples).unwrap();
-        let (dims, rgb) = raw_preview(&raw);
-        assert_eq!((dims.width, dims.height), (1, 1));
+        let (dims, rgb) = raw_preview(&raw).unwrap();
+        assert_eq!((dims.width(), dims.height()), (1, 1));
         // R = avg(100,200,0,0)=75, G = avg(0,0,60,100)=40, B = 0.
         assert_eq!(rgb, vec![75, 40, 0]);
     }
@@ -214,8 +207,8 @@ mod tests {
         ];
         let raw =
             RawImage::new_cfa(Dimensions::new(4, 4).unwrap(), 8, (2, 2), pattern, samples).unwrap();
-        let (dims, rgb) = raw_preview(&raw);
-        assert_eq!((dims.width, dims.height), (2, 2));
+        let (dims, rgb) = raw_preview(&raw).unwrap();
+        assert_eq!((dims.width(), dims.height()), (2, 2));
         // Tiles map to [v, v, v]; distinct values catch any misindexing of rows/cols.
         assert_eq!(rgb, vec![10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40]);
     }
@@ -233,8 +226,8 @@ mod tests {
             30, 30, 40, 40,
         ];
         let raw = RawImage::new_linear_raw(Dimensions::new(4, 4).unwrap(), 8, 1, samples).unwrap();
-        let (dims, rgb) = raw_preview(&raw);
-        assert_eq!((dims.width, dims.height), (2, 2));
+        let (dims, rgb) = raw_preview(&raw).unwrap();
+        assert_eq!((dims.width(), dims.height()), (2, 2));
         assert_eq!(rgb, vec![10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40]);
     }
 }

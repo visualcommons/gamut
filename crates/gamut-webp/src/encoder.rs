@@ -220,7 +220,8 @@ impl WebpEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`](gamut_core::Error) if `len` exceeds the `uint32` a RIFF chunk's
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if `len`
+    /// exceeds the `uint32` a RIFF chunk's
     /// size field holds (RFC 9649 §2.3) — the same limit
     /// [`gamut_riff::RiffWriter::write_chunk`] enforces, checked here so the reservation is refused
     /// rather than allocated: `vec![0; len]` panics on a `len` no allocator could serve, and a
@@ -299,7 +300,8 @@ impl WebpEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`](gamut_core::Error) if `chunks` names any chunk the WebP
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `chunks` names any chunk the WebP
     /// container defines (RFC 9649 §2.5-§2.7) or the `C2PA` chunk of C2PA 2.4 §A.3.7 — that is,
     /// anything [`gamut_riff::WebpChunkId`] classifies as something other than
     /// [`Unknown`](gamut_riff::WebpChunkId::Unknown). Each is written by this crate itself, from a
@@ -431,8 +433,8 @@ impl WebpEncoder {
         ));
         let header = Vp8xHeader {
             alpha: has_alpha,
-            canvas_width: dims.width,
-            canvas_height: dims.height,
+            canvas_width: dims.width(),
+            canvas_height: dims.height(),
             ..Default::default()
         };
         let unknown: Vec<Chunk<'_>> = self
@@ -467,7 +469,8 @@ impl WebpEncoder {
             }
             WebpMode::Lossy => {
                 // WebP/VP8 is limited-range BT.601 (what libwebp + browsers decode); see ColorRange.
-                let yuv = Yuv420::from_rgb8(pixels, dims.width, dims.height, ColorRange::Limited)?;
+                let yuv =
+                    Yuv420::from_rgb8(pixels, dims.width(), dims.height(), ColorRange::Limited)?;
                 let payload = self.encode_vp8_codestream(&yuv, dims)?;
                 self.wrap(dims, WebpCodestream::Vp8, &payload, None, false)
             }
@@ -509,12 +512,13 @@ impl WebpEncoder {
                     .iter()
                     .flat_map(|p| [p[0], p[1], p[2]])
                     .collect();
-                let yuv = Yuv420::from_rgb8(&rgb, dims.width, dims.height, ColorRange::Limited)?;
+                let yuv =
+                    Yuv420::from_rgb8(&rgb, dims.width(), dims.height(), ColorRange::Limited)?;
                 let vp8 = self.encode_vp8_codestream(&yuv, dims)?;
                 if transparent {
                     let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
                     let alph =
-                        alpha::write_alph(&alpha, dims.width as usize, dims.height as usize)?;
+                        alpha::write_alph(&alpha, dims.width() as usize, dims.height() as usize)?;
                     self.wrap(dims, WebpCodestream::Vp8, &vp8, Some(&alph), true)
                 } else {
                     self.wrap(dims, WebpCodestream::Vp8, &vp8, None, false)
@@ -558,7 +562,8 @@ impl WebpEncoder {
     ///
     /// # Errors
     ///
-    /// As [`EncodeImage::encode_image`], plus [`Error::InvalidInput`](gamut_core::Error) if the
+    /// As [`EncodeImage::encode_image`], plus an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
     /// `C2PA` chunk read back out of the finished file is not the store that was configured. That
     /// check is what makes the reported range trustworthy: a range is only returned once the bytes
     /// inside it have been confirmed to be the caller's own store, so a signer can never be handed a
@@ -633,10 +638,7 @@ mod tests {
     use super::*;
 
     fn dims(w: u32, h: u32) -> Dimensions {
-        Dimensions {
-            width: w,
-            height: h,
-        }
+        Dimensions::new(w, h).unwrap()
     }
 
     #[test]

@@ -21,14 +21,7 @@ fn gamut_rgb_is_decoded_by_libtiff() {
         let mut tiff = Vec::new();
         TiffEncoder::new()
             .encode_image(
-                ImageRef::<Rgb8>::new(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut tiff,
             )
             .expect("gamut encode");
@@ -45,14 +38,7 @@ fn gamut_gray_is_decoded_by_libtiff() {
         let mut tiff = Vec::new();
         TiffEncoder::new()
             .encode_image(
-                ImageRef::<Gray8>::new(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Gray8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut tiff,
             )
             .expect("gamut encode");
@@ -71,7 +57,10 @@ fn libtiff_rgb_is_decoded_by_gamut() {
         let got: ImageBuf<Rgb8> = TiffDecoder::new()
             .decode_image(&tiff)
             .expect("gamut decode");
-        assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+        assert_eq!(
+            (got.dimensions().width(), got.dimensions().height()),
+            (w, h)
+        );
         assert_eq!(got.as_samples(), src.as_slice(), "RGB mismatch at {w}x{h}");
     }
 }
@@ -85,7 +74,10 @@ fn libtiff_gray_is_decoded_by_gamut() {
         let got: ImageBuf<Gray8> = TiffDecoder::new()
             .decode_image(&tiff)
             .expect("gamut decode");
-        assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+        assert_eq!(
+            (got.dimensions().width(), got.dimensions().height()),
+            (w, h)
+        );
         assert_eq!(got.as_samples(), src.as_slice(), "gray mismatch at {w}x{h}");
     }
 }

@@ -44,7 +44,8 @@ impl UnknownValue {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `type_code` is a recognised field type, or if `word`
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `type_code` is a recognised field type, or if `word`
     /// is not exactly the variant's offset width.
     pub fn new(
         type_code: u16,
@@ -362,7 +363,8 @@ impl Value {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `variant` is classic and an offset exceeds `u32::MAX`
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `variant` is classic and an offset exceeds `u32::MAX`
     /// (classic TIFF cannot address past 4 GiB).
     pub fn offset_array(variant: Variant, offsets: &[u64]) -> Result<Value> {
         match variant {
@@ -519,7 +521,8 @@ impl Value {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `bytes` is too short for the declared count.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `bytes` is too short for the declared count.
     pub fn decode(ty: FieldType, count: usize, bytes: &[u8], order: ByteOrder) -> Result<Value> {
         let need = count.checked_mul(ty.size()).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: field length overflow")

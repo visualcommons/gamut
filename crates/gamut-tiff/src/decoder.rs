@@ -24,7 +24,8 @@ use crate::tags;
 ///
 /// Reads chunky strips or tiles compressed with None, PackBits, LZW, Adobe Deflate, Modified
 /// Huffman, or Group 4 fax. Supported layouts are 8- and 16-bit grayscale/RGB/RGBA/CMYK, 8-bit
-/// palette, and 1-bit bilevel; other compression and colour modes return [`Error::Unsupported`].
+/// palette, and 1-bit bilevel; other compression and colour modes return an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
 ///
 /// # Choosing a pixel type
 ///
@@ -41,7 +42,8 @@ use crate::tags;
 /// # Refused, deliberately
 ///
 /// Sample formats this crate's `u8`/`u16` model cannot represent — signed integer, IEEE float, and
-/// 32-bit samples — return [`Error::Unsupported`] naming the offending tag, never a truncated or
+/// 32-bit samples — return an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error
+/// naming the offending tag, never a truncated or
 /// reinterpreted image. A 16-bit *half-float* page is refused by its `SampleFormat`, not its depth.
 ///
 /// CMYK is an ink space, not a rearrangement of RGB, so no policy converts into or out of it; a
@@ -136,7 +138,8 @@ impl TiffDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the file header or IFD chain is malformed.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// file header or IFD chain is malformed.
     pub fn page_count(&self, data: &[u8]) -> Result<usize> {
         Ok(read(data)?.ifds.len())
     }
@@ -150,7 +153,7 @@ impl TiffDecoder {
     /// use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray16, ImageBuf, ImageRef};
     /// use gamut_tiff::{TiffDecoder, TiffEncoder};
     ///
-    /// let dims = Dimensions { width: 2, height: 1 };
+    /// let dims = Dimensions::new(2, 1)?;
     /// let tiff = TiffEncoder::new()
     ///     .encode_to_vec(ImageRef::<Gray16>::new(&[4660, 43981], dims)?)?;
     ///
@@ -166,8 +169,9 @@ impl TiffDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or
-    /// [`Error::Unsupported`] for an unrecognised on-disk code or a page whose samples disagree
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
+    /// malformed header or IFD chain, or an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for an unrecognised on-disk code or a page whose samples disagree
     /// about their depth or format.
     pub fn info(&self, data: &[u8]) -> Result<TiffInfo> {
         self.info_page(data, 0)
@@ -177,7 +181,8 @@ impl TiffDecoder {
     ///
     /// # Errors
     ///
-    /// As [`Self::info`], plus [`Error::InvalidInput`] for an out-of-range page.
+    /// As [`Self::info`], plus an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
+    /// error for an out-of-range page.
     pub fn info_page(&self, data: &[u8], page: usize) -> Result<TiffInfo> {
         let file = read(data)?;
         let ifd = file.ifds.get(page).ok_or_else(|| {
@@ -202,7 +207,7 @@ impl TiffDecoder {
     /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
     /// use gamut_tiff::{TiffDecoder, TiffEncoder, TiffMetadata};
     ///
-    /// let dims = Dimensions { width: 2, height: 1 };
+    /// let dims = Dimensions::new(2, 1)?;
     /// let tiff = TiffEncoder::new()
     ///     .with_tiff_metadata(TiffMetadata::new().with_xmp(b"<x:xmpmeta/>".to_vec()))
     ///     .encode_to_vec(ImageRef::<Gray8>::new(&[7, 9], dims)?)?;
@@ -214,7 +219,8 @@ impl TiffDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or for a **followed**
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
+    /// malformed header or IFD chain, or for a **followed**
     /// pointer that does not resolve into a tree: an out-of-bounds or unparseable target, two
     /// pointers naming one directory, or nesting below the `ExifIFD` → `InteroperabilityIFD` pair
     /// — two levels under IFD 0, the deepest tree those two tags legitimately reach (EXIF 2.3
@@ -305,8 +311,10 @@ impl TiffDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for malformed input or an out-of-range page,
-    /// [`Error::Unsupported`] for a feature not yet implemented, or [`Error::Unsupported`] for a
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for
+    /// malformed input or an out-of-range page, an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a feature not yet
+    /// implemented, or an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a
     /// conversion to `P` that would lose information this decoder's [`ConvertPolicy`] does not
     /// permit.
     pub fn decode_page_as<P: Pixel>(&self, data: &[u8], page: usize) -> Result<ImageBuf<P>> {
@@ -640,10 +648,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     };
 
     Ok(DecodedImage {
-        dims: Dimensions {
-            width: width as u32,
-            height: height as u32,
-        },
+        dims: Dimensions::new(width as u32, height as u32)?,
         format,
         samples,
     })
@@ -815,10 +820,7 @@ mod tests {
     #[test]
     fn gray_roundtrips_both_orders() {
         for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
-            let dims = Dimensions {
-                width: 5,
-                height: 3,
-            };
+            let dims = Dimensions::new(5, 3).unwrap();
             let pixels: Vec<u8> = (0..15).collect();
             let mut tiff = Vec::new();
             TiffEncoder::new()

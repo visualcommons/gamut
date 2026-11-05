@@ -71,8 +71,8 @@ preference order (`push_backend`, `Box<dyn HevcDecoder + Send>` — `Send` is bo
 as a trait supertrait); `supports() == false`, or the `BACKEND_DECLINED` late-decline sentinel, is
 the only fall-through, and a backend that accepts and then fails propagates its error with no later
 backend consulted. There is **no implicit software tail** — gamut ships no in-tree HEVC codestream
-decoder (issue #18) — so an empty registry or an all-declining one returns
-`Error::Unsupported(NO_BACKEND)`. `AbiHevcDecoder` adapts a `gamut_codec_abi::Decoder` (pure-Rust or
+decoder (issue #18) — so an empty registry or an all-declining one returns an
+`ErrorKind::Unsupported` error with the `NO_BACKEND` message. `AbiHevcDecoder` adapts a `gamut_codec_abi::Decoder` (pure-Rust or
 a bridged C vtable) onto the seam: it lowers `HevcConfig` to a `HEVC_CODEC_ID` `StreamConfig` with
 Annex-B parameter sets as extradata, allocates the `u16` planes itself (`planar_pixel_format` tags
 the layout), and maps the written planes back through the validating `DecodedFrame::new`.
@@ -284,7 +284,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | `iovl` source-over compositing onto a filled canvas (signed offsets, clipping) | 23008-12 §6.6.2.4 | ✅ | S3 |
 | Ordered backend registry `HevcDecoders` (`push_backend`, itself a `HevcDecoder`; `Send` bound at insertion) | #241 / #273 | ✅ | S5 |
 | `HevcDecoder::supports` capability probe (defaulted `true`, additive to the S3 trait) | #273 | ✅ | S5 |
-| Fallback contract: push order; `supports()==false` / `BACKEND_DECLINED` fall through, accepted-then-failed propagates; no implicit software tail ⇒ `Error::Unsupported(NO_BACKEND)` | #241 | ✅ | S5 |
+| Fallback contract: push order; `supports()==false` / `BACKEND_DECLINED` fall through, accepted-then-failed propagates; no implicit software tail ⇒ `ErrorKind::Unsupported` with `NO_BACKEND` | #241 | ✅ | S5 |
 | `AbiHevcDecoder`: `gamut_codec_abi::Decoder` ⇄ `HevcDecoder` (StreamConfig/`ImageDesc` lowering, `Status::UNSUPPORTED` ⇒ late decline) | #241 / #272 | ✅ | S5 |
 | HEVC-intra reconstruction (slice/CTU/transform/intra-pred/in-loop filters) — delegated to the caller's `HevcDecoder` | H.265 (ITU-T) | ☐ | user / #18 |
 | Matrix coefficients outside the modeled Kr/Kb set (YCgCo 8, chromaticity-derived 12/13/14) and unmodeled coded depths (9/11/13…) on the RGBA surfaces — explicitly refused, never approximated | H.273 | ☐ | later |

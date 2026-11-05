@@ -66,7 +66,7 @@ fn all_orientations_decode_identically_in_gamut_and_oracle() {
 
         // Both decoders present display orientation: identical dims and identical samples.
         assert_eq!(
-            (dims.width, dims.height),
+            (dims.width(), dims.height()),
             (oracle.width, oracle.height),
             "dims disagree for {orientation:?}"
         );
@@ -92,7 +92,7 @@ fn transposing_orientations_swap_displayed_dimensions() {
             (W, H)
         };
         assert_eq!(
-            (dims.width, dims.height),
+            (dims.width(), dims.height()),
             expected,
             "displayed dims wrong for {orientation:?}"
         );

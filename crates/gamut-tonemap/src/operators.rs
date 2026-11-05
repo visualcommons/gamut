@@ -41,7 +41,8 @@ impl Clamp {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `max` is not finite or is not strictly positive.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `max`
+    /// is not finite or is not strictly positive.
     pub fn new(max: f32) -> Result<Self> {
         if !max.is_finite() || max <= 0.0 {
             return Err(Error::invalid_input(
@@ -105,8 +106,8 @@ impl ReinhardExtended {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `white` is not finite, is not strictly positive, or if
-    /// `white * white` is not a normal f32 — squares that underflow (white ≲ 1.1e-19) would make
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `white` is not finite, is not strictly positive, or if `white * white` is not a normal f32 — squares that underflow (white ≲ 1.1e-19) would make
     /// `map` divide by zero or a subnormal, and squares that overflow (white ≳ 1.8e19) would break
     /// the `map(white) == 1` fixed point.
     pub fn new(white: f32) -> Result<Self> {
@@ -180,7 +181,8 @@ impl Exposure {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `scale` is not finite or is not strictly positive.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `scale` is not finite or is not strictly positive.
     pub fn new(scale: f32) -> Result<Self> {
         if !scale.is_finite() || scale <= 0.0 {
             return Err(Error::invalid_input(
@@ -196,7 +198,8 @@ impl Exposure {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `2^stops` is not a finite, strictly positive gain: when
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `2^stops` is not a finite, strictly positive gain: when
     /// `stops` is NaN, large enough that the gain overflows to infinity (≥ 128), or negative
     /// enough that it underflows to zero (≲ −150).
     pub fn from_stops(stops: f32) -> Result<Self> {
@@ -287,8 +290,8 @@ impl Hable {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `white` is not finite, is not strictly positive, or if
-    /// the derived divisor `hable_partial(white)` is not a normal f32. That last case is not a
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `white` is not finite, is not strictly positive, or if the derived divisor `hable_partial(white)` is not a normal f32. That last case is not a
     /// range: `hable_partial` ends in a subtraction that cancels, and at isolated white points the
     /// cancellation lands on exactly zero, which would make every `map` call divide by it —
     /// `map(white)` returning `0 / 0 = NaN` and every other input `+∞`. Found by the fuzz tier
@@ -387,7 +390,8 @@ impl Drago {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `world_max` is not finite or is not strictly positive,
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `world_max` is not finite or is not strictly positive,
     /// or if it is so small (≲ 6e-8) that `world_max + 1` rounds to `1.0` in f32, collapsing the
     /// curve's `log10(world_max + 1)` normalizer to zero.
     pub fn new(world_max: f32) -> Result<Self> {
@@ -420,8 +424,8 @@ impl Drago {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `bias` is not finite or is not in the open interval
-    /// `(0, 1)`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `bias`
+    /// is not finite or is not in the open interval `(0, 1)`.
     pub fn with_bias(self, bias: f32) -> Result<Self> {
         if !bias.is_finite() || bias <= 0.0 || bias >= 1.0 {
             return Err(Error::invalid_input(

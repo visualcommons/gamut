@@ -335,10 +335,7 @@ pub(crate) fn decode_native(path: &Path, bytes: &[u8]) -> Result<NativeImage, Cl
     })?;
     let color = decoded.color();
     let channel_bits = color.bits_per_pixel() / u16::from(color.channel_count());
-    let dims = Dimensions {
-        width: decoded.width(),
-        height: decoded.height(),
-    };
+    let dims = Dimensions::new(decoded.width(), decoded.height())?;
     let image = match Layout::pick(!color.has_color(), color.has_alpha(), channel_bits > 8) {
         Layout::Gray8 => NativeImage::Gray8(ImageBuf::new(decoded.to_luma8().into_raw(), dims)?),
         Layout::Rgb8 => NativeImage::Rgb8(ImageBuf::new(decoded.to_rgb8().into_raw(), dims)?),
@@ -468,7 +465,7 @@ pub(crate) fn decode_bytes(
         let (w, h) = rgb.dimensions();
         (rgb.into_raw(), w, h)
     };
-    Ok((buf, Dimensions { width, height }))
+    Ok((buf, Dimensions::new(width, height)?))
 }
 
 /// Returns `true` if `bytes` begins with a RIFF/WebP container signature (`RIFF`…`WEBP`), matching
@@ -514,7 +511,7 @@ mod tests {
         let mut out = Vec::new();
         WebpEncoder::lossless()
             .encode_image(
-                ImageRef::<Rgba8>::new(rgba, Dimensions { width, height }).unwrap(),
+                ImageRef::<Rgba8>::new(rgba, Dimensions::new(width, height).unwrap()).unwrap(),
                 &mut out,
             )
             .expect("encode webp");
@@ -526,7 +523,7 @@ mod tests {
         let mut out = Vec::new();
         JxlEncoder::lossless()
             .encode_image(
-                ImageRef::<Rgba8>::new(rgba, Dimensions { width, height }).unwrap(),
+                ImageRef::<Rgba8>::new(rgba, Dimensions::new(width, height).unwrap()).unwrap(),
                 &mut out,
             )
             .expect("encode jxl");
@@ -544,13 +541,7 @@ mod tests {
         let webp = lossless_webp(2, 2, &rgba);
         assert!(is_webp(&webp));
         let (rgb, dims) = decode_bytes(Path::new("mem.webp"), &webp, false).unwrap();
-        assert_eq!(
-            dims,
-            Dimensions {
-                width: 2,
-                height: 2
-            }
-        );
+        assert_eq!(dims, Dimensions::new(2, 2).unwrap());
         // Lossless: RGB survives exactly; alpha is dropped.
         assert_eq!(
             rgb,
@@ -572,13 +563,7 @@ mod tests {
         ];
         let webp = lossless_webp(2, 2, &rgba);
         let (out, dims) = decode_bytes(Path::new("mem.webp"), &webp, true).unwrap();
-        assert_eq!(
-            dims,
-            Dimensions {
-                width: 2,
-                height: 2
-            }
-        );
+        assert_eq!(dims, Dimensions::new(2, 2).unwrap());
         // Lossless VP8L carries alpha natively, so the round-trip is bit-exact.
         assert_eq!(out, rgba);
     }
@@ -596,13 +581,7 @@ mod tests {
         assert_eq!(&jxl[0..2], &[0xFF, 0x0A]);
         assert!(is_jxl(&jxl));
         let (rgb, dims) = decode_bytes(Path::new("mem.jxl"), &jxl, false).unwrap();
-        assert_eq!(
-            dims,
-            Dimensions {
-                width: 2,
-                height: 2
-            }
-        );
+        assert_eq!(dims, Dimensions::new(2, 2).unwrap());
         // Lossless: RGB survives exactly; alpha is dropped.
         assert_eq!(
             rgb,
@@ -625,13 +604,7 @@ mod tests {
         let jxl = lossless_jxl(2, 2, &rgba);
         assert!(is_jxl(&jxl));
         let (out, dims) = decode_bytes(Path::new("mem.jxl"), &jxl, true).unwrap();
-        assert_eq!(
-            dims,
-            Dimensions {
-                width: 2,
-                height: 2
-            }
-        );
+        assert_eq!(dims, Dimensions::new(2, 2).unwrap());
         // Lossless JPEG XL carries alpha natively, so the round-trip is bit-exact.
         assert_eq!(out, rgba);
     }
@@ -658,10 +631,7 @@ mod tests {
         // and a single grey channel replicates into three. The decode therefore succeeds only
         // because this module opts into the loss -- and only because the PNG path now goes through
         // gamut-png at all instead of detouring through the `image` crate.
-        let dims = Dimensions {
-            width: 4,
-            height: 1,
-        };
+        let dims = Dimensions::new(4, 1).unwrap();
         let gray16: [u16; 4] = [0, 0x8080, 0xFFFF, 0x0101];
         let mut png = Vec::new();
         PngEncoder::new()
@@ -685,10 +655,7 @@ mod tests {
         // gamut-jpeg has no `DecodeImage<Rgba8>` (a JPEG carries no alpha), so this exercises the
         // decode-then-widen path: grey replicates into RGB and the shared engine appends opaque
         // alpha.
-        let dims = Dimensions {
-            width: 8,
-            height: 8,
-        };
+        let dims = Dimensions::new(8, 8).unwrap();
         let gray = vec![0x40u8; 64];
         let mut jpeg = Vec::new();
         JpegEncoder::new()
@@ -756,10 +723,7 @@ mod tests {
     fn native_grey_jpeg_stays_grey() {
         use gamut::jpeg::JpegEncoder;
 
-        let dims = Dimensions {
-            width: 8,
-            height: 8,
-        };
+        let dims = Dimensions::new(8, 8).unwrap();
         let mut jpeg = Vec::new();
         JpegEncoder::new()
             .encode_image(
@@ -775,10 +739,7 @@ mod tests {
         use gamut::core::Indexed8;
         use gamut::png::{PngEncoder, PngPalette};
 
-        let dims = Dimensions {
-            width: 2,
-            height: 1,
-        };
+        let dims = Dimensions::new(2, 1).unwrap();
         let encode = |palette: PngPalette| {
             let mut png = Vec::new();
             PngEncoder::new()
@@ -802,10 +763,7 @@ mod tests {
         use gamut::core::Gray16;
         use gamut::png::PngEncoder;
 
-        let dims = Dimensions {
-            width: 2,
-            height: 1,
-        };
+        let dims = Dimensions::new(2, 1).unwrap();
         let png = PngEncoder::new()
             .encode_to_vec(ImageRef::<Gray16>::new(&[0, 0x8080], dims).unwrap())
             .unwrap();
