@@ -1,7 +1,7 @@
 //! PNG seam handles: [`GamutPngDecoder`] / [`GamutPngEncoder`] and their C entry points.
 //!
 //! The PNG seam is the zlib/IDAT layer: a pushed decoder backend inflates IDAT zlib streams, a
-//! pushed encoder backend deflates them (`CODEC_ID_ZLIB`). Backends are tried in push order;
+//! pushed encoder backend deflates them (`ZLIB_CODEC_ID`). Backends are tried in push order;
 //! the built-in implementations (`miniz_oxide` inflate / `gamut-deflate`) are the implicit
 //! tail.
 //!
@@ -49,7 +49,7 @@ seam_handle! {
     host = gamut::png::PngDecoder,
     new = gamut::png::PngDecoder::new(),
     seam = decoder,
-    push = |host, backend| { host.push_backend(gamut::png::AbiInflater::new(backend)); },
+    push = |host, backend| { host.push_backend(gamut::png::AbiZlibInflater::new(backend)); },
     fns = (gamut_png_decoder_new, gamut_png_decoder_free, gamut_png_decoder_push_backend),
     tests = png_decoder_tests,
 }
@@ -59,7 +59,7 @@ seam_handle! {
     host = gamut::png::PngEncoder,
     new = gamut::png::PngEncoder::new(),
     seam = encoder,
-    push = |host, backend| { host.push_backend(gamut::png::AbiDeflater::new(backend)); },
+    push = |host, backend| { host.push_backend(gamut::png::AbiZlibDeflater::new(backend)); },
     fns = (gamut_png_encoder_new, gamut_png_encoder_free, gamut_png_encoder_push_backend),
     tests = png_encoder_tests,
 }

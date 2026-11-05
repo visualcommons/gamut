@@ -43,11 +43,17 @@
 //! # Pluggable IDAT backends
 //!
 //! The PNG codestream is the concatenated-IDAT **zlib stream**, and it is where PNG spends its
-//! time. The [`backend`] module opens that one seam: push an [`IdatDeflater`] or [`IdatInflater`]
-//! to route it through a hardware DEFLATE engine (Intel QAT/IAA, IBM zEDC, POWER nx-gzip) or a
-//! faster software library (zlib-ng, libdeflate), with [`AbiDeflater`] / [`AbiInflater`] adapting a
-//! [`gamut_codec_abi`] backend. The built-ins ([`gamut_deflate`] and `miniz_oxide`) stay the
+//! time. One seam opens it: push a [`ZlibDeflater`] or [`ZlibInflater`] with
+//! [`PngEncoder::push_backend`] / [`PngDecoder::push_backend`] to route it through a hardware
+//! DEFLATE engine (Intel QAT/IAA, IBM zEDC, POWER nx-gzip) or a faster software library (zlib-ng,
+//! libdeflate), with [`AbiZlibDeflater`] / [`AbiZlibInflater`] adapting a [`gamut_codec_abi`]
+//! backend under [`ZLIB_CODEC_ID`]. The built-ins ([`gamut_deflate`] and `miniz_oxide`) stay the
 //! implicit tail, so an encoder or decoder with nothing pushed behaves exactly as before.
+//!
+//! Backends are tried in push order. [`ZlibInflater::supports`] returning `false` is the only
+//! fall-through; a backend that accepts and then fails ends the job with its error. The decoder
+//! re-checks every inflater's output length against its own budget, so an untrusted backend
+//! cannot turn a zlib bomb into an out-of-memory.
 //!
 //! # Example
 //!
@@ -77,7 +83,7 @@ struct ReadmeDoctests;
 mod abi;
 mod adam7;
 mod ancillary;
-pub mod backend;
+mod backend;
 mod chunk;
 mod color;
 mod crc32;
@@ -97,9 +103,9 @@ mod reduce;
 #[doc(hidden)]
 pub mod stages;
 
-pub use abi::{AbiDeflater, AbiInflater, CODEC_ID_ZLIB, PIXEL_FORMAT_FILTERED_BYTES};
+pub use abi::{AbiZlibDeflater, AbiZlibInflater, PIXEL_FORMAT_FILTERED_BYTES, ZLIB_CODEC_ID};
 pub use ancillary::{PhysicalUnit, SrgbIntent};
-pub use backend::{IdatDeflater, IdatInflater, IdatInfo};
+pub use backend::{IdatInfo, ZlibDeflater, ZlibInflater};
 pub use chunk::{
     C2PA_NOT_VALIDATED, C2paSpan, C2paSummary, C2paUnreadChunk, C2paUnreadReason, c2pa_summary,
     fill_c2pa,

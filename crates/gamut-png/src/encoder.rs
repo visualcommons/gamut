@@ -29,7 +29,7 @@ use crate::ancillary::{
     Ancillary, C2paStore, PaletteOrigin, PhysicalUnit, SrgbIntent, WrittenHeader, WrittenPalette,
     background_entry,
 };
-use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
+use crate::backend::{Deflaters, IdatInfo, ZlibDeflater, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
 use crate::decoded::{
@@ -559,7 +559,7 @@ pub struct PngEncoder {
     auto_reduce: bool,
     clean_transparent: bool,
     palette_order: PaletteOrder,
-    backends: Registry<dyn IdatDeflater + Send>,
+    backends: Deflaters,
     /// What the last metadata carry could not take *as a whole payload*, in the order it was
     /// found. Reset by each [`Self::with_metadata`] / [`Self::with_metadata_from`] call, so it
     /// describes that call. Per-annotation notices live with their annotation instead, so that a
@@ -587,20 +587,17 @@ impl PngEncoder {
             auto_reduce: false,
             clean_transparent: false,
             palette_order: PaletteOrder::AsSupplied,
-            backends: Registry::default(),
+            backends: Deflaters::new(),
             carry_notices: Vec::new(),
         }
     }
 
-    /// Appends a pluggable [`IdatDeflater`] backend for the IDAT zlib stream (issue #278).
+    /// Appends a pluggable [`ZlibDeflater`] backend for the IDAT zlib stream (issue #278).
     ///
     /// Backends are tried in **push order**; the built-in [`gamut_deflate`] encoder is the implicit
     /// tail, so pushing nothing keeps today's behaviour byte for byte. A backend that returns
-    /// `false` from [`IdatDeflater::supports`] (or an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error from
-    /// [`IdatDeflater::deflate`]) is skipped; one that accepts and then fails propagates its error
-    /// rather than falling back — see the [`backend`](crate::backend) module docs for the full
-    /// contract.
+    /// `false` from [`ZlibDeflater::supports`] is skipped — the only fall-through; one that accepts
+    /// and then fails, with any error, propagates it rather than falling back.
     ///
     /// # Interaction with [`with_compression`](Self::with_compression)
     ///
@@ -612,9 +609,10 @@ impl PngEncoder {
     ///
     /// # Cloning shares backends
     ///
-    /// [`PngEncoder`] is [`Clone`], and cloning copies the registry *handles*: the clone and the
-    /// original drive the **same** backend instances (they are held behind `Arc<Mutex<…>>`, since
-    /// encoding takes `&self`). Push a fresh backend instance if you need independent state.
+    /// [`PngEncoder`] is [`Clone`], and cloning copies the registry's list of *handles*: the clone
+    /// and the original drive the **same** backend instances (they are held behind
+    /// `Arc<Mutex<…>>`, since encoding takes `&self`), while a backend pushed to one afterwards is
+    /// not seen by the other. Push a fresh backend instance if you need independent state.
     ///
     /// # Concurrent calls under [`FilterStrategy::BruteForce`]
     ///
@@ -626,7 +624,7 @@ impl PngEncoder {
     ///
     /// Takes `&mut self` and returns `&mut Self` — unlike the `with_*` builder setters — because a
     /// registry accumulates rather than replaces.
-    pub fn push_backend(&mut self, backend: impl IdatDeflater + 'static) -> &mut Self {
+    pub fn push_backend(&mut self, backend: impl ZlibDeflater + Send + 'static) -> &mut Self {
         self.backends
             .push(std::sync::Arc::new(std::sync::Mutex::new(backend)));
         self
@@ -680,7 +678,7 @@ impl PngEncoder {
     ///
     /// Defaults to [`DeflateEncoder::DEFAULT_DEFLATE_PASSES`]; `0` keeps the lazy seed parse only,
     /// and `zopfli`'s default budget is 15. Ignored at every other [`Level`] and by any pushed
-    /// [`IdatDeflater`] backend that accepts a stream.
+    /// [`ZlibDeflater`] backend that accepts a stream.
     #[must_use]
     pub fn with_effort(mut self, effort: u8) -> Self {
         self.effort = effort;
@@ -694,7 +692,7 @@ impl PngEncoder {
     /// A filtered PNG scanline stream longer than the limit is parsed as consecutive spans of this
     /// size, so raising it lets one cost model span more of the image. A limit below the 32 KiB
     /// LZ77 window is raised to it. Ignored at every other [`Level`], and by any pushed
-    /// [`IdatDeflater`] backend that accepts a stream.
+    /// [`ZlibDeflater`] backend that accepts a stream.
     ///
     /// # What raising it costs: memory, linearly, with no bound of its own
     ///

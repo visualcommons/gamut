@@ -4,7 +4,7 @@ crates/gamut-jpeg/src/decoder.rs pub fn push_backend(&mut self, backend: impl Jp
 crates/gamut-jpeg/src/encoder.rs pub fn push_backend(&mut self, backend: impl JpegStreamEncoder + 'static) -> &mut Self {
 crates/gamut-jxl/src/decoder.rs pub fn push_backend(&mut self, backend: impl JxlCodestreamDecoder + 'static) -> &mut Self {
 crates/gamut-jxl/src/encoder.rs pub fn push_backend(&mut self, backend: impl JxlCodestreamEncoder + 'static) -> &mut Self {
-crates/gamut-png/src/decoder.rs pub fn push_backend(&mut self, backend: impl IdatInflater + 'static) -> &mut Self {
-crates/gamut-png/src/encoder.rs pub fn push_backend(&mut self, backend: impl IdatDeflater + 'static) -> &mut Self {
+crates/gamut-png/src/decoder.rs pub fn push_backend(&mut self, backend: impl ZlibInflater + Send + 'static) -> &mut Self {
+crates/gamut-png/src/encoder.rs pub fn push_backend(&mut self, backend: impl ZlibDeflater + Send + 'static) -> &mut Self {
 crates/gamut-webp/src/decoder.rs pub fn push_backend(&mut self, backend: impl WebpCodestreamDecoder + 'static) -> &mut Self {
 crates/gamut-webp/src/encoder.rs pub fn push_backend(&mut self, backend: impl WebpCodestreamEncoder + 'static) -> &mut Self {

@@ -26,7 +26,7 @@ use gamut_core::{
     Indexed8, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
-use crate::backend::{IdatInflater, IdatInfo, Registry, run_inflaters};
+use crate::backend::{IdatInfo, Inflaters, ZlibInflater, run_inflaters};
 use crate::chunk::{CABX, ChunkReader};
 use crate::color::ColorType;
 use crate::decoded::{self, DecodedPng, PngHeader, PngImage, PngMetadata};
@@ -66,7 +66,7 @@ pub struct PngDecoder {
     max_height: u32,
     max_image_bytes: usize,
     max_metadata_bytes: usize,
-    backends: Registry<dyn IdatInflater + Send>,
+    backends: Inflaters,
     policy: ConvertPolicy,
 }
 
@@ -86,20 +86,17 @@ impl PngDecoder {
             max_height: SPEC_MAX_DIMENSION,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_metadata_bytes: DEFAULT_MAX_METADATA_BYTES,
-            backends: Registry::default(),
+            backends: Inflaters::new(),
             policy: ConvertPolicy::lossless(),
         }
     }
 
-    /// Appends a pluggable [`IdatInflater`] backend for the IDAT zlib stream (issue #278).
+    /// Appends a pluggable [`ZlibInflater`] backend for the IDAT zlib stream (issue #278).
     ///
     /// Backends are tried in **push order**; the built-in `miniz_oxide` inflater is the implicit
     /// tail, so pushing nothing keeps today's behaviour exactly. A backend that returns `false`
-    /// from [`IdatInflater::supports`] (or an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error from
-    /// [`IdatInflater::inflate`])
-    /// is skipped; one that accepts and then fails propagates its error rather than falling back —
-    /// see the [`backend`](crate::backend) module docs for the full contract.
+    /// from [`ZlibInflater::supports`] is skipped — the only fall-through; one that accepts and
+    /// then fails, with any error, propagates it rather than falling back.
     ///
     /// # The output cap stays with the host
     ///
@@ -116,13 +113,14 @@ impl PngDecoder {
     ///
     /// # Cloning shares backends
     ///
-    /// [`PngDecoder`] is [`Clone`], and cloning copies the registry *handles*: the clone and the
-    /// original drive the **same** backend instances (held behind `Arc<Mutex<…>>`, since decoding
-    /// takes `&self`). Push a fresh backend instance if you need independent state.
+    /// [`PngDecoder`] is [`Clone`], and cloning copies the registry's list of *handles*: the clone
+    /// and the original drive the **same** backend instances (held behind `Arc<Mutex<…>>`, since
+    /// decoding takes `&self`), while a backend pushed to one afterwards is not seen by the other.
+    /// Push a fresh backend instance if you need independent state.
     ///
     /// Takes `&mut self` and returns `&mut Self` — unlike the `with_*` builder setters — because a
     /// registry accumulates rather than replaces.
-    pub fn push_backend(&mut self, backend: impl IdatInflater + 'static) -> &mut Self {
+    pub fn push_backend(&mut self, backend: impl ZlibInflater + Send + 'static) -> &mut Self {
         self.backends
             .push(std::sync::Arc::new(std::sync::Mutex::new(backend)));
         self
