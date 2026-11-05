@@ -281,13 +281,13 @@ exclude_re = [
     # distinct cap messages rather than a bare `is_err()`.
     '^crates/gamut-tiff/src/decoder\.rs:72:14: replace > with == in within_size_limit$',
     '^crates/gamut-tiff/src/decoder\.rs:72:14: replace > with >= in within_size_limit$',
-    # gamut-riff `Vp8xHeader::to_payload`: the feature-flag byte ORs five single bits each shifted to
+    # gamut-riff `Vp8xHeader::to_bytes`: the feature-flag byte ORs five single bits each shifted to
     # a distinct position (`icc<<5 | alpha<<4 | ...`), so the operands are disjoint and `|` == `^`.
-    # gamut-riff `Vp8xHeader::from_payload`: the `le24` closure ORs three bytes at offsets 0/8/16
+    # gamut-riff `Vp8xHeader::parse`: the `le24` closure ORs three bytes at offsets 0/8/16
     # (`b[0] | (b[1]<<8) | (b[2]<<16)`), again disjoint. Both functions' `| -> ^` are equivalent.
     # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    '^crates/gamut-riff/src/webp\.rs:(78:13|79:13|80:13|81:13): replace \| with \^ in Vp8xHeader::to_payload$',
-    '^crates/gamut-riff/src/webp\.rs:(138:47|138:72): replace \| with \^ in Vp8xHeader::from_payload$',
+    '^crates/gamut-riff/src/vp8x\.rs:(62:13|63:13|64:13|65:13): replace \| with \^ in Vp8xHeader::to_bytes$',
+    '^crates/gamut-riff/src/vp8x\.rs:(122:47|122:72): replace \| with \^ in Vp8xHeader::parse$',
     # gamut-ifd `Value::decode`: the DOUBLE assembly OR's a 32-bit low half with a 32-bit high half
     # shifted up by 32 (`u64::from(a) | (u64::from(b) << 32)`). The operands occupy disjoint bits, so
     # `|` is identical to `^`; both `| -> ^` mutations are equivalent.

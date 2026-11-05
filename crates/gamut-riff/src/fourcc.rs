@@ -33,6 +33,12 @@ impl FourCc {
     pub const ANIM: Self = Self(*b"ANIM");
     /// Per-frame animation chunk (`ANMF`).
     pub const ANMF: Self = Self(*b"ANMF");
+    /// C2PA manifest-store chunk (`C2PA`).
+    ///
+    /// The one code here that RFC 9649 does not define: it is C2PA 2.4 §A.3.7's, which places the
+    /// chunk last in the `RIFF`/`WEBP` form. To the WebP container itself it is an unknown chunk
+    /// readers ignore (§2.7.1.6).
+    pub const C2PA: Self = Self(*b"C2PA");
 
     /// Returns the raw four bytes of the code.
     #[must_use]
