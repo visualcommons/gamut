@@ -23,7 +23,9 @@ pub(crate) fn reverse_bits(value: u32, len: u32) -> u32 {
     let mut v = value;
     let mut r = 0u32;
     for _ in 0..len {
-        r = (r << 1) | (v & 1);
+        // Added, not OR'd: the shift vacates exactly the bit `v & 1` occupies, so `|` had a `^`
+        // twin no input could tell apart (#1054). `+` has none.
+        r = (r << 1) + (v & 1);
         v >>= 1;
     }
     r
@@ -82,13 +84,22 @@ impl CanonicalCode {
 ///
 /// Unused symbols (length 0) get code 0. Implements the RFC 1951 §3.2.2 `bl_count`/`next_code`
 /// assignment.
+///
+/// Neither loop guards against a zero length, and both are right without one (#1054). Counting a
+/// zero length lands in `bl_count[0]`, which step 1 of §3.2.2 then clears. Assigning one takes
+/// `next_code[0]` and stores `reverse_bits(_, 0)`, which is 0 — the code an unused symbol already
+/// has — and bumps `next_code[0]`, which nothing reads. A `len > 0 && len <= MAX_CODE_LEN` guard on
+/// each loop used to stand here, and every relaxation of it was a mutant no input could tell apart.
+/// A length beyond [`MAX_CODE_LEN`] — which [`build_lengths`] never produces — is skipped by the
+/// `get_mut`s, as that guard skipped it.
 fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
     let mut bl_count = [0u32; MAX_CODE_LEN + 1];
     for &len in lengths {
-        if len > 0 && usize::from(len) <= MAX_CODE_LEN {
-            bl_count[usize::from(len)] += 1;
+        if let Some(count) = bl_count.get_mut(usize::from(len)) {
+            *count += 1;
         }
     }
+    bl_count[0] = 0;
     let mut next_code = [0u32; MAX_CODE_LEN + 1];
     let mut code = 0u32;
     for bits in 1..=MAX_CODE_LEN {
@@ -97,10 +108,9 @@ fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
     }
     let mut codes = vec![0u16; lengths.len()];
     for (sym, &len) in lengths.iter().enumerate() {
-        if len > 0 && usize::from(len) <= MAX_CODE_LEN {
-            let c = next_code[usize::from(len)];
-            next_code[usize::from(len)] += 1;
-            codes[sym] = reverse_bits(c, u32::from(len)) as u16;
+        if let Some(next) = next_code.get_mut(usize::from(len)) {
+            codes[sym] = reverse_bits(*next, u32::from(len)) as u16;
+            *next += 1;
         }
     }
     codes
@@ -142,11 +152,12 @@ fn huffman_pass(histogram: &[u32], count_min: u32) -> Vec<u32> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
-    /// A node in the Huffman tree (`sym >= 0` marks a leaf).
-    struct Node {
-        left: i32,
-        right: i32,
-        sym: i32,
+    /// A node in the Huffman tree. A leaf carries only its symbol: the `-1` child indices a single
+    /// struct gave it were never read, so deleting either sign was a mutant nothing could see
+    /// (#1054).
+    enum Node {
+        Leaf(usize),
+        Internal(usize, usize),
     }
 
     let n = histogram.len();
@@ -156,11 +167,7 @@ fn huffman_pass(histogram: &[u32], count_min: u32) -> Vec<u32> {
     for (sym, &count) in histogram.iter().enumerate() {
         if count > 0 {
             let idx = nodes.len();
-            nodes.push(Node {
-                left: -1,
-                right: -1,
-                sym: sym as i32,
-            });
+            nodes.push(Node::Leaf(sym));
             heap.push(Reverse((u64::from(count.max(count_min)), idx)));
         }
     }
@@ -175,11 +182,7 @@ fn huffman_pass(histogram: &[u32], count_min: u32) -> Vec<u32> {
             break;
         };
         let idx = nodes.len();
-        nodes.push(Node {
-            left: a as i32,
-            right: b as i32,
-            sym: -1,
-        });
+        nodes.push(Node::Internal(a, b));
         heap.push(Reverse((wa + wb, idx)));
     }
     let Some(Reverse((_, root))) = heap.pop() else {
@@ -187,14 +190,17 @@ fn huffman_pass(histogram: &[u32], count_min: u32) -> Vec<u32> {
     };
     let mut stack = vec![(root, 0u32)];
     while let Some((idx, depth)) = stack.pop() {
-        let Some(node) = nodes.get(idx) else { continue };
-        if node.sym >= 0 {
-            if let Some(slot) = lengths.get_mut(node.sym as usize) {
-                *slot = depth;
+        match nodes.get(idx) {
+            Some(&Node::Leaf(sym)) => {
+                if let Some(slot) = lengths.get_mut(sym) {
+                    *slot = depth;
+                }
             }
-        } else {
-            stack.push((node.left as usize, depth + 1));
-            stack.push((node.right as usize, depth + 1));
+            Some(&Node::Internal(left, right)) => {
+                stack.push((left, depth + 1));
+                stack.push((right, depth + 1));
+            }
+            None => {}
         }
     }
     lengths
