@@ -522,6 +522,44 @@ mod tests {
         );
     }
 
+    /// An unknown `PhotometricInterpretation` (262) code is flagged — including one past `u16`
+    /// that would alias `BlackIsZero` (1) if truncated — and a recognised one is not.
+    #[test]
+    fn check_codes_flags_an_unknown_photometric_interpretation_only() {
+        for code in [99, 0x1_0001] {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Long(vec![code]));
+            let mut findings = Findings::default();
+            findings.check_codes(&ifd, 3);
+            assert_eq!(
+                findings.anomalies,
+                [Anomaly::UnknownCode {
+                    page: 3,
+                    tag: tags::PHOTOMETRIC_INTERPRETATION,
+                    code,
+                    detail: "DNG: unrecognised PhotometricInterpretation code",
+                }]
+            );
+        }
+
+        let mut ifd = Ifd::new();
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+        let mut findings = Findings::default();
+        findings.check_codes(&ifd, 3);
+        assert_eq!(findings.anomalies, []);
+    }
+
+    /// Unlike `gamut-tiff`'s deconstruct, this one does not check `Predictor` (317): an unknown
+    /// code there raises no anomaly. Pinned as the current difference between the two crates.
+    #[test]
+    fn check_codes_does_not_check_predictor() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::PREDICTOR, Value::Short(vec![99]));
+        let mut findings = Findings::default();
+        findings.check_codes(&ifd, 3);
+        assert_eq!(findings.anomalies, []);
+    }
+
     /// A directory that repeats a tag is graded: the audit's shadowed-entry finding folds into one
     /// `DuplicateTag` naming the directory by offset and counting both entries.
     #[test]
