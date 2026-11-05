@@ -2,7 +2,11 @@
 
 `gamut-ifd` is a pure-Rust implementation of the **TIFF Image File Directory (IFD) container core**:
 the byte-order header, the field-type / value model, the IFD chain, and the offset-driven read/write
-spine. It models *structure only* — no pixels, compression, or photometry.
+spine. It models *structure only* — no pixels, compression, or photometry. It does name the codes
+the `Compression`, `PhotometricInterpretation`, `Predictor` and `SampleFormat` tags carry
+(`tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat}`), so gamut-tiff and
+gamut-dng spell them alike; what a code does to the pixels, and whether a codec supports it, stays
+the codec's.
 
 ## Goals
 
