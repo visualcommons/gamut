@@ -120,9 +120,11 @@ pub use limits::{
     PIXEL_LIMIT,
 };
 
-/// Executable laws and the stub codec binding they decode through, for the property tests and
-/// an out-of-tree fuzz driver (`test-support`). Not part of the stable API; see
-/// `docs/testing.md`.
+// Executable laws and the stub codec binding they decode through, for the property tests and
+// an out-of-tree fuzz driver (`test-support`). Not part of the stable API; see
+// `docs/testing.md`.
+// A plain comment, not `///`: outer docs here would make rustdoc resolve the module's own `//!`
+// intra-doc links from the crate root, where its items are not in scope.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod invariants;
