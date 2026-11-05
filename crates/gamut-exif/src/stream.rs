@@ -52,7 +52,7 @@ impl ExifReader {
     /// # Errors
     ///
     /// Returns [`ExifError::MissingMarker`] when the marker is required but absent, an
-    /// [`ExifError::Ifd`] when the TIFF stream is malformed or the source fails, or (in
+    /// [`ExifError::Core`] when the TIFF stream is malformed or the source fails, or (in
     /// [`strict`](Self::strict) mode) [`ExifError::InvalidIfd`] /
     /// [`ExifError::BadThumbnail`] when a sub-IFD pointer or thumbnail range is unusable.
     ///
@@ -136,7 +136,7 @@ impl ExifReader {
     /// [`IfdReader::read_file`], whose directory-body failures stay fatal here as they are there.
     /// The walk reads every directory body before decoding any, so a file with both a broken chain
     /// and an unreadable value in an earlier directory reports the chain's error where `read_file`
-    /// would report the value's; both are the same [`ExifError::Ifd`] kind.
+    /// would report the value's; both are the same [`ExifError::Core`] kind.
     ///
     /// A trailing directory's entries are never reported: the model discards it whole, as
     /// [`DroppedRegion::TrailingIfd`]. Without recovery it is still decoded, so an unreadable value
@@ -1290,7 +1290,7 @@ mod tests {
                             "{name} budget {budget}: the thumbnail bytes were silently lost"
                         );
                     }
-                    Err(ExifError::Ifd(e)) => {
+                    Err(ExifError::Core(e)) => {
                         failures += 1;
                         assert_eq!(
                             e.kind(),
@@ -1332,7 +1332,7 @@ mod tests {
             .parse_from(source)
             .expect_err("a source that cannot be read must not parse");
         match err {
-            ExifError::Ifd(e) => assert_eq!(
+            ExifError::Core(e) => assert_eq!(
                 e.kind(),
                 ErrorKind::Io,
                 "the transport failure must keep its kind"
@@ -1468,7 +1468,7 @@ mod tests {
     fn strict_mode_ignores_recovery() {
         let reader = ExifReader::new().strict(true).recover_entries(true);
         let image = poisoned_blob(IfdKind::Image, 0x0110);
-        assert!(matches!(reader.parse(&image), Err(ExifError::Ifd(_))));
+        assert!(matches!(reader.parse(&image), Err(ExifError::Core(_))));
         let exif = poisoned_blob(IfdKind::Exif, 0xA434);
         assert!(matches!(
             reader.parse(&exif),

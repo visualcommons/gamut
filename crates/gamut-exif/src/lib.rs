@@ -115,4 +115,4 @@ pub use report::{DropReason, Dropped, DroppedEntry, DroppedRegion, EntryDropReas
 pub use tag::{ExifTag, IfdKind, TagCount};
 pub use thumbnail::Thumbnail;
 pub use value::{Rational, SRational, as_text};
-pub use writer::{ExifWriter, TagConstraintError, check_tag, set_tag_checked};
+pub use writer::{ExifWriter, check_tag, set_tag_checked};

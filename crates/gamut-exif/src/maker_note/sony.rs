@@ -81,7 +81,7 @@ impl SonyMakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD — entry count, entries and
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD — entry count, entries and
     /// next-IFD pointer — does not fit in `stream`, or `stream` fails;
     /// [`ExifError::BadOffset`](crate::ExifError::BadOffset) when `note_at` plus the IFD's offset
     /// overflows.

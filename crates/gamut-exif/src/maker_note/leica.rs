@@ -61,7 +61,7 @@ impl LeicaMakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD — entry count, entries and
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD — entry count, entries and
     /// next-IFD pointer — does not fit in `stream`, or `stream` fails;
     /// [`ExifError::BadOffset`](crate::ExifError::BadOffset) when `note_at` plus the IFD's offset
     /// overflows.
@@ -155,7 +155,7 @@ impl LeicaMakerNote {
 ///
 /// # Errors
 ///
-/// [`ExifError::Ifd`](crate::ExifError::Ifd) only when the source fails (an I/O-kind error).
+/// [`ExifError::Core`](crate::ExifError::Core) only when the source fails (an I/O-kind error).
 fn read_subdirectory<S: ReadAt>(
     reader: &mut IfdReader<S>,
     entry: &RawEntry,
@@ -955,7 +955,7 @@ mod tests {
             0,
             layout,
         );
-        assert!(matches!(read, Err(crate::ExifError::Ifd(_))));
+        assert!(matches!(read, Err(crate::ExifError::Core(_))));
         // The same note over a source that never fails reads whole.
         let whole = LeicaMakerNote::read(&bytes[..], 0, layout).expect("reads");
         assert!(whole.is_some());

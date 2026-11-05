@@ -98,7 +98,7 @@ impl ExifReader {
     /// # Errors
     ///
     /// Returns [`ExifError::MissingMarker`](crate::ExifError::MissingMarker) when the marker is
-    /// required but absent, an [`ExifError::Ifd`](crate::ExifError::Ifd) when the TIFF stream is
+    /// required but absent, an [`ExifError::Core`](crate::ExifError::Core) when the TIFF stream is
     /// malformed, or (in [`strict`](Self::strict) mode)
     /// [`ExifError::InvalidIfd`](crate::ExifError::InvalidIfd) when a sub-IFD pointer addresses a
     /// malformed directory or [`ExifError::BadThumbnail`](crate::ExifError::BadThumbnail) when the

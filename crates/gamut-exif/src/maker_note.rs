@@ -91,7 +91,7 @@ impl MakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD itself — its entry count,
     /// entries and next-IFD pointer — does not fit in the note.
     pub fn canon(&self, outer: ByteOrder, note_at: u64) -> Result<Option<canon::CanonMakerNote>> {
         let Some(layout) = self.layout(outer) else {
@@ -118,7 +118,7 @@ impl MakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD itself — its entry count,
     /// entries and next-IFD pointer — does not fit in the note.
     pub fn leica(&self, outer: ByteOrder, note_at: u64) -> Result<Option<leica::LeicaMakerNote>> {
         let Some(layout) = self.layout(outer) else {
@@ -143,7 +143,7 @@ impl MakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD itself — its entry count,
     /// entries and next-IFD pointer — does not fit in the note.
     pub fn sony(&self, outer: ByteOrder, note_at: u64) -> Result<Option<sony::SonyMakerNote>> {
         let Some(layout) = self.layout(outer) else {
@@ -169,7 +169,7 @@ impl MakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD itself — its entry count,
     /// entries and next-IFD pointer — does not fit in the note.
     pub fn fujifilm(
         &self,
@@ -231,7 +231,7 @@ impl ReadAt for Placed<'_> {
 ///
 /// # Errors
 ///
-/// [`ExifError::Ifd`](crate::ExifError::Ifd) when the directory does not fit in `stream` or
+/// [`ExifError::Core`](crate::ExifError::Core) when the directory does not fit in `stream` or
 /// `stream` fails, and [`ExifError::BadOffset`](crate::ExifError::BadOffset) when the IFD's
 /// position overflows `u64` or lies before the offset base.
 pub(crate) fn read_note_ifd<S: ReadAt>(
@@ -277,7 +277,7 @@ pub(crate) fn open_note_ifd<S: ReadAt>(
 ///
 /// # Errors
 ///
-/// [`ExifError::Ifd`](crate::ExifError::Ifd) only when the source fails (an I/O-kind error); an
+/// [`ExifError::Core`](crate::ExifError::Core) only when the source fails (an I/O-kind error); an
 /// unreadable value is never an error.
 pub(crate) fn decode_lenient<S: ReadAt>(
     reader: &mut IfdReader<S>,
