@@ -301,7 +301,7 @@ exclude_re = [
     # gamut-color `vp8_clip8`: the `else if v < 0` branch is reached only when `v` is out of range
     # (`v == 0` takes the `v & !MASK2 == 0` fast path), so `v != 0` always holds there and `v < 0`
     # is equivalent to `v <= 0`. (`v < 0 → v == 0` *is* observable and is killed by a test.)
-    '^crates/gamut-color/src/ycbcr\.rs:91:17: replace < with <= in vp8_clip8$',
+    '^crates/gamut-color/src/ycbcr\.rs:92:17: replace < with <= in vp8_clip8$',
     # gamut-color `prophoto_rgb_eotf_standard`: the ROMM toe `x/16` and the power curve `x^1.8` are
     # equal at the x = 1/32 breakpoint (both 2^-9), so the curve is continuous and `x < 1/32` vs
     # `x <= 1/32` choose between two identical values there — unobservable. (`1.0/32.0 → 1.0%32.0`
