@@ -15,8 +15,8 @@ mod common;
 use common::{chunk, ihdr_payload, png_from_chunks, tiny_exif, tiny_icc_profile, zlib};
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
 use gamut_png::{
-    Background, MetadataNotice, ModificationTime, PngDecoder, PngEncoder, PngImage, PngMetadata,
-    SrgbIntent, TextChunkKind,
+    Background, Cicp, MetadataNotice, ModificationTime, PngDecoder, PngEncoder, PngImage,
+    PngMetadata, SrgbIntent, TextChunkKind,
 };
 use libpng_oracle::{OracleText, OracleTextKind};
 
@@ -503,6 +503,25 @@ fn a_cicp_is_carried_only_when_its_matrix_coefficients_are_zero() {
             .contains(&MetadataNotice::NonRgbCicp),
         "{:?}",
         encoder.metadata_notices()
+    );
+}
+
+/// A carried non-RGB cICP replaces a cICP the caller set before the carry: the chunk is omitted,
+/// not left holding the caller's earlier code points. cICP outranks every other colour chunk
+/// (§4.3 Table 1, priority 1), so a stale caller cICP beside the source's carried `iCCP`/`sRGB`
+/// would override the colour statement the carry brought; the encoder writes the code points it
+/// was last handed, and reports that it dropped them.
+#[test]
+fn a_carried_non_rgb_cicp_replaces_an_earlier_caller_cicp() {
+    let non_rgb = gamut_png::metadata(&source(&[chunk(b"cICP", &[9, 16, 1, 1])])).unwrap();
+    let encoder = PngEncoder::new()
+        .with_cicp(Cicp::new(1, 13, true))
+        .with_png_metadata(&non_rgb);
+    assert_eq!(re_encoded(|_| encoder.clone()).cicp, None);
+    // `source` also holds a C2PA store, whose own notice follows.
+    assert_eq!(
+        encoder.metadata_notices().first(),
+        Some(&MetadataNotice::NonRgbCicp)
     );
 }
 
