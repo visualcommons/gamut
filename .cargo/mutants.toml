@@ -914,10 +914,10 @@ exclude_re = [
     # All whole-body replacements, so every operator mutant in these functions stays in the survey.
     # (gamut-jpeg's `decode_symbol` only: the bare signature used to reach gamut-dng's lossless-JPEG
     # `decode_symbol` as well, which nobody argued for here.)
-    '^crates/gamut-jpeg/src/scan\.rs:389:5: replace decode_symbol -> Result<u8> with Ok\(0\)$',
-    '^crates/gamut-jpeg/src/scan\.rs:463:9: replace Ctx<._>::decode_block -> Result<\(\)> with Ok\(\(\)\)$',
+    '^crates/gamut-jpeg/src/scan/reader\.rs:328:5: replace decode_symbol -> Result<u8> with Ok\(0\)$',
+    '^crates/gamut-jpeg/src/scan/sequential\.rs:52:9: replace Ctx<._>::decode_block -> Result<\(\)> with Ok\(\(\)\)$',
     '^crates/gamut-jpeg/src/huffman\.rs:278:9: replace DecTable::walk -> \(u32, Result<u8>\) with \(0, Ok\(0\)\)$',
-    '^crates/gamut-jpeg/src/scan\.rs:232:9: replace BitReader<.a>::consume -> Result<\(\)> with Ok\(\(\)\)$',
+    '^crates/gamut-jpeg/src/scan/reader\.rs:171:9: replace BitReader<.a>::consume -> Result<\(\)> with Ok\(\(\)\)$',
     # syntax::Reader::u8 — the segment cursor. `self.pos += 1` mutated to `*= 1` pins `pos`, so the
     # `while r.remaining() > 0` table loops in parse_dqt/parse_dht never make progress and never
     # terminate. (The `-=` sibling walks `pos` backwards into an out-of-range read that errors, and is
