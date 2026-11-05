@@ -29,9 +29,7 @@ use core::cell::Cell;
 use core::ffi::c_void;
 use core::ptr;
 
-use gamut::avif::{
-    AvifContainer, AvifEncoder, AvifImage, AvifItem, C2paByteRange, Mirror, Rotation,
-};
+use gamut::avif::{AvifContainer, AvifEncoder, AvifImage, AvifItem, Mirror, Rotation};
 use gamut::core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16};
 use gamut_codec_abi::EncoderVTable;
 use gamut_color::{
@@ -79,7 +77,8 @@ pub struct GamutAvifEncoder {
     ///
     /// A `Cell` because the encode entry points take a `const` handle (an encode never changes
     /// the configuration); handles are single-threaded, so the interior mutability is unshared.
-    c2pa: Cell<Option<C2paByteRange>>,
+    /// Held as the C out-params' `(offset, len)` pair: the report's `Range<u64>` is not `Copy`.
+    c2pa: Cell<Option<(usize, usize)>>,
 }
 
 seam_handle! {
@@ -185,7 +184,13 @@ impl GamutAvifEncoder {
             // — so every encode keeps the slot range `gamut_avif_encoder_c2pa_slot` reads.
             match this.inner.encode_with_report(image) {
                 Ok((bytes, report)) => {
-                    this.c2pa.set(report.c2pa);
+                    // The slot lies inside the in-memory file just returned, so both offsets fit
+                    // `usize`.
+                    this.c2pa.set(
+                        report
+                            .c2pa
+                            .map(|slot| (slot.start as usize, (slot.end - slot.start) as usize)),
+                    );
                     let (data, len) = bytes_out(bytes);
                     // SAFETY: as the clearing writes above.
                     unsafe {
@@ -683,10 +688,10 @@ pub unsafe extern "C" fn gamut_avif_encoder_c2pa_slot(
             return GAMUT_STATUS_NULL_ARGUMENT;
         }
         // SAFETY: the three out-params are non-null and writable per contract.
-        let write = |slot: Option<C2paByteRange>| unsafe {
+        let write = |slot: Option<(usize, usize)>| unsafe {
             present.write(slot.is_some());
-            offset.write(slot.map_or(0, C2paByteRange::start));
-            len.write(slot.map_or(0, C2paByteRange::len));
+            offset.write(slot.map_or(0, |(start, _)| start));
+            len.write(slot.map_or(0, |(_, len)| len));
         };
         // SAFETY: null is rejected here; a non-null handle is live per contract.
         let Some(this) = (unsafe { encoder.as_ref() }) else {
@@ -1914,14 +1919,14 @@ mod tests {
     }
 
     /// The handle's C2PA slot report as `gamut_avif_encoder_c2pa_slot` gives it.
-    fn c2pa_slot(encoder: *const GamutAvifEncoder) -> Option<C2paByteRange> {
+    fn c2pa_slot(encoder: *const GamutAvifEncoder) -> Option<core::ops::Range<u64>> {
         let (mut present, mut offset, mut len) = (true, usize::MAX, usize::MAX);
         assert_eq!(
             unsafe { gamut_avif_encoder_c2pa_slot(encoder, &mut present, &mut offset, &mut len) },
             GAMUT_OK
         );
         if present {
-            Some(C2paByteRange::new(offset, offset + len).expect("a slot ends after it starts"))
+            Some(offset as u64..(offset + len) as u64)
         } else {
             assert_eq!((offset, len), (0, 0), "an absent slot has no range");
             None
@@ -1977,9 +1982,10 @@ mod tests {
             slots.push(slot);
         }
         // Each slot is the one its setter asked for, read back out of the C output.
-        assert_eq!(slots[0].map(C2paByteRange::len), Some(96));
-        assert_eq!(slots[1].map(C2paByteRange::len), Some(23));
-        assert_eq!(slots[2].map(C2paByteRange::len), Some(0));
+        let len = |slot: &Option<core::ops::Range<u64>>| slot.as_ref().map(|r| r.end - r.start);
+        assert_eq!(len(&slots[0]), Some(96));
+        assert_eq!(len(&slots[1]), Some(23));
+        assert_eq!(len(&slots[2]), Some(0));
         assert_eq!(slots[3], None);
     }
 
@@ -1993,12 +1999,12 @@ mod tests {
         let first = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4).unwrap();
         let slot = c2pa_slot(encoder).expect("the reserved slot is reported");
         assert_eq!(
-            slot.bytes_in(&first),
+            first.get(slot.start as usize..slot.end as usize),
             Some(&[0; 64][..]),
             "the slot is the reserved zeros"
         );
         // Reading the report does not consume it, and a setting alone does not change it.
-        assert_eq!(c2pa_slot(encoder), Some(slot));
+        assert_eq!(c2pa_slot(encoder), Some(slot.clone()));
         unsafe {
             assert_eq!(gamut_avif_encoder_set_c2pa_reserved(encoder, 4), GAMUT_OK);
         }
