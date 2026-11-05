@@ -201,8 +201,8 @@
 //! ships the pure-Rust one (its default `decode` feature), but today it parses only the header
 //! and tile-framing layer and reconstructs no samples, so gamut-avif does not yet register it as
 //! the implicit tail behind [`Av1StillDecoder`] — until it does, the caller supplies that decoder
-//! (which will then become optional). All of these land semver-minor — the current major's surface is
-//! designed so no deferred feature reshapes it.
+//! (which will then become optional). All of these land semver-minor — the current major's
+//! surface is designed so no deferred feature reshapes it.
 //!
 //! **Permanently out of scope** (workspace charter — gamut is image-first): image sequences and
 //! tracks (the `avis`/`avio` brands) and AV1 inter-frame coding. An `avis` file that also carries

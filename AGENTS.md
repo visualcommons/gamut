@@ -25,8 +25,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
 
 - **gamut** — umbrella; re-exports the other library crates behind Cargo features, with
   `default = []`. The feature-to-crate map is kept once, in
-  [`crates/gamut/README.md`](crates/gamut/README.md#features). ← core, av1 (optional), av2 (optional), avif (optional),
-  bitstream (optional), cmm (optional), codec-abi (optional), color (optional), dng (optional),
+  [`crates/gamut/README.md`](crates/gamut/README.md#features). ← core, av1 (optional), av2
+  (optional), avif (optional), bitstream (optional), cmm (optional), codec-abi (optional), color (optional), dng (optional),
   dsp (optional), exif (optional), heic (optional), icc (optional), ifd (optional), iptc
   (optional), isobmff (optional), jpeg (optional), jxl (optional), metadata (optional), png
   (optional), tiff (optional), tonemap (optional), vvc (optional), webp (optional), xmp
@@ -124,8 +124,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
 - **gamut-dng** — DNG (Adobe Digital Negative) 1.7.1 raw encoder + decoder, a TIFF/EP
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw
   photometry, uncompressed/Deflate/lossless-JPEG/JPEG XL, colour-calibration profile,
-  EXIF/XMP/ICC metadata. ← ifd, bitstream, color, metadata, core, deflate (Deflate encode), `miniz_oxide` (Deflate
-  decode), jxl (JPEG XL, `Compression = 52546`). MSB-first sub-byte packing reuses
+  EXIF/XMP/ICC metadata. ← ifd, bitstream, color, metadata, core, deflate (Deflate encode),
+  `miniz_oxide` (Deflate decode), jxl (JPEG XL, `Compression = 52546`). MSB-first sub-byte packing reuses
   `gamut-bitstream`; the DNG §6 `AsShotWhiteXY` → camera-neutral conversion reuses
   `gamut-color`'s chromaticity/3×3/CCT math; `DngMetadata` carries the facade's own models — a
   DNG `ExifIFD` *is* an EXIF sub-IFD, so it is `gamut-exif`'s `Exif` over the same `gamut-ifd`

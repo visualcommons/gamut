@@ -361,8 +361,8 @@ pipeline stalls silently when either is missing (issue #377):
    crate added after that.
 
 A missing `<crate>-v<version>` tag is **not** evidence of a missing publish, and this section
-previously read it that way. `gamut-dng`, `gamut-jpeg` and `gamut-png` carry no release tag and are nonetheless on crates.io, each at the version its
-`Cargo.toml` declares. That is the stall above showing itself in the tag-and-release half of the
+previously read it that way. `gamut-dng`, `gamut-jpeg` and `gamut-png` carry no release tag and
+are nonetheless on crates.io, each at the version its `Cargo.toml` declares. That is the stall above showing itself in the tag-and-release half of the
 pipeline rather than in the publish half.
 
 The opposite skew exists too: `gamut-riff`'s manifest declares `1.0.0` while the newest

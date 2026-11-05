@@ -3,8 +3,8 @@
 **v1 stabilization: GitHub issue #192.** `gamut-dsp` is the workspace's shared signal-processing
 kernel library: spec-exact transform kernels, quantization rounding, and companding, implemented
 once and consumed by the codec crates (the dependency-edge list in
-[`AGENTS.md`](../../AGENTS.md) names which). It is `#![deny(unsafe_code)]` (a hot-path crate: `deny`, not `forbid`, so a benchmarked win may take a
-site exception; none does today).
+[`AGENTS.md`](../../AGENTS.md) names which). It is `#![deny(unsafe_code)]` (a hot-path crate:
+`deny`, not `forbid`, so a benchmarked win may take a site exception; none does today).
 
 **Keystone:** the split between *normative* and *chosen* math, under a namespace rule that keeps
 every future standard additive. The `inverse_*` kernels are bit-exact transcriptions of the AV1
