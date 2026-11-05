@@ -591,7 +591,7 @@ fn encode16_with(
     let frame = if qindex == 0 {
         // Lossless: the reconstruction *is* the source. Each plane crops at its own extent, so a
         // monochrome buffer's empty chroma planes stay empty.
-        let extents = plane_extents(width, height, planes.subsampling());
+        let extents = planes.plane_extents();
         CodedFrame::lossless(encoder().encode(&layout, options.threads), |i| {
             let (pw, ph) = extents[i];
             crop(planes.planes()[i], pw, pw, ph)
@@ -705,7 +705,7 @@ fn encode_with(
         // Each plane crops at its **own** extent — the source carries no coded padding, so the
         // stride is the plane width. A monochrome buffer's chroma planes are empty and stay empty;
         // cropping them at the luma extent would index past the end of a zero-length slice.
-        let extents = plane_extents(width, height, planes.subsampling());
+        let extents = planes.plane_extents();
         CodedFrame::lossless(encoder().encode(&layout, options.threads), |i| {
             let (pw, ph) = extents[i];
             crop(planes.planes()[i], pw, pw, ph)
@@ -874,13 +874,6 @@ impl CodedFrame {
             bit_depth,
         }
     }
-}
-
-/// The visible `(width, height)` of each source plane `[Y, U, V]`: the luma extent, then
-/// [`ChromaSubsampling::chroma_dimensions`] twice (`(0, 0)` for monochrome's absent chroma).
-fn plane_extents(width: u32, height: u32, subsampling: ChromaSubsampling) -> [(u32, u32); 3] {
-    let chroma = subsampling.chroma_dimensions(width, height);
-    [(width, height), chroma, chroma]
 }
 
 /// Crops a `src_stride`-wide plane to `width × height`, row-major.

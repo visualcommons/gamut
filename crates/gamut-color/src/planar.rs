@@ -613,11 +613,16 @@ impl Planar8 {
     /// `index >= 3`, matching [`plane`](Self::plane).
     #[must_use]
     pub fn plane_dimensions(&self, index: usize) -> Option<(u32, u32)> {
-        match index {
-            0 => Some((self.width, self.height)),
-            1 | 2 => Some(self.subsampling.chroma_dimensions(self.width, self.height)),
-            _ => None,
-        }
+        self.plane_extents().get(index).copied()
+    }
+
+    /// The dimensions of all three planes, `[Y/G, U/B, V/R]`, each as
+    /// [`plane_dimensions`](Self::plane_dimensions) returns it — the infallible form for a caller
+    /// that wants every plane, as [`planes`](Self::planes) is for the samples.
+    #[must_use]
+    pub fn plane_extents(&self) -> [(u32, u32); 3] {
+        let chroma = self.subsampling.chroma_dimensions(self.width, self.height);
+        [(self.width, self.height), chroma, chroma]
     }
 
     /// The row-major samples of plane `index` (`0 = Y/G, 1 = U/B, 2 = V/R`), or `None` for an
