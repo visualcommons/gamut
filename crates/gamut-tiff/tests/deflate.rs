@@ -27,7 +27,9 @@ fn gamut_encode(pixels: &[u8], width: u32, height: u32, tiled: bool, predicted: 
         encoder = encoder.with_predictor(Predictor::HorizontalDifferencing);
     }
     encoder
-        .encode_to_vec(ImageRef::<Rgb8>::new(pixels, Dimensions { width, height }).unwrap())
+        .encode_to_vec(
+            ImageRef::<Rgb8>::new(pixels, Dimensions::new(width, height).unwrap()).unwrap(),
+        )
         .unwrap()
 }
 

@@ -49,6 +49,7 @@ use gamut_core::{Dimensions, Error, Result};
 
 use crate::cicp::{ColorRange, MatrixCoefficients};
 use crate::format::BitDepth;
+use crate::planar::pixel_count;
 use crate::upsample::{ChromaUpsampling, libwebp, replicate, taps};
 use crate::{clip_pixel, clip_pixel8};
 
@@ -181,12 +182,10 @@ impl Yuv420 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if any plane length does not match the dimensions, or if
-    /// the luma sample count overflows `usize`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
+    /// plane length does not match the dimensions, or if the luma sample count overflows `usize`.
     pub fn new(width: u32, height: u32, y: Vec<u8>, u: Vec<u8>, v: Vec<u8>) -> Result<Self> {
-        let luma = Dimensions { width, height }.num_pixels().ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
-        })?;
+        let luma = pixel_count(width, height)?;
         // Cannot overflow: each chroma plane has at most as many samples as the luma plane
         // (`ceil(d / 2) <= d` for d >= 1, and 0 for d == 0), and `luma` just fit `usize`.
         let chroma = Self::chroma_width(width) as usize * Self::chroma_height(height) as usize;
@@ -220,8 +219,9 @@ impl Yuv420 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, if that product
-    /// overflows `usize`, or if either dimension is 0.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `rgb.len() != width * height * 3`, if that product overflows `usize`, or if either dimension
+    /// is 0.
     pub fn from_rgb8(rgb: &[u8], width: u32, height: u32, range: ColorRange) -> Result<Self> {
         let samples = Dimensions::new(width, height)?
             .sample_count(3)
@@ -471,7 +471,8 @@ impl YcbcrMatrix {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] for coefficients that are not a non-constant-luminance
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for
+    /// coefficients that are not a non-constant-luminance
     /// `Kr`/`Kb` de-matrixing:
     ///
     /// - [`MatrixCoefficients::Identity`] — a GBR plane permutation requiring 4:4:4, not an affine
@@ -656,7 +657,8 @@ impl RgbToYcbcr {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] for exactly the coefficients [`YcbcrMatrix::new`] rejects,
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for exactly
+    /// the coefficients [`YcbcrMatrix::new`] rejects,
     /// and for the same reasons: [`MatrixCoefficients::Identity`] (the encoder writes GBR planes
     /// itself — see [`Planar8::from_rgb8_identity`](crate::Planar8::from_rgb8_identity)),
     /// [`MatrixCoefficients::YCgCo`], [`MatrixCoefficients::Unspecified`], and any code point a

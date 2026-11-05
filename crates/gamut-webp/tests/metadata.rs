@@ -21,7 +21,7 @@ const XMP: &[u8] = b"<?xpacket begin='\xef\xbb\xbf'?><x:xmpmeta/><?xpacket end='
 const C2PA: &[u8] = b"opaque C2PA manifest store";
 
 fn dims(width: u32, height: u32) -> Dimensions {
-    Dimensions { width, height }
+    Dimensions::new(width, height).unwrap()
 }
 
 /// A deterministic RGB gradient.

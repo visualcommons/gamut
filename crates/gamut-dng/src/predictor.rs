@@ -41,10 +41,11 @@ fn x_factor(predictor: Predictor) -> Option<usize> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unsupported`] for the floating-point predictors (3, 34894, 34895 — this
-/// crate rejects floating-point samples outright) and for a non-null predictor at a bit depth
-/// whose container width the sample model cannot wrap at, and [`Error::InvalidInput`] for a
-/// predictor code outside the spec's set.
+/// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for the
+/// floating-point predictors (3, 34894, 34895 — this crate rejects floating-point samples
+/// outright) and for a non-null predictor at a bit depth whose container width the sample model
+/// cannot wrap at, and an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error
+/// for a predictor code outside the spec's set.
 pub(crate) fn validate(
     code: Option<u32>,
     compression: Compression,

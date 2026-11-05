@@ -13,8 +13,11 @@
 //! | [`IdatInfo`] | [`StreamConfig`] / [`EncodeConfig`] with [`CODEC_ID_ZLIB`] |
 //! | the filtered scanline stream | a single-plane [`ImageDesc`] (see below) |
 //! | `supports() == false` | `supports()` → `false` |
-//! | late decline ([`Error::Unsupported`]) | [`Status::UNSUPPORTED`] returned from the call |
-//! | any other failure | any other non-[`Status::OK`] status → [`Error::InvalidInput`] |
+//! | late decline ([`ErrorKind::Unsupported`]) | [`Status::UNSUPPORTED`] returned from the call |
+//! | any other failure | any other non-[`Status::OK`] status → [`ErrorKind::InvalidInput`] |
+//!
+//! [`ErrorKind::Unsupported`]: gamut_core::ErrorKind::Unsupported
+//! [`ErrorKind::InvalidInput`]: gamut_core::ErrorKind::InvalidInput
 //!
 //! Only [`Status::UNSUPPORTED`] declines; every other non-OK status becomes a typed error the host
 //! **propagates** rather than falling through to the next backend.

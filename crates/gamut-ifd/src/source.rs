@@ -18,7 +18,8 @@ pub trait ReadAt {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the range lies outside the source, or [`Error::Io`]
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// range lies outside the source, or an [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error
     /// if an underlying stream operation fails.
     fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()>;
 
@@ -26,7 +27,8 @@ pub trait ReadAt {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if the length cannot be determined from an underlying stream.
+    /// Returns an [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the length cannot be
+    /// determined from an underlying stream.
     fn len(&mut self) -> Result<u64>;
 
     /// Whether the source is empty.
@@ -92,8 +94,9 @@ impl<S: ReadAt + ?Sized> ReadAt for &mut S {
 ///
 /// Each read seeks to the offset then reads exactly; the length is measured once (a seek to the
 /// end) and cached. A short read at a validated offset means the stream ended early — that is
-/// reported as the same [`Error::InvalidInput`] a truncated slice produces, while any other
-/// stream failure surfaces as [`Error::Io`].
+/// reported as the same [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error a
+/// truncated slice produces, while any other stream failure surfaces as an
+/// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error.
 ///
 /// Note for `BufReader` users: every positioned read seeks, which discards the buffer — for the
 /// directory-walk access pattern, pass the [`File`](std::fs::File) directly.
@@ -122,7 +125,7 @@ impl<R: std::io::Read + std::io::Seek> ReadAt for StreamSource<R> {
         self.inner
             .seek(std::io::SeekFrom::Start(offset))
             .map_err(|error| {
-                Error::Io(error)
+                Error::from(error)
                     .with_origin(env!("CARGO_PKG_NAME"))
                     .with_byte_offset(offset)
             })?;
@@ -133,7 +136,7 @@ impl<R: std::io::Read + std::io::Seek> ReadAt for StreamSource<R> {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: read out of bounds")
                     .with_byte_offset(offset)
             } else {
-                Error::Io(e)
+                Error::from(e)
                     .with_origin(env!("CARGO_PKG_NAME"))
                     .with_byte_offset(offset)
             }
@@ -147,7 +150,7 @@ impl<R: std::io::Read + std::io::Seek> ReadAt for StreamSource<R> {
         let len = self
             .inner
             .seek(std::io::SeekFrom::End(0))
-            .map_err(|error| Error::Io(error).with_origin(env!("CARGO_PKG_NAME")))?;
+            .map_err(|error| Error::from(error).with_origin(env!("CARGO_PKG_NAME")))?;
         self.len = Some(len);
         Ok(len)
     }
@@ -267,7 +270,7 @@ mod tests {
     }
 
     /// A stream whose reads fail with a non-EOF error, proving transport failures surface as
-    /// [`Error::Io`] rather than being branded malformed input.
+    /// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) rather than being branded malformed input.
     struct FailingStream;
 
     impl std::io::Read for FailingStream {

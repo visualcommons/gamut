@@ -36,10 +36,7 @@ fn gradient_rgb() -> Vec<u8> {
 #[divan::bench(args = [None, Some(90), Some(50), Some(10)])]
 fn encode(bencher: Bencher, quality: Option<u8>) {
     let rgb = gradient_rgb();
-    let dims = Dimensions {
-        width: SIDE,
-        height: SIDE,
-    };
+    let dims = Dimensions::new(SIDE, SIDE).unwrap();
     let encoder = match quality {
         None => AvifEncoder::lossless(),
         Some(q) => AvifEncoder::lossy(q),

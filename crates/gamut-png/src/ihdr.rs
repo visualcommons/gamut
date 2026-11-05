@@ -72,9 +72,9 @@ pub(crate) fn native_bytes(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for a wrong payload length, a zero or ≥ 2³¹ dimension, an
-/// undefined colour type, a bit depth Table 12 forbids, or a non-zero compression, filter, or
-/// unknown interlace method code.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a wrong
+/// payload length, a zero or ≥ 2³¹ dimension, an undefined colour type, a bit depth Table 12
+/// forbids, or a non-zero compression, filter, or unknown interlace method code.
 pub(crate) fn parse(data: &[u8]) -> Result<Ihdr> {
     let data: &[u8; 13] = data.try_into().map_err(|_| {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: IHDR payload must be 13 bytes")

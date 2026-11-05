@@ -180,7 +180,8 @@ impl<'a> BoxReader<'a> {
         self.data.len() - self.pos
     }
 
-    /// Consumes `n` bytes, returning them, or [`Error::InvalidInput`] if fewer remain.
+    /// Consumes `n` bytes, returning them, or an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if fewer remain.
     pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let offset = self.pos as u64;
         let end = self.pos.checked_add(n).ok_or_else(|| {
@@ -235,8 +236,8 @@ impl<'a> BoxReader<'a> {
     /// through the end of this reader's slice. The writer continues to emit only 32-bit sizes.
     ///
     /// # Errors
-    /// Returns [`Error::InvalidInput`] if the header or body is truncated, the declared size is
-    /// smaller than its header, a size cannot fit the platform address space, or a `uuid` body does
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// header or body is truncated, the declared size is smaller than its header, a size cannot fit the platform address space, or a `uuid` body does
     /// not contain its complete 16-byte user type.
     pub fn next_box(&mut self) -> Result<Option<RawBox<'a>>> {
         if self.remaining() == 0 {

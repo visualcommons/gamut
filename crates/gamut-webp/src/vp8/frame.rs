@@ -1198,8 +1198,8 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> Result<(Vec<u8>, FrameBuff
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] when the coded frame outgrows one of the bitstream's own
-/// partition-size fields: the control partition past
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the coded
+/// frame outgrows one of the bitstream's own partition-size fields: the control partition past
 /// `MAX_FIRST_PARTITION_SIZE` (19 bits, RFC 6386 §9.1),
 /// or a non-final token partition past [`MAX_TOKEN_PARTITION_SIZE`] (24 bits, §9.5). Both are
 /// format ceilings a large, highly detailed frame can genuinely reach — the mode records of a
@@ -1459,9 +1459,9 @@ pub fn encode_frame_filtered(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] when `len` exceeds [`MAX_TOKEN_PARTITION_SIZE`], which the
-/// prefix cannot describe. Split out from the writer so the ceiling is reachable from a test
-/// without building a 16 MiB partition.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when `len`
+/// exceeds [`MAX_TOKEN_PARTITION_SIZE`], which the prefix cannot describe. Split out from the
+/// writer so the ceiling is reachable from a test without building a 16 MiB partition.
 fn token_partition_size(len: usize) -> Result<u32> {
     match u32::try_from(len) {
         Ok(len) if len <= MAX_TOKEN_PARTITION_SIZE => Ok(len),
@@ -1511,8 +1511,9 @@ fn split_token_partitions(data: &[u8], n: usize) -> Result<Vec<BoolDecoder<'_>>>
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for a malformed stream, or [`Error::Unsupported`] for an inter
-/// frame or an undefined bitstream version (> 3).
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
+/// malformed stream, or an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for
+/// an inter frame or an undefined bitstream version (> 3).
 pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     let chunk = header::read_uncompressed_chunk(data)?;
     if chunk.width == 0 || chunk.height == 0 {

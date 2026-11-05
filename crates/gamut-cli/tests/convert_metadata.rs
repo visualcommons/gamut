@@ -57,10 +57,7 @@ fn grey_icc() -> Vec<u8> {
 /// store — the last being the one payload a re-encode may not carry.
 fn png_with_metadata() -> Vec<u8> {
     let rgba = vec![255u8; 4 * 4];
-    let dims = Dimensions {
-        width: 2,
-        height: 2,
-    };
+    let dims = Dimensions::new(2, 2).unwrap();
     let image = ImageRef::<Rgba8>::new(&rgba, dims).unwrap();
     PngEncoder::new()
         .with_exif(&exif_with(&[]))

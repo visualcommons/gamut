@@ -128,8 +128,10 @@ impl HevcConfig {
     ///
     /// # Errors
     ///
-    /// - [`Error::Unsupported`] if `configurationVersion != 1`.
-    /// - [`Error::InvalidInput`] if `lengthSizeMinusOne` is 2 (14496-15 permits only 0, 1, 3 ⇒
+    /// - An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if
+    ///   `configurationVersion != 1`.
+    /// - An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    ///   `lengthSizeMinusOne` is 2 (14496-15 permits only 0, 1, 3 ⇒
     ///   1/2/4-byte prefixes), if the record is truncated anywhere (header, an array header, or a
     ///   NAL unit body), or if any bytes remain after the final array.
     pub fn parse(data: &[u8]) -> Result<Self> {
@@ -404,7 +406,8 @@ impl HevcConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if a VCL NAL unit is not an IRAP type, and propagates the
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a VCL
+    /// NAL unit is not an IRAP type, and propagates the
     /// payload-split ([`crate::iter_nal_units`]) and NAL-header ([`NalHeader::parse`]) errors.
     pub fn validate_still_payload(&self, payload: &[u8]) -> Result<()> {
         for nal in iter_nal_units(payload, self.nal_length_size()) {
@@ -428,7 +431,8 @@ fn emit_annex_b(nal: &[u8], out: &mut Vec<u8>) {
 }
 
 /// A minimal big-endian, bounds-checked byte cursor for the `hvcC` body. Every read is fallible and
-/// returns [`Error::InvalidInput`] on truncation, so a malformed length never reads out of bounds.
+/// returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error on
+/// truncation, so a malformed length never reads out of bounds.
 struct Reader<'a> {
     data: &'a [u8],
     pos: usize,

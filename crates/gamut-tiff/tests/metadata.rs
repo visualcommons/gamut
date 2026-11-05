@@ -55,14 +55,7 @@ fn rgb(w: u32, h: u32) -> Vec<u8> {
 }
 
 fn image(pixels: &[u8], w: u32, h: u32) -> ImageRef<'_, Rgb8> {
-    ImageRef::<Rgb8>::new(
-        pixels,
-        Dimensions {
-            width: w,
-            height: h,
-        },
-    )
-    .expect("image")
+    ImageRef::<Rgb8>::new(pixels, Dimensions::new(w, h).unwrap()).expect("image")
 }
 
 /// Asserts that `ifd` carries every block of [`metadata`] under its own tag and field type.
@@ -315,10 +308,7 @@ fn every_public_encode_surface_refuses_an_exif_tree_its_own_decoder_could_not_re
     deeper.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![inner]);
     let enc = TiffEncoder::new().with_tiff_metadata(TiffMetadata::new().with_exif(deeper));
 
-    let dims = Dimensions {
-        width: 2,
-        height: 2,
-    };
+    let dims = Dimensions::new(2, 2).unwrap();
     let palette = Palette8::from_rgb_triples(&[0u8; 768]).expect("palette");
     let rgb8 = ImageRef::<Rgb8>::new(&[0u8; 12], dims).expect("rgb8");
     let mut out = Vec::new();

@@ -926,7 +926,7 @@ mod tests {
     impl ReadAt for Failing<'_> {
         fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> gamut_core::Result<()> {
             if offset >= self.fail_at {
-                return Err(gamut_core::Error::Io(std::io::Error::other("transport")));
+                return Err(gamut_core::Error::from(std::io::Error::other("transport")));
             }
             self.bytes.read_exact_at(offset, buf)
         }

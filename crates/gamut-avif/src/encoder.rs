@@ -167,8 +167,8 @@ impl<'a> RawPlanes<'a> {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] when the planes cannot form one AVIF image: `colour` is zero-sized
-    /// or [`ChromaSubsampling::Cs400`] (a single plane is not YCbCr — encode it as
+    /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the planes
+    /// cannot form one AVIF image: `colour` is zero-sized or [`ChromaSubsampling::Cs400`] (a single plane is not YCbCr — encode it as
     /// [`Gray8`](gamut_core::Gray8)), or `alpha` is not a [`ChromaSubsampling::Cs400`] plane of
     /// `colour`'s width and height.
     pub fn eight(
@@ -201,12 +201,13 @@ impl<'a> RawPlanes<'a> {
     ///
     /// # Errors
     ///
-    /// As [`RawPlanes::eight`], plus [`Error::InvalidInput`] when `colour` is
+    /// As [`RawPlanes::eight`], plus an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when `colour` is
     /// [`BitDepth::Eight`] (8-bit planes take [`RawPlanes::eight`], so a backend's
     /// [`encode_still16`](crate::Av1StillEncoder::encode_still16) is only ever handed 10 or 12
     /// bits) or when `alpha`'s depth is not `colour`'s. A [`BitDepth::Sixteen`] buffer is
-    /// accepted here and refused by the encode, as
-    /// [`Error::Unsupported`](gamut_core::Error::Unsupported): AV1 codes 8, 10 or 12 bits
+    /// accepted here and refused by the encode, as an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error: AV1 codes 8, 10 or 12 bits
     /// (§6.4.1).
     pub fn high(
         colour: &'a Planar16,
@@ -1125,7 +1126,9 @@ impl AvifEncoder {
     ///
     /// This builder cannot fail — it returns `Self` — so an unusable `len` is refused by the
     /// *encode* that follows, on every entry point including [`EncodeImage::encode_to_vec`]. This
-    /// crate refuses two lengths, both as [`Error::InvalidInput`]: one **below 8 bytes**, the size
+    /// crate refuses two lengths, both as
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) errors: one **below 8
+    /// bytes**, the size
     /// of a JUMBF box header, which could not hold even an empty manifest store's outermost box;
     /// and one so large that the framed box exceeds what a buffer can hold. Neither is merely
     /// documented as a precondition, because in the release profile a downstream consumer builds
@@ -1135,8 +1138,8 @@ impl AvifEncoder {
     /// On **64-bit** targets a **third** refusal sits between them: a top-level box carries a
     /// 32-bit size field, so a `ContentProvenanceBox` at or beyond 4 GiB cannot be written. This
     /// crate applies the bound [`gamut_isobmff::write`] enforces on every top-level box, *before*
-    /// the slot is allocated, and refuses as
-    /// [`Error::Unsupported`](gamut_core::Error::Unsupported) — the kind the container writer
+    /// the slot is allocated, and refuses with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error — the kind the container writer
     /// would give. It is the encoder's effective ceiling: on this framing the largest `len` that
     /// clears it is `4_294_967_250`, and `4_294_967_251` is refused. It is `Unsupported` rather
     /// than `InvalidInput` because such a box is well-formed ISOBMFF (a 64-bit `largesize`) that
@@ -1199,7 +1202,8 @@ impl AvifEncoder {
     ///
     /// The container's own bound still applies: a `store` large enough to push the
     /// `ContentProvenanceBox` to or past 4 GiB is refused at encode time by
-    /// [`gamut_isobmff::write`], as [`Error::Unsupported`](gamut_core::Error::Unsupported).
+    /// [`gamut_isobmff::write`], as an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
     ///
     /// The box is labelled `box_purpose = manifest`, the only purpose this encoder writes; see
     /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) for why an `original`/`update` pair is a
@@ -1226,10 +1230,12 @@ impl AvifEncoder {
     ///
     /// # Errors
     ///
-    /// As [`EncodeImage::encode_image`] — which includes [`Error::InvalidInput`] for a
+    /// As [`EncodeImage::encode_image`] — which includes an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
     /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) length that cannot be framed — and
     /// additionally an error if the file just written does not parse with
-    /// [`AvifContainer::parse`], or [`Error::InvalidInput`] if a C2PA slot was configured but
+    /// [`AvifContainer::parse`], or an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a C2PA slot was configured but
     /// cannot be located in it. Either would mean the writer and the reader disagree about the
     /// container, and is never expected.
     pub fn encode_with_report<P: Pixel>(
@@ -1296,11 +1302,11 @@ impl AvifEncoder {
     ///
     /// # Errors
     ///
-    /// - [`Error::Unsupported`](gamut_core::Error::Unsupported) for
+    /// - An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for
     ///   [`AlphaMode::PremultiplyOnEncode`] with an alpha plane (the encoder converts no sample
     ///   here), lossless at a subsampled chroma, or a [`BitDepth::Sixteen`] buffer;
-    /// - [`Error::InvalidInput`] for [`MatrixCoefficients::Identity`] at a subsampled chroma
-    ///   (AV1 §6.4.2), or limited range under the BT.709 / sRGB / identity triple, which AV1
+    /// - An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for
+    ///   [`MatrixCoefficients::Identity`] at a subsampled chroma (AV1 §6.4.2), or limited range under the BT.709 / sRGB / identity triple, which AV1
     ///   §5.5.2 can only signal as full range;
     /// - any error the AV1 encode, a pushed backend or the container writer returns.
     pub fn encode_raw_planes(&self, planes: RawPlanes<'_>, out: &mut Vec<u8>) -> Result<usize> {
@@ -1447,8 +1453,8 @@ impl AvifEncoder {
             Property {
                 essential: false,
                 kind: PropertyKind::ImageSpatialExtents {
-                    width: dims.width,
-                    height: dims.height,
+                    width: dims.width(),
+                    height: dims.height(),
                 },
             },
             Property {
@@ -1815,8 +1821,8 @@ fn alpha_item(id: u32, alpha: &EncodedStill, dims: Dimensions) -> Item {
             Property {
                 essential: false,
                 kind: PropertyKind::ImageSpatialExtents {
-                    width: dims.width,
-                    height: dims.height,
+                    width: dims.width(),
+                    height: dims.height(),
                 },
             },
             Property {
@@ -2455,7 +2461,7 @@ mod tests {
     #[test]
     fn rgba8_encode_codes_the_premultiplied_colour_on_premultiply_on_encode() {
         let px = banded_rgba8();
-        let mut premultiplied = ImageBuf::<Rgba8>::new(px.clone(), BANDED).unwrap();
+        let mut premultiplied = ImageBuf::<Rgba8>::new(px.clone(), banded()).unwrap();
         premultiply_alpha(&mut premultiplied);
         assert_ne!(
             premultiplied.as_samples(),
@@ -2464,7 +2470,7 @@ mod tests {
         );
         let encode = |enc: AvifEncoder, px: &[u8]| {
             enc.with_clean_alpha(true)
-                .encode_to_vec(ImageRef::<Rgba8>::new(px, BANDED).unwrap())
+                .encode_to_vec(ImageRef::<Rgba8>::new(px, banded()).unwrap())
                 .unwrap()
         };
         // Coded as a caller handing over the premultiplied image would have it coded — on both
@@ -2489,11 +2495,11 @@ mod tests {
             .into_iter()
             .map(|s| u16::from(s) * 257)
             .collect();
-        let mut premultiplied = ImageBuf::<Rgba16>::new(px.clone(), BANDED).unwrap();
+        let mut premultiplied = ImageBuf::<Rgba16>::new(px.clone(), banded()).unwrap();
         premultiply_alpha(&mut premultiplied);
         assert_ne!(premultiplied.as_samples(), &px[..]);
         let encode = |enc: AvifEncoder, px: &[u16]| {
-            enc.encode_to_vec(ImageRef::<Rgba16>::new(px, BANDED).unwrap())
+            enc.encode_to_vec(ImageRef::<Rgba16>::new(px, banded()).unwrap())
                 .unwrap()
         };
         assert_eq!(
@@ -2511,13 +2517,13 @@ mod tests {
     #[test]
     fn widened_rgba8_encode_premultiplies_after_widening_on_premultiply_on_encode() {
         let px = banded_rgba8();
-        let narrow = ImageRef::<Rgba8>::new(&px, BANDED).unwrap();
+        let narrow = ImageRef::<Rgba8>::new(&px, banded()).unwrap();
         // Widen first, then premultiply at 16-bit precision (decision 5 of #710) ...
         let mut wide = convert::<Rgba8, Rgba16>(narrow, ConvertPolicy::lossless()).unwrap();
         premultiply_alpha(&mut wide);
         // ... which differs from premultiplying at 8 bits and widening the result, so the
         // comparison below pins the order and not just that premultiplication happened.
-        let mut narrow_first = ImageBuf::<Rgba8>::new(px.clone(), BANDED).unwrap();
+        let mut narrow_first = ImageBuf::<Rgba8>::new(px.clone(), banded()).unwrap();
         premultiply_alpha(&mut narrow_first);
         let narrow_first =
             convert::<Rgba8, Rgba16>(narrow_first.as_ref(), ConvertPolicy::lossless()).unwrap();
@@ -2555,10 +2561,9 @@ mod tests {
         px
     }
 
-    const BANDED: Dimensions = Dimensions {
-        width: 8,
-        height: 8,
-    };
+    fn banded() -> Dimensions {
+        Dimensions::new(8, 8).unwrap()
+    }
 
     #[test]
     fn rgba8_encode_codes_the_cleaned_colour_when_cleaning_applies() {
@@ -2569,7 +2574,7 @@ mod tests {
             "the fixture hides colour for cleaning to change"
         );
         let encode = |enc: AvifEncoder, px: &[u8]| {
-            enc.encode_to_vec(ImageRef::<Rgba8>::new(px, BANDED).unwrap())
+            enc.encode_to_vec(ImageRef::<Rgba8>::new(px, banded()).unwrap())
                 .unwrap()
         };
         assert_eq!(
@@ -2592,7 +2597,7 @@ mod tests {
         let cleaned = clean_rgba(&px, 8);
         assert_ne!(cleaned, px);
         let encode = |enc: AvifEncoder, px: &[u16]| {
-            enc.encode_to_vec(ImageRef::<Rgba16>::new(px, BANDED).unwrap())
+            enc.encode_to_vec(ImageRef::<Rgba16>::new(px, banded()).unwrap())
                 .unwrap()
         };
         assert_eq!(
@@ -2936,10 +2941,7 @@ mod tests {
         // `Ok` on either length is the outcome this pins shut. The two lengths fail for different
         // reasons, so each is matched on the reason it gives.
         let rgb = vec![0u8; 34 * 18 * 3];
-        let dims = Dimensions {
-            width: 34,
-            height: 18,
-        };
+        let dims = Dimensions::new(34, 18).unwrap();
         let img = ImageRef::<Rgb8>::new(&rgb, dims).expect("the ramp fits the dimensions");
         for (len, reason) in [
             (0usize, "at least 8 bytes"),
@@ -3031,14 +3033,7 @@ mod tests {
         let rgb = vec![128u8; 4 * 4 * 3];
         let n = AvifEncoder::new()
             .encode_image(
-                ImageRef::<Rgb8>::new(
-                    &rgb,
-                    Dimensions {
-                        width: 4,
-                        height: 4,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Rgb8>::new(&rgb, Dimensions::new(4, 4).unwrap()).unwrap(),
                 &mut out,
             )
             .unwrap();
@@ -3052,10 +3047,7 @@ mod tests {
             *b = (i * 37) as u8;
         }
         let mut out = Vec::new();
-        let dims = Dimensions {
-            width: w,
-            height: h,
-        };
+        let dims = Dimensions::new(w, h).unwrap();
         enc.encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut out)
             .unwrap();
         out
@@ -3103,14 +3095,7 @@ mod tests {
         let px: Vec<u8> = (0..H)
             .flat_map(|y| (0..W).map(move |x| ((x * x + y * 29) & 0xff) as u8))
             .collect();
-        let image = ImageRef::<Gray8>::new(
-            &px,
-            Dimensions {
-                width: W,
-                height: H,
-            },
-        )
-        .unwrap();
+        let image = ImageRef::<Gray8>::new(&px, Dimensions::new(W, H).unwrap()).unwrap();
         for depth in [BitDepth::Ten, BitDepth::Twelve] {
             let primary_at = |speed| {
                 let enc = AvifEncoder::lossy(50)
@@ -3361,7 +3346,8 @@ mod typed {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message
+        /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when
+        /// the model does not serialize (the facade's message
         /// is carried as [`Error::detail`]), and whatever
         /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
         pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
@@ -3384,8 +3370,8 @@ mod typed {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (HEIF
-        /// defines no IPTC-IIM item type) or a C2PA manifest store. A store is never embedded from
+        /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when
+        /// the blocks carry a legacy IPTC-IIM stream (HEIF defines no IPTC-IIM item type) or a C2PA manifest store. A store is never embedded from
         /// metadata blocks: it is signed over the bytes of the one file it was made for, so a
         /// store computed for this output goes through [`with_c2pa`](Self::with_c2pa) /
         /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) instead. Nothing is applied when an

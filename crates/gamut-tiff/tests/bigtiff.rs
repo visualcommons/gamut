@@ -31,10 +31,7 @@ fn assert_is_bigtiff(tiff: &[u8]) {
 #[test]
 fn bigtiff_roundtrips_in_gamut() {
     for &(w, h) in SIZES {
-        let dims = Dimensions {
-            width: w,
-            height: h,
-        };
+        let dims = Dimensions::new(w, h).unwrap();
         for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
             // RGB.
             let rgb = rgb_pattern(w, h);
@@ -46,7 +43,10 @@ fn bigtiff_roundtrips_in_gamut() {
                 .expect("encode");
             assert_is_bigtiff(&tiff);
             let got: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
-            assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+            assert_eq!(
+                (got.dimensions().width(), got.dimensions().height()),
+                (w, h)
+            );
             assert_eq!(
                 got.as_samples(),
                 rgb.as_slice(),
@@ -75,10 +75,7 @@ fn bigtiff_roundtrips_in_gamut() {
 #[test]
 fn gamut_bigtiff_is_decoded_by_libtiff() {
     for &(w, h) in SIZES {
-        let dims = Dimensions {
-            width: w,
-            height: h,
-        };
+        let dims = Dimensions::new(w, h).unwrap();
         let rgb = rgb_pattern(w, h);
         let mut tiff = Vec::new();
         TiffEncoder::new()
@@ -112,7 +109,10 @@ fn libtiff_bigtiff_is_decoded_by_gamut() {
         let got: ImageBuf<Rgb8> = TiffDecoder::new()
             .decode_image(&tiff)
             .expect("gamut decode");
-        assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+        assert_eq!(
+            (got.dimensions().width(), got.dimensions().height()),
+            (w, h)
+        );
         assert_eq!(
             got.as_samples(),
             rgb.as_slice(),
@@ -140,10 +140,7 @@ fn bigtiff_compression_variants_cross_check() {
     // round-trips and is read back by libtiff under BigTIFF.
     let (w, h) = (40, 30);
     let rgb = rgb_pattern(w, h);
-    let dims = Dimensions {
-        width: w,
-        height: h,
-    };
+    let dims = Dimensions::new(w, h).unwrap();
     for compression in [
         Compression::None,
         Compression::PackBits,
@@ -181,10 +178,7 @@ fn bigtiff_tiled_is_decoded_by_libtiff() {
     // offset array lands in the value pool rather than inline.
     let (w, h) = (40, 36);
     let rgb = rgb_pattern(w, h);
-    let dims = Dimensions {
-        width: w,
-        height: h,
-    };
+    let dims = Dimensions::new(w, h).unwrap();
     let mut tiff = Vec::new();
     TiffEncoder::new()
         .with_big_tiff(true)
@@ -218,22 +212,8 @@ fn bigtiff_multipage_is_decoded_by_libtiff() {
     // Two pages chained through 8-byte next-IFD pointers, with all strip data in a shared region.
     let pages_px = [rgb_pattern(20, 12), rgb_pattern(8, 30)];
     let pages = [
-        ImageRef::<Rgb8>::new(
-            pages_px[0].as_slice(),
-            Dimensions {
-                width: 20,
-                height: 12,
-            },
-        )
-        .unwrap(),
-        ImageRef::<Rgb8>::new(
-            pages_px[1].as_slice(),
-            Dimensions {
-                width: 8,
-                height: 30,
-            },
-        )
-        .unwrap(),
+        ImageRef::<Rgb8>::new(pages_px[0].as_slice(), Dimensions::new(20, 12).unwrap()).unwrap(),
+        ImageRef::<Rgb8>::new(pages_px[1].as_slice(), Dimensions::new(8, 30).unwrap()).unwrap(),
     ];
     let mut tiff = Vec::new();
     TiffEncoder::new()
@@ -249,13 +229,13 @@ fn bigtiff_multipage_is_decoded_by_libtiff() {
         // gamut round-trip.
         let got: ImageBuf<Rgb8> = dec.decode_page(&tiff, i).expect("gamut decode page");
         assert_eq!(
-            (got.dimensions().width, got.dimensions().height),
-            (dims.width, dims.height)
+            (got.dimensions().width(), got.dimensions().height()),
+            (dims.width(), dims.height())
         );
         assert_eq!(got.as_samples(), px, "BigTIFF page {i} gamut round-trip");
         // libtiff cross-check.
         let lt = libtiff_oracle::decode_page(&tiff, i as u32).expect("libtiff decode page");
-        assert_eq!((lt.width, lt.height), (dims.width, dims.height));
+        assert_eq!((lt.width, lt.height), (dims.width(), dims.height()));
         assert_eq!(lt.pixels, px, "BigTIFF page {i} libtiff cross-check");
     }
 }

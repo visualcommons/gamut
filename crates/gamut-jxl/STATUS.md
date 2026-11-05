@@ -130,7 +130,7 @@ on a hand-written golden bitstream.
   `gamut-codec-abi` seam, cut at the **bare `FF 0A` codestream**: `JxlEncoder::push_backend` /
   `JxlDecoder::push_backend` insert a `JxlCodestreamEncoder` / `JxlCodestreamDecoder` ahead of the
   built-in wrappers, which are the implicit **tails**. Push order; `supports() == false` (or a late
-  `Error::Unsupported`, the typed mirror of `Status::UNSUPPORTED`) is the only fall-through, and an
+  `ErrorKind::Unsupported` error, the typed mirror of `Status::UNSUPPORTED`) is the only fall-through, and an
   accepted-then-failed backend propagates. `AbiEncodeBackend` / `AbiDecodeBackend` adapt a
   `gamut_codec_abi::Encoder` / `Decoder` (including a C vtable via `bridge::Foreign*`) onto the same
   door under `JXL_CODEC_ID` (`"jxl "`). Container-dependent features — ISO BMFF output,

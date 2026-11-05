@@ -30,19 +30,15 @@ fn rgba_roundtrips_in_gamut() {
             TiffEncoder::new()
                 .with_compression(comp)
                 .encode_image(
-                    ImageRef::<Rgba8>::new(
-                        &src,
-                        Dimensions {
-                            width: w,
-                            height: h,
-                        },
-                    )
-                    .unwrap(),
+                    ImageRef::<Rgba8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
             let got: ImageBuf<Rgba8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
-            assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+            assert_eq!(
+                (got.dimensions().width(), got.dimensions().height()),
+                (w, h)
+            );
             assert_eq!(got.as_samples(), src.as_slice(), "{comp:?} {w}x{h}");
 
             // An RGB view of an RGBA file discards the alpha channel, so the default (lossless)
@@ -75,14 +71,7 @@ fn gamut_rgba_is_decoded_by_libtiff() {
         TiffEncoder::new()
             .with_compression(Compression::Lzw)
             .encode_image(
-                ImageRef::<Rgba8>::new(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
-                )
-                .unwrap(),
+                ImageRef::<Rgba8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut tiff,
             )
             .expect("encode");
@@ -114,14 +103,7 @@ fn grayscale_is_presented_as_replicated_opaque_rgba() {
     let mut tiff = Vec::new();
     TiffEncoder::new()
         .encode_image(
-            ImageRef::<Gray8>::new(
-                &gray,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Gray8>::new(&gray, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut tiff,
         )
         .unwrap();
@@ -141,14 +123,7 @@ fn rgb_is_presented_as_opaque_rgba() {
     let mut tiff = Vec::new();
     TiffEncoder::new()
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                &src,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut tiff,
         )
         .unwrap();

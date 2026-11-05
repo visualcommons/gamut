@@ -69,7 +69,8 @@ const BUDGET_BYTES_PER_PIXEL: u64 = 4;
 /// dimension caps with [`with_max_dimensions`](Self::with_max_dimensions) when the application
 /// knows its domain. Both are checked against the `VP8 ` key-frame or `VP8L` header before any
 /// frame-sized allocation, and before any [backend](Self::push_backend) is offered the job; a file
-/// over either limit is refused with [`Error::Unsupported`].
+/// over either limit is refused with an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
 #[derive(Clone)]
 pub struct WebpDecoder {
     /// Pluggable codestream decoders, tried in push order ahead of the built-in tails.
@@ -121,9 +122,9 @@ impl WebpDecoder {
         }
     }
 
-    /// Caps the accepted frame dimensions; a wider or taller frame is refused with
-    /// [`Error::Unsupported`] before any allocation. The default is the format's own bound, 16384
-    /// on each side.
+    /// Caps the accepted frame dimensions; a wider or taller frame is refused with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before any allocation.
+    /// The default is the format's own bound, 16384 on each side.
     #[must_use]
     pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
         self.max_width = width;
@@ -131,8 +132,8 @@ impl WebpDecoder {
         self
     }
 
-    /// Caps the decoded frame in bytes (default 64 MiB), refusing a larger one with
-    /// [`Error::Unsupported`] before any allocation.
+    /// Caps the decoded frame in bytes (default 64 MiB), refusing a larger one with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before any allocation.
     ///
     /// The frame is charged at **four bytes per pixel** (`width × height × 4`, the 8-bit RGBA
     /// frame) whatever the file turns out to hold: whether a lossless image is opaque is known
@@ -147,7 +148,7 @@ impl WebpDecoder {
 
     /// Enforces the dimension and byte-budget limits against the frame a codestream header declares.
     fn check_limits(&self, dims: Dimensions) -> Result<()> {
-        if dims.width > self.max_width || dims.height > self.max_height {
+        if dims.width() > self.max_width || dims.height() > self.max_height {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "WebP: image exceeds the dimension limit",
@@ -155,7 +156,7 @@ impl WebpDecoder {
         }
         // Two `u32` sides times four cannot overflow `u64`, and `usize` widens into `u64` losslessly
         // on every target Rust supports, so the comparison is exact.
-        let bytes = u64::from(dims.width) * u64::from(dims.height) * BUDGET_BYTES_PER_PIXEL;
+        let bytes = u64::from(dims.width()) * u64::from(dims.height()) * BUDGET_BYTES_PER_PIXEL;
         if bytes > self.max_image_bytes as u64 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -309,10 +310,7 @@ impl WebpDecoder {
             }
             WebpCodestream::Vp8 => {
                 let yuv = Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
-                let dims = Dimensions {
-                    width: yuv.width(),
-                    height: yuv.height(),
-                };
+                let dims = Dimensions::new(yuv.width(), yuv.height())?;
                 // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
                 let rgb = yuv.to_rgb8(ColorRange::Limited, self.upsampling);
                 // A lossy bitstream carries no alpha of its own: it exists only when the extended
@@ -320,7 +318,7 @@ impl WebpDecoder {
                 let Some(payload) = layout.alph else {
                     return Ok((dims, PixelFormat::Rgb8, rgb));
                 };
-                let (w, h) = (dims.width as usize, dims.height as usize);
+                let (w, h) = (dims.width() as usize, dims.height() as usize);
                 let alpha = alpha::read_alph(payload, w, h)?;
                 let mut out = Vec::with_capacity(w * h * 4);
                 for (px, &a) in rgb.as_chunks::<3>().0.iter().zip(alpha.iter()) {
@@ -366,7 +364,7 @@ mod tests {
     /// Builds a simple-lossless WebP file holding a solid-color `width`×`height` VP8L image.
     fn solid_lossless_webp(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
         let mut w = BitWriter::new();
-        Vp8lHeader::from_dimensions(Dimensions { width, height }, false)
+        Vp8lHeader::from_dimensions(Dimensions::new(width, height).unwrap(), false)
             .unwrap()
             .write(&mut w);
         w.write_bits(0, 1); // no transforms
@@ -397,13 +395,7 @@ mod tests {
     fn decodes_lossless_container_to_rgb8() {
         let file = solid_lossless_webp(2, 2, 0x12, 0x34, 0x56);
         let got: ImageBuf<Rgb8> = WebpDecoder::new().decode_image(&file).unwrap();
-        assert_eq!(
-            got.dimensions(),
-            Dimensions {
-                width: 2,
-                height: 2
-            }
-        );
+        assert_eq!(got.dimensions(), Dimensions::new(2, 2).unwrap());
         assert_eq!(got.as_samples(), [0x12, 0x34, 0x56].repeat(4).as_slice());
     }
 
@@ -438,13 +430,7 @@ mod tests {
         let got: ImageBuf<Rgb8> = WebpDecoder::new()
             .decode_image(&file)
             .expect("decode VP8X file");
-        assert_eq!(
-            got.dimensions(),
-            Dimensions {
-                width: 2,
-                height: 2
-            }
-        );
+        assert_eq!(got.dimensions(), Dimensions::new(2, 2).unwrap());
         assert_eq!(got.as_samples(), [0x11, 0x22, 0x33].repeat(4).as_slice());
     }
 
@@ -483,13 +469,7 @@ mod tests {
         w.write_chunk(FourCc::VP8L, &vp8l).unwrap();
         let file = w.finish().unwrap();
         let got: ImageBuf<Rgb8> = WebpDecoder::new().decode_image(&file).unwrap();
-        assert_eq!(
-            got.dimensions(),
-            Dimensions {
-                width: 1,
-                height: 1
-            }
-        );
+        assert_eq!(got.dimensions(), Dimensions::new(1, 1).unwrap());
         assert_eq!(got.as_samples(), [9, 8, 7].as_slice());
     }
 
@@ -520,13 +500,7 @@ mod tests {
         // of the RGBA decoder, which deleting would route to "no bitstream".
         let file = solid_lossless_webp(2, 2, 0x12, 0x34, 0x56);
         let got: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).unwrap();
-        assert_eq!(
-            got.dimensions(),
-            Dimensions {
-                width: 2,
-                height: 2
-            }
-        );
+        assert_eq!(got.dimensions(), Dimensions::new(2, 2).unwrap());
         assert_eq!(
             got.as_samples(),
             [0x12, 0x34, 0x56, 0xff].repeat(4).as_slice()

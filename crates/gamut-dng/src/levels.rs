@@ -64,7 +64,7 @@ impl RawLevels {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `samples_per_pixel` is zero, `black` is negative or not
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `samples_per_pixel` is zero, `black` is negative or not
     /// finite, or `white` is not finite and positive.
     pub fn uniform(samples_per_pixel: u16, black: f64, white: f64) -> Result<Self> {
         let spp = usize::from(samples_per_pixel);
@@ -84,7 +84,7 @@ impl RawLevels {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `samples_per_pixel` is zero, a repeat dimension is zero
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `samples_per_pixel` is zero, a repeat dimension is zero
     /// or above [`MAX_BLACK_REPEAT`], the vector lengths don't match, a black level is negative or not finite, or a white level is
     /// not finite and positive.
     pub fn new(

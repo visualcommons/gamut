@@ -70,16 +70,16 @@ const asserts in `src/status.rs`:
 | `GAMUT_STATUS_BUFFER_TOO_SMALL` | 6 | boundary-only (reserved for #242) |
 | `GAMUT_STATUS_ABI_MISMATCH` | 7 | boundary-only: a pushed vtable's `abi_version` is from another seam generation — rebuild, don't fall back. Deliberately distinct from `UNSUPPORTED`, whose meaning (decline → try the next option) calls for the opposite caller reaction. |
 
-`Error` is `#[non_exhaustive]`; unknown future variants map to a catch-all code. `gamut_status_t`
+`ErrorKind` is `#[non_exhaustive]`; unknown future kinds map to a catch-all code. `gamut_status_t`
 is the *library's* result type; it is distinct from the backend-seam `GamutAbiStatus`
 (`gamut_codec_abi::Status`), whose `0`/`-1` values carry the registry fall-through contract and
 belong to backends.
 
-Error classification always uses `Error::kind()`, looking through `Error::Context`. Bare
-`Error::InvalidInput`/`Error::Unsupported` messages remain borrowed `const char*` values valid for
-the program lifetime. Contextual diagnostics (origin, byte offset, or owned detail), like
-`Error::Io`, are formatted into the thread-local last-error string; no Rust allocation crosses the
-C allocator boundary.
+Error classification always uses `Error::kind()`; `gamut_core::Error` is opaque, so there is no
+variant to match. An invalid-input or unsupported error's `Error::static_message()` remains a
+borrowed `const char*` value valid for the program lifetime. Contextual diagnostics (origin, byte
+offset, or owned detail), like an `ErrorKind::Io` error's underlying I/O error, are formatted into
+the thread-local last-error string; no Rust allocation crosses the C allocator boundary.
 
 ## Ownership
 

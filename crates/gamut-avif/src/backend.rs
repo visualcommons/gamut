@@ -141,13 +141,13 @@ impl Av1EncodeRequest {
     /// The display width in pixels.
     #[must_use]
     pub fn width(&self) -> u32 {
-        self.dimensions.width
+        self.dimensions.width()
     }
 
     /// The display height in pixels.
     #[must_use]
     pub fn height(&self) -> u32 {
-        self.dimensions.height
+        self.dimensions.height()
     }
 
     /// The AV1 `base_q_idx` (AV1 §5.9.12) to encode at, `0..=255` — lower is finer. This is the
@@ -320,11 +320,13 @@ pub(crate) fn run_backends(
 ///
 /// # Errors
 ///
-/// - [`Error::InvalidInput`] if the stream has no sequence header `gamut-av1` can parse, or if its
-///   coded dimensions disagree with `dims` (which the container's `ispe` states).
-/// - [`Error::Unsupported`] if the sequence header is not `reduced_still_picture_header = 1`, is
-///   monochrome, or leaves its colour undescribed.
-/// - [`Error::InvalidInput`] if the stream's coded depth is not the one the request asked for —
+/// - An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream has
+///   no sequence header `gamut-av1` can parse, or if its coded dimensions disagree with `dims`
+///   (which the container's `ispe` states).
+/// - An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the sequence header
+///   is not `reduced_still_picture_header = 1`, is monochrome, or leaves its colour undescribed.
+/// - An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream's
+///   coded depth is not the one the request asked for —
 ///   the container's `av1C` and `pixi` would otherwise lie about the payload.
 /// - Whatever [`Av1Config::validate_still_payload`] reports for a non-conformant item payload.
 pub(crate) fn still_from_backend_obus(
@@ -341,7 +343,7 @@ pub(crate) fn still_from_backend_obus(
             "AVIF: AV1 backend stream is coded at a different bit depth than requested",
         ));
     }
-    if (header.width, header.height) != (dims.width, dims.height) {
+    if (header.width, header.height) != (dims.width(), dims.height()) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "AVIF: AV1 backend stream dimensions differ from the image",
@@ -429,12 +431,14 @@ impl SeqHeaderParams {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidInput`] if the stream has no sequence header OBU, does not split into
-    ///   OBUs, or carries a header [`SequenceHeader::parse`] rejects (truncated, a reserved
+    /// - An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream
+    ///   has no sequence header OBU, does not split into OBUs, or carries a header [`SequenceHeader::parse`] rejects (truncated, a reserved
     ///   `seq_profile`, or not ending in the §5.3.1 `trailing_bits()` its size declares) — the
     ///   parser's own error is kept as the detail.
-    /// - [`Error::Unsupported`] for the first three refusals above.
-    /// - [`Error::InvalidInput`] for the shortcut/profile contradiction.
+    /// - An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for the first
+    ///   three refusals above.
+    /// - An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for the
+    ///   shortcut/profile contradiction.
     fn parse(payload: &[u8]) -> Result<Self> {
         let seq = first_sequence_header(payload)?.ok_or_else(|| {
             Error::invalid_input(
@@ -590,7 +594,8 @@ impl SeqHeaderParams {
 /// [`Status::UNSUPPORTED`] is the fall-through code in both places it can appear: from `supports`
 /// (as `false`) and — for a backend that changes its mind — from `encode`, where it is treated as
 /// a late decline and the encoder moves on to the next backend. Any other non-OK status is a
-/// terminal failure and propagates as [`Error::InvalidInput`].
+/// terminal failure and propagates as an
+/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error.
 pub struct AbiAv1StillEncoder<E: Encoder + Send> {
     /// The wrapped ABI encoder.
     inner: E,
@@ -740,7 +745,7 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
 /// declined at `encode` time.
 ///
 /// The typed trait has no third outcome between "handled" and "declined", so the late decline is
-/// this exact [`Error::Unsupported`] payload, which [`run_backends`] maps back to a fall-through.
+/// this exact [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) payload, which [`run_backends`] maps back to a fall-through.
 /// Two things raise it: [`AbiAv1StillEncoder`] translating a late [`Status::UNSUPPORTED`] from a C
 /// backend, and the default [`Av1StillEncoder::encode_still16`], which is how a backend written
 /// against the 8-bit contract declines a high-bit-depth job it never agreed to. A hand-written
@@ -790,10 +795,7 @@ mod tests {
     fn extra_blob_appends_the_speed_discriminant_only_off_the_full_search() {
         let blob = |speed| {
             extra_blob(&Av1EncodeRequest::new(
-                Dimensions {
-                    width: W,
-                    height: H,
-                },
+                Dimensions::new(W, H).unwrap(),
                 77,
                 Av1Colour::default(),
                 ChromaSubsampling::Cs444,

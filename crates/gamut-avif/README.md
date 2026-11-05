@@ -38,7 +38,7 @@ use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 
 let (width, height) = (64u32, 64);
 let rgb: Vec<u8> = vec![0; (width * height * 3) as usize]; // 8-bit interleaved RGB
-let dims = Dimensions { width, height };
+let dims = Dimensions::new(width, height).expect("non-zero dimensions");
 let image = ImageRef::<Rgb8>::new(&rgb, dims).expect("buffer length matches dimensions");
 
 // Lossless by default. `AvifEncoder::lossy(quality)` (0..=100) trades fidelity for a smaller
@@ -137,7 +137,7 @@ its hard binding digests the finished file — so the encoder reserves rather th
 else in the file moves. `with_c2pa(bytes)` writes a store the caller has already computed over
 this exact output. A `len` that could never hold a store — below the 8-byte JUMBF box header, or
 beyond what a buffer holds — is refused by the encode that follows, since the builder itself cannot
-fail; on 64-bit targets a third refusal, `Error::Unsupported` and made before the slot is
+fail; on 64-bit targets a third refusal, `ErrorKind::Unsupported` and made before the slot is
 allocated, is a box at or beyond 4 GiB, which a top-level box's 32-bit size field cannot express
 (on 32-bit targets such as `wasm32` a buffer holds under 2 GiB, so the encode's other refusal is
 the limit and the 4 GiB one is never reached). That minimum bounds

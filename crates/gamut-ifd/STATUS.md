@@ -92,7 +92,7 @@ shape. P9 adds the streaming layer **additively** — the frozen v1 slice surfac
 - [`ReadAt`](src/source.rs) — positioned exact reads + length; implemented by `&[u8]`,
   `StreamSource<R: Read + Seek>`, and `Rebased<S>` (the offset-shifting adapter maker-note
   mini-IFDs and embedded TIFF blocks need). Transport failures surface as the new
-  `gamut_core::Error::Io`; a stream that ends early stays `InvalidInput`, like a short slice.
+  `gamut_core::ErrorKind::Io`; a stream that ends early stays `InvalidInput`, like a short slice.
 - [`IfdReader`](src/stream.rs) — lazy walker: `read_ifd` fetches one directory body into raw
   entries (value/offset words verbatim, in file byte order); `value` fetches/decodes one value
   on demand, span-checked against the source length *before* allocating; `ifds()` iterates the
@@ -173,9 +173,9 @@ a slice reader that cast u64 counts/offsets to `usize` before its checked arithm
 hostile 64-bit BigTIFF width into a silent in-bounds misparse on 32-bit targets — cannot recur:
 the streaming engine stays u64 until a bound against the source length proves each conversion
 lossless. [`tests/hardening_audit.rs`](tests/hardening_audit.rs) remains the acceptance artifact,
-pinning the exact `Error::InvalidInput` string rawshift keys its `ParseError` mapping on for every
+pinning the exact `ErrorKind::InvalidInput` string rawshift keys its `ParseError` mapping on for every
 checklist case; per the issue ("correctness verification, not an API ask") error granularity stays
-`InvalidInput(&'static str)` — no per-case error variants were added.
+`ErrorKind::InvalidInput` with a `&'static str` message — no per-case error variants were added.
 
 ## P11 — C2PA manifest-store carriage (issue #442, epic #239)
 

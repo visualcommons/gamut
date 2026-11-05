@@ -65,7 +65,8 @@ pub struct ScanResult {
 pub struct McuRowLimit {
     /// Maximum number of MCU rows the configured limits can permit.
     pub rows: usize,
-    /// Static [`Error::Unsupported`] message identifying the limit that supplied this ceiling.
+    /// Static [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) message identifying
+    /// the limit that supplied this ceiling.
     pub message: &'static str,
 }
 
@@ -559,8 +560,8 @@ fn write_flat(s: i32, plane: &mut Plane, bx: usize, by: usize) {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidInput`] for an undefined referenced table, a corrupt Huffman code, an
-/// out-of-range coefficient, a bad restart sequence, or a truncated stream.
+/// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for an undefined
+/// referenced table, a corrupt Huffman code, an out-of-range coefficient, a bad restart sequence, or a truncated stream.
 pub fn decode_scan(
     data: &[u8],
     start: usize,
@@ -830,7 +831,8 @@ struct ProgSc<'a> {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidInput`] for an undefined referenced table, an out-of-order or overlapping scan,
+/// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for an undefined
+/// referenced table, an out-of-order or overlapping scan,
 /// a corrupt Huffman code, an out-of-band coefficient index, a bad restart sequence, or a truncated
 /// stream.
 pub fn decode_progressive_scan(

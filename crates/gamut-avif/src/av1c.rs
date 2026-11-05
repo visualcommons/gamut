@@ -116,8 +116,10 @@ impl Av1Config {
     ///
     /// # Errors
     ///
-    /// - [`Error::Unsupported`] if `version != 1`.
-    /// - [`Error::InvalidInput`] if the record is shorter than four bytes, if `marker != 1` (a
+    /// - An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if
+    ///   `version != 1`.
+    /// - An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the record is
+    ///   shorter than four bytes, if `marker != 1` (a
     ///   §2.3.4 SHALL — the marker distinguishes the record from an OBU header byte), if the
     ///   subsampling pair is `(0, 1)` or `monochrome` lacks `(1, 1)` (combinations the AV1
     ///   sequence header cannot express, §6.4.2), or if `configOBUs` does not split into
@@ -232,8 +234,8 @@ impl Av1Config {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if neither the payload nor `configOBUs` carries a sequence
-    /// header OBU, propagates the OBU-split errors of [`crate::iter_obus`] for either source, and
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if neither
+    /// the payload nor `configOBUs` carries a sequence header OBU, propagates the OBU-split errors of [`crate::iter_obus`] for either source, and
     /// propagates [`SequenceHeader::parse`]'s errors for a malformed header.
     pub fn sequence_header(&self, payload: &[u8]) -> Result<SequenceHeader> {
         let obu = match first_sequence_header(payload)? {
@@ -309,7 +311,8 @@ impl Av1Config {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if any constraint above fails, and propagates the
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
+    /// constraint above fails, and propagates the
     /// payload-split ([`crate::iter_obus`]) errors.
     pub fn validate_still_payload(&self, payload: &[u8]) -> Result<()> {
         let mut sequence_headers = 0usize;

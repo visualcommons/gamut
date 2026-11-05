@@ -1,7 +1,7 @@
 //! The issue #262 acceptance checklist: downstream RAW decoding (rawshift) replaces a hardened
 //! TIFF parser with this crate and maps our errors onto its `ParseError` cases (`InvalidMagic`,
 //! `InvalidByteOrder`, `OffsetOutOfBounds`, `CircularReference`, …). The crate deliberately has
-//! no such variants — every hostile input is `Error::InvalidInput` with a distinguishing static
+//! no such variants — every hostile input is `ErrorKind::InvalidInput` with a distinguishing static
 //! string — so those strings *are* the mapping contract, and this file pins them.
 //!
 //! Non-redundancy: the robustness corpus and in-module tests assert *behavior* (typed error,
@@ -22,7 +22,7 @@ fn msg<T: std::fmt::Debug>(res: Result<T, Error>) -> &'static str {
         Err(error) if error.kind() == ErrorKind::InvalidInput => error
             .static_message()
             .expect("invalid input has a static message"),
-        other => panic!("expected Error::InvalidInput, got {other:?}"),
+        other => panic!("expected ErrorKind::InvalidInput, got {other:?}"),
     }
 }
 

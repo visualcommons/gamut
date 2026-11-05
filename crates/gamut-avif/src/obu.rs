@@ -114,8 +114,8 @@ impl ObuHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `obu` is too short (one byte, or two with
-    /// `obu_extension_flag` set) or if `obu_forbidden_bit` is set (a conforming AV1 OBU header
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `obu`
+    /// is too short (one byte, or two with `obu_extension_flag` set) or if `obu_forbidden_bit` is set (a conforming AV1 OBU header
     /// always has it 0).
     pub fn parse(obu: &[u8]) -> Result<Self> {
         parse_header(obu).map(|(header, _)| header)

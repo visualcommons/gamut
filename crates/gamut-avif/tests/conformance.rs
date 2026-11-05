@@ -30,8 +30,12 @@ impl Av1StillDecoder for Dav1dDecoder {
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;
-        let pic = dav1d_oracle::decode_obu(&stream)
-            .map_err(|_| Error::InvalidInput("conformance: dav1d rejected the stream"))?;
+        let pic = dav1d_oracle::decode_obu(&stream).map_err(|_| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "conformance: dav1d rejected the stream",
+            )
+        })?;
         let chroma = config.chroma_format();
         let [y, u, v] = pic.planes;
         // `DecodedFrame::new` validates the plane lengths against the av1C-derived chroma, so a
@@ -67,14 +71,7 @@ fn source_rgb(w: u32, h: u32) -> Vec<u8> {
 fn encode(enc: AvifEncoder, rgb: &[u8], w: u32, h: u32) -> Vec<u8> {
     let mut out = Vec::new();
     enc.encode_image(
-        ImageRef::<Rgb8>::new(
-            rgb,
-            Dimensions {
-                width: w,
-                height: h,
-            },
-        )
-        .unwrap(),
+        ImageRef::<Rgb8>::new(rgb, Dimensions::new(w, h).unwrap()).unwrap(),
         &mut out,
     )
     .unwrap();
@@ -135,7 +132,7 @@ fn structure_agrees_with_libavif() {
             .dimensions()
             .unwrap_or_else(|| panic!("{name}: ispe"));
         assert_eq!(
-            (dims.width, dims.height),
+            (dims.width(), dims.height()),
             (oracle.width, oracle.height),
             "{name}: dims"
         );

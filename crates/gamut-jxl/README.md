@@ -70,7 +70,7 @@ Encode a lossless stream (the default), decode it straight back:
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
 use gamut_jxl::{JxlDecoder, JxlEncoder};
 
-let dims = Dimensions { width: 64, height: 64 };
+let dims = Dimensions::new(64, 64).expect("non-zero dimensions");
 let pixels: Vec<u8> = vec![0; (64 * 64 * 3) as usize]; // 8-bit interleaved RGB
 let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("buffer length matches dimensions");
 
@@ -86,7 +86,7 @@ Encode a lossy stream with a chosen effort, coding tool and ISO BMFF container f
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_jxl::{Container, Distance, Effort, JxlEncoder, ModularMode};
 
-let dims = Dimensions { width: 64, height: 64 };
+let dims = Dimensions::new(64, 64).expect("non-zero dimensions");
 let pixels = vec![0u8; (64 * 64 * 3) as usize];
 let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("buffer length matches dimensions");
 
@@ -105,7 +105,7 @@ settings — each one stays unsent (libjxl's default) unless set:
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_jxl::{DecodingSpeed, Distance, FrameSettings, JxlEncoder, ProgressiveDc, Toggle};
 
-let dims = Dimensions { width: 64, height: 64 };
+let dims = Dimensions::new(64, 64).expect("non-zero dimensions");
 let pixels = vec![0u8; (64 * 64 * 3) as usize];
 let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("buffer length matches dimensions");
 
@@ -126,7 +126,7 @@ are to be interpreted), or losslessly re-pack an existing JPEG:
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb16};
 use gamut_jxl::{ColorSpec, Container, JxlEncoder, Orientation};
 
-let dims = Dimensions { width: 64, height: 64 };
+let dims = Dimensions::new(64, 64).expect("non-zero dimensions");
 let pixels = vec![0u16; (64 * 64 * 3) as usize];
 let image = ImageRef::<Rgb16>::new(&pixels, dims).expect("buffer length matches dimensions");
 
@@ -161,12 +161,12 @@ Neither half is a fixed implementation. The seam is the **bare JPEG XL codestrea
 `JxlCodestreamDecoder` — a platform codec, an alternate library, or a C backend reached through the
 shared [`gamut-codec-abi`](../gamut-codec-abi) vtables via `AbiEncodeBackend` / `AbiDecodeBackend`.
 Backends are tried in push order and the built-in wrapper is tried **last**, so pushing one is
-additive. `supports() == false` (or a late `Error::Unsupported`) is the only fall-through; a backend
+additive. `supports() == false` (or a late `ErrorKind::Unsupported` error) is the only fall-through; a backend
 that accepts a job and then fails propagates its error rather than being silently retried.
 
 This is also how the encode direction works where libjxl cannot be built: on
 `wasm32-unknown-unknown` there is no tail, so a pushed backend *is* the encoder. With neither, the
-direction returns `Error::Unsupported`.
+direction returns an `ErrorKind::Unsupported` error.
 
 Container-dependent features — ISO BMFF output, `with_exif`/`with_xmp`, and `recompress_jpeg` — are
 written by libjxl today, so they are pinned to the built-in path by a host-side veto and never reach
@@ -181,8 +181,8 @@ a backend. Giving gamut-jxl its own container writer is a recorded follow-up ([S
 
 Each feature means "**include the built-in tail**", not "enable the direction": without `encode`,
 `JxlEncoder` still exists and still encodes through any backend pushed with `push_backend`; without
-`decode`, likewise for `JxlDecoder`. With neither a tail nor a backend, that direction returns
-`Error::Unsupported`.
+`decode`, likewise for `JxlDecoder`. With neither a tail nor a backend, that direction returns an
+`ErrorKind::Unsupported` error.
 
 For a C-toolchain-free build — a pure-Rust decoder, e.g. for `wasm32` or CI without cmake — depend
 with `default-features = false, features = ["decode"]`. On `wasm32` the encoder is compiled out
@@ -193,7 +193,7 @@ decode-only JXL there by construction.
 
 The decoder converts between the stream's natural layout and the requested one where that is
 lossless — grayscale expands to RGB, a missing alpha channel is padded opaque, a present-but-unwanted
-alpha is dropped. It refuses to *guess*, returning `Error::Unsupported` rather than fabricating data:
+alpha is dropped. It refuses to *guess*, returning an `ErrorKind::Unsupported` error rather than fabricating data:
 
 - **Animation** — rejected (gamut is image-first; this is a deliberate policy, additive to relax).
 - **Premultiplied (associated) alpha** — rejected (no un-premultiply is performed).
@@ -225,7 +225,7 @@ if !report.is_complete() {
 
 | Where the stream ran out | Result |
 | ------------------------ | ------ |
-| Before the image headers | `Error::InvalidInput` — no dimensions, so no buffer to return |
+| Before the image headers | `ErrorKind::InvalidInput` — no dimensions, so no buffer to return |
 | Before the frame header | `JxlRender::HeaderOnly`: a zero-filled buffer at the declared size |
 | Mid-frame | `JxlRender::BestEffort`: whatever groups arrived |
 | Not truncated | `JxlRender::Complete`: byte-identical to `decode_image` |
@@ -235,8 +235,8 @@ detail pass from the upsampled DC image, so it yields a full-size coarse preview
 toward the front of the stream; a truncated *lossless* (Modular) stream renders the groups that
 arrived exactly and leaves the rest zero. But an image small enough to be coded as a single group
 (roughly 256×256 and below) has no partially-decodable structure at all and comes back blank, and
-some cut points are indistinguishable from corruption to the decoder and still return
-`Error::InvalidInput`. Always check `report.is_complete()`; never assume pixels are present.
+some cut points are indistinguishable from corruption to the decoder and still return an
+`ErrorKind::InvalidInput` error. Always check `report.is_complete()`; never assume pixels are present.
 
 This path is always answered by the built-in jxl-rs tail — a pushed backend is not consulted,
 because the shared codec-abi seam has no way to express a partial result. It relaxes *truncation

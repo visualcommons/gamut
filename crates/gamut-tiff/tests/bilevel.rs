@@ -27,19 +27,15 @@ fn bilevel_roundtrips_in_gamut() {
             TiffEncoder::new()
                 .with_compression(comp)
                 .encode_image(
-                    ImageRef::<Bilevel>::new(
-                        &src,
-                        Dimensions {
-                            width: w,
-                            height: h,
-                        },
-                    )
-                    .unwrap(),
+                    ImageRef::<Bilevel>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
             let got: ImageBuf<Gray8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
-            assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+            assert_eq!(
+                (got.dimensions().width(), got.dimensions().height()),
+                (w, h)
+            );
             assert_eq!(got.as_samples(), src.as_slice(), "{comp:?} {w}x{h}");
         }
     }
@@ -54,14 +50,7 @@ fn gamut_bilevel_is_decoded_by_libtiff() {
             TiffEncoder::new()
                 .with_compression(comp)
                 .encode_image(
-                    ImageRef::<Bilevel>::new(
-                        &src,
-                        Dimensions {
-                            width: w,
-                            height: h,
-                        },
-                    )
-                    .unwrap(),
+                    ImageRef::<Bilevel>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");

@@ -131,8 +131,8 @@ impl NalHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `nal` is shorter than two bytes or if `forbidden_zero_bit`
-    /// is set (a conforming HEVC NAL header always has it 0).
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `nal` is
+    /// shorter than two bytes or if `forbidden_zero_bit` is set (a conforming HEVC NAL header always has it 0).
     pub fn parse(nal: &[u8]) -> Result<Self> {
         let &[b0, b1, ..] = nal else {
             return Err(Error::invalid_input(

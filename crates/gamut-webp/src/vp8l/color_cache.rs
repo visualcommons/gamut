@@ -29,7 +29,8 @@ impl ColorCache {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `bits` is outside `1..=11`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `bits`
+    /// is outside `1..=11`.
     pub fn new(bits: u32) -> Result<Self> {
         if !(MIN_CACHE_BITS..=MAX_CACHE_BITS).contains(&bits) {
             return Err(Error::invalid_input(

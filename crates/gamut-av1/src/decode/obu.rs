@@ -47,8 +47,8 @@ pub(crate) const SELECT_INTEGER_MV: u8 = 2;
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the marker bit is absent, the payload is truncated, or any
-/// padding bit is set.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the marker
+/// bit is absent, the payload is truncated, or any padding bit is set.
 pub(crate) fn obu_trailing_bits(r: &mut BitReader<'_>) -> Result<()> {
     r.trailing_bits()?;
     // Byte-aligned after `trailing_bits`, so the rest of the payload is whole padding bytes.
@@ -310,8 +310,8 @@ impl SequenceHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the payload is truncated, internally inconsistent, or
-    /// does not end in the `trailing_bits()` the OBU's declared size requires.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// payload is truncated, internally inconsistent, or does not end in the `trailing_bits()` the OBU's declared size requires.
     pub fn parse(payload: &[u8]) -> Result<Self> {
         let mut r = BitReader::new(payload);
         let header = Self::parse_syntax(&mut r)?;

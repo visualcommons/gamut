@@ -22,10 +22,9 @@ use gamut_core::{
 const W: u32 = 34;
 const H: u32 = 18;
 
-const DIMS: Dimensions = Dimensions {
-    width: W,
-    height: H,
-};
+fn dims() -> Dimensions {
+    Dimensions::new(W, H).unwrap()
+}
 
 /// [`Av1StillDecoder`] over the real dav1d decoder, as `conformance.rs` bridges it: the typed
 /// `av1C` plus the raw item payload are assembled into one self-contained temporal unit and handed
@@ -36,8 +35,12 @@ impl Av1StillDecoder for Dav1dDecoder {
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;
-        let pic = dav1d_oracle::decode_obu(&stream)
-            .map_err(|_| Error::InvalidInput("high-bitdepth: dav1d rejected the stream"))?;
+        let pic = dav1d_oracle::decode_obu(&stream).map_err(|_| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "high-bitdepth: dav1d rejected the stream",
+            )
+        })?;
         let [y, u, v] = pic.planes;
         DecodedFrame::new(
             pic.width,
@@ -98,7 +101,7 @@ fn expected_plane(plane: usize, bits: BitDepth) -> Vec<u16> {
 fn encode_rgb16(encoder: &AvifEncoder) -> Vec<u8> {
     let px = source_rgb16();
     encoder
-        .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).expect("buffer matches dimensions"))
+        .encode_to_vec(ImageRef::<Rgb16>::new(&px, dims()).expect("buffer matches dimensions"))
         .expect("encode")
 }
 
@@ -188,7 +191,7 @@ fn rgba16_carries_its_alpha_at_the_master_depth() {
         let px = source_rgba16();
         let avif = AvifEncoder::new()
             .with_bit_depth(bits)
-            .encode_to_vec(ImageRef::<Rgba16>::new(&px, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Rgba16>::new(&px, dims()).unwrap())
             .expect("encode");
 
         assert!(
@@ -231,7 +234,7 @@ fn only_ten_and_twelve_bit_coding_is_offered() {
     for bits in [BitDepth::Eight, BitDepth::Sixteen] {
         let err = AvifEncoder::new()
             .with_bit_depth(bits)
-            .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Rgb16>::new(&px, dims()).unwrap())
             .expect_err("rejected");
         assert_eq!(
             err.static_message(),
@@ -245,7 +248,7 @@ fn only_ten_and_twelve_bit_coding_is_offered() {
     // The default needs no knob at all: unset, a 16-bit input codes at 12.
     assert_eq!(AvifEncoder::new().config().bit_depth, None);
     let default_avif = AvifEncoder::new()
-        .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgb16>::new(&px, dims()).unwrap())
         .expect("encode");
     assert_eq!(libavif_oracle::introspect(&default_avif).unwrap().depth, 12);
 }
@@ -258,7 +261,7 @@ fn lossy_rgb16_decodes_at_the_coded_depth() {
         let px = source_rgb16();
         let avif = AvifEncoder::lossy(70)
             .with_bit_depth(bits)
-            .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Rgb16>::new(&px, dims()).unwrap())
             .expect("encode");
         let decoded = libavif_oracle::decode_avif(&avif)
             .unwrap_or_else(|e| panic!("libavif decode failed at {bits:?}: {e}"));
@@ -292,7 +295,7 @@ fn sixteen_bit_input_honours_the_requested_chroma() {
                 .with_bit_depth(bits)
                 .with_matrix(MatrixCoefficients::Bt709)
                 .with_chroma(chroma)
-                .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).unwrap())
+                .encode_to_vec(ImageRef::<Rgb16>::new(&px, dims()).unwrap())
                 .unwrap_or_else(|e| panic!("encode at {bits:?}/{chroma:?} failed: {e}"));
 
             // What the container says.
@@ -338,7 +341,7 @@ fn the_identity_matrix_stays_four_four_four_at_high_bit_depth() {
         .with_bit_depth(BitDepth::Twelve)
         .with_matrix(MatrixCoefficients::Identity)
         .with_chroma(ChromaSubsampling::Cs420)
-        .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).unwrap())
+        .encode_to_vec(ImageRef::<Rgb16>::new(&px, dims()).unwrap())
         .expect("encode");
     let container = AvifContainer::parse(&avif).expect("parse");
     let cfg = container
@@ -398,7 +401,7 @@ fn lossless_rgb8_widens_by_replication_and_narrows_back_exactly() {
     for bits in [BitDepth::Ten, BitDepth::Twelve] {
         let avif = AvifEncoder::new()
             .with_bit_depth(bits)
-            .encode_to_vec(ImageRef::<Rgb8>::new(&px, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Rgb8>::new(&px, dims()).unwrap())
             .expect("encode");
         let decoded = libavif_oracle::decode_avif(&avif)
             .unwrap_or_else(|e| panic!("libavif decode failed at {bits:?}: {e}"));
@@ -428,7 +431,7 @@ fn rgba8_widens_its_alpha_to_the_colour_depth() {
     for bits in [BitDepth::Ten, BitDepth::Twelve] {
         let avif = AvifEncoder::new()
             .with_bit_depth(bits)
-            .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Rgba8>::new(&px, dims()).unwrap())
             .expect("encode");
         let container = AvifContainer::parse(&avif).expect("parses");
         let img = container.image();
@@ -468,7 +471,7 @@ fn gray8_widens_to_a_deeper_monochrome_item() {
     for bits in [BitDepth::Ten, BitDepth::Twelve] {
         let avif = AvifEncoder::new()
             .with_bit_depth(bits)
-            .encode_to_vec(ImageRef::<Gray8>::new(&px, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Gray8>::new(&px, dims()).unwrap())
             .expect("encode");
         let decoded = libavif_oracle::decode_avif(&avif)
             .unwrap_or_else(|e| panic!("libavif decode failed at {bits:?}: {e}"));
@@ -517,7 +520,7 @@ fn lossy_rgb8_codes_deeper_and_stays_within_the_quality_bound() {
             })
         })
         .collect();
-    let image = ImageRef::<Rgb8>::new(&px, DIMS).unwrap();
+    let image = ImageRef::<Rgb8>::new(&px, dims()).unwrap();
     for bits in [BitDepth::Ten, BitDepth::Twelve] {
         let avif = AvifEncoder::lossy(90)
             .with_bit_depth(bits)
@@ -542,7 +545,7 @@ fn lossy_rgb8_codes_deeper_and_stays_within_the_quality_bound() {
 #[test]
 fn eight_bit_input_codes_at_eight_unless_asked() {
     let px = source8(3);
-    let image = ImageRef::<Rgb8>::new(&px, DIMS).unwrap();
+    let image = ImageRef::<Rgb8>::new(&px, dims()).unwrap();
     // Unset is 8 for an 8-bit input — the bytes it always wrote — and an explicit `Eight` is the
     // same request, so the two encodes are identical.
     let default_avif = AvifEncoder::new().encode_to_vec(image).expect("encode");
@@ -571,10 +574,10 @@ fn eight_bit_input_codes_at_eight_unless_asked() {
     let errors = [
         encoder.encode_to_vec(image).expect_err("Rgb8"),
         encoder
-            .encode_to_vec(ImageRef::<Rgba8>::new(&rgba, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Rgba8>::new(&rgba, dims()).unwrap())
             .expect_err("Rgba8"),
         encoder
-            .encode_to_vec(ImageRef::<Gray8>::new(&gray, DIMS).unwrap())
+            .encode_to_vec(ImageRef::<Gray8>::new(&gray, dims()).unwrap())
             .expect_err("Gray8"),
     ];
     for err in errors {

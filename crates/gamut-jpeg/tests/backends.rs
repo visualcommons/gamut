@@ -87,7 +87,8 @@ enum Act {
     Fail,
     /// Accept, then return the late-decline sentinel.
     LateDecline,
-    /// Accept, then fail with an [`Error::Unsupported`] that is *not* the late-decline sentinel.
+    /// Accept, then fail with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
+    /// error that is *not* the late-decline sentinel.
     Unsupported,
 }
 
@@ -110,8 +111,14 @@ impl JpegStreamDecoder for ScriptedDecoder {
         match self.act {
             Act::Accept => Ok(self.out.clone()),
             Act::LateDecline => Err(backend_declined()),
-            Act::Unsupported => Err(Error::Unsupported("scripted decode unsupported")),
-            _ => Err(Error::InvalidInput("scripted decode failure")),
+            Act::Unsupported => Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "scripted decode unsupported",
+            )),
+            _ => Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "scripted decode failure",
+            )),
         }
     }
 }
@@ -139,8 +146,14 @@ impl JpegStreamEncoder for ScriptedEncoder {
         match self.act {
             Act::Accept => Ok(self.out.clone()),
             Act::LateDecline => Err(backend_declined()),
-            Act::Unsupported => Err(Error::Unsupported("scripted encode unsupported")),
-            _ => Err(Error::InvalidInput("scripted encode failure")),
+            Act::Unsupported => Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "scripted encode unsupported",
+            )),
+            _ => Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "scripted encode failure",
+            )),
         }
     }
 }
@@ -1488,8 +1501,14 @@ fn abi_decode_adapter_rejects_component_counts_it_cannot_lay_out() {
 fn the_declined_sentinel_is_public_and_recognised() {
     let err = backend_declined();
     assert!(is_backend_declined(&err));
-    assert!(!is_backend_declined(&Error::InvalidInput("nope")));
-    assert!(!is_backend_declined(&Error::Unsupported("nope")));
+    assert!(!is_backend_declined(&Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
+        "nope"
+    )));
+    assert!(!is_backend_declined(&Error::unsupported(
+        env!("CARGO_PKG_NAME"),
+        "nope"
+    )));
 }
 
 #[test]

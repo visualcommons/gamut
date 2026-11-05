@@ -16,7 +16,8 @@
 //! The typed [`DecodeImage`] implementations therefore perform **lossless widening only** —
 //! greyscale replicates into RGB, an opaque alpha channel can be added, sub-byte greys scale
 //! exactly to 8 bits, 8-bit samples widen to 16 — and refuse lossy requests (dropping alpha or
-//! transparency, narrowing 16-bit samples) with [`Error::Unsupported`] unless
+//! transparency, narrowing 16-bit samples) with an
+//! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error unless
 //! [`PngDecoder::convert_policy`] permits them.
 
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
@@ -94,7 +95,9 @@ impl PngDecoder {
     ///
     /// Backends are tried in **push order**; the built-in `miniz_oxide` inflater is the implicit
     /// tail, so pushing nothing keeps today's behaviour exactly. A backend that returns `false`
-    /// from [`IdatInflater::supports`] (or [`Error::Unsupported`] from [`IdatInflater::inflate`])
+    /// from [`IdatInflater::supports`] (or an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error from
+    /// [`IdatInflater::inflate`])
     /// is skipped; one that accepts and then fails propagates its error rather than falling back —
     /// see the [`backend`](crate::backend) module docs for the full contract.
     ///
@@ -102,7 +105,9 @@ impl PngDecoder {
     ///
     /// The decoder's own budget (see [`with_max_image_bytes`](Self::with_max_image_bytes)) is
     /// passed to the backend as `max_out` *and* re-checked against the bytes it returns. A backend
-    /// that overshoots is rejected with [`Error::InvalidInput`], never truncated, so a hostile or
+    /// that overshoots is rejected with an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error, never truncated, so
+    /// a hostile or
     /// buggy backend cannot turn a zlib bomb into an out-of-memory.
     ///
     /// Only the **IDAT** stream goes through the seam. Ancillary compressed payloads (iCCP, zTXt,
@@ -410,9 +415,11 @@ impl PngDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for a malformed file and [`Error::Unsupported`] for one
-    /// exceeding the decoder's limits or using an unknown critical chunk. Malformed *metadata*
-    /// payloads are not errors: the affected chunk is skipped (§13.1) and its field stays empty.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
+    /// malformed file and an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error
+    /// for one exceeding the decoder's limits or using an unknown critical chunk. Malformed
+    /// *metadata* payloads are not errors: the affected chunk is skipped (§13.1) and its field
+    /// stays empty.
     pub fn decode(&self, data: &[u8]) -> Result<DecodedPng> {
         let parsed = self.parse_stream(data, true)?;
         let meta = collected(
@@ -689,8 +696,10 @@ fn collected(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the signature, IHDR, or chunk framing is malformed, IHDR is
-/// duplicated, or IEND is missing; [`Error::Unsupported`] for an unknown critical chunk. Unlike
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// signature, IHDR, or chunk framing is malformed, IHDR is duplicated, or IEND is missing; an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for an unknown critical
+/// chunk. Unlike
 /// [`PngDecoder::decode`] it does **not** require IDAT — a stream carrying only metadata is read
 /// successfully. Malformed *metadata* payloads are never errors: the affected chunk is skipped
 /// (§13.1) and its field stays empty, as are chunks whose CRC does not match.

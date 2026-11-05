@@ -101,8 +101,9 @@ impl DngRewrite {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the container or its sub-IFD tree is unreadable — a
-    /// preserving rewrite refuses to guess — and [`Error::Unsupported`] if the file carries
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// container or its sub-IFD tree is unreadable — a preserving rewrite refuses to guess — and an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the file carries
     /// `ExtraCameraProfiles` (embedded camera-profile streams; carrying them through a rewrite
     /// is deferred).
     pub fn open(data: &[u8]) -> Result<Self> {
@@ -218,7 +219,8 @@ impl DngRewrite {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if a payload range lies outside the original stream, an
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
+    /// payload range lies outside the original stream, an
     /// offset/count pair is incoherent, or the layout is unrepresentable (classic width
     /// overflow).
     pub fn write(&self) -> Result<RewrittenDng> {

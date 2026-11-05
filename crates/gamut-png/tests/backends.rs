@@ -299,10 +299,16 @@ impl IdatInflater for ScriptedInflater {
         );
         match self.act {
             Act::Work => miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(zlib, max_out)
-                .map_err(|_| Error::InvalidInput("test: inflate failed")),
+                .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "test: inflate failed")),
             Act::Produce(n) => Ok(vec![0u8; n]),
-            Act::DeclineLate => Err(Error::Unsupported("test: late decline")),
-            Act::Fail => Err(Error::InvalidInput("test: backend exploded")),
+            Act::DeclineLate => Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "test: late decline",
+            )),
+            Act::Fail => Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "test: backend exploded",
+            )),
         }
     }
 }
@@ -351,8 +357,14 @@ impl IdatDeflater for ScriptedDeflater {
                     .zlib_compress(raw, &mut zlib);
                 Ok(zlib)
             }
-            Act::DeclineLate => Err(Error::Unsupported("test: late decline")),
-            Act::Fail => Err(Error::InvalidInput("test: backend exploded")),
+            Act::DeclineLate => Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "test: late decline",
+            )),
+            Act::Fail => Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "test: backend exploded",
+            )),
         }
     }
 }

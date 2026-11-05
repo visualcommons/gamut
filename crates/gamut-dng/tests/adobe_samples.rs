@@ -13,8 +13,8 @@ fn assert_matches_adobe(name: &str) {
     let adobe = gamut_dng_oracle::read_raw_dng(&bytes).expect("adobe decode");
     assert_eq!(
         (
-            gamut.raw.dimensions().width,
-            gamut.raw.dimensions().height,
+            gamut.raw.dimensions().width(),
+            gamut.raw.dimensions().height(),
             u32::from(gamut.raw.samples_per_pixel())
         ),
         (adobe.width, adobe.height, adobe.planes),

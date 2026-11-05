@@ -135,7 +135,7 @@ now refuses a recognised code in `UnknownValue::new` (#608), so variant and code
 value a caller can build. *Pair*: a tag given both a field and a group is two entries under one tag, which
 TIFF 6.0 §2 does not allow and which readers resolve in opposite directions — this crate keeps the
 last occurrence, libtiff ignores everything after the first — so it is refused too. All four are
-`Error::InvalidInput` from `with_tiff_metadata`'s encode before any pixel work, on **every** public
+`ErrorKind::InvalidInput` from `with_tiff_metadata`'s encode before any pixel work, on **every** public
 encode surface, rather than a well-formed file this crate cannot read back unchanged. The bound is
 the spec's; that a narrower one is also easier to assert is not on its own a reason to narrow a
 contract.
@@ -148,7 +148,7 @@ entry — that a `c2pa.hash.data` binding excludes; §18.7.3.3 leaves that the o
 asset has), and `gamut-dng` calls the same helper, so the two formats cannot drift.
 `with_c2pa_reserved` writes a zero-filled reservation for an external signer to overwrite in place.
 It is an infallible builder, so every bound on `len` is enforced by the **encode** that follows, as
-`Error::InvalidInput`, on every entry point: below the store's minimum (8 bytes, 9 in BigTIFF — the
+`ErrorKind::InvalidInput`, on every entry point: below the store's minimum (8 bytes, 9 in BigTIFF — the
 JUMBF box header, and one more than the variant's inline threshold, since a value that packs inline
 is not the run at the end of the file §A.3.6 wants), above what a buffer can hold, since past
 `isize::MAX` a `Vec<u8>` cannot exist and `vec![0; len]` said so by panicking with a capacity
@@ -259,7 +259,7 @@ The API was frozen after a full-surface review; the additions and breaks:
   written into the page's own IFD 0) and `gps` (the `GPSInfo` sub-IFD), with `with_ifd0` /
   `with_gps` builders and nine named `tags` constants (`IMAGE_DESCRIPTION` … `PRIMARY_CHROMATICITIES`)
   — fields on a `#[non_exhaustive]` struct and new items, so semver-minor. The encode refuses a
-  0th-IFD field under any other tag, or a group, with `Error::InvalidInput`; the GPS sub-IFD is
+  0th-IFD field under any other tag, or a group, with `ErrorKind::InvalidInput`; the GPS sub-IFD is
   held to the Exif sub-IFD's four bounds. The typed path maps the facade model's 0th IFD and GPS
   sub-IFD onto them instead of refusing it. **Behaviour change:** `GPSInfo` is now followed at
   IFD 0, so a file whose IFD-0 `GPSInfo` names an unreadable directory — which used to read with

@@ -185,10 +185,7 @@ fn write_compressed_alph(
         .iter()
         .map(|&a| 0xff00_0000 | (u32::from(a) << 8))
         .collect();
-    let dims = Dimensions {
-        width: width as u32,
-        height: height as u32,
-    };
+    let dims = Dimensions::new(width as u32, height as u32)?;
     let stream = encode_image(&argb, dims, effort)?;
     let mut out = Vec::with_capacity(1 + stream.len());
     out.push(method.code() << 2 | 0x01); // P = 0, C = 1 (lossless)
@@ -221,6 +218,11 @@ pub fn write_alph_with_effort(
     effort: Effort,
 ) -> Result<Vec<u8>> {
     let mut best = write_raw_alph(plane, width, height);
+    // A zero-sized plane has no `Dimensions` for the VP8L encode, and no compressed payload could
+    // undercut its one-byte raw one anyway.
+    if width == 0 || height == 0 {
+        return Ok(best);
+    }
     // The compressed path's pre-filter is a free choice the decoder inverts either way. Most rungs
     // leave it off and let the VP8L spatial predictors do the decorrelation; the top rungs search
     // all four, which costs a full VP8L encode each and is why it sits where it does on the ladder.
@@ -249,8 +251,8 @@ pub fn write_alph_with_effort(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for an empty payload, a raw payload of the wrong length, or a
-/// malformed compressed stream.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for an empty
+/// payload, a raw payload of the wrong length, or a malformed compressed stream.
 pub fn read_alph(payload: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
     let &header = payload
         .first()
@@ -328,6 +330,18 @@ mod tests {
         assert_eq!(chunk.len(), 1 + w * h);
         assert_eq!(chunk[0] & 0x3, 0, "compression method is raw");
         assert_eq!(read_alph(&chunk, w, h).unwrap(), plane);
+    }
+
+    /// A plane with either side zero has no `Dimensions` for the VP8L encode, so it takes the raw
+    /// payload; one zero side alone must suffice, or the compressed path would fail on it.
+    #[test]
+    fn zero_sided_planes_store_the_raw_payload() {
+        for (w, h) in [(0, 5), (5, 0)] {
+            assert_eq!(
+                write_alph_with_effort(&[], w, h, Effort::default()).unwrap(),
+                write_raw_alph(&[], w, h),
+            );
+        }
     }
 
     /// The filter method lives in bits 2-3 of the `ALPH` header byte (RFC 9649 §2.7.1), beside the

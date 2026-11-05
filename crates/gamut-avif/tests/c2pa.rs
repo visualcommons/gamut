@@ -44,14 +44,7 @@ fn source_rgb() -> Vec<u8> {
 }
 
 fn image(rgb: &[u8]) -> ImageRef<'_, Rgb8> {
-    ImageRef::<Rgb8>::new(
-        rgb,
-        Dimensions {
-            width: W,
-            height: H,
-        },
-    )
-    .expect("buffer matches dimensions")
+    ImageRef::<Rgb8>::new(rgb, Dimensions::new(W, H).unwrap()).expect("buffer matches dimensions")
 }
 
 /// A deterministic payload standing in for a manifest store; every byte differs from

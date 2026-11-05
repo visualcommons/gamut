@@ -72,7 +72,7 @@ impl CameraProfile {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `unique_camera_model` is empty or any `as_shot_neutral`
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `unique_camera_model` is empty or any `as_shot_neutral`
     /// component is not strictly positive (a neutral coordinate must be a usable divisor).
     pub fn new(
         unique_camera_model: impl Into<String>,
@@ -160,7 +160,7 @@ impl CameraProfile {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `xy` is not a usable chromaticity, or if this profile's
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `xy` is not a usable chromaticity, or if this profile's
     /// calibration maps it to an all-zero camera response.
     pub fn with_as_shot_white_xy(mut self, xy: [f64; 2]) -> Result<Self> {
         self.as_shot_neutral = camera_neutral_from_white_xy(&self.calibration(), xy)?;

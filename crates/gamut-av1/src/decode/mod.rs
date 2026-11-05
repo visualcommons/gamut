@@ -4,8 +4,8 @@
 //! `gamut_avif::Av1StillDecoder`. Where the encoder chooses a subset of AV1's tools, a decoder
 //! must accept whatever a conformant encoder produced — so these modules follow the spec's syntax
 //! tables rather than the encoder's choices, and refuse, with a typed
-//! [`Error::Unsupported`](gamut_core::Error::Unsupported), any tool that is signalled but not yet
-//! implemented. A refusal is always explicit; nothing is approximated.
+//! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, any tool that is
+//! signalled but not yet implemented. A refusal is always explicit; nothing is approximated.
 //!
 //! Modules mirror the spec:
 //!
@@ -76,7 +76,8 @@ impl DecodeLimits {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the frame exceeds any cap.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// frame exceeds any cap.
     pub fn check(&self, width: u32, height: u32, tiles: usize) -> Result<()> {
         if width == 0 || height == 0 {
             return Err(Error::invalid_input(
@@ -135,7 +136,8 @@ pub struct StreamInfo {
 /// of issue #259.
 ///
 /// Streams are accepted only at `seq_profile = 1` (8-bit 4:4:4) with intra key frames. Anything
-/// else is refused with a typed [`Error::Unsupported`](gamut_core::Error::Unsupported) naming the
+/// else is refused with a typed [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
+/// error naming the
 /// tool — never approximated. The remaining surface is tracked row by row in
 /// `gamut-avif/STATUS.md`.
 #[derive(Debug, Clone, Default)]
@@ -172,9 +174,9 @@ impl Av1Decoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the bitstream is
-    /// malformed, truncated, or exceeds this decoder's [`DecodeLimits`], and
-    /// [`Error::Unsupported`](gamut_core::Error::Unsupported) if it uses a coding tool that is
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// bitstream is malformed, truncated, or exceeds this decoder's [`DecodeLimits`], and an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if it uses a coding tool that is
     /// not implemented.
     pub fn inspect(&self, temporal_unit: &[u8]) -> Result<StreamInfo> {
         let (sequence, frame, tiles) = self.parse_frame(temporal_unit)?;

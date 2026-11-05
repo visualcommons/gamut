@@ -15,14 +15,7 @@ fn valid_rgb(w: u32, h: u32) -> Vec<u8> {
     let mut out = Vec::new();
     TiffEncoder::new()
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut out,
         )
         .unwrap();
@@ -92,14 +85,7 @@ fn rejects_zero_tile_dimension() {
     TiffEncoder::new()
         .with_tiling(16, 16)
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: 32,
-                    height: 32,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(32, 32).unwrap()).unwrap(),
             &mut v,
         )
         .unwrap();
@@ -120,14 +106,7 @@ fn honours_white_is_zero_photometric() {
     TiffEncoder::new()
         .with_compression(Compression::None)
         .encode_image(
-            ImageRef::<Bilevel>::new(
-                &src,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Bilevel>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut tiff,
         )
         .unwrap();
@@ -188,14 +167,7 @@ fn rejects_a_tile_past_the_size_cap() {
         .with_compression(Compression::None)
         .with_tiling(16, 16)
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: 16,
-                    height: 16,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(16, 16).unwrap()).unwrap(),
             &mut v,
         )
         .unwrap();
@@ -331,14 +303,7 @@ fn rejects_tile_count_mismatch() {
     TiffEncoder::new()
         .with_tiling(16, 16)
         .encode_image(
-            ImageRef::<Rgb8>::new(
-                &rgb,
-                Dimensions {
-                    width: 32,
-                    height: 32,
-                },
-            )
-            .unwrap(),
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(32, 32).unwrap()).unwrap(),
             &mut v,
         )
         .unwrap();

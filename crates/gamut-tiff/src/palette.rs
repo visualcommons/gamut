@@ -23,7 +23,7 @@ impl Palette8 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `rgb.len() != 256 * 3`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `rgb.len() != 256 * 3`.
     pub fn from_rgb_triples(rgb: &[u8]) -> Result<Self> {
         if rgb.len() != 256 * 3 {
             return Err(Error::invalid_input(
@@ -44,7 +44,7 @@ impl Palette8 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `colormap.len() != 3 * 256`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `colormap.len() != 3 * 256`.
     pub fn from_tiff_colormap(colormap: &[u32]) -> Result<Self> {
         if colormap.len() != 3 * 256 {
             return Err(Error::invalid_input(

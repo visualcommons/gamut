@@ -174,7 +174,8 @@ fn predict(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `precision` is not `2..=16`, `components` is not `1..=4`,
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `precision`
+/// is not `2..=16`, `components` is not `1..=4`,
 /// a dimension is zero or exceeds 65535, or `samples.len()` is not
 /// `width * height * components`.
 pub fn encode(
@@ -705,12 +706,13 @@ fn parse_sos(data: &[u8], pos: usize, frame: &Frame) -> Result<Scan> {
 ///
 /// Accepts the full T.81 process-14 reader envelope: predictors 1–7, the point transform,
 /// per-component Huffman tables, and restart intervals. See the module docs for what is
-/// rejected as [`Error::Unsupported`].
+/// rejected as [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported).
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the markers or entropy stream are malformed, or
-/// [`Error::Unsupported`] for conformant-but-unsupported shapes (multi-scan, subsampling,
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the markers
+/// or entropy stream are malformed, or an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for conformant-but-unsupported shapes (multi-scan, subsampling,
 /// DNL-deferred height).
 pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
     if data.len() < 2 || data[0] != MARKER || data[1] != SOI {

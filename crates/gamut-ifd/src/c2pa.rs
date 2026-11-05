@@ -59,22 +59,27 @@ use crate::{
 /// §A.3.6.
 pub const C2PA_MANIFEST_STORE: u16 = 52545;
 
-/// The length below which a value cannot be a manifest store: a JUMBF box header, being a
-/// 4-byte `LBox` followed by a 4-byte `TBox` (C2PA 2.4 §8.4.2.3's incidental description of the
-/// box framing; see `references/c2pa/README.md`). A manifest store is a JUMBF superbox, so
-/// nothing shorter can be one, and a reservation shorter than this could never be filled with a
-/// valid store.
-///
-/// The bound is applied in both directions, but not symmetrically — `references/c2pa/README.md`
-/// prescribes exactly this split for a reader: [`locate`] treats a shorter value as **not a
-/// manifest store** and reports absence, while [`append_store`] **refuses** it, because an
-/// encoder handed a store it cannot write must say so rather than silently drop it.
-///
-/// **It does not by itself guarantee the value is out of line.** Classic TIFF's inline threshold
-/// is 4 bytes, but BigTIFF's is 8, so a store of exactly this length packs *inline* in a BigTIFF
-/// entry. [`append_store`] therefore gates on the variant's own
-/// [`inline_threshold`](Variant::inline_threshold), not on this constant.
-pub const MIN_STORE_LEN: usize = 8;
+// Both constants are gamut-core's, re-exported under this crate's names.
+//
+// MIN_STORE_LEN: the JUMBF box header length below which a value cannot be a manifest store, and
+// a reservation shorter than it could never be filled with a valid store.
+//
+// The bound is applied in both directions, but not symmetrically — `references/c2pa/README.md`
+// prescribes exactly this split for a reader: `locate` treats a shorter value as **not a
+// manifest store** and reports absence, while `append_store` **refuses** it, because an
+// encoder handed a store it cannot write must say so rather than silently drop it.
+//
+// **It does not by itself guarantee the value is out of line.** Classic TIFF's inline threshold
+// is 4 bytes, but BigTIFF's is 8, so a store of exactly this length packs *inline* in a BigTIFF
+// entry. `append_store` therefore gates on the variant's own `Variant::inline_threshold`, not on
+// this constant.
+//
+// C2PA_NOT_VALIDATED: C2PA 2.4 §15.12 puts validation on a validator; this crate holds no COSE,
+// X.509, RFC 3161 or trust-list code and never reports a validity verdict. "C2PA: present"
+// printed beside EXIF and ICC reads as *verified* to anyone who has seen a Content Credentials
+// badge, so `C2paSummary::summary_lines` carries this text in the line that reports the store, never as a
+// footnote. The same sentence `gamut-heic` carries, so every container reports alike.
+pub use gamut_core::c2pa::{MIN_STORE_LEN, NOT_VALIDATED as C2PA_NOT_VALIDATED};
 
 /// The two byte ranges an external signer excludes from a `c2pa.hash.data` hard binding over a
 /// TIFF-based asset (C2PA 2.4 §18.5.5): the manifest store itself and the `count` field of its
@@ -118,8 +123,8 @@ impl C2paExclusions {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if either range is empty (nothing to exclude), or if the
-    /// two overlap. Ranges that merely *abut* are accepted: touching is not overlapping.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if either
+    /// range is empty (nothing to exclude), or if the two overlap. Ranges that merely *abut* are accepted: touching is not overlapping.
     pub fn new(store: Range, count_field: Range) -> Result<Self> {
         if store.len == 0 || count_field.len == 0 {
             return Err(Error::invalid_input(
@@ -243,11 +248,12 @@ fn exceeds_offset_width(variant: Variant, end: u64) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the container is unreadable (bad header, looping or
-/// runaway chain, no IFD) or the store's declared extent lies outside the source — the same
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// container is unreadable (bad header, looping or runaway chain, no IFD) or the store's declared
+/// extent lies outside the source — the same
 /// verdicts [`read`](crate::read) gives such a file — or overlaps the entry's own count field
 /// (a store offset no writer places, which would break [`C2paExclusions`]' disjointness), or
-/// [`Error::Io`] if the source fails.
+/// an [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails.
 pub fn locate<S: ReadAt>(src: S) -> Result<Option<C2paExclusions>> {
     let mut reader = IfdReader::open(src)?;
     let last = last_ifd(&mut reader)?;
@@ -313,17 +319,6 @@ fn read_store<S: ReadAt>(
     )
     .map_err(|_| C2paUnreadReason::OverlapsCountField))
 }
-
-/// What a report of a located manifest store has to say beside it, because locating one is not
-/// validating it.
-///
-/// C2PA 2.4 §15.12 puts validation on a validator; this crate holds no COSE, X.509, RFC 3161 or
-/// trust-list code and never reports a validity verdict. "C2PA: present" printed beside EXIF and
-/// ICC reads as *verified* to anyone who has seen a Content Credentials badge, so
-/// [`C2paSummary::summary_lines`] carries this text in the line that reports the store, never as a
-/// footnote. The same sentence `gamut-heic` carries, so every container reports alike.
-pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
-     it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
 
 /// Why a tag-52545 ([`C2PA_MANIFEST_STORE`]) entry of the main IFD chain yielded no manifest store.
 ///
@@ -526,8 +521,9 @@ impl C2paSummary {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the container is unreadable (bad header, looping or runaway
-/// chain, no IFD), or [`Error::Io`] if the source fails. Unlike [`locate`], a store whose extent
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// container is unreadable (bad header, looping or runaway chain, no IFD), or an
+/// [`ErrorKind::Io`](gamut_core::ErrorKind::Io) error if the source fails. Unlike [`locate`], a store whose extent
 /// lies outside the file or overlaps its count field is not an error here: it is listed in
 /// [`C2paSummary::unread`].
 pub fn summarize<S: ReadAt>(src: S) -> Result<C2paSummary> {
@@ -607,7 +603,8 @@ pub fn summarize<S: ReadAt>(src: S) -> Result<C2paSummary> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `store` is shorter than [`MIN_STORE_LEN`]; if it is not
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `store` is
+/// shorter than [`MIN_STORE_LEN`]; if it is not
 /// longer than the container variant's [`inline_threshold`](Variant::inline_threshold), since a
 /// value that packs *inline* cannot be the run at the end of the file this function exists to
 /// place (in BigTIFF that threshold is `MIN_STORE_LEN` itself, so the shortest writable BigTIFF

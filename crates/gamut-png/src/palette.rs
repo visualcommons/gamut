@@ -56,7 +56,8 @@ impl PngPalette {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if there are zero or more than 256 entries.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if there
+    /// are zero or more than 256 entries.
     pub fn new(entries: &[[u8; 3]]) -> Result<Self> {
         Self::with_transparency(entries, &[])
     }
@@ -66,8 +67,8 @@ impl PngPalette {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if there are zero or more than 256 RGB entries, or if there
-    /// are more alpha values than RGB entries.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if there
+    /// are zero or more than 256 RGB entries, or if there are more alpha values than RGB entries.
     pub fn with_transparency(rgb: &[[u8; 3]], alpha: &[u8]) -> Result<Self> {
         if rgb.is_empty() || rgb.len() > 256 {
             return Err(Error::invalid_input(
@@ -91,8 +92,9 @@ impl PngPalette {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the PLTE payload is not a whole number of RGB triples,
-    /// holds zero or more than 256 entries, or has fewer entries than the tRNS payload.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// PLTE payload is not a whole number of RGB triples, holds zero or more than 256 entries, or
+    /// has fewer entries than the tRNS payload.
     pub(crate) fn from_chunks(plte: &[u8], trns: Option<&[u8]>) -> Result<Self> {
         if !plte.len().is_multiple_of(3) {
             return Err(Error::invalid_input(

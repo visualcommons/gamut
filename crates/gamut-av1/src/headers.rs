@@ -172,7 +172,8 @@ const LEVELS: [(u8, u32, u32, u64); 7] = [
 ///
 /// # Errors
 ///
-/// [`Error::Unsupported`] if the image exceeds the level-6.0 limits (out of M0 scope).
+/// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the image exceeds
+/// the level-6.0 limits (out of M0 scope).
 pub fn pick_level(width: u32, height: u32) -> Result<u8> {
     let pixels = u64::from(width) * u64::from(height);
     for &(idx, max_h, max_v, max_pic) in &LEVELS {

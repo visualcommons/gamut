@@ -66,9 +66,9 @@ pub struct TiffInfo {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if a required tag is missing, the page is zero-sized, or
-/// `SamplesPerPixel` is 0, or
-/// [`Error::Unsupported`] for an on-disk code this crate does not recognise or a layout a single
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
+/// required tag is missing, the page is zero-sized, or `SamplesPerPixel` is 0, or an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for an on-disk code this crate does not recognise or a layout a single
 /// depth cannot describe.
 pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
     let width = require_u32(ifd, tags::IMAGE_WIDTH, "TIFF: missing ImageWidth")?;

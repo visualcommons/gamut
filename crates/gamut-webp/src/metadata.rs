@@ -71,8 +71,8 @@ pub struct WebpMetadata {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if `data` is not a valid
-/// RIFF/WebP file, or if a chunk's declared size runs past the end of the data.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data` is
+/// not a valid RIFF/WebP file, or if a chunk's declared size runs past the end of the data.
 ///
 /// # Example
 ///
@@ -115,8 +115,8 @@ pub fn metadata(data: &[u8]) -> Result<WebpMetadata> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if `data` is not a valid
-/// RIFF/WebP file, or if a chunk's declared size runs past the end of the data.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data` is
+/// not a valid RIFF/WebP file, or if a chunk's declared size runs past the end of the data.
 ///
 /// # Example
 ///
@@ -234,7 +234,8 @@ mod typed {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message
+        /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when
+        /// the model does not serialize (the facade's message
         /// is carried as [`Error::detail`]), and whatever
         /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
         pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
@@ -256,7 +257,8 @@ mod typed {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (RIFF
+        /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the
+        /// blocks carry a legacy IPTC-IIM stream (RIFF
         /// defines no IPTC-IIM chunk) or a C2PA manifest store. A store is never embedded from
         /// metadata blocks: it is signed over the bytes of the one file it was made for, so a
         /// store computed for this output goes through [`with_c2pa`](Self::with_c2pa) /

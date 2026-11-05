@@ -716,7 +716,7 @@ mod tests {
 
     /// A `ReadAt` whose *transport* fails after `budget` successful reads — a disk error, a
     /// dropped network mount. Distinct from a source whose bytes are merely wrong: `gamut-core`
-    /// maps the former to `Error::Io` and the latter to `Error::InvalidInput`.
+    /// maps the former to `ErrorKind::Io` and the latter to `ErrorKind::InvalidInput`.
     struct FailingAfter<S> {
         inner: S,
         budget: usize,
@@ -725,7 +725,7 @@ mod tests {
     impl<S: ReadAt> ReadAt for FailingAfter<S> {
         fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> gamut_core::Result<()> {
             let Some(left) = self.budget.checked_sub(1) else {
-                return Err(gamut_core::Error::Io(std::io::Error::other(
+                return Err(gamut_core::Error::from(std::io::Error::other(
                     "transport lost",
                 )));
             };

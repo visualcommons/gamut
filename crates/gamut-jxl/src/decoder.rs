@@ -74,9 +74,10 @@ pub struct JxlMetadata {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for a truncated or malformed box header, a box overrunning the
-/// stream, or an `Exif` payload shorter than its offset field or with the offset past its end;
-/// [`Error::Unsupported`] for a Brotli-compressed (`brob`) `Exif`/`xml ` box, which this crate
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
+/// truncated or malformed box header, a box overrunning the stream, or an `Exif` payload shorter
+/// than its offset field or with the offset past its end; an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a Brotli-compressed (`brob`) `Exif`/`xml ` box, which this crate
 /// cannot decompress. Any other `brob` box is skipped.
 #[cfg(feature = "decode")]
 fn container_metadata_boxes(data: &[u8]) -> Result<MetadataBoxes> {
@@ -154,7 +155,8 @@ const LARGE_BOX_HEADER: usize = 16;
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `data` is too short to hold the header it announces.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data` is
+/// too short to hold the header it announces.
 #[cfg(feature = "decode")]
 fn parse_box_header(data: &[u8]) -> Result<([u8; 4], usize, usize)> {
     let [s0, s1, s2, s3, t0, t1, t2, t3, tail @ ..] = data else {
@@ -252,8 +254,8 @@ impl gamut_metadata::TypedMetadata for JxlMetadata {
 ///
 /// Anything **lossy** — dropping a present alpha channel, reducing colour to grayscale — is refused
 /// by default and needs [`JxlDecoder::with_convert_policy`]. Animated input and premultiplied
-/// (associated) alpha are rejected outright, each an [`Error::Unsupported`] a later version may
-/// relax.
+/// (associated) alpha are rejected outright, each an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error a later version may relax.
 ///
 /// Construct it with [`JxlDecoder::new`] or [`Default`], then optionally set
 /// [`JxlDecoder::with_codestream_bit_depth`], [`JxlDecoder::with_convert_policy`], and the hostile-input
@@ -265,7 +267,8 @@ impl gamut_metadata::TypedMetadata for JxlMetadata {
 /// The codestream itself is decoded by a [`JxlCodestreamDecoder`]. With the `decode` feature the
 /// pure-Rust jxl-rs wrapper is the implicit **last** backend, so the default decoder needs no
 /// wiring. [`JxlDecoder::push_backend`] inserts a platform or alternate decoder *ahead* of it; with
-/// neither a pushed backend nor the built-in tail, decoding reports [`Error::Unsupported`]. See
+/// neither a pushed backend nor the built-in tail, decoding reports an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error. See
 /// [`crate::backend`] for the fallback contract.
 ///
 /// The type is `Clone` but **not `Copy`** (it was `Copy` before backends existed): it owns a shared
@@ -352,8 +355,9 @@ impl JxlDecoder {
         Self::default()
     }
 
-    /// Caps the accepted image dimensions; a wider or taller image is refused with
-    /// [`Error::Unsupported`] once its header is parsed, before any pixel buffer is allocated.
+    /// Caps the accepted image dimensions; a wider or taller image is refused with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error once its header is
+    /// parsed, before any pixel buffer is allocated.
     ///
     /// Unbounded by default. This only ever tightens what the decoder accepts: the built-in
     /// tail's fixed jxl-rs pixel limit of `1 << 28` samples still applies on top. A raster a pushed
@@ -371,8 +375,9 @@ impl JxlDecoder {
         (self.limits.max_width, self.limits.max_height)
     }
 
-    /// Caps the decoded sample buffer in bytes; a larger image is refused with
-    /// [`Error::Unsupported`] once its header is parsed, before any pixel buffer is allocated.
+    /// Caps the decoded sample buffer in bytes; a larger image is refused with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error once its header is
+    /// parsed, before any pixel buffer is allocated.
     ///
     /// The budgeted quantity is `width × height × bytes per pixel` of the wider of the stream's
     /// natural layout and the requested one — the largest raster the decode materialises. It
@@ -457,8 +462,8 @@ impl JxlDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the data is not a decodable JPEG XL stream or is
-    /// truncated before the image headers.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// data is not a decodable JPEG XL stream or is truncated before the image headers.
     #[cfg(feature = "decode")]
     pub fn info(&self, data: &[u8]) -> Result<JxlInfo> {
         crate::jxlrs::info(data)
@@ -476,8 +481,8 @@ impl JxlDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the data is not a decodable JPEG XL stream or is
-    /// truncated before the colour metadata.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// data is not a decodable JPEG XL stream or is truncated before the colour metadata.
     #[cfg(feature = "decode")]
     pub fn embedded_icc_profile(&self, data: &[u8]) -> Result<Option<Vec<u8>>> {
         crate::jxlrs::embedded_icc_profile(data)
@@ -497,10 +502,12 @@ impl JxlDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the data carries neither signature, is truncated before
-    /// the colour metadata, or has a malformed box sequence (a truncated header, a box overrunning
-    /// the stream, an `Exif` payload shorter than its offset field or with the offset past its
-    /// end); [`Error::Unsupported`] for a `brob`-wrapped `Exif` / `xml ` box.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// data carries neither signature, is truncated before the colour metadata, or has a malformed
+    /// box sequence (a truncated header, a box overrunning the stream, an `Exif` payload shorter
+    /// than its offset field or with the offset past its end); an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a `brob`-wrapped
+    /// `Exif` / `xml ` box.
     ///
     /// The call is strict: a codestream fault fails it even when the boxes were located, so a
     /// caller recovering what a damaged file still carries reads
@@ -524,10 +531,11 @@ impl JxlDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the data carries neither signature or has a malformed
-    /// box sequence (a truncated header, a box overrunning the stream, an `Exif` payload shorter
-    /// than its offset field or with the offset past its end); [`Error::Unsupported`] for a
-    /// `brob`-wrapped `Exif` / `xml ` box.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// data carries neither signature or has a malformed box sequence (a truncated header, a box
+    /// overrunning the stream, an `Exif` payload shorter than its offset field or with the offset
+    /// past its end); an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for
+    /// a `brob`-wrapped `Exif` / `xml ` box.
     #[cfg(feature = "decode")]
     pub fn metadata_boxes(&self, data: &[u8]) -> Result<JxlMetadata> {
         let (exif, xmp) = match JxlFraming::detect(data) {
@@ -587,7 +595,7 @@ impl JxlDecoder {
                     }
                     let dims = decoded.dimensions();
                     self.limits
-                        .check(dims.width, dims.height, format.bytes_per_pixel())?;
+                        .check(dims.width(), dims.height(), format.bytes_per_pixel())?;
                     return Ok(Some(decoded));
                 }
                 // A late decline: fall through exactly as `supports() == false` would.
@@ -614,7 +622,8 @@ impl JxlDecoder {
 ///
 /// Best effort means exactly that, and JPEG XL's coding structure sets the ceiling:
 ///
-/// - Truncation **before the image headers** is still [`Error::InvalidInput`] — without dimensions
+/// - Truncation **before the image headers** is still an
+///   [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error — without dimensions
 ///   there is no buffer to hand back.
 /// - Truncation **before the frame header** yields a zero-filled buffer at the declared dimensions
 ///   ([`JxlRender::HeaderOnly`]).
@@ -625,7 +634,8 @@ impl JxlDecoder {
 /// - An image small enough to be coded as a **single group** — roughly 256×256 or below — has no
 ///   partially-decodable structure at all, and comes back blank.
 /// - Not every truncation is even recoverable: some cut points are indistinguishable from
-///   corruption to the decoder and still return [`Error::InvalidInput`].
+///   corruption to the decoder and still return an
+///   [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error.
 ///
 /// So always consult [`JxlPartialReport::is_complete`]; never assume pixels are present.
 ///
@@ -645,9 +655,10 @@ pub trait DecodePartialImage<P: Pixel> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `data` is malformed, or truncated before the image
-    /// headers, or truncated at a point jxl-rs cannot tell from corruption; [`Error::Unsupported`]
-    /// if the stream uses a feature that is not implemented or cannot be presented as `P`.
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `data`
+    /// is malformed, or truncated before the image headers, or truncated at a point jxl-rs cannot
+    /// tell from corruption; an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
+    /// error if the stream uses a feature that is not implemented or cannot be presented as `P`.
     fn decode_partial_image(&self, data: &[u8]) -> Result<(ImageBuf<P>, JxlPartialReport)>;
 }
 

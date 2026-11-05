@@ -33,8 +33,10 @@ pub struct LinearImage {
 /// Applies the Chapter-5 mapping to `raw` (see [`RawImage::to_linear`]).
 pub(crate) fn linearize(raw: &RawImage) -> Result<LinearImage> {
     let dims = raw.dimensions();
-    let (width, height) = (dims.width as usize, dims.height as usize);
-    let [top, left, bottom, right] = raw.active_area().unwrap_or([0, 0, dims.height, dims.width]);
+    let (width, height) = (dims.width() as usize, dims.height() as usize);
+    let [top, left, bottom, right] =
+        raw.active_area()
+            .unwrap_or([0, 0, dims.height(), dims.width()]);
     let (top, left, bottom, right) = (top as usize, left as usize, bottom as usize, right as usize);
     if top >= bottom || left >= right || bottom > height || right > width {
         return Err(Error::invalid_input(

@@ -27,10 +27,7 @@ fn fixture() -> Vec<u8> {
 }
 
 fn dims() -> Dimensions {
-    Dimensions {
-        width: W,
-        height: H,
-    }
+    Dimensions::new(W, H).unwrap()
 }
 
 fn encode(encoder: &AvifEncoder) -> Result<Vec<u8>> {
@@ -356,7 +353,7 @@ enum Outcome {
     Passthrough,
     /// Return the given bytes verbatim (used for malformed-stream cases).
     Bytes(Vec<u8>),
-    /// Fail with `Error::Unsupported(msg)`.
+    /// Fail with an `ErrorKind::Unsupported` error carrying `msg`.
     Fail(&'static str),
 }
 
@@ -410,7 +407,7 @@ impl Av1StillEncoder for Scripted {
         match &self.result {
             Outcome::Passthrough => Ok(builtin_obus(req.base_q_idx(), req.colour(), req.chroma())),
             Outcome::Bytes(b) => Ok(b.clone()),
-            Outcome::Fail(msg) => Err(Error::Unsupported(msg)),
+            Outcome::Fail(msg) => Err(Error::unsupported(env!("CARGO_PKG_NAME"), msg)),
         }
     }
 }
@@ -500,7 +497,7 @@ fn accepted_then_failed_propagates_and_skips_the_tail() {
         .push_backend(Scripted::new("later", true, Outcome::Passthrough, &log));
     let err = encode(&encoder).expect_err("the accepted backend's error propagates");
     assert!(
-        matches!(err, Error::Unsupported("backend exploded")),
+        err.kind() == ErrorKind::Unsupported && err.static_message() == Some("backend exploded"),
         "unexpected error: {err:?}"
     );
     assert_eq!(

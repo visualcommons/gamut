@@ -20,10 +20,7 @@ const PIXELS: [u8; 12] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
 
 /// A 2×2 RGB PNG of [`PIXELS`].
 fn png() -> Vec<u8> {
-    let dims = Dimensions {
-        width: 2,
-        height: 2,
-    };
+    let dims = Dimensions::new(2, 2).unwrap();
     PngEncoder::new()
         .encode_to_vec(ImageRef::<Rgb8>::new(&PIXELS, dims).unwrap())
         .unwrap()

@@ -27,7 +27,8 @@ use super::header::TileInfo;
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the framing is malformed: a tile-size prefix that runs past
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// framing is malformed: a tile-size prefix that runs past
 /// the payload, a tile group whose range falls outside the frame's tile grid, or a payload that
 /// ends before the declared tiles do.
 pub(crate) fn split_tiles<'a>(payload: &'a [u8], info: &TileInfo) -> Result<Vec<&'a [u8]>> {

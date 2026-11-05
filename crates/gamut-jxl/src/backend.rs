@@ -22,7 +22,7 @@
 //! [`JxlDecoder::push_backend`](crate::JxlDecoder::push_backend) insert a backend *ahead* of that
 //! tail. A pushed encode backend is therefore also what **supplies encode on `wasm32`**, where the
 //! libjxl tail cannot be built at all. With no pushed backend and no built-in tail, the direction
-//! reports [`gamut_core::Error::Unsupported`].
+//! reports an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
 //!
 //! # Fallback contract
 //!
@@ -31,7 +31,7 @@
 //!
 //! 1. [`supports`](JxlCodestreamEncoder::supports) returning `false` — the backend declines before
 //!    doing any work;
-//! 2. `Err(`[`Error::Unsupported`]`)` from
+//! 2. an `Err` of kind [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) from
 //!    [`encode`](JxlCodestreamEncoder::encode) / [`decode`](JxlCodestreamDecoder::decode) — a *late*
 //!    decline, the typed mirror of the C [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED)
 //!    code the [`crate::abi`] adapters translate.
@@ -202,9 +202,10 @@ impl<'a> JxlImageRef<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if `format` is not one of the eight layouts gamut-jxl codes
-    /// (8/16-bit gray, gray+alpha, RGB, RGBA), and [`Error::InvalidInput`] if `samples`' storage
-    /// width or length contradicts `format` and `dimensions`.
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if `format`
+    /// is not one of the eight layouts gamut-jxl codes (8/16-bit gray, gray+alpha, RGB, RGBA), and
+    /// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `samples`'
+    /// storage width or length contradicts `format` and `dimensions`.
     pub fn new(
         format: PixelFormat,
         dimensions: Dimensions,
@@ -292,9 +293,10 @@ impl JxlDecoded {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if `format` is not one of the eight layouts gamut-jxl codes,
-    /// and [`Error::InvalidInput`] if `samples`' storage width or length contradicts `format` and
-    /// `dimensions`.
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if `format`
+    /// is not one of the eight layouts gamut-jxl codes, and an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `samples`' storage
+    /// width or length contradicts `format` and `dimensions`.
     pub fn new(
         format: PixelFormat,
         dimensions: Dimensions,
@@ -577,8 +579,9 @@ pub trait JxlCodestreamEncoder: Send {
     ///
     /// # Errors
     ///
-    /// [`Error::Unsupported`] is a *late decline*: the host falls through to the next backend as if
-    /// [`supports`](Self::supports) had returned `false`. Every other error is terminal and
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error is a *late decline*:
+    /// the host falls through to the next backend as if [`supports`](Self::supports) had returned
+    /// `false`. Every other error is terminal and
     /// propagates to the caller unchanged.
     fn encode(&mut self, req: &JxlEncodeRequest, image: &JxlImageRef<'_>) -> Result<Vec<u8>>;
 }
@@ -602,8 +605,9 @@ pub trait JxlCodestreamDecoder: Send {
     ///
     /// # Errors
     ///
-    /// [`Error::Unsupported`] is a *late decline* and falls through to the next backend; every other
-    /// error is terminal and propagates unchanged.
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error is a *late decline*
+    /// and falls through to the next backend; every other error is terminal and propagates
+    /// unchanged.
     fn decode(&mut self, info: &JxlStreamInfo, codestream: &[u8]) -> Result<JxlDecoded>;
 }
 
