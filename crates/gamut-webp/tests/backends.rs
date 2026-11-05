@@ -93,6 +93,8 @@ enum Outcome {
     Bytes(Vec<u8>),
     /// Fail with this error.
     Fail(&'static str),
+    /// Fail with an [`Error::Unsupported`] carrying this message.
+    Unsupported(&'static str),
 }
 
 /// The raster a [`Outcome::Yuv`] backend returns: constant `luma`, and chroma that varies from
@@ -169,6 +171,7 @@ impl WebpCodestreamDecoder for ScriptedDecoder {
             )?)),
             Outcome::Bytes(_) => panic!("byte outcome is encode-only"),
             Outcome::Fail(msg) => Err(Error::InvalidInput(msg)),
+            Outcome::Unsupported(msg) => Err(Error::Unsupported(msg)),
         }
     }
 }
@@ -210,6 +213,7 @@ impl WebpCodestreamEncoder for ScriptedEncoder {
         match &self.outcome {
             Outcome::Bytes(bytes) => Ok(bytes.clone()),
             Outcome::Fail(msg) => Err(Error::InvalidInput(msg)),
+            Outcome::Unsupported(msg) => Err(Error::Unsupported(msg)),
             _ => panic!("raster outcomes are decode-only"),
         }
     }
@@ -315,6 +319,31 @@ fn decode_propagates_an_accepted_backends_error_without_running_the_tail() {
     let err: Result<ImageBuf<Rgb8>> = dec.decode_image(&file);
     assert!(matches!(err, Err(Error::InvalidInput("backend exploded"))));
     assert_eq!(log.ran(), vec!["boom"]);
+}
+
+/// WebP has no late-decline sentinel: once a backend accepts, even its `Unsupported` is terminal,
+/// reaching neither a later backend nor the built-in tail.
+#[test]
+fn decode_propagates_an_accepted_backends_unsupported_without_falling_through() {
+    let (file, _) = lossless_fixture();
+    let log = Arc::new(Log::default());
+    let mut dec = WebpDecoder::new();
+    dec.push_backend(ScriptedDecoder::new(
+        "unsupported",
+        Some(WebpCodestream::Vp8l),
+        Outcome::Unsupported("backend cannot after all"),
+        &log,
+    ));
+    dec.push_backend(ScriptedDecoder::new(
+        "never",
+        Some(WebpCodestream::Vp8l),
+        Outcome::Argb(vec![0; 64]),
+        &log,
+    ));
+    let err: Result<ImageBuf<Rgb8>> = dec.decode_image(&file);
+    assert_error(err, ErrorKind::Unsupported, "backend cannot after all");
+    assert_eq!(log.supports(), vec!["unsupported"]);
+    assert_eq!(log.ran(), vec!["unsupported"]);
 }
 
 #[test]
@@ -605,6 +634,30 @@ fn encode_propagates_an_accepted_backends_error_without_running_the_tail() {
     assert_eq!(log.ran(), vec!["boom"]);
 }
 
+/// The encode twin of
+/// [`decode_propagates_an_accepted_backends_unsupported_without_falling_through`].
+#[test]
+fn encode_propagates_an_accepted_backends_unsupported_without_falling_through() {
+    let log = Arc::new(Log::default());
+    let mut enc = WebpEncoder::lossy(60);
+    enc.push_backend(ScriptedEncoder::new(
+        "unsupported",
+        Some(WebpCodestream::Vp8),
+        Outcome::Unsupported("encoder cannot after all"),
+        &log,
+    ));
+    enc.push_backend(ScriptedEncoder::new(
+        "never",
+        Some(WebpCodestream::Vp8),
+        Outcome::Bytes(vec![0x01, 0x02, 0x03, 0x04]),
+        &log,
+    ));
+    let err = encode_rgb(&enc, &rgb(16, 16), dims(16, 16));
+    assert_error(err, ErrorKind::Unsupported, "encoder cannot after all");
+    assert_eq!(log.supports(), vec!["unsupported"]);
+    assert_eq!(log.ran(), vec!["unsupported"]);
+}
+
 #[test]
 fn encode_routing_is_per_codestream() {
     let log = Arc::new(Log::default());
@@ -721,6 +774,68 @@ fn clone_shares_decoder_backends() {
     assert_eq!(a.as_samples(), b.as_samples());
     assert_eq!(b.as_samples(), [4u8, 5, 6].repeat(64).as_slice());
     assert_eq!(log.ran(), vec!["shared", "shared"]);
+}
+
+/// A clone copies the *list* of shared backends: a push to either side after the clone is taken
+/// is invisible to the other.
+#[test]
+fn a_push_after_cloning_reaches_only_the_codec_it_was_pushed_to() {
+    let log = Arc::new(Log::default());
+    let mut enc = WebpEncoder::lossless();
+    enc.push_backend(ScriptedEncoder::new(
+        "shared",
+        None,
+        Outcome::Bytes(vec![]),
+        &log,
+    ));
+    let mut clone = enc.clone();
+    enc.push_backend(ScriptedEncoder::new(
+        "original-only",
+        None,
+        Outcome::Bytes(vec![]),
+        &log,
+    ));
+    clone.push_backend(ScriptedEncoder::new(
+        "clone-only",
+        None,
+        Outcome::Bytes(vec![]),
+        &log,
+    ));
+    encode_rgb(&enc, &rgb(8, 8), dims(8, 8)).expect("encode");
+    encode_rgb(&clone, &rgb(8, 8), dims(8, 8)).expect("encode");
+    assert_eq!(
+        log.supports(),
+        vec!["shared", "original-only", "shared", "clone-only"]
+    );
+
+    let (file, _) = lossless_fixture();
+    let log = Arc::new(Log::default());
+    let mut dec = WebpDecoder::new();
+    dec.push_backend(ScriptedDecoder::new(
+        "shared",
+        None,
+        Outcome::Argb(vec![]),
+        &log,
+    ));
+    let mut clone = dec.clone();
+    dec.push_backend(ScriptedDecoder::new(
+        "original-only",
+        None,
+        Outcome::Argb(vec![]),
+        &log,
+    ));
+    clone.push_backend(ScriptedDecoder::new(
+        "clone-only",
+        None,
+        Outcome::Argb(vec![]),
+        &log,
+    ));
+    let _: ImageBuf<Rgb8> = dec.decode_image(&file).expect("decode");
+    let _: ImageBuf<Rgb8> = clone.decode_image(&file).expect("decode");
+    assert_eq!(
+        log.supports(),
+        vec!["shared", "original-only", "shared", "clone-only"]
+    );
 }
 
 #[test]
