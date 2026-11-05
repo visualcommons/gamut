@@ -1,7 +1,8 @@
 # gamut-ffi
 
-`gamut-ffi` provides C-compatible FFI bindings for the gamut image codecs, so `gamut` can be used as
-a drop-in replacement for traditional C image libraries from C, C++, Python, Go, and more.
+`gamut-ffi` provides C-compatible FFI bindings for the gamut image codecs, so `gamut` can be called
+from C, C++, Python, Go, and any other language with a C FFI. It has its own C API (specified in
+[DESIGN.md](DESIGN.md)); it is not a drop-in replacement for any existing C image library's API.
 
 ## Goals
 
@@ -11,9 +12,11 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
   the memory-safe Rust encoders are callable from any language with a C FFI.
 - **Wrap, not re-implement.** All encoding stays in the gamut codecs; this crate only marshals across
   the boundary.
-- **Contain `unsafe` to the boundary.** Unlike the rest of the workspace, `unsafe` is *permitted*
-  here — but only for the `extern "C"` layer (raw pointers, lengths); the safe Rust core underneath
-  keeps its `#![forbid(unsafe_code)]` guarantees.
+- **Contain `unsafe` to the boundary.** `unsafe` is *permitted* here, but only for the `extern "C"`
+  layer (raw pointers, lengths). The Rust crates underneath keep their own policy: most are
+  `#![forbid(unsafe_code)]`, while the six hot-path crates (`gamut-png`, `gamut-deflate`,
+  `gamut-dsp`, `gamut-color`, `gamut-cmm`, `gamut-jpeg`) *deny* it, so a benchmarked site may carry
+  a written exception.
 
 This crate builds as both a `cdylib` and a `staticlib`, and ships a committed, cbindgen-generated
 C header ([include/gamut.h](include/gamut.h) — regenerate with `mise run gen-ffi-header`). It is
@@ -50,7 +53,7 @@ const GamutDecoderVTable vtable = {
 
 GamutPngDecoder *dec = gamut_png_decoder_new();
 if (gamut_png_decoder_push_backend(dec, &vtable, my_ctx) != GAMUT_OK) { /* caller keeps my_ctx */ }
-/* ... issue #242 will add the entry points that run decodes ... */
+/* ... the PNG entry points that run decodes are issue #242 ... */
 gamut_png_decoder_free(dec); /* runs my_destroy(my_ctx) exactly once */
 ```
 
@@ -60,9 +63,12 @@ Backends are tried in push order; the built-in codec, where one exists, is the i
 
 The provider boundary (`_new`/`_free`/`push_backend` for PNG, JPEG, WebP, JXL both directions,
 AVIF encode, and HEIC decode) is live, with the committed C header and its CI drift gates. The
-**consumer boundary** — C entry points that run encodes and decodes — is the per-crate
-conversion work tracked in issue #242; AVIF decode joins the surface when its Rust registry
-exists (issue #259). See [DESIGN.md](DESIGN.md) for the full contract.
+first slices of the **consumer boundary** — C entry points that run encodes and decodes — have
+shipped: AVIF encode (`gamut_avif_encoder_encode_*` for the five layouts, plus the encoder's config
+setters) and AVIF container parse (`gamut_avif_image_*`, issue #666), and the PNG encoder's palette
+order setter (issue #887). The rest of the consumer boundary is the per-crate conversion work
+tracked in issue #242; AVIF decode joins the surface when its Rust registry exists (issue #259).
+See [DESIGN.md](DESIGN.md) for the full contract.
 
 ## License
 

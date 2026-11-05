@@ -1,7 +1,5 @@
-//! WebAssembly bindings for the gamut image codecs, exposing the encoders to JavaScript and
-//! TypeScript so they can run directly in the browser.
-//!
-//! Placeholder — implementation pending.
+//! Placeholder for WebAssembly bindings to the gamut image codecs. No binding ships yet: the
+//! crate exports nothing to JavaScript or TypeScript.
 #![forbid(unsafe_code)]
 
 // Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.

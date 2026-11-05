@@ -7,7 +7,8 @@ complete for its documented scope; the **decoder** is being built out slice by s
 
 If you want a complete `.avif` file, use [`gamut-avif`](../gamut-avif). Reach for this crate when you
 need the **raw AV1 still bitstream** itself — to embed in your own container or build another
-AV1-based format. It operates on `Planar8` planes and emits an AV1 temporal unit, not a container.
+AV1-based format. It operates on `Planar8` / `Planar16` planes and emits an AV1 temporal unit, not
+a container.
 
 ## Goals
 
@@ -46,44 +47,44 @@ std::fs::write("out.obu", &still.obus).unwrap();
 
 ## Status
 
-Today (milestone **M0**) the encoder implements a single, narrow path: a **lossless** all-intra
-keyframe — `seq_profile = 1`, 8-bit 4:4:4, identity matrix coefficients, full range, single tile,
-64×64 superblocks, `DC_PRED`, and the forced `TX_4X4` Walsh–Hadamard transform. Symbols are coded
-against adapting CDFs (`disable_cdf_update = 0`, AV1 §8.2.6): each tile starts from the §9.4
-defaults and nudges every context toward what it codes. It produces the AV1 temporal unit that
-`gamut-avif` wraps in an AVIF still image.
+The encoder codes **lossless and lossy all-intra keyframes**, producing the AV1 temporal unit that
+`gamut-avif` wraps in an AVIF still image:
 
-The colour signalling is selectable on top of that: `encode_still_intra_with` takes an
-`Av1Colour` (the CICP primaries/transfer/matrix triple plus the signal range) and mirrors it into
-the sequence header's `color_config()` and the `av1C`/`colr` values `gamut-avif` stamps. A
-luma–chroma matrix changes what the samples mean, not their geometry.
-
-Chroma sampling is selectable alongside it: `Planar8` carries its own `ChromaSubsampling`, and the
-`seq_profile` follows it (Main for 4:2:0, High for 4:4:4). The identity matrix is refused below
-4:4:4, which AV1 §6.4.2 requires.
-
-**Monochrome** (`mono_chrome = 1`, `seq_profile = 0`) is a geometry of its own: pass a
-`ChromaSubsampling::Cs400` `Planar8` — one luma plane, no chroma — and the encoder codes a single
-plane and drops every chroma syntax element the spec gates on `NumPlanes > 1`. Use
-`Av1Colour::monochrome()` rather than the default: §5.5.2 infers `subsampling_x = subsampling_y = 1`
-for a monochrome stream and §6.4.2 permits `MC_IDENTITY` only at 0/0, so the default identity matrix
-is rejected. 4:2:2 (Professional, `seq_profile = 2`) is the one layout still deferred.
-
-**10- and 12-bit** samples are encoded from a `gamut_color::Planar16`, whose `BitDepth` decides the
-profile: 10-bit stays `seq_profile = 1` (or 0 monochrome) with `high_bitdepth`, and 12-bit of any
-plane count is `seq_profile = 2` with `twelve_bit` (§6.4.1).
+- **Lossless** (`encode_still_lossless_identity`): identity matrix, full range, `DC_PRED` and the
+  forced `TX_4X4` Walsh–Hadamard transform.
+- **Lossy** (`encode_still_intra*`): the eight directional modes with `angle_delta`,
+  `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, recursive filter-intra, chroma-from-luma and palette;
+  DCT/ADST/identity transforms with variable `tx_depth` and `TX_SET_INTRA_2` type selection;
+  recursive partitioning; uniform multi-tile; and the in-loop filters (deblocking, CDEF, loop
+  restoration, superres). Every block is coded at the frame-level quantizer and loop-filter level.
+- **Adapting CDFs** (`disable_cdf_update = 0`, AV1 §8.2.6): each tile starts from the §9.4
+  defaults and nudges every context toward what it codes.
+- **Colour signalling**: `encode_still_intra_with` takes an `Av1Colour` (the CICP
+  primaries/transfer/matrix triple plus the signal range) and mirrors it into the sequence
+  header's `color_config()` and the `av1C`/`colr` values `gamut-avif` stamps.
+- **Chroma sampling** comes from the buffer: 4:4:4, 4:2:2 and 4:2:0 are all coded, and
+  **monochrome** (`mono_chrome = 1`) from a `ChromaSubsampling::Cs400` buffer — use
+  `Av1Colour::monochrome()`, since §6.4.2 permits `MC_IDENTITY` only at 4:4:4. The identity matrix
+  is refused below 4:4:4.
+- **Bit depth** comes from the buffer too: `Planar8` codes 8-bit, and `encode_still_intra16_with`
+  codes a `gamut_color::Planar16` at 10 or 12 bits. `BitDepth::Sixteen` is not an AV1 depth and is
+  rejected; superres has no high-bit-depth entry point.
+- **`seq_profile`** is a joint function of the two (Annex A.2): Main (0) for 4:2:0 and monochrome,
+  High (1) for 4:4:4, and Professional (2) for 4:2:2 or any layout at 12 bits.
+- **Encode speed** is a `Speed` preset (`encode_still_intra_with_speed`): each step prunes the
+  lossy mode-decision search; the default is `Speed::Balanced`.
+- **Tiling and threads** are `EncodeOptions` (`encode_still_intra_with_options`): a `Tiling` picks
+  the uniform tile layout, and `threads` caps how many tiles are coded concurrently. The stream
+  depends on the layout only, never on the thread count.
 
 ```rust,ignore
 let planes = Planar16::from_planes(w, h, BitDepth::Twelve, [y, u, v])?;
 let (still, recon) = encode_still_intra16_with(&planes, qindex, Av1Colour::default())?;
 ```
 
-Superres has no high-bit-depth entry point; `BitDepth::Sixteen` is not an AV1 depth and is
-rejected.
-
-The wider AV1 surface — lossy DCT/ADST, more intra modes, in-loop filters, inter coding for image
-sequences — is tracked row by row in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md), whose
-section N is the decoder's ledger.
+The remaining surface (quantizer matrices and the AVIF-level alpha/metadata/container features)
+is tracked row by row in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md), whose section N is the
+decoder's ledger. The crate docs carry the per-tool detail.
 
 ## Decoding
 
@@ -119,12 +120,10 @@ exercises tools this crate's encoder never emits.
 
 ## Roadmap
 
-- M1: lossy intra (DCT/ADST + quantization), adaptive CDFs ✅, more intra prediction modes.
 - #259: the pure-Rust decoder — headers ✅, then tile parsing, reconstruction, the in-loop
-  filters, and the 10/12-bit + 4:2:0/4:2:2 pixel-format matrix.
+  filters, and the 10/12-bit + 4:2:0/4:2:2/monochrome pixel-format matrix.
 
-The encoder already emits the in-loop filters and uniform multi-tile frames. Inter coding is out
-of scope: gamut is image-first, so animated AVIF is not planned.
+Inter coding is out of scope: gamut is image-first, so animated AVIF is not planned.
 
 ## License
 

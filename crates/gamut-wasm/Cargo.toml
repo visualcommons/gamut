@@ -1,6 +1,6 @@
 [package]
 name = "gamut-wasm"
-description = "Placeholder: WebAssembly bindings for the gamut image codecs, for running encoders in the browser."
+description = "Placeholder for WebAssembly bindings to the gamut image codecs; no bindings ship yet."
 version = "0.1.4"
 edition.workspace = true
 rust-version.workspace = true

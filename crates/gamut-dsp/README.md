@@ -1,8 +1,8 @@
 # gamut-dsp
 
 `gamut-dsp` holds the shared digital signal processing kernels for the gamut codecs —
-spec-exact transform kernels, quantization rounding, and companding, implemented once and
-consumed by the format crates.
+spec-exact transform kernels and quantization rounding, implemented once and consumed by the
+format crates.
 
 The surface is one module per spec family, plus the shared integer vocabulary:
 
@@ -12,6 +12,11 @@ The surface is one module per spec family, plus the shared integer vocabulary:
   kernels are the normative, bit-exact decoder processes; the `forward_*` kernels are encoder
   choices guaranteed consistent with them. The 2-D row/column assembly (AV1 §7.13.3) lives with
   the codec, in `gamut-av1`.
+- **`jpeg`** — the ITU-T T.81 §A.3.3 8×8 DCT: the reference forward/inverse pair
+  (`forward_dct8x8` / `inverse_dct8x8`, separable `f64` evaluations rounded once) and the fast
+  13-bit fixed-point inverse `gamut-jpeg`'s decoder runs (`inverse_dct8x8_int`, bit-exact with
+  libjpeg-turbo's `jpeg_idct_islow`, plus its DC-only shortcut `inverse_dct8x8_int_dc`). Level
+  shift, quantization and zig-zag ordering live with the codec, in `gamut-jpeg`.
 - **`math`** — the cross-codec integer primitives: the AV1 §4.7 rounding/clamp operations
   (`round2`, `round2_signed`, `clip3` — names every codec spec defines equivalents of) and the
   forward-quantize rounding shared by the AV1 and VP8 encoders (`round_div_nearest`).
@@ -49,17 +54,15 @@ assert_eq!(round_div_nearest(-10, 4), -3);
 ## Status
 
 **Stable at the current major.** The complete AV1 1-D kernel family (DCT 4–64, ADST
-4/8/16, identity 4–32, lossless WHT), the shared integer math, and µ-law companding ship today
-and their signatures will not change; every future extension is additive — a new sibling module
-per spec family, or new functions in an existing one. See [`STATUS.md`](STATUS.md) for the
+4/8/16, identity 4–32, lossless WHT), the JPEG 8×8 DCT kernels, and the shared integer math ship
+today and their signatures will not change; every future extension is additive — a new sibling
+module per spec family, or new functions in an existing one. See [`STATUS.md`](STATUS.md) for the
 frozen surface table, the settled design decisions, and the tracked deferrals.
 
 ## Roadmap (all additive)
 
-- **`jpeg`** — the ITU-T T.81 8×8 DCT and friends, for `gamut-tiff`'s JPEG-in-TIFF compression
-  and any future JPEG codec work.
 - **`jxl`** / **`av2`** — kernels for the JPEG XL and AV2 codecs as those crates grow real
-  surfaces (both already declare the dependency).
+  surfaces; neither declares a `gamut-dsp` dependency today.
 - **SIMD** variants behind the same signatures, where the benches justify them — an internal,
   non-breaking optimization.
 

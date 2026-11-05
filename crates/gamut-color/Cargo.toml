@@ -1,6 +1,6 @@
 [package]
 name = "gamut-color"
-description = "Color primitives for gamut: CICP code points, coded-plane bit depth and chroma subsampling, identity and BT.601 YCbCr planar buffers, and f64 colour science (encoder-exact transfers, OKLab, gamut mapping)."
+description = "Color primitives for gamut: CICP code points, coded-plane bit depth and chroma subsampling, 8- and 10/12-bit (including monochrome) planar buffers, BT.601 YCbCr 4:2:0, and f64 colour science (encoder-exact transfers, OKLab, gamut mapping)."
 version = "3.0.0"
 edition.workspace = true
 rust-version.workspace = true

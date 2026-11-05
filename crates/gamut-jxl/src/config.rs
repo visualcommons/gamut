@@ -405,7 +405,7 @@ impl Default for Distance {
 ///   `0xFF 0x0A`. The smallest option; carries no room for metadata boxes.
 /// - [`Container::IsoBmff`] — the ISO BMFF container (`.jxl` file format), starting with the 12-byte
 ///   box signature `00 00 00 0C 4A 58 4C 20 0D 0A 87 0A`. The framing needed to attach Exif/XMP/JUMBF
-///   metadata boxes (metadata embedding itself is future work).
+///   metadata boxes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Container {
     /// A bare codestream (signature `0xFF 0x0A`); the default.

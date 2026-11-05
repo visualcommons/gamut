@@ -29,10 +29,10 @@
 //! # What is out of scope
 //!
 //! [`Indexed8`](crate::Indexed8) and [`Cmyk8`](crate::Cmyk8) convert only to themselves. Palette
-//! indices are meaningless without the palette table, which the single-buffer model cannot carry
-//! (see `gamut-core`'s deferred shared-palette primitive), and CMYK↔RGB is a colour-management
-//! transform requiring an ICC rendering intent — not a layout rearrangement. Both refuse with a
-//! message naming the missing machinery rather than silently applying a naive approximation.
+//! indices are meaningless without their [`Palette`](crate::Palette), which the single-buffer
+//! model does not carry, and CMYK↔RGB is a colour-management transform requiring an ICC
+//! rendering intent — not a layout rearrangement. Both refuse with a message naming the missing
+//! machinery rather than silently applying a naive approximation.
 //!
 //! # Associated (premultiplied) alpha
 //!

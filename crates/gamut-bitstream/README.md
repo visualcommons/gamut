@@ -1,20 +1,24 @@
 # gamut-bitstream
 
-`gamut-bitstream` holds the low-level bit writers and entropy coders the gamut codecs share — the
-encoder-side mirror of the parsing processes defined in the codec specs.
+`gamut-bitstream` holds the low-level bit readers, bit writers and entropy coders the gamut codecs
+share — the parsing processes defined in the codec specs and their encoder-side mirrors.
 
 ## Goals
 
 Part of the [gamut](../../README.md) workspace, this crate exists to:
 
-- **Provide the bit-level building blocks once.** The pieces here are the encoder-side counterpart of
-  the AV1 Bitstream & Decoding Process Specification
-  ([`../../references/av1/`](../../references/av1)):
-  - [`BitWriter`] — most-significant-bit-first fixed-width fields (`f(n)`) and byte alignment, used
-    by the AV1 uncompressed sequence/frame headers (AV1 §4, §8.1).
+- **Provide the bit-level building blocks once.** The pieces here implement the parsing processes
+  of the AV1 Bitstream & Decoding Process Specification
+  ([`../../references/av1/`](../../references/av1)) and their encoder-side mirrors:
+  - [`BitWriter`] / [`BitReader`] — most-significant-bit-first fixed-width fields (`f(n)`) and
+    byte alignment, used by the AV1 uncompressed sequence/frame headers (AV1 §4, §8.1); the reader
+    also covers `su(n)`, `ns(n)`, `uvlc()`, `le(n)` and `leb128()`.
   - [`write_leb128`] / [`leb128_len`] — unsigned LEB128 for OBU sizes (AV1 §4.10.5, Annex B).
-  - [`SymbolEncoder`] — the AV1 multi-symbol arithmetic (range) coder, derived by inverting the
-    symbol *decoder* of AV1 §8.2; the entropy back-end for coded tile data.
+  - [`SymbolDecoder`] / [`SymbolEncoder`] — the AV1 multi-symbol arithmetic (range) coder of
+    §8.2, the entropy back-end for coded tile data; the encoder is derived by inverting the
+    normative decoder.
+  - [`pack_msb_rows`] / [`unpack_msb_rows`] / [`row_bytes`] — MSB-first packing of fixed-width
+    samples into byte-aligned rows, the sub-byte layout the TIFF-family raw formats share.
 - **Own the Huffman table construction the JPEG family shares.** [`build_optimal_table`] is the
   ITU-T T.81 Annex K.2 optimal 16-bit length-limited table over measured symbol frequencies, for
   any alphabet of at most 256 symbols (JPEG DC/AC symbols, the lossless-JPEG difference categories
@@ -39,16 +43,17 @@ assert_eq!(leb128_len(300), 2);
 
 ## Status
 
-M0 provides the AV1 encoder-side primitives: [`BitWriter`], LEB128 ([`write_leb128`] /
-[`leb128_len`]), and the [`SymbolEncoder`] range coder. The T.81 Huffman table side
-([`build_optimal_table`], [`CanonicalCodes`]) serves `gamut-jpeg`'s optimized tables. The
-forward-looking ANS coders and JPEG XL prefix codes named in the workspace plan (for AV2 / JPEG XL)
-are not implemented yet.
+Ships both directions of the AV1 primitives — [`BitReader`] / [`BitWriter`], LEB128
+([`write_leb128`] / [`leb128_len`]), and the [`SymbolDecoder`] / [`SymbolEncoder`] range coder.
+`gamut-av1` uses [`BitReader`], [`BitWriter`], [`write_leb128`] and [`SymbolEncoder`];
+[`SymbolDecoder`] has no workspace consumer yet. [`BitWriter`] also backs `gamut-tiff`'s CCITT
+coders. The crate further ships the MSB-first sample packing used by `gamut-dng`, and the T.81
+Huffman table side ([`build_optimal_table`], [`CanonicalCodes`]) behind `gamut-jpeg`'s optimized
+tables and `gamut-dng`'s lossless JPEG.
 
-## Roadmap
-
-- ANS and JPEG XL prefix entropy coders (for `gamut-av2` / `gamut-jxl`), each behind its own
-  module.
+No ANS coder and no JPEG XL prefix code ship here, and neither is planned: `gamut-jxl` wraps the
+format's reference implementations rather than coding its entropy layer itself. An entropy coder
+for `gamut-av2` would join behind its own module when that stub crate gains an encoder.
 
 ## License
 

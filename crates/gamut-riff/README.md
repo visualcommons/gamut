@@ -37,10 +37,6 @@ and what is deferred. The simple-WebP container and the extended format (`VP8X` 
 `EXIF`, `XMP `, the `C2PA` manifest-store chunk of C2PA 2.4 §A.3.7, and unknown chunks) are
 implemented, read and write, and validated against libwebp's demuxer as the differential oracle.
 
-`MetadataChunks` is exhaustive by design, so the `c2pa` field it gained for the manifest store is a
-breaking change: code that builds one with a struct literal adds `c2pa: None` (or
-`..Default::default()`). Nothing else in the surface changed shape.
-
 Animation (`ANIM`/`ANMF`) is **out of scope** — recognized FourCCs only, so an animated file is
 reported as unsupported rather than mis-parsed. Multi-frame sequences sit outside the image-first
 charter; see

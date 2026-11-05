@@ -1,7 +1,7 @@
 # gamut-av2
 
-`gamut-av2` is a pure-Rust AV2 (AOMedia Video 2) image encoder — the next-generation successor to
-AV1.
+`gamut-av2` is a placeholder for a pure-Rust AV2 (AOMedia Video 2) still-image encoder — AV2 is the
+next-generation successor to AV1. No codec ships here yet.
 
 ## Goals
 
@@ -20,9 +20,12 @@ the project's scope sharpens (see the workspace README's "Scope").
 
 ## Usage
 
-No public API yet — implementation pending. It will follow the same shape as
-[`gamut-av1`](../gamut-av1): a still-image encode entry point reachable through the umbrella crate's
-`av2` feature.
+No public API yet — implementation pending. When implemented it follows the workspace convention
+for codec crates (the workspace [`AGENTS.md`](../../AGENTS.md)): an encoder type implementing
+`gamut_core::EncodeImage` over the pixel layouts it supports, with its codestream exposed through
+the shared `gamut-codec-abi` seam — a typed backend trait, a thin codec-abi adapter, and a registry
+tried in push order with this crate's own software implementation as the tail — reachable through
+the umbrella crate's `av2` feature.
 
 ## Status
 

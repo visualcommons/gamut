@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0](https://github.com/visualcommons/gamut/compare/gamut-riff-v0.1.3...gamut-riff-v1.0.0) - 2026-10-12
 
+### Migration notes
+
+- `MetadataChunks` is exhaustive by design, so the `c2pa` field it gained for the manifest store is
+  a breaking change: code that builds one with a struct literal adds `c2pa: None` (or
+  `..Default::default()`). Nothing else in the surface changed shape.
+
 ### Added
 
 - *(cli)* [**breaking**] report the C2PA manifest store in gamut inspect for AVIF, WebP, TIFF and DNG ([#718](https://github.com/visualcommons/gamut/pull/718))

@@ -1,7 +1,7 @@
 # gamut-wasm
 
-`gamut-wasm` provides WebAssembly bindings for the gamut image codecs, exposing the encoders to
-JavaScript and TypeScript so they can run directly in the browser.
+`gamut-wasm` is a placeholder for WebAssembly bindings to the gamut image codecs. No binding ships
+yet: the crate exports nothing to JavaScript or TypeScript.
 
 ## Goals
 
@@ -18,15 +18,8 @@ This crate builds as a `cdylib`.
 
 ## Usage
 
-No public API yet — implementation pending. Once it lands, build it with `wasm-pack` (or
-`wasm-bindgen`) and call the generated bindings from JS/TS — roughly:
-
-```js
-import init, { encodeAvif } from "gamut-wasm";
-
-await init();
-const avifBytes = encodeAvif(rgba, width, height);
-```
+No public API yet — implementation pending. The crate exports no binding today, so there is
+nothing to call from JavaScript or TypeScript.
 
 ## JPEG XL note
 

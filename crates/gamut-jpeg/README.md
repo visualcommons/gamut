@@ -10,9 +10,8 @@ Part of the [gamut](../../README.md) workspace, this crate reads and writes JPEG
 - **Spec-compliant.** Implemented directly against ITU-T T.81 (the core codec) and T.871 (JFIF),
   with clause citations in the source. Correctness is proven differentially against libjpeg-turbo
   (see Validation).
-- **Encoder + decoder.** Unlike the workspace's encoder-only PNG crate, JPEG is a two-way format:
-  a baseline sequential and **progressive (SOF2)** DCT Huffman **encoder** and a **sequential +
-  progressive decoder** ship together (see [STATUS.md](STATUS.md)).
+- **Encoder + decoder.** A baseline sequential and **progressive (SOF2)** DCT Huffman **encoder**
+  and a **sequential + progressive decoder** ship together (see [STATUS.md](STATUS.md)).
 - **Memory-safe.** 100% safe Rust (`#![deny(unsafe_code)]`).
 
 ## Usage

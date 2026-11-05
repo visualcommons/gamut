@@ -1,6 +1,6 @@
 [package]
 name = "gamut-png"
-description = "Research-grade, space-efficient PNG (Portable Network Graphics) image encoder and spec-compliant decoder."
+description = "Space-efficient PNG (Portable Network Graphics) image encoder and spec-compliant decoder."
 version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true

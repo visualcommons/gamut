@@ -13,8 +13,9 @@ foundation so that:
   through the same [`EncodeImage`]/[`DecodeImage`] traits and gets back the same [`Error`] type,
   regardless of format. A codec implements them only for the pixel layouts it supports, so handing
   it an unsupported format is a compile error, not a runtime check.
-- **The dependency graph stays acyclic.** This crate has **no** dependency on the format crates;
-  everything else in the workspace depends on it, never the other way around.
+- **The dependency graph stays acyclic.** This crate has **no** dependency on any other workspace
+  crate, so no format crate is below it; most workspace crates depend on it, never the other way
+  around.
 - **Errors are typed, never panicking.** [`Error`] is opaque and classified by
   [`ErrorKind`] (`#[non_exhaustive]`), so new kinds land without a breaking change and library
   paths return errors instead of `unwrap()`/`expect()`.

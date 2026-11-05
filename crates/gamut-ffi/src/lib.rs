@@ -1,5 +1,6 @@
-//! C-compatible FFI bindings for the gamut image codecs, so `gamut` can be used as a
-//! drop-in replacement for traditional C image libraries from C, C++, Python, Go, and more.
+//! C-compatible FFI bindings for the gamut image codecs, so `gamut` can be called from C, C++,
+//! Python, Go, and any other language with a C FFI, through its own C API (not a drop-in
+//! replacement for an existing C image library's).
 //!
 //! The surface implemented today is the **provider boundary** (issue #280): per-format opaque
 //! handles with `gamut_<fmt>_<dir>_new`/`_free` lifecycles and `..._push_backend` entry points

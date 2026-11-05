@@ -1,8 +1,9 @@
 # gamut-color — color primitives implementation status
 
 The shared color layer of the [gamut](../../README.md) codec campaign: CICP (H.273 /
-ISO/IEC 23091-2) code points, coded-plane metadata (AV1 §5.5.2/§6.4.2), identity and BT.601
-YCbCr 4:2:0 planar buffers (RFC 6386 §9.2 / libwebp), and the Tier-1 `f64` colour science
+ISO/IEC 23091-2) code points, coded-plane metadata (AV1 §5.5.2/§6.4.2), 8-bit (`Planar8`) and
+10/12-bit (`Planar16`) coded planes, monochrome included, BT.601 YCbCr 4:2:0 planar buffers
+(RFC 6386 §9.2 / libwebp), and the Tier-1 `f64` colour science
 documented in [`references/color`](../../references/color/README.md). Released as **v1**
 (issue #179).
 
@@ -57,21 +58,16 @@ tolerance-level, not bit-for-bit.
 
 ## Intentionally deferred (additive)
 
-- **10/12-bit plane wiring** — both H.273 directions now cover 8/10/12/16-bit (`RgbToYcbcr` /
-  `YcbcrMatrix`); what is deferred is the plane geometry to carry them. `BitDepth::Ten`/`Twelve`
-  are modeled and the AV1 reconstruction accepts them, but `Planar8` is 8-bit and no encode path
-  produces a deeper plane yet (gamut-avif M2).
-- **16-bit is modeled, not an AV1 depth** — `BitDepth::Sixteen` (issue #260) is not deferred AV1
-  wiring like `Ten`/`Twelve`: AV1 tops out at 12 and never produces it. It exists for the 16-bit
+- **16-bit is modeled, not an AV1 depth** — 10/12-bit planes ship (`Planar16`, coded end to end by
+  gamut-avif), but `BitDepth::Sixteen` (issue #260) is not an AV1 depth: AV1 tops out at 12 and
+  never produces it. It exists for the 16-bit
   interleaved still-image pipelines (PNG/TIFF/JXL/DNG) that consume this vocabulary. `clip_pixel`
   accepts it; no gamut encode path emits it. Depths outside the fixed 8/10/12/16 set (RAW's
   14-bit, TIFF's `1..=16`) are deliberately **not** enum variants — those formats carry a
   free-form integer depth (`gamut-dng`'s `bits_per_sample`, validated `1..=16`), a domain an enum
   cannot model.
-- **Subsampled coded planes** — `Cs422`/`Cs420`/`Cs400` wiring into AV1 (M2); today 4:2:0
-  exists only in the WebP/VP8 `Yuv420` path.
 - **`MatrixCoefficients::YCgCo`** — modeled, with neither direction yet: it is a lifting transform,
-  not a `Kr`/`Kb` matrix. Lands with M4. `Identity` is deliberately *not* a `YcbcrMatrix` either —
+  not a `Kr`/`Kb` matrix. `Identity` is deliberately *not* a `YcbcrMatrix` either —
   it is a GBR plane permutation the caller performs, not an affine transform — and `Unspecified` is
   a policy choice belonging to the format layer.
 - **Row / SIMD YCbCr ↔ RGB** — `YcbcrMatrix::to_rgb` and `RgbToYcbcr::from_rgb` are scalar and

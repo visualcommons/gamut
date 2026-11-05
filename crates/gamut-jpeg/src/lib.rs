@@ -22,28 +22,28 @@
 //!
 //! # Scope
 //!
-//! This crate is a JPEG **encoder + decoder** (unlike the workspace's encoder-only PNG crate — JPEG
-//! is a two-way format). It ships a **baseline (SOF0) sequential and progressive (SOF2) 8-bit DCT
-//! Huffman encoder**, and a **decoder for the sequential and progressive processes**. The encoder
-//! writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 / 4:4:0 subsampling, standard
-//! (Annex K) tables — or, with [`JpegEncoder::with_optimized_tables`], tables fitted to the
-//! image's own symbol statistics (Annex K.2), a few percent smaller for the same decoded pixels —
-//! a quality→quantization mapping (or caller-supplied [`QuantTables`] via
-//! [`JpegEncoder::with_quant_tables`]), opt-in rate–distortion optimized coefficient selection
-//! ([`JpegEncoder::with_rd_optimization`]: per-block AC trellis, optionally with per-block
-//! adaptive quantization), an opt-in jpegli-style **XYB colour mode**
-//! ([`JpegEncoder::with_color_mode`]: scaled-XYB samples, no JFIF APP0, Adobe APP14 `transform = 0`,
-//! component ids `R`,`G`,`B`, and the embedded [`XYB_ICC_PROFILE`] so any ICC-aware decoder
-//! reproduces sRGB), and optional restart intervals; [`JpegEncoder::with_progressive`]
-//! selects the progressive process (Annex G), which uses libjpeg's frozen `jpeg_simple_progression`
-//! scan script (or, opted into with [`JpegEncoder::with_progressive_script`], mozjpeg's
-//! maximum-compression one) with optimized per-scan Huffman tables (Annex K.2) and produces the same quantized
-//! coefficients — hence the same decoded image — as the baseline encoding. The [`JpegDecoder`] reads
-//! any spec-valid sequential **or progressive** stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via
-//! the JFIF APP0 / Adobe APP14 hints), interleaved or non-interleaved scans, spectral selection and
-//! successive approximation, restart intervals, and (for sequential frames) DNL-defined heights —
-//! presenting it as `Rgb8`, `Gray8`, or `Cmyk8` (with [`gamut_core::DecodeImage::decode_image_into`]
-//! reusing the destination's allocation when dimensions match).
+//! This crate is a JPEG **encoder + decoder**. It ships a **baseline (SOF0) sequential and
+//! progressive (SOF2) 8-bit DCT Huffman encoder**, and a **decoder for the sequential and
+//! progressive processes**. The encoder writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0
+//! / 4:4:0 subsampling, standard (Annex K) tables — or, with
+//! [`JpegEncoder::with_optimized_tables`], tables fitted to the image's own symbol statistics
+//! (Annex K.2), a few percent smaller for the same decoded pixels — a quality→quantization mapping
+//! (or caller-supplied [`QuantTables`] via [`JpegEncoder::with_quant_tables`]), opt-in
+//! rate–distortion optimized coefficient selection ([`JpegEncoder::with_rd_optimization`]:
+//! per-block AC trellis, optionally with per-block adaptive quantization), an opt-in jpegli-style
+//! **XYB colour mode** ([`JpegEncoder::with_color_mode`]: scaled-XYB samples, no JFIF APP0, Adobe
+//! APP14 `transform = 0`, component ids `R`,`G`,`B`, and the embedded [`XYB_ICC_PROFILE`] so any
+//! ICC-aware decoder reproduces sRGB), and optional restart intervals;
+//! [`JpegEncoder::with_progressive`] selects the progressive process (Annex G), which uses
+//! libjpeg's frozen `jpeg_simple_progression` scan script (or, opted into with
+//! [`JpegEncoder::with_progressive_script`], mozjpeg's maximum-compression one) with optimized
+//! per-scan Huffman tables (Annex K.2) and produces the same quantized coefficients — hence the
+//! same decoded image — as the baseline encoding. The [`JpegDecoder`] reads any spec-valid
+//! sequential **or progressive** stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via the JFIF APP0 /
+//! Adobe APP14 hints), interleaved or non-interleaved scans, spectral selection and successive
+//! approximation, restart intervals, and (for sequential frames) DNL-defined heights — presenting
+//! it as `Rgb8`, `Gray8`, or `Cmyk8` (with [`gamut_core::DecodeImage::decode_image_into`] reusing
+//! the destination's allocation when dimensions match).
 //!
 //! Embedded **APP-segment metadata** ships both ways: [`metadata`] reads APP1 EXIF, APP1 XMP, and
 //! multi-segment APP2 `ICC_PROFILE` payloads without decoding pixels, and

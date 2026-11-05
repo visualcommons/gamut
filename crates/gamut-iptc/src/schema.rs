@@ -29,8 +29,7 @@ pub mod ns {
     ///
     /// The IPTC Extension schema embeds PLUS 1.2 properties under their own namespace rather than
     /// re-declaring them; `plus:Licensor` (see [`crate::extension::Licensor`]) is the one gamut
-    /// models. Declared here rather than taken from [`gamut_xmp::WellKnownNs`], which does not
-    /// carry PLUS.
+    /// models. The same URI as [`gamut_xmp::WellKnownNs::Plus`].
     pub const PLUS: &str = "http://ns.useplus.org/ldf/xmp/1.0/";
     /// XMP basic — `xmp:`.
     ///

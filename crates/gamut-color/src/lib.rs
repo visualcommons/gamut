@@ -3,10 +3,9 @@
 //! layouts are not modelled here — that is the [`Pixel`](gamut_core::Pixel) vocabulary in
 //! `gamut-core`.
 //!
-//! The M0 AVIF encoder uses only a narrow slice — 8-bit RGB in, mapped to identity (`mc = 0`)
-//! 4:4:4 planes. The enums here intentionally model the wider spec surface (more formats, bit
-//! depths, subsamplings, and CICP code points) so later milestones (M2 pixel formats, M4 HDR;
-//! see `gamut-avif/STATUS.md`) extend without reshaping the types.
+//! The enums model the full spec surface (every AV1 bit depth and subsampling, and the CICP code
+//! points), so a code point no encode path emits yet is still representable and extension does
+//! not reshape the types.
 //!
 //! On top of that metadata layer, the [`transfer`], [`oklab`], [`lab`], [`matrix`],
 //! [`gamut_map`], [`cct`], and [`profile`] modules add `f64` colour science — encoder-exact EOTFs, OKLab
@@ -24,32 +23,32 @@
 //! `M2` matrices, the `*_standard` transfer-curve variants, the matrix derivations) — is reachable
 //! and grouped under its module. For convenience the crate root additionally re-exports the items
 //! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`],
-//! [`Planar8`] / [`Yuv420`] / [`YcbcrMatrix`] / [`RgbToYcbcr`], the decoders' [`ChromaUpsampling`]
-//! choice (its kernels live in [`upsample`]), the [`clip_pixel`] /
+//! [`Planar8`] / [`Planar16`] / [`Yuv420`] / [`YcbcrMatrix`] / [`RgbToYcbcr`], the decoders'
+//! [`ChromaUpsampling`] choice (its kernels live in [`upsample`]), the [`clip_pixel`] /
 //! [`rgb_to_ycbcr`] helpers, the colour-science entry types [`Gamut`] and [`SourceProfile`] /
 //! [`SourceTransfer`], and the headline colour-difference metrics [`delta_e_76`] /
 //! [`delta_e_2000`].
 //!
 //! # Implemented vs. modeled
 //!
-//! Many enum variants model the full spec surface but are **not yet wired into an encode path** —
-//! they exist so later milestones extend without reshaping the types. As of this release:
+//! A few enum variants model the spec surface without a conversion behind them. As of this
+//! release:
 //!
 //! - **Implemented:** 8-bit ([`BitDepth::Eight`]) RGB → 4:4:4, 4:2:2 or 4:2:0 planes,
 //!   either identity ([`MatrixCoefficients::Identity`]) or through a CICP luma–chroma matrix
-//!   ([`Planar8`]); the CICP code-point tables; BT.601 YCbCr 4:2:0 ([`ycbcr`]); **the H.273
-//!   matrixing and de-matrixing at every modeled bit depth for [`MatrixCoefficients::Bt709`] /
-//!   `Bt601` / `Bt470Bg` / `Bt2020Ncl` in both ranges ([`RgbToYcbcr`] / [`YcbcrMatrix`])**; and the
-//!   `f64` colour science ([`transfer`], [`oklab`], [`lab`], [`xyb`], [`matrix`], [`gamut_map`],
-//!   [`cct`], [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
-//! - **Modeled but deferred:** 10/12-bit *plane* wiring ([`BitDepth::Ten`] / [`BitDepth::Twelve`] —
-//!   both H.273 directions ship at these depths; what is missing is the AV1 encode path and a
-//!   [`Planar8`] geometry to carry them. Distinct from [`BitDepth::Sixteen`], which is outside the
-//!   AV1 profile set entirely and exists for the 16-bit still-image pipelines that share these
-//!   types); [`ChromaSubsampling::Cs400`] (monochrome) as an encode path;
-//!   [`MatrixCoefficients::YCgCo`], the one modeled matrix with neither
-//!   direction (it is a lifting transform, not a `Kr`/`Kb` matrix). These land with the
-//!   milestones tracked in `gamut-avif/STATUS.md`.
+//!   ([`Planar8`]); 10/12-bit ([`BitDepth::Ten`] / [`BitDepth::Twelve`]) planes at 4:4:4, 4:2:2
+//!   or 4:2:0 from 16-bit RGB(A) ([`Planar16`]); monochrome ([`ChromaSubsampling::Cs400`])
+//!   planes from grey or alpha at every one of those depths, in either buffer (`gamut-avif` codes
+//!   all of these end to end); the CICP code-point tables;
+//!   BT.601 YCbCr 4:2:0 ([`ycbcr`]); **the H.273 matrixing and de-matrixing at every modeled bit
+//!   depth for [`MatrixCoefficients::Bt709`] / `Bt601` / `Bt470Bg` / `Bt2020Ncl` in both ranges
+//!   ([`RgbToYcbcr`] / [`YcbcrMatrix`])**; and the `f64` colour science ([`transfer`], [`oklab`],
+//!   [`lab`], [`xyb`], [`matrix`], [`gamut_map`], [`cct`], [`profile`]) for the sRGB, Display P3,
+//!   Adobe RGB, BT.2020 and ProPhoto gamuts.
+//! - **Modeled only:** [`MatrixCoefficients::YCgCo`], the one modeled matrix with neither
+//!   direction (it is a lifting transform, not a `Kr`/`Kb` matrix). [`BitDepth::Sixteen`] is
+//!   outside the AV1 profile set entirely: it exists for the 16-bit still-image pipelines that
+//!   share these types, and no gamut encode path codes planes at it.
 //!
 //! `Bt709`, `Bt601`, `Bt2020_10` and `Bt2020_12` — one curve in ITU-T H.273 Table 3 — dispatch in both directions to
 //! [`bt709_eotf`](transfer::bt709_eotf) / [`bt709_oetf`](transfer::bt709_oetf), and `Hlg` to

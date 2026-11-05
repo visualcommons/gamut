@@ -147,7 +147,7 @@ pub enum ProgressiveScript {
     Mozjpeg = 1,
 }
 
-/// A reusable baseline JPEG encoder.
+/// A reusable JPEG encoder: baseline sequential (SOF0) by default, progressive (SOF2) on request.
 ///
 /// Configure it with the builder methods, then drive it through [`EncodeImage`]. It writes JFIF
 /// interchange streams: grayscale ([`Gray8`], one component) or YCbCr ([`Rgb8`], converted per

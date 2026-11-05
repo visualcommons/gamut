@@ -10,12 +10,11 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
 
 - **Centralize color management.** One place defines [`BitDepth`], [`ChromaSubsampling`], the CICP
   enums ([`ColourPrimaries`], [`TransferCharacteristics`], [`MatrixCoefficients`], [`ColorRange`]),
-  and the [`Planar8`] buffer — so a color bug is fixed once, not re-implemented per format. (The
-  interleaved pixel layouts are the typed `Pixel` markers in `gamut-core`.)
-- **Model the full spec surface up front.** The M0 AVIF path uses only a narrow slice (8-bit RGB in,
-  mapped to identity `mc = 0` 4:4:4 planes), but the enums intentionally cover the wider range of
-  formats, bit depths, subsamplings, and CICP code points so later milestones (M2 pixel formats, M4
-  HDR — see [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md)) extend without reshaping the types.
+  and the [`Planar8`] / [`Planar16`] buffers — so a color bug is fixed once, not re-implemented
+  per format. (The interleaved pixel layouts are the typed `Pixel` markers in `gamut-core`.)
+- **Model the full spec surface up front.** The enums cover every AV1 bit depth and subsampling and
+  the CICP code points, so a code point no encode path emits yet is still representable and
+  extension does not reshape the types.
 - **Match the spec code points exactly.** CICP values mirror the H.273 / AV1 sequence-header code
   points so they round-trip through `av1C`/`colr` and AV1 headers unchanged.
 - **Provide the colour science.** The `transfer` (encoder-exact EOTFs), `oklab` (per-gamut OKLab
@@ -58,11 +57,11 @@ signal ranges, at every modeled bit depth — the AVIF lossy encode path and the
 presentation path), the `f64` colour science for the sRGB, Display P3, Adobe RGB, BT.2020 and
 ProPhoto gamuts, and the CIELab / ΔE layer (issue #321: XYZ↔Lab↔LCh, xyY, the ICC PCS encodings,
 CIE76 and CIEDE2000 — the latter pinned to the Sharma 34-pair golden set, with lcms2 differential
-tests to follow in issue #322). The 10/12-bit *plane* geometries and the subsampled ones are
-modeled in the type system (`#[non_exhaustive]` enums, so extension is non-breaking) and land with
-the milestones tracked in
-[`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md). See the crate docs ("Implemented vs. modeled")
-for the precise split.
+tests to follow in issue #322), the 4:2:2 / 4:2:0 [`Planar8`] geometries, the 10/12-bit
+[`Planar16`] planes, and monochrome (`Cs400`) grey/alpha planes in both buffers — all coded end to
+end by `gamut-avif`. `YCgCo` is modeled
+without a conversion; the enums are `#[non_exhaustive]`, so extension is non-breaking. See the
+crate docs ("Implemented vs. modeled") for the precise split.
 
 ## License
 

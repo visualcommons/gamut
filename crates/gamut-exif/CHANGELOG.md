@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-exif-v1.0.0...gamut-exif-v2.0.0) - 2026-10-12
 
+### Migration notes
+
+- `parse` keeps its signature, its accept/reject verdict and its re-serialised bytes, with the
+  exceptions below, measured over a 3 144-case truncation-and-corruption sweep against 1.0.0.
+- An error message's offset is now a position in the buffer the caller handed in, so for a marked
+  blob it is six bytes larger than before — the `Exif\0\0` marker — while a `Dropped::offset`
+  stays relative to the TIFF stream.
+- A 1st IFD carrying `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` used to parse as
+  a thumbnail that simply had no bytes; it is now a loss named in the report
+  (`DropReason::ThumbnailLengthMissing`) and rejected by `strict` with `ExifError::BadThumbnail`. A
+  caller running `strict` over blobs 1.0.0 accepted should know the verdict moved.
+- A 1st IFD whose integer `StripOffsets` names strips that cannot be read used to parse as a
+  thumbnail with no strips, its `StripOffsets` kept and re-emitted by the writer addressing
+  nothing; it is now a `DroppedRegion::ThumbnailStrips` loss with `StripOffsets` removed from the
+  model, rejected by `strict` with `ExifError::BadThumbnail`.
+- Neither verdict move refuses a conformant input (see the README's "Unreadable thumbnails"), so
+  they are fixes, not redefinitions.
+
 ### Added
 
 - *(exif)* name shadowed duplicate-tag entries in the read report ([#791](https://github.com/visualcommons/gamut/pull/791))
