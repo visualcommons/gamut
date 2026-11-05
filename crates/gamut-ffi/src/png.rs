@@ -185,14 +185,14 @@ pub unsafe extern "C" fn gamut_png_encoder_set_palette_order(
 #[cfg(test)]
 mod palette_order_tests {
     use gamut::core::{Dimensions, ImageRef, Indexed8};
-    use gamut::png::{PngEncoder, PngPalette};
+    use gamut::png::{Palette, PngEncoder};
 
     use super::*;
 
     /// What `encoder` writes for a picture whose first-seen palette order differs from its
     /// modified-Zeng order, so the two settings give different files.
     fn encode(encoder: &PngEncoder) -> Vec<u8> {
-        let palette = PngPalette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]]).unwrap();
+        let palette = Palette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]]).unwrap();
         let indices = [0u8, 2, 0, 2, 0, 2, 3, 2, 3, 1];
         let image = ImageRef::<Indexed8>::new(&indices, Dimensions::new(10, 1).unwrap()).unwrap();
         let mut out = Vec::new();

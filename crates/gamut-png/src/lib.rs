@@ -125,14 +125,15 @@ pub use deconstruct::{
 };
 pub use encoder::{Effort, MetadataNotice, PngEncodeReport, PngEncoder};
 pub use filter::{FilterStrategy, FilterType};
-/// The workspace's shared decoder vocabulary, accepted by [`PngDecoder::with_limits`] and
-/// [`PngDecoder::with_convert_policy`], re-exported so a caller needs no direct `gamut-core`
+/// The workspace's shared vocabulary, accepted by [`PngDecoder::with_limits`],
+/// [`PngDecoder::with_convert_policy`] and [`PngEncoder::encode_indexed8`] (and returned in
+/// [`DecodedPng::palette`]), re-exported so a caller needs no direct `gamut-core`
 /// dependency to spell them.
-pub use gamut_core::{DecodeLimits, convert::ConvertPolicy};
+pub use gamut_core::{DecodeLimits, Palette, convert::ConvertPolicy};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
 pub use gamut_deflate::Level;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `PngMetadata::metadata` / `PngEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
 pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataSink, TypedMetadata};
-pub use palette::{PaletteOrder, PngPalette};
+pub use palette::PaletteOrder;

@@ -40,7 +40,7 @@
 //! `reordered_bytes` (#887) is that first-seen candidate encoded again with
 //! `with_palette_order(PaletteOrder::ModifiedZeng)`: the opt-in a caller turns on, measured on the
 //! palette such a caller would hand over. Its adjacency is whatever this build's
-//! `PngPalette::modified_zeng` counts: consecutive pixels in raster order as shipped, horizontal
+//! `Plte::modified_zeng` counts: consecutive pixels in raster order as shipped, horizontal
 //! plus vertical neighbours under `experiments/612/caller-2d.patch`, horizontal neighbours alone
 //! under `caller-rows.patch`. So the `baseline`, `caller-2d` and `caller-rows` runs compare the
 //! three. `reordered_bytes - first_seen_bytes` is what the opt-in buys.
@@ -51,7 +51,7 @@ use std::time::Instant;
 
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Indexed8, Pixel, Rgb8, Rgb16, Rgba8};
 use gamut_png::stages::{self, Crc32, Reduced, Reductions};
-use gamut_png::{FilterStrategy, Level, PaletteOrder, PngEncoder, PngPalette};
+use gamut_png::{FilterStrategy, Level, Palette, PaletteOrder, PngEncoder};
 
 #[path = "../tests/common/corpus.rs"]
 mod corpus;
@@ -420,7 +420,7 @@ fn indexed_size(
     alpha: &[u8],
     order: PaletteOrder,
 ) -> usize {
-    let palette = PngPalette::with_transparency(rgb, alpha).expect("analysis palette is valid");
+    let palette = Palette::with_alpha(rgb, alpha).expect("analysis palette is valid");
     let dims = Dimensions::new(side, side).expect("valid dimensions");
     let image = ImageRef::<Indexed8>::new(indices, dims).expect("one index per pixel");
     let mut out = Vec::new();

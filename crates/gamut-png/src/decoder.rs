@@ -23,7 +23,7 @@
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
 use gamut_core::{
     Bilevel, DecodeImage, DecodeLimits, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
-    ImageBuf, Indexed8, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    ImageBuf, Indexed8, Palette, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
 use crate::backend::{IdatInfo, Inflaters, ZlibInflater, run_inflaters};
@@ -32,7 +32,7 @@ use crate::color::ColorType;
 use crate::decoded::{self, DecodedPng, PngHeader, PngImage, PngMetadata};
 use crate::filter::{self, FilterType};
 use crate::ihdr::{self, Ihdr};
-use crate::palette::PngPalette;
+use crate::palette::palette_from_chunks;
 use crate::{adam7, inflate, pack};
 
 /// Default cap on the decoded sample buffer: the workspace's
@@ -193,7 +193,7 @@ enum NativeSamples {
 struct NativeImage {
     header: Ihdr,
     samples: NativeSamples,
-    palette: Option<PngPalette>,
+    palette: Option<Palette>,
     trns_key: Option<TransparencyKey>,
 }
 
@@ -525,7 +525,9 @@ impl PngDecoder {
         // §11.2.2: every pixel of an indexed image must reference an existing palette entry
         // (indexed depths are at most 8, so the samples are always the byte variant).
         if let (Some(palette), NativeSamples::B8(indices)) = (&palette, &samples)
-            && indices.iter().any(|&idx| usize::from(idx) >= palette.len())
+            && indices
+                .iter()
+                .any(|&idx| usize::from(idx) >= palette.rgb_entries().len())
         {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -731,7 +733,7 @@ fn validate_plte_and_trns(
     header: &Ihdr,
     plte: Option<&[u8]>,
     trns: Option<&[u8]>,
-) -> Result<(Option<PngPalette>, Option<TransparencyKey>)> {
+) -> Result<(Option<Palette>, Option<TransparencyKey>)> {
     if let Some(plte) = plte {
         match header.color {
             ColorType::Grayscale | ColorType::GrayscaleAlpha => {
@@ -761,9 +763,9 @@ fn validate_plte_and_trns(
                 "PNG: an indexed image requires a PLTE chunk",
             )
         })?;
-        let palette = PngPalette::from_chunks(plte, trns)?;
+        let palette = palette_from_chunks(plte, trns)?;
         // §11.2.2: the palette must not have more entries than the bit depth can reference.
-        if palette.len() > 1 << header.bit_depth {
+        if palette.rgb_entries().len() > 1 << header.bit_depth {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "PNG: palette larger than the bit depth can reference",
@@ -943,8 +945,8 @@ fn dims(header: &Ihdr) -> Result<Dimensions> {
 
 /// The palette's grey values (every entry has `r == g == b`), or `None` if any entry is coloured —
 /// the gate for presenting an indexed file as a greyscale layout losslessly.
-fn gray_palette(palette: &PngPalette) -> Option<Vec<u8>> {
-    (0..palette.len())
+fn gray_palette(palette: &Palette) -> Option<Vec<u8>> {
+    (0..palette.rgb_entries().len())
         .map(|i| {
             let [r, g, b] = palette.rgb(i as u8)?;
             (r == g && g == b).then_some(r)
@@ -1090,7 +1092,7 @@ fn presentable(native: NativeImage) -> Result<Presentable> {
 
 /// Expands validated palette indices to RGB or RGBA bytes. Indices were range-checked during
 /// decode, so lookups cannot fail; a defensive default keeps the path panic-free regardless.
-fn expand_palette(indices: &[u8], palette: &PngPalette, with_alpha: bool) -> Vec<u8> {
+fn expand_palette(indices: &[u8], palette: &Palette, with_alpha: bool) -> Vec<u8> {
     let channels = if with_alpha { 4 } else { 3 };
     let mut out = Vec::with_capacity(indices.len() * channels);
     for &index in indices {
@@ -1329,7 +1331,7 @@ mod tests {
             let rgb: Vec<[u8; 3]> = (0..entries)
                 .map(|i| [i as u8, (i * 3) as u8, 255 - i as u8])
                 .collect();
-            let palette = PngPalette::with_transparency(&rgb, &[10, 250]).unwrap();
+            let palette = Palette::with_alpha(&rgb, &[10, 250]).unwrap();
             let (w, h) = (13u32, 9u32);
             let indices: Vec<u8> = (0..(w * h) as usize).map(|i| (i % entries) as u8).collect();
             let mut png = Vec::new();
@@ -1367,7 +1369,7 @@ mod tests {
     fn opaque_indexed_expands_to_rgb() {
         use gamut_core::Indexed8 as Idx;
         let rgb = [[1u8, 2, 3], [4, 5, 6], [7, 8, 9]];
-        let palette = PngPalette::new(&rgb).unwrap();
+        let palette = Palette::new(&rgb).unwrap();
         let indices = [0u8, 1, 2, 1, 0, 2];
         let mut png = Vec::new();
         PngEncoder::new()
@@ -1503,7 +1505,7 @@ mod tests {
     #[test]
     fn grey_layouts_accept_only_all_grey_palettes() {
         use gamut_core::Indexed8 as Idx;
-        let encode = |palette: &PngPalette| {
+        let encode = |palette: &Palette| {
             let indices = [0u8, 1, 0, 1, 1, 0];
             let mut png = Vec::new();
             PngEncoder::new()
@@ -1517,12 +1519,12 @@ mod tests {
         };
 
         // An entry with r == g but a different b is coloured: both grey layouts must refuse it.
-        let colored = encode(&PngPalette::new(&[[7, 7, 200], [3, 3, 3]]).unwrap());
+        let colored = encode(&Palette::new(&[[7, 7, 200], [3, 3, 3]]).unwrap());
         assert!(DecodeImage::<Gray8>::decode_image(&PngDecoder::new(), &colored).is_err());
         assert!(DecodeImage::<GrayAlpha8>::decode_image(&PngDecoder::new(), &colored).is_err());
 
         // An all-grey opaque palette resolves to its grey values (plus opaque alpha).
-        let grey = encode(&PngPalette::new(&[[7, 7, 7], [200, 200, 200]]).unwrap());
+        let grey = encode(&Palette::new(&[[7, 7, 7], [200, 200, 200]]).unwrap());
         let gray: ImageBuf<Gray8> = PngDecoder::new().decode_image(&grey).unwrap();
         assert_eq!(gray.as_samples(), [7, 200, 7, 200, 200, 7]);
         let ga: ImageBuf<GrayAlpha8> = PngDecoder::new().decode_image(&grey).unwrap();
@@ -1532,8 +1534,7 @@ mod tests {
         );
 
         // A grey palette with transparency: Gray8 refuses (alpha is lossy), GrayAlpha8 keeps it.
-        let keyed =
-            encode(&PngPalette::with_transparency(&[[7, 7, 7], [200, 200, 200]], &[128]).unwrap());
+        let keyed = encode(&Palette::with_alpha(&[[7, 7, 7], [200, 200, 200]], &[128]).unwrap());
         assert!(DecodeImage::<Gray8>::decode_image(&PngDecoder::new(), &keyed).is_err());
         let ga: ImageBuf<GrayAlpha8> = PngDecoder::new().decode_image(&keyed).unwrap();
         assert_eq!(
@@ -1716,7 +1717,7 @@ mod tests {
         use crate::decoded::PngImage;
 
         let rgb = [[9u8, 8, 7], [1, 2, 3]];
-        let palette = PngPalette::with_transparency(&rgb, &[128]).unwrap();
+        let palette = Palette::with_alpha(&rgb, &[128]).unwrap();
         let indices = [0u8, 1, 1, 0];
         let mut png = Vec::new();
         PngEncoder::new()

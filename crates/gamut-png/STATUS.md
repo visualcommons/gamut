@@ -48,7 +48,7 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | ----- | ---- | ----- | ------ |
 | D1 | §5, §11.2.1 | libpng-oracle reference *encode* entry point (fixture generator); chunk-stream parser + CRC policy; IHDR validation | ✅ done |
 | D2 | §9, §10 | `PngDecoder` + decode limits (dimensions, byte budget); bounded zlib inflation (`miniz_oxide`); scanline defilter; non-interlaced typed `DecodeImage` matrix (lossless widening via `gamut_core::convert`) | ✅ done |
-| D3 | §11.2.2/§11.3.1 | Palette + tRNS: `PngPalette::from_chunks`, index range checks, `DecodeImage<Indexed8>`, RGB(A) expansion, colour keys | ✅ done |
+| D3 | §11.2.2/§11.3.1 | Palette + tRNS: `palette_from_chunks` (into the shared `gamut_core::Palette`), index range checks, `DecodeImage<Indexed8>`, RGB(A) expansion, colour keys | ✅ done |
 | D4 | §8.1, §13.10 | Adam7 de-interlacing (per-pass defilter/unpack, empty passes, checked stream-length sum) | ✅ done |
 | D5 | §11.3 | Rich `decode()` → `DecodedPng`: raw eXIf/iCCP/XMP/text payloads (MetadataBlock-ready), parsed gAMA/cHRM/sRGB/cICP, metadata inflation budget | ✅ done |
 | D6 | — | libpng differential conformance suite over generated fixtures; malformed-input rejection corpus; mutation-gap closure | ✅ done |
@@ -859,7 +859,7 @@ so — unlike the encoder-derived one, which cannot contain either by constructi
 entries nothing names and entries that name a colour another entry already names. Both are written
 into an incompressible `PLTE`, and the count of them decides the index bit depth.
 
-So the palette is cleaned before it is written (`PngPalette::cleaned`): an entry no pixel and no
+So the palette is cleaned before it is written (`Plte::cleaned`): an entry no pixel and no
 `bKGD` background names is dropped, a later entry with the same RGB **and** the same alpha as an
 earlier one is merged into it, the trailing opaque `tRNS` bytes §11.3.1.1 lets a chunk omit are
 omitted, the index bit depth is derived from what survives, and the image's indices — and the

@@ -9,8 +9,8 @@ use gamut_core::{
 };
 use gamut_deflate::Level;
 use gamut_png::{
-    Background, FilterStrategy, FilterType, ModificationTime, PhysicalDimensions, PhysicalUnit,
-    PngEncoder, PngPalette, SrgbIntent,
+    Background, FilterStrategy, FilterType, ModificationTime, Palette, PhysicalDimensions,
+    PhysicalUnit, PngEncoder, SrgbIntent,
 };
 
 const SIZES: &[(u32, u32)] = &[
@@ -202,7 +202,7 @@ fn indexed8_with_palette_and_transparency_round_trips() {
         [128, 128, 128],
     ];
     let alpha = vec![0u8, 255, 128]; // entries 0/1/2 have alpha; 3/4 are opaque
-    let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+    let palette = Palette::with_alpha(&rgb, &alpha).unwrap();
     let indices: Vec<u8> = (0..(w * h) as usize)
         .map(|i| (i % rgb.len()) as u8)
         .collect();
@@ -264,7 +264,7 @@ fn a_cleaned_palette_still_resolves_to_the_colours_the_caller_supplied() {
     ];
     let rgb: Vec<[u8; 3]> = (0..256).map(|i| colours[i % 3].0).collect();
     let alpha: Vec<u8> = (0..256).map(|i| colours[i % 3].1).collect();
-    let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+    let palette = Palette::with_alpha(&rgb, &alpha).unwrap();
 
     let (w, h) = (16u32, 16u32);
     let indices: Vec<u8> = (0..(w * h) as usize).map(|i| i as u8).collect();
@@ -322,7 +322,7 @@ fn a_colour_background_keeps_its_entry_in_the_palette_libpng_resolves() {
         [10, 10, 10],
     ];
     let alpha: [u8; 6] = [255, 255, 0, 255, 255, 255];
-    let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+    let palette = Palette::with_alpha(&rgb, &alpha).unwrap();
 
     let painted = [0u8, 2, 3, 4, 5];
     let (w, h) = (16u32, 16u32);
@@ -368,7 +368,7 @@ fn a_colour_background_keeps_its_entry_in_the_palette_libpng_resolves() {
 
 #[test]
 fn indexed8_rejects_out_of_range_index() {
-    let palette = PngPalette::new(&[[0, 0, 0], [255, 255, 255]]).unwrap();
+    let palette = Palette::new(&[[0, 0, 0], [255, 255, 255]]).unwrap();
     let indices = vec![0u8, 1, 2]; // 2 is out of range for a 2-entry palette
     let mut png = Vec::new();
     let result = PngEncoder::new().encode_indexed8(
@@ -385,7 +385,7 @@ fn indexed_uses_minimal_bit_depth() {
     // indices (png_set_packing unpacks sub-byte indices to one byte each).
     for (entries, depth) in [(2usize, 1u8), (4, 2), (16, 4), (17, 8)] {
         let rgb: Vec<[u8; 3]> = (0..entries).map(|i| [i as u8, 0, 0]).collect();
-        let palette = PngPalette::new(&rgb).unwrap();
+        let palette = Palette::new(&rgb).unwrap();
         let (w, h) = (20u32, 8u32);
         let indices: Vec<u8> = (0..(w * h) as usize).map(|i| (i % entries) as u8).collect();
         let mut png = Vec::new();

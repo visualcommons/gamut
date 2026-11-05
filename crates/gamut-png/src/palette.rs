@@ -1,6 +1,6 @@
 //! Palette (PLTE) and palette transparency (tRNS) for indexed-colour PNG (PNG spec §11.2.2/§11.3.1).
 
-use gamut_core::{Error, Result};
+use gamut_core::{Error, Palette, Result};
 
 /// The order [`PngEncoder::encode_indexed8`](crate::PngEncoder::encode_indexed8) writes a
 /// caller-supplied palette in, set with
@@ -41,113 +41,78 @@ pub enum PaletteOrder {
     ModifiedZeng = 1,
 }
 
-/// A PNG palette: 1–256 RGB entries, with optional per-entry alpha (written as a tRNS chunk).
+/// Builds the [`Palette`] an indexed file's raw `PLTE` and optional `tRNS` chunk payloads
+/// describe (§11.2.2, §11.3.1.1).
 ///
-/// Entries without an alpha value are fully opaque. Indexed images reference entries by index.
+/// # Errors
+///
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+/// PLTE payload is not a whole number of RGB triples, holds zero or more than 256 entries, or
+/// has fewer entries than the tRNS payload.
+pub(crate) fn palette_from_chunks(plte: &[u8], trns: Option<&[u8]>) -> Result<Palette> {
+    if !plte.len().is_multiple_of(3) {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: PLTE payload must be a whole number of RGB triples",
+        ));
+    }
+    let rgb: Vec<[u8; 3]> = plte
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|entry| [entry[0], entry[1], entry[2]])
+        .collect();
+    let trns = trns.unwrap_or_default();
+    // The chunk-level wording for the two refusals `Palette::with_alpha` would also make, so a
+    // malformed file is reported in PNG's terms.
+    if rgb.is_empty() || rgb.len() > 256 {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: palette must have 1..=256 entries",
+        ));
+    }
+    if trns.len() > rgb.len() {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: more tRNS entries than palette entries",
+        ));
+    }
+    Palette::with_alpha(&rgb, trns)
+}
+
+/// The `PLTE` / `tRNS` pair the encoder writes for a caller-supplied [`Palette`]: its RGB
+/// entries, and the alpha of the leading entries — every entry past `alpha.len()` is opaque —
+/// with the cleaning and reordering only an encoder needs.
+///
+/// Crate-private: the public palette is [`gamut_core::Palette`], which
+/// [`PngEncoder::encode_indexed8`](crate::PngEncoder::encode_indexed8) takes and
+/// [`DecodedPng::palette`](crate::DecodedPng::palette) returns. A value is always 1–256 entries
+/// with no more alphas than entries: [`From<&Palette>`] inherits that from the core type, and
+/// [`cleaned`](Self::cleaned) and [`modified_zeng`](Self::modified_zeng) keep it.
 #[derive(Debug, Clone)]
-pub struct PngPalette {
+pub(crate) struct Plte {
     rgb: Vec<[u8; 3]>,
     /// Per-entry alpha for the leading entries; entries beyond `alpha.len()` are opaque.
     alpha: Vec<u8>,
 }
 
-impl PngPalette {
-    /// Builds an opaque palette from 1–256 RGB entries.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if there
-    /// are zero or more than 256 entries.
-    pub fn new(entries: &[[u8; 3]]) -> Result<Self> {
-        Self::with_transparency(entries, &[])
-    }
-
-    /// Builds a palette with per-entry transparency. `alpha[i]` is the alpha of palette entry `i`;
-    /// `alpha` may be shorter than `rgb` (the remaining entries are opaque).
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if there
-    /// are zero or more than 256 RGB entries, or if there are more alpha values than RGB entries.
-    pub fn with_transparency(rgb: &[[u8; 3]], alpha: &[u8]) -> Result<Self> {
-        if rgb.is_empty() || rgb.len() > 256 {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "PNG: palette must have 1..=256 entries",
-            ));
-        }
-        if alpha.len() > rgb.len() {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "PNG: more tRNS entries than palette entries",
-            ));
-        }
-        Ok(Self {
-            rgb: rgb.to_vec(),
-            alpha: alpha.to_vec(),
-        })
-    }
-
-    /// Builds a palette from raw `PLTE` and optional `tRNS` chunk payloads (§11.2.2, §11.3.1.1).
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
-    /// PLTE payload is not a whole number of RGB triples, holds zero or more than 256 entries, or
-    /// has fewer entries than the tRNS payload.
-    pub(crate) fn from_chunks(plte: &[u8], trns: Option<&[u8]>) -> Result<Self> {
-        if !plte.len().is_multiple_of(3) {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "PNG: PLTE payload must be a whole number of RGB triples",
-            ));
-        }
-        let rgb: Vec<[u8; 3]> = plte
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .map(|entry| [entry[0], entry[1], entry[2]])
+impl From<&Palette> for Plte {
+    fn from(palette: &Palette) -> Self {
+        let rgb = palette.rgb_entries().to_vec();
+        // At most 256 entries, so every index is a `u8`; each answers `Some`.
+        let mut alpha: Vec<u8> = (0..=u8::MAX)
+            .zip(&rgb)
+            .map(|(index, _)| palette.alpha(index).unwrap_or(OPAQUE))
             .collect();
-        Self::with_transparency(&rgb, trns.unwrap_or_default())
+        trim_trailing_opaque(&mut alpha);
+        Self { rgb, alpha }
     }
+}
 
+impl Plte {
     /// The number of palette entries (1–256).
-    #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.rgb.len()
-    }
-
-    /// The RGB triple of entry `index`, or `None` if the index is out of range.
-    #[must_use]
-    pub fn rgb(&self, index: u8) -> Option<[u8; 3]> {
-        self.rgb.get(usize::from(index)).copied()
-    }
-
-    /// The alpha of entry `index` (255 for entries beyond the tRNS values), or `None` if the
-    /// index is out of range.
-    #[must_use]
-    pub fn alpha(&self, index: u8) -> Option<u8> {
-        if usize::from(index) >= self.rgb.len() {
-            return None;
-        }
-        Some(
-            self.alpha
-                .get(usize::from(index))
-                .copied()
-                .unwrap_or(OPAQUE),
-        )
-    }
-
-    /// Whether any entry is not fully opaque (i.e. the palette carries transparency).
-    #[must_use]
-    pub fn has_transparency(&self) -> bool {
-        self.alpha.iter().any(|&alpha| alpha != OPAQUE)
-    }
-
-    /// Always `false` — a palette has at least one entry (kept for API completeness).
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.rgb.is_empty()
     }
 
     /// The palette reduced to the entries `used` marks, with duplicates merged and the `tRNS`
@@ -374,7 +339,7 @@ const DISTANCE_WEIGHT: [u32; 255] = [
 /// predict across one, and DEFLATE matches along the stream.
 ///
 /// Both halves of the table are written for every pair, unconditionally. A pixel beside its own
-/// colour adds to the diagonal, which [`PngPalette::modified_zeng`] never reads: a candidate is
+/// colour adds to the diagonal, which [`Plte::modified_zeng`] never reads: a candidate is
 /// never on the list it is weighed against.
 fn co_occurrence(indices: &[u8], n: usize) -> Vec<u64> {
     let mut weight = vec![0u64; n * n];
@@ -395,7 +360,7 @@ pub(crate) const OPAQUE: u8 = 255;
 ///
 /// One owner for the rule, because both palette paths need it and a rule restated twice is a rule
 /// that can drift: the encoder-derived palette trims the alphas it collects
-/// ([`crate::reduce`]), and a caller-supplied one trims [`PngPalette::cleaned`]'s.
+/// ([`crate::reduce`]), and a caller-supplied one trims [`Plte::cleaned`]'s.
 ///
 /// Written as a search for the last entry that must stay rather than as a pop-until loop. The two
 /// compute the same length, but the loop's condition has a form -- `last() == Some(&OPAQUE)` -- in
@@ -412,51 +377,71 @@ pub(crate) fn trim_trailing_opaque(alphas: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-
-    /// A constructed palette is never empty, and `is_empty` says so.
-    ///
-    /// The method had no caller in any test, so it could return a constant `true` unnoticed
-    /// (#110). Its counterpart -- a constant `false` -- is a genuinely equivalent mutant rather
-    /// than a gap: `with_transparency` is the only constructor and it refuses an empty `rgb`, so
-    /// `self.rgb.is_empty()` is invariantly false for every value that exists. The refusal is
-    /// asserted here too, because that invariant is the whole reason the equivalence holds.
-    #[test]
-    fn a_constructed_palette_is_never_empty() {
-        let one = PngPalette::new(&[[1, 2, 3]]).expect("one entry is a palette");
-        assert!(!one.is_empty());
-        assert_eq!(one.len(), 1);
-
-        assert!(
-            PngPalette::new(&[]).is_err(),
-            "the constructor is what makes is_empty invariantly false"
-        );
-    }
     use super::*;
 
+    impl Plte {
+        /// An opaque palette, built through the public [`Palette`] and its conversion.
+        fn new(entries: &[[u8; 3]]) -> Result<Self> {
+            Ok(Self::from(&Palette::new(entries)?))
+        }
+
+        /// A palette with `alpha` exactly as given — trailing opaque entries included, so the
+        /// trims under test have something to cut.
+        fn with_transparency(rgb: &[[u8; 3]], alpha: &[u8]) -> Result<Self> {
+            Palette::with_alpha(rgb, alpha)?;
+            Ok(Self {
+                rgb: rgb.to_vec(),
+                alpha: alpha.to_vec(),
+            })
+        }
+
+        /// The RGB triple of entry `index`.
+        fn rgb(&self, index: u8) -> Option<[u8; 3]> {
+            self.rgb.get(usize::from(index)).copied()
+        }
+
+        /// The alpha of entry `index`, opaque past the `tRNS` values.
+        fn alpha(&self, index: u8) -> Option<u8> {
+            (usize::from(index) < self.rgb.len()).then(|| {
+                self.alpha
+                    .get(usize::from(index))
+                    .copied()
+                    .unwrap_or(OPAQUE)
+            })
+        }
+    }
+
+    /// The conversion from the public [`Palette`] keeps every entry's RGB and alpha, with the
+    /// `tRNS` trailing-opaque bytes trimmed: kills a `From` that drops, reorders or misreads an
+    /// entry, or that keeps an alpha past the last non-opaque one.
     #[test]
-    fn rejects_invalid_sizes() {
-        assert!(PngPalette::new(&[]).is_err());
-        assert!(PngPalette::new(&vec![[0, 0, 0]; 257]).is_err());
-        assert!(PngPalette::with_transparency(&[[0, 0, 0]], &[1, 2]).is_err());
-        assert!(PngPalette::new(&[[1, 2, 3]]).is_ok());
+    fn the_public_palette_converts_entry_for_entry() {
+        let palette = Palette::with_alpha(&[[1, 2, 3], [4, 5, 6], [7, 8, 9]], &[0, 128]).unwrap();
+        let plte = Plte::from(&palette);
+        assert_eq!(plte.plte(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(plte.trns(), Some(&[0u8, 128][..]));
+        let opaque = Plte::from(&Palette::with_alpha(&[[0; 3]; 3], &[255, 255]).unwrap());
+        assert_eq!(opaque.trns(), None);
+        let full = Plte::from(&Palette::with_alpha(&[[0; 3]; 256], &[9; 256]).unwrap());
+        assert_eq!((full.len(), full.trns().map(<[u8]>::len)), (256, Some(256)));
     }
 
     #[test]
     fn serialises_plte_and_trns() {
-        let p = PngPalette::with_transparency(&[[1, 2, 3], [4, 5, 6]], &[0]).unwrap();
+        let p = Plte::with_transparency(&[[1, 2, 3], [4, 5, 6]], &[0]).unwrap();
         assert_eq!(p.len(), 2);
         assert_eq!(p.plte(), vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(p.trns(), Some(&[0u8][..]));
-        let opaque = PngPalette::new(&[[7, 8, 9]]).unwrap();
+        let opaque = Plte::new(&[[7, 8, 9]]).unwrap();
         assert_eq!(opaque.trns(), None);
     }
 
     #[test]
     fn from_chunks_round_trips_serialisation() {
         let original =
-            PngPalette::with_transparency(&[[1, 2, 3], [4, 5, 6], [7, 8, 9]], &[0, 128]).unwrap();
-        let parsed = PngPalette::from_chunks(&original.plte(), original.trns()).unwrap();
-        assert_eq!(parsed.len(), 3);
+            Plte::with_transparency(&[[1, 2, 3], [4, 5, 6], [7, 8, 9]], &[0, 128]).unwrap();
+        let parsed = palette_from_chunks(&original.plte(), original.trns()).unwrap();
+        assert_eq!(parsed.rgb_entries().len(), 3);
         assert_eq!(parsed.rgb(0), Some([1, 2, 3]));
         assert_eq!(parsed.rgb(2), Some([7, 8, 9]));
         assert_eq!(parsed.rgb(3), None);
@@ -465,7 +450,36 @@ mod tests {
         assert_eq!(parsed.alpha(2), Some(255)); // beyond tRNS: opaque
         assert_eq!(parsed.alpha(3), None);
         assert!(parsed.has_transparency());
-        assert!(!PngPalette::new(&[[0, 0, 0]]).unwrap().has_transparency());
+        let opaque = palette_from_chunks(&[0, 0, 0], None).unwrap();
+        assert!(!opaque.has_transparency());
+    }
+
+    /// The chunk-level refusals keep PNG's own wording: a `PLTE` that is not whole triples, holds
+    /// no entry or more than 256, or is shorter than its `tRNS`.
+    #[test]
+    fn from_chunks_refuses_a_malformed_pair_in_png_terms() {
+        for (plte, trns, message) in [
+            (
+                &[0u8; 4][..],
+                None,
+                "PNG: PLTE payload must be a whole number of RGB triples",
+            ),
+            (&[][..], None, "PNG: palette must have 1..=256 entries"),
+            (
+                &[0u8; 257 * 3][..],
+                None,
+                "PNG: palette must have 1..=256 entries",
+            ),
+            (
+                &[0u8; 3][..],
+                Some(&[1u8, 2][..]),
+                "PNG: more tRNS entries than palette entries",
+            ),
+        ] {
+            let err = palette_from_chunks(plte, trns).unwrap_err();
+            assert_eq!(err.static_message(), Some(message), "{} bytes", plte.len());
+        }
+        assert!(palette_from_chunks(&[0u8; 256 * 3], Some(&[1u8; 256])).is_ok());
     }
 
     /// Marks `indices` (and nothing else) as used, the way `encode_indexed8` does.
@@ -499,10 +513,10 @@ mod tests {
         assert_eq!(none, vec![7, 8]);
     }
 
-    /// [`PngPalette::cleaned`] drops an entry no index marks, and renumbers the survivors.
+    /// [`Plte::cleaned`] drops an entry no index marks, and renumbers the survivors.
     #[test]
     fn cleaning_drops_an_entry_no_index_marks() {
-        let palette = PngPalette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]]).unwrap();
+        let palette = Plte::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]]).unwrap();
         let (cleaned, remap) = palette.cleaned(&used_by(&[1, 3]));
 
         assert_eq!(cleaned.len(), 2);
@@ -513,11 +527,11 @@ mod tests {
         assert_eq!(remap[3], 1);
     }
 
-    /// [`PngPalette::cleaned`] merges two entries naming the same colour, sending both old indices
+    /// [`Plte::cleaned`] merges two entries naming the same colour, sending both old indices
     /// to the surviving one.
     #[test]
     fn cleaning_merges_entries_that_name_the_same_colour() {
-        let palette = PngPalette::new(&[[9, 9, 9], [4, 4, 4], [9, 9, 9]]).unwrap();
+        let palette = Plte::new(&[[9, 9, 9], [4, 4, 4], [9, 9, 9]]).unwrap();
         let (cleaned, remap) = palette.cleaned(&used_by(&[0, 1, 2]));
 
         assert_eq!(cleaned.len(), 2, "the repeated colour is written once");
@@ -531,12 +545,12 @@ mod tests {
     }
 
     /// Two entries with the same RGB but different alphas are different colours, so
-    /// [`PngPalette::cleaned`] keeps both.
+    /// [`Plte::cleaned`] keeps both.
     ///
     /// Merging them would silently repaint every pixel using one of them.
     #[test]
     fn an_entry_is_its_alpha_as_well_as_its_rgb() {
-        let palette = PngPalette::with_transparency(&[[9, 9, 9], [9, 9, 9]], &[0, 200]).unwrap();
+        let palette = Plte::with_transparency(&[[9, 9, 9], [9, 9, 9]], &[0, 200]).unwrap();
         let (cleaned, remap) = palette.cleaned(&used_by(&[0, 1]));
 
         assert_eq!(cleaned.len(), 2);
@@ -546,27 +560,26 @@ mod tests {
     }
 
     /// An entry the palette leaves out of `tRNS` is opaque (§11.3.1.1), so
-    /// [`PngPalette::cleaned`] must compare it as opaque rather than as absent.
+    /// [`Plte::cleaned`] must compare it as opaque rather than as absent.
     ///
     /// Entry 1 below carries an explicit `OPAQUE` and entry 2 carries none; they are the same
     /// colour and must merge, which they cannot if a missing alpha is treated as its own value.
     #[test]
     fn a_missing_trns_entry_is_opaque_when_entries_are_compared() {
         let palette =
-            PngPalette::with_transparency(&[[0, 0, 0], [5, 5, 5], [5, 5, 5]], &[0, OPAQUE])
-                .unwrap();
+            Plte::with_transparency(&[[0, 0, 0], [5, 5, 5], [5, 5, 5]], &[0, OPAQUE]).unwrap();
         let (cleaned, remap) = palette.cleaned(&used_by(&[0, 1, 2]));
 
         assert_eq!(cleaned.len(), 2);
         assert_eq!(remap[2], remap[1]);
     }
 
-    /// [`PngPalette::cleaned`] hands back a palette whose `tRNS` payload is already trimmed, so
+    /// [`Plte::cleaned`] hands back a palette whose `tRNS` payload is already trimmed, so
     /// the encoder writes the shortest chunk §11.3.1.1 allows.
     #[test]
     fn a_cleaned_palette_carries_a_trimmed_trns() {
         let palette =
-            PngPalette::with_transparency(&[[0, 0, 0], [1, 1, 1], [2, 2, 2]], &[0, OPAQUE, OPAQUE])
+            Plte::with_transparency(&[[0, 0, 0], [1, 1, 1], [2, 2, 2]], &[0, OPAQUE, OPAQUE])
                 .unwrap();
         let (cleaned, _) = palette.cleaned(&used_by(&[0, 1, 2]));
         assert_eq!(cleaned.trns(), Some(&[0u8][..]));
@@ -578,13 +591,13 @@ mod tests {
 
     /// `n` opaque grey entries, entry `i` holding `[i, i, i]`, so a reordered palette's `rgb`
     /// reads back as the old index each new slot holds.
-    fn greys(n: u8) -> PngPalette {
+    fn greys(n: u8) -> Plte {
         let entries: Vec<[u8; 3]> = (0..n).map(|i| [i, i, i]).collect();
-        PngPalette::new(&entries).unwrap()
+        Plte::new(&entries).unwrap()
     }
 
     /// The old index in each new slot of a reordered [`greys`] palette.
-    fn order_of(palette: &PngPalette) -> Vec<u8> {
+    fn order_of(palette: &Plte) -> Vec<u8> {
         (0..palette.len()).map(|i| palette.rgb[i][0]).collect()
     }
 
@@ -616,7 +629,7 @@ mod tests {
         assert_eq!(weight[2], 3);
     }
 
-    /// [`PngPalette::modified_zeng`] seeds with the heaviest pair and then grows by adjacency,
+    /// [`Plte::modified_zeng`] seeds with the heaviest pair and then grows by adjacency,
     /// each entry going to the end it neighbours.
     ///
     /// One row, so only horizontal pairs: 0–2 five times, 2–3 three times, 3–1 once. The seed is
@@ -699,7 +712,7 @@ mod tests {
     /// Zeng alone orders the row below `[0, 1, 2, 3]`; entries 1 and 3 are translucent.
     #[test]
     fn modified_zeng_puts_transparent_entries_first() {
-        let palette = PngPalette::with_transparency(
+        let palette = Plte::with_transparency(
             &[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]],
             &[OPAQUE, 40, OPAQUE, 0],
         )
@@ -714,7 +727,7 @@ mod tests {
     /// A one-entry palette is its own order.
     #[test]
     fn modified_zeng_leaves_a_single_entry_alone() {
-        let palette = PngPalette::with_transparency(&[[5, 6, 7]], &[9]).unwrap();
+        let palette = Plte::with_transparency(&[[5, 6, 7]], &[9]).unwrap();
         let (reordered, remap) = palette.modified_zeng(&[0, 0]);
         assert_eq!(reordered.plte(), vec![5, 6, 7]);
         assert_eq!(reordered.trns(), Some(&[9u8][..]));
@@ -725,18 +738,10 @@ mod tests {
     /// and the translucent entry 1 then moves ahead of the opaque 0.
     #[test]
     fn modified_zeng_partitions_a_two_entry_palette() {
-        let palette = PngPalette::with_transparency(&[[0, 0, 0], [1, 1, 1]], &[OPAQUE, 0]).unwrap();
+        let palette = Plte::with_transparency(&[[0, 0, 0], [1, 1, 1]], &[OPAQUE, 0]).unwrap();
         let (reordered, remap) = palette.modified_zeng(&[0, 1]);
         assert_eq!(reordered.plte(), vec![1, 1, 1, 0, 0, 0]);
         assert_eq!(reordered.trns(), Some(&[0u8][..]));
         assert_eq!(&remap[..2], &[1, 0]);
-    }
-
-    #[test]
-    fn from_chunks_rejects_malformed_payloads() {
-        assert!(PngPalette::from_chunks(&[1, 2, 3, 4], None).is_err()); // not a triple multiple
-        assert!(PngPalette::from_chunks(&[], None).is_err()); // zero entries
-        assert!(PngPalette::from_chunks(&[0; 771], None).is_err()); // 257 entries
-        assert!(PngPalette::from_chunks(&[1, 2, 3], Some(&[0, 0])).is_err()); // tRNS too long
     }
 }

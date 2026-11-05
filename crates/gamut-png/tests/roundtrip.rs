@@ -10,8 +10,8 @@ use gamut_core::{
     ImageBuf, ImageRef, Indexed8, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_png::{
-    Background, FilterStrategy, FilterType, Level, ModificationTime, PhysicalDimensions,
-    PngDecoder, PngEncoder, PngImage, PngPalette, SrgbIntent,
+    Background, FilterStrategy, FilterType, Level, ModificationTime, Palette, PhysicalDimensions,
+    PngDecoder, PngEncoder, PngImage, SrgbIntent,
 };
 
 /// Encodes `src` as `P` with `encoder`, decodes as `P`, and asserts the samples survive.
@@ -121,7 +121,7 @@ fn indexed_round_trips_at_every_auto_depth() {
             .map(|i| [i as u8, (i * 11) as u8, (i * 29) as u8])
             .collect();
         let alpha: Vec<u8> = (0..entries.min(5)).map(|i| (i * 60) as u8).collect();
-        let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+        let palette = Palette::with_alpha(&rgb, &alpha).unwrap();
         // At least 256 pixels, so the cycling indices below name every entry of even the largest
         // palette -- `encode_indexed8` drops an entry no pixel names, which would otherwise make
         // this test about palette cleaning instead of about bit depth. An odd width keeps the
@@ -141,7 +141,7 @@ fn indexed_round_trips_at_every_auto_depth() {
         // And through the rich path, the palette itself survives.
         let rich = PngDecoder::new().decode(&png).unwrap();
         let carried = rich.palette.expect("palette carried");
-        assert_eq!(carried.len(), entries);
+        assert_eq!(carried.rgb_entries().len(), entries);
         for (i, &[r, g, b]) in rgb.iter().enumerate() {
             assert_eq!(carried.rgb(i as u8), Some([r, g, b]));
             let expected_alpha = alpha.get(i).copied().unwrap_or(255);

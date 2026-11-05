@@ -15,7 +15,7 @@ use gamut_core::{
 use gamut_deflate::DeflateEncoder;
 use gamut_png::{
     AbiZlibDeflater, AbiZlibInflater, FilterStrategy, IdatInfo, Level, PIXEL_FORMAT_FILTERED_BYTES,
-    PngDecoder, PngEncoder, PngPalette, ZLIB_CODEC_ID, ZlibDeflater, ZlibInflater,
+    Palette, PngDecoder, PngEncoder, ZLIB_CODEC_ID, ZlibDeflater, ZlibInflater,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -182,7 +182,7 @@ fn default_output_is_byte_identical_across_colour_types_and_depths() {
     out.clear();
 
     let idx: Vec<u8> = (0..N).map(|i| (i % 5) as u8).collect();
-    let plte = PngPalette::new(&[[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255], [9, 9, 9]])
+    let plte = Palette::new(&[[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255], [9, 9, 9]])
         .expect("palette");
     PngEncoder::new()
         .encode_indexed8(

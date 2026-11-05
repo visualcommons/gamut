@@ -15,7 +15,7 @@
 //! same budget rather than copied beside it.
 
 use gamut_core::{
-    Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Indexed8, Rgb8, Rgb16, Rgba8, Rgba16,
+    Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Indexed8, Palette, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
 use crate::ancillary::{PhysicalUnit, SrgbIntent, sbit_for, time_in_range};
@@ -25,7 +25,6 @@ use crate::decoder::{TransparencyKey, depth_mask};
 use crate::ihdr::Ihdr;
 use crate::inflate;
 use crate::pack::gray8_scale;
-use crate::palette::PngPalette;
 
 /// The parsed image header (IHDR, §11.2.1), reported as stored in the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +227,7 @@ pub struct DecodedPng {
     pub image: PngImage,
     /// The palette of an indexed image (indices are in [`Self::image`]; per-entry alpha comes
     /// from tRNS).
-    pub palette: Option<PngPalette>,
+    pub palette: Option<Palette>,
     /// The tRNS colour key of a greyscale/truecolour image, in native (unscaled) sample units.
     pub transparency: Option<TransparencyKey>,
     /// The ancillary metadata, as [`metadata`](crate::metadata) reads it. Its `bKGD`

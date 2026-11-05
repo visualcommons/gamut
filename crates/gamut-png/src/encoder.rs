@@ -21,7 +21,7 @@
 
 use gamut_core::{
     Bilevel, Dimensions, EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef,
-    Indexed8, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Indexed8, Palette, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::{DeflateEncoder, Level};
 
@@ -36,7 +36,7 @@ use crate::decoded::{
     Background, Cicp, ModificationTime, PhysicalDimensions, PngMetadata, TextChunkKind,
 };
 use crate::filter::{self, FilterStrategy, FilterType};
-use crate::palette::{PaletteOrder, PngPalette};
+use crate::palette::{PaletteOrder, Plte};
 use crate::reduce::{self, Family, Reduced, Reductions};
 use crate::{ihdr, pack};
 
@@ -1307,8 +1307,8 @@ impl PngEncoder {
     /// the file names is dropped, a second entry holding the same RGB *and* alpha as an earlier one
     /// is merged into it, the trailing opaque `tRNS` bytes §11.3.1.1 lets a chunk omit are omitted,
     /// the index bit depth is derived from what survives, and the image's indices are renumbered to
-    /// match (`PngPalette::cleaned`). The colour every pixel resolves to is unchanged, which is
-    /// why this reports nothing: a merged entry did not fail to come along, it arrived under
+    /// match (the crate-private `Plte::cleaned`). The colour every pixel resolves to is unchanged,
+    /// which is why this reports nothing: a merged entry did not fail to come along, it arrived under
     /// another index. Surviving entries keep the order you gave them unless
     /// [`with_palette_order`](Self::with_palette_order) asks for another, in which case they are
     /// renumbered after cleaning and the indices follow.
@@ -1332,17 +1332,18 @@ impl PngEncoder {
     pub fn encode_indexed8(
         &self,
         image: ImageRef<'_, Indexed8>,
-        palette: &PngPalette,
+        palette: &Palette,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         let indices = image.as_samples();
         let max_index = indices.iter().copied().max().unwrap_or(0);
-        if usize::from(max_index) >= palette.len() {
+        if usize::from(max_index) >= palette.rgb_entries().len() {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "PNG: palette index out of range",
             ));
         }
+        let palette = Plte::from(palette);
         // Every entry the finished file still has to name. A pixel names one; so does the `bKGD`
         // background, in whichever of its three forms it was set — an index into this palette, a
         // grey sample, an RGB triple. Which entry each form names is `ancillary::background_entry`
@@ -2199,7 +2200,7 @@ mod tests {
 
         // Indexed: one byte, the palette index.
         let entries: Vec<[u8; 3]> = (0..8u8).map(|i| [i, i.wrapping_add(70), 90]).collect();
-        let palette = PngPalette::new(&entries).unwrap();
+        let palette = Palette::new(&entries).unwrap();
         let indices: Vec<u8> = (0..200u8).map(|i| i % 8).collect();
         let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(200, 1).unwrap()).unwrap();
         let mut png = Vec::new();
@@ -2226,7 +2227,7 @@ mod tests {
         for distinct in [1usize, 2, 3, 4, 5, 16] {
             // 256 entries, of which the image names the first `distinct`.
             let entries: Vec<[u8; 3]> = (0..256u32).map(|i| [i as u8, 0, 0]).collect();
-            let palette = PngPalette::new(&entries).unwrap();
+            let palette = Palette::new(&entries).unwrap();
             let indices: Vec<u8> = (0..64usize).map(|i| (i % distinct) as u8).collect();
             let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(64, 1).unwrap()).unwrap();
             let mut png = Vec::new();
@@ -2264,13 +2265,13 @@ mod tests {
         // 256 entries holding those four colours, 64 times over.
         let padded: Vec<[u8; 3]> = (0..256).map(|i| colours[i % 4]).collect();
         let padded_alpha: Vec<u8> = (0..256).map(|i| alphas[i % 4]).collect();
-        let padded = PngPalette::with_transparency(&padded, &padded_alpha).unwrap();
-        let tight = PngPalette::with_transparency(&colours, &alphas).unwrap();
+        let padded = Palette::with_alpha(&padded, &padded_alpha).unwrap();
+        let tight = Palette::with_alpha(&colours, &alphas).unwrap();
 
         let indices: Vec<u8> = (0..(w * h) as usize)
             .map(|i| (((i as u32 % w) / 7 + (i as u32 / w) / 5) % 4) as u8)
             .collect();
-        let encode = |palette: &PngPalette| {
+        let encode = |palette: &Palette| {
             let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(w, h).unwrap()).unwrap();
             let mut png = Vec::new();
             PngEncoder::new()
@@ -2294,7 +2295,7 @@ mod tests {
     #[test]
     fn a_background_index_names_a_surviving_entry_after_cleaning() {
         let palette =
-            PngPalette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]]).unwrap();
+            Palette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]]).unwrap();
         // Only entry 1 is painted; entry 3 is named by the background alone.
         let indices = vec![1u8; 8];
         let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(8, 1).unwrap()).unwrap();
@@ -2327,7 +2328,7 @@ mod tests {
     #[test]
     fn a_reordered_palette_carries_its_pixels_and_background_along() {
         let entries: Vec<[u8; 3]> = (0..6).map(|i| [i * 10, i * 10, i * 10]).collect();
-        let palette = PngPalette::new(&entries).unwrap();
+        let palette = Palette::new(&entries).unwrap();
         let indices = [1u8, 3, 1, 3, 1, 3, 4, 3, 4, 2];
         let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(10, 1).unwrap()).unwrap();
         let mut reordered = Vec::new();
@@ -2414,7 +2415,7 @@ mod tests {
                 background: [r, g, b],
                 alpha,
             } = case;
-            let palette = PngPalette::with_transparency(entries, alphas).unwrap();
+            let palette = Palette::with_alpha(entries, alphas).unwrap();
             let dims = Dimensions::new(painted.len() as u32, 1).unwrap();
             let img = ImageRef::<Indexed8>::new(painted, dims).unwrap();
             let mut png = Vec::new();
@@ -2448,7 +2449,7 @@ mod tests {
     /// out.
     #[test]
     fn a_background_index_past_the_palette_stays_omitted() {
-        let palette = PngPalette::new(&[[9, 8, 7], [6, 5, 4], [3, 2, 1]]).unwrap();
+        let palette = Palette::new(&[[9, 8, 7], [6, 5, 4], [3, 2, 1]]).unwrap();
         for index in [3u8, 4, 200, 255] {
             let indices = vec![0u8, 1, 2, 1];
             let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(4, 1).unwrap()).unwrap();

@@ -15,8 +15,8 @@ use common::{
 };
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Indexed8, Rgb8, Rgba8};
 use gamut_png::{
-    Background, ModificationTime, PhysicalDimensions, PhysicalUnit, PngDecoder, PngEncodeReport,
-    PngEncoder, PngPalette, SegmentKind, SrgbIntent, deconstruct, fill_c2pa,
+    Background, ModificationTime, Palette, PhysicalDimensions, PhysicalUnit, PngDecoder,
+    PngEncodeReport, PngEncoder, SegmentKind, SrgbIntent, deconstruct, fill_c2pa,
 };
 
 /// [`PngEncoder::encode_with_report`] into a fresh buffer, returning the PNG beside its report.
@@ -144,7 +144,7 @@ fn cabx_is_the_chunk_immediately_before_idat_after_every_other_chunk() {
     assert_eq!(types.last(), Some(b"IEND"));
 
     // The indexed path, whose PLTE and tRNS the caller supplies, orders the same way.
-    let palette = PngPalette::with_transparency(&[[1, 2, 3], [4, 5, 6]], &[9]).expect("palette");
+    let palette = Palette::with_alpha(&[[1, 2, 3], [4, 5, 6]], &[9]).expect("palette");
     let indices = [0u8, 1, 1, 0, 1, 0];
     let image =
         ImageRef::<Indexed8>::new(&indices, Dimensions::new(3, 2).expect("valid")).expect("image");
@@ -521,7 +521,7 @@ fn a_reserved_store_is_filled_in_place_to_the_same_bytes_as_a_second_encode() {
 /// accounting, fill in place, read it back.
 #[test]
 fn an_indexed_encode_reserves_and_fills_through_the_report() {
-    let palette = PngPalette::new(&[[1, 2, 3], [4, 5, 6]]).expect("palette");
+    let palette = Palette::new(&[[1, 2, 3], [4, 5, 6]]).expect("palette");
     let indices = [0u8, 1, 1, 0, 1, 0];
     let image =
         ImageRef::<Indexed8>::new(&indices, Dimensions::new(3, 2).expect("valid")).expect("image");

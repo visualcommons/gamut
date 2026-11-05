@@ -118,17 +118,6 @@ exclude_re = [
     # -----------------------------------------------------------------------------------------
     # GROUP 1 — UNKILLABLE: provably equivalent, or a correctness-preserving free choice.
     # -----------------------------------------------------------------------------------------
-    # gamut-png PngPalette::is_empty -- equivalent by the type's construction invariant.
-    # `with_transparency` is the only constructor (`new` delegates to it) and it refuses an empty
-    # `rgb`, so `self.rgb.is_empty()` is invariantly false for every value that can exist. A mutant
-    # returning the constant `false` is therefore observationally identical and no test can
-    # distinguish it. The method exists because clippy's `len_without_is_empty` requires it
-    # alongside the public `len`, and its own doc says "Always `false`".
-    #
-    # The *other* direction is NOT excluded: `with true` is a real defect and is killed by
-    # `a_constructed_palette_is_never_empty`, which also asserts the constructor's refusal --
-    # the invariant this argument rests on.
-    '^crates/gamut-png/src/palette\.rs:150:9: replace PngPalette::is_empty -> bool with false$',
     # gamut capability::typed_wiring -- equivalent because every format is wired (#510).
     # The table's cell is `true` for each of the eight `Format` variants, and its `match` names
     # all eight with no wildcard, so the constant `true` agrees with the body on every value a
