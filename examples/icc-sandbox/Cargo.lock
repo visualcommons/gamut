@@ -808,14 +808,14 @@ dependencies = [
 
 [[package]]
 name = "gamut-bitstream"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "gamut-core",
 ]
 
 [[package]]
 name = "gamut-cmm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gamut-color",
  "gamut-core",
@@ -825,11 +825,11 @@ dependencies = [
 
 [[package]]
 name = "gamut-codec-abi"
-version = "0.1.2"
+version = "0.2.0"
 
 [[package]]
 name = "gamut-color"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "gamut-core",
  "gamut-dsp",
@@ -837,14 +837,14 @@ dependencies = [
 
 [[package]]
 name = "gamut-core"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "gamut-deflate"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "gamut-core",
  "miniz_oxide 0.8.9",
@@ -852,11 +852,11 @@ dependencies = [
 
 [[package]]
 name = "gamut-dsp"
-version = "2.0.1"
+version = "3.0.0"
 
 [[package]]
 name = "gamut-icc"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "gamut-color",
  "gamut-core",
