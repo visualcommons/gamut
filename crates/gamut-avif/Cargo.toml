@@ -20,7 +20,8 @@ workspace = true
 # guarantee, and never enabled by the `gamut` umbrella; the crate's own tests get it via `cfg(test)`.
 test-support = []
 # Typed metadata wiring: `AvifImage`'s `TypedMetadata` impl (`blocks` / `metadata`) and
-# `AvifEncoder::with_metadata` / `with_encoded_metadata` over the `gamut-metadata` facade.
+# `AvifEncoder`'s `MetadataSink` impl (`with_metadata` / `with_encoded_metadata`) over the
+# `gamut-metadata` facade.
 metadata = ["dep:gamut-metadata"]
 
 [dependencies]
