@@ -800,7 +800,7 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
 #[cfg(test)]
 mod tests {
     use gamut_core::{EncodeImage, ImageRef};
-    use gamut_ifd::ByteOrder;
+    use gamut_ifd::{ByteOrder, Value};
 
     use super::*;
     use crate::encoder::TiffEncoder;
@@ -829,5 +829,89 @@ mod tests {
             assert_eq!(got.dimensions(), dims);
             assert_eq!(got.as_samples(), pixels.as_slice());
         }
+    }
+
+    /// A 2-wide, 3-tall, 8-bit single-sample uncompressed layout: 2 stored bytes per row.
+    fn gray_layout() -> Layout {
+        Layout {
+            width: 2,
+            height: 3,
+            spp: 1,
+            bps: 8,
+            stored_row_bytes: 2,
+            compression: Compression::None,
+            order: ByteOrder::LittleEndian,
+        }
+    }
+
+    /// An IFD holding one strip at `offset` of `count` bytes, with `RowsPerStrip` set when given.
+    fn one_strip_ifd(rows_per_strip: Option<u32>, offset: u32, count: u32) -> Ifd {
+        let mut ifd = Ifd::new();
+        if let Some(rows) = rows_per_strip {
+            ifd.set(tags::ROWS_PER_STRIP, Value::Long(vec![rows]));
+        }
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![offset]));
+        ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![count]));
+        ifd
+    }
+
+    /// Asserts `got` is an `InvalidInput` error carrying exactly `message`.
+    fn assert_invalid_input<T: std::fmt::Debug>(got: Result<T>, message: &str) {
+        let err = got.expect_err("expected an error");
+        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput, "{err:?}");
+        assert_eq!(err.static_message(), Some(message), "{err:?}");
+    }
+
+    /// `RowsPerStrip` of 0 means the whole image is one strip, the same as an absent tag (TIFF 6.0
+    /// §8 defaults it to 2**32 - 1, i.e. "one strip"). Both alternatives of the `Some(0) | None`
+    /// pattern are asserted, since the mutation gate cannot delete one alone: without the
+    /// `Some(0)` alternative a zero would reach the clamp arm and divide the height by zero.
+    /// `gamut-dng` refuses the zero instead (`chunk_grid`); the difference is pinned on both sides.
+    #[test]
+    fn decode_strips_reads_rows_per_strip_zero_or_absent_as_one_full_height_strip() {
+        let data = [1, 2, 3, 4, 5, 6];
+        for rows in [Some(0), None] {
+            let got = decode_strips(&one_strip_ifd(rows, 0, 6), &data, &gray_layout());
+            assert_eq!(got.expect("decode"), data, "RowsPerStrip {rows:?}");
+        }
+    }
+
+    /// A `RowsPerStrip` beyond the image height decodes as one full-height strip. This does not
+    /// pin the `.min(l.height)` clamp on `rows_per_strip`: without it the strip count is still 1
+    /// and each strip's rows are clamped again in the loop, so the output is identical.
+    #[test]
+    fn decode_strips_decodes_an_oversized_rows_per_strip_as_one_strip() {
+        let data = [1, 2, 3, 4, 5, 6];
+        let got = decode_strips(&one_strip_ifd(Some(100), 0, 6), &data, &gray_layout());
+        assert_eq!(got.expect("decode"), data);
+    }
+
+    /// Pins the current result of a strip whose `offset + count` passes `u32::MAX`: the extent is
+    /// summed unchecked in `usize`, which on a 64-bit target cannot overflow, so the slice lookup
+    /// reports it out of bounds. Recorded as-is ahead of the move into `gamut-ifd` (#1057); a
+    /// 32-bit target would overflow the sum instead, which is why the pin is width-gated.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn decode_strips_reports_an_extent_past_u32_max_as_out_of_bounds() {
+        let got = decode_strips(
+            &one_strip_ifd(None, 0xFFFF_FFF0, 0x20),
+            &[0; 6],
+            &gray_layout(),
+        );
+        assert_invalid_input(got, "TIFF: strip out of bounds");
+    }
+
+    /// The tile twin of [`decode_strips_reports_an_extent_past_u32_max_as_out_of_bounds`]: the
+    /// same unchecked `offset + count`, the same current out-of-bounds result.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn decode_tiles_reports_an_extent_past_u32_max_as_out_of_bounds() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::TILE_WIDTH, Value::Long(vec![2]));
+        ifd.set(tags::TILE_LENGTH, Value::Long(vec![3]));
+        ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0xFFFF_FFF0]));
+        ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![0x20]));
+        let got = decode_tiles(&ifd, &[0; 6], &gray_layout(), false);
+        assert_invalid_input(got, "TIFF: tile out of bounds");
     }
 }

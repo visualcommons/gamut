@@ -2449,6 +2449,65 @@ mod tests {
         }
     }
 
+    /// A strip IFD's `RowsPerStrip` of 0 is refused, unlike `gamut-tiff`, which reads it as one
+    /// full-height strip; an absent tag still means one strip of the whole height.
+    #[test]
+    fn chunk_grid_refuses_zero_rows_per_strip_and_defaults_an_absent_one_to_the_height() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::ROWS_PER_STRIP, Value::Long(vec![0]));
+        let err = chunk_grid(&TrackedIfd::new(&ifd), 4, 3).unwrap_err();
+        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput, "{err:?}");
+        assert_eq!(
+            err.static_message(),
+            Some("DNG: RowsPerStrip must be non-zero")
+        );
+
+        let grid = chunk_grid(&TrackedIfd::new(&Ifd::new()), 4, 3).expect("strips");
+        assert!(
+            matches!(grid, ChunkGrid::Strips { rows_per_strip: 3 }),
+            "{grid:?}"
+        );
+    }
+
+    /// Asserts `got` is an `InvalidInput` error carrying exactly `message`.
+    fn assert_byte_chunks_refused(got: Result<Vec<&[u8]>>, message: &str) {
+        let err = got.expect_err("expected an error");
+        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput, "{err:?}");
+        assert_eq!(err.static_message(), Some(message), "{err:?}");
+    }
+
+    #[test]
+    fn byte_chunks_refuses_offset_and_count_arrays_of_different_lengths() {
+        assert_byte_chunks_refused(
+            byte_chunks(&[0, 1], &[1], &[0; 4]),
+            "DNG: image-data offset/count length mismatch",
+        );
+    }
+
+    /// `offset + count` past `usize::MAX` is an overflow, reported as such rather than wrapped.
+    #[test]
+    fn byte_chunks_refuses_an_extent_that_overflows_usize() {
+        let offset = u64::try_from(usize::MAX).expect("usize fits u64");
+        assert_byte_chunks_refused(
+            byte_chunks(&[offset], &[1], &[0; 4]),
+            "DNG: image-data extent overflow",
+        );
+    }
+
+    /// An extent that ends one byte past the data is out of bounds; one that ends on it is not.
+    #[test]
+    fn byte_chunks_refuses_an_extent_past_the_data() {
+        let data = [1, 2, 3, 4];
+        assert_byte_chunks_refused(
+            byte_chunks(&[2], &[3], &data),
+            "DNG: image data out of bounds",
+        );
+        assert_eq!(
+            byte_chunks(&[0, 2], &[2, 2], &data).expect("in bounds"),
+            [&data[..2], &data[2..]]
+        );
+    }
+
     /// Either tile tag alone classifies the IFD as tiled — the resulting error must come from
     /// the *tile* family, not from a strips fallback complaining about StripOffsets.
     #[test]

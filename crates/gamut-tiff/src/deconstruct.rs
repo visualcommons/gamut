@@ -609,6 +609,53 @@ mod tests {
         );
     }
 
+    /// An unknown `Predictor` (317) code is flagged; a recognised one is not. `gamut-dng`'s
+    /// deconstruct does not check `Predictor` at all, and pins that difference on its side.
+    #[test]
+    fn check_codes_flags_an_unknown_predictor_only() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::PREDICTOR, Value::Short(vec![99]));
+        let mut findings = Findings::default();
+        findings.check_codes(&ifd, 3);
+        assert_eq!(
+            findings.anomalies,
+            [Anomaly::UnknownCode {
+                page: 3,
+                tag: tags::PREDICTOR,
+                code: 99,
+                detail: "TIFF: unrecognised Predictor code",
+            }]
+        );
+
+        ifd.set(tags::PREDICTOR, Value::Short(vec![2]));
+        let mut findings = Findings::default();
+        findings.check_codes(&ifd, 3);
+        assert_eq!(findings.anomalies, []);
+    }
+
+    /// An unknown `PhotometricInterpretation` (262) code is flagged; a recognised one is not.
+    #[test]
+    fn check_codes_flags_an_unknown_photometric_interpretation_only() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![99]));
+        let mut findings = Findings::default();
+        findings.check_codes(&ifd, 3);
+        assert_eq!(
+            findings.anomalies,
+            [Anomaly::UnknownCode {
+                page: 3,
+                tag: tags::PHOTOMETRIC_INTERPRETATION,
+                code: 99,
+                detail: "TIFF: unrecognised PhotometricInterpretation code",
+            }]
+        );
+
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![1]));
+        let mut findings = Findings::default();
+        findings.check_codes(&ifd, 3);
+        assert_eq!(findings.anomalies, []);
+    }
+
     /// An IFD that claims to be tiled but carries no tile data is diagnosed *as tiled*.
     ///
     /// `check_pixel_structure` enters the tile branch on `TileWidth` **or** `TileOffsets`, and the

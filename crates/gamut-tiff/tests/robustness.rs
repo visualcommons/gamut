@@ -13,7 +13,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgb16};
+use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8, Rgb16};
 use gamut_tiff::{Compression, Ifd, Predictor, TiffDecoder, TiffEncoder, TiffMetadata, Value};
 
 /// The largest single allocation this binary grants: four times the decoder's 64 MiB
@@ -159,7 +159,7 @@ fn absent_bits_per_sample_is_not_sized_by_samples_per_pixel() {
 }
 
 #[test]
-fn specific_malformed_inputs_error_without_panic() {
+fn specific_malformed_inputs_are_refused_as_invalid_input() {
     let dec = TiffDecoder::new();
     let cases: &[&[u8]] = &[
         b"",
@@ -175,10 +175,15 @@ fn specific_malformed_inputs_error_without_panic() {
         // list defaulted to empty and was then indexed.
         b"II\x2a\x00\x08\x00\x00\x00\x04\x00\x00\x01\x03\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x01\x03\x00\x01\x00\x00\x00\x01\x00\x00\x00\x06\x01\x03\x00\x01\x00\x00\x00\x01\x00\x00\x00\x15\x01\x03\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
     ];
-    for &c in cases {
-        // Must return without panicking (Ok or Err either way).
-        let _ = dec.info(c);
-        let _ = dec.decode_page(c, 0);
+    for (i, &c) in cases.iter().enumerate() {
+        // Every case is malformed, so both entry points refuse it as invalid input: returning
+        // without a panic is necessary but not sufficient.
+        let info = dec.info(c).expect_err("info accepted a malformed file");
+        assert_eq!(info.kind(), ErrorKind::InvalidInput, "case {i}: {info:?}");
+        let page = dec
+            .decode_page(c, 0)
+            .expect_err("decode_page accepted a malformed file");
+        assert_eq!(page.kind(), ErrorKind::InvalidInput, "case {i}: {page:?}");
     }
 }
 
