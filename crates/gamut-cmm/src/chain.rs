@@ -86,7 +86,7 @@ fn compatible(a: ColorSpace, b: ColorSpace) -> bool {
     a == b
         || matches!(
             (a, b),
-            (ColorSpace::NColor(4), ColorSpace::Cmyk) | (ColorSpace::Cmyk, ColorSpace::NColor(4))
+            (ColorSpace::NColor4, ColorSpace::Cmyk) | (ColorSpace::Cmyk, ColorSpace::NColor4)
         )
         || matches!(
             (a, b),
@@ -756,12 +756,12 @@ mod tests {
     #[test]
     fn compatible_matches_lcms2s_table() {
         assert!(compatible(ColorSpace::Rgb, ColorSpace::Rgb));
-        assert!(compatible(ColorSpace::Cmyk, ColorSpace::NColor(4)));
-        assert!(compatible(ColorSpace::NColor(4), ColorSpace::Cmyk));
+        assert!(compatible(ColorSpace::Cmyk, ColorSpace::NColor4));
+        assert!(compatible(ColorSpace::NColor4, ColorSpace::Cmyk));
         assert!(compatible(ColorSpace::Xyz, ColorSpace::Lab));
         assert!(compatible(ColorSpace::Lab, ColorSpace::Xyz));
         assert!(!compatible(ColorSpace::Rgb, ColorSpace::Cmyk));
-        assert!(!compatible(ColorSpace::NColor(3), ColorSpace::Cmyk));
+        assert!(!compatible(ColorSpace::NColor3, ColorSpace::Cmyk));
         assert!(!compatible(ColorSpace::Lab, ColorSpace::Rgb));
     }
 
@@ -770,7 +770,7 @@ mod tests {
         // The AddConversion default-arm quirk: 4CLR≡CMYK passes `compatible` but cannot
         // bridge a conversion hop.
         let (m, off) = IDENTITY;
-        let err = pcs_seam(ColorSpace::Cmyk, ColorSpace::NColor(4), m, off).unwrap_err();
+        let err = pcs_seam(ColorSpace::Cmyk, ColorSpace::NColor4, m, off).unwrap_err();
         assert_eq!(
             err.to_string(),
             "cmm: profile chain mismatch (device-space hop cannot bridge distinct colour spaces)"

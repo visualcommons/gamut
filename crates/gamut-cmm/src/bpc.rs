@@ -346,10 +346,7 @@ pub(crate) fn is_matrix_shaper(profile: &IccProfile) -> bool {
 /// space (`nCLR`; lcms2 also lists its legacy `MCHx` aliases, which `gamut-icc` folds into
 /// the same family).
 fn is_ink_space(space: ColorSpace) -> bool {
-    matches!(
-        space,
-        ColorSpace::Cmy | ColorSpace::Cmyk | ColorSpace::NColor(_)
-    )
+    matches!(space, ColorSpace::Cmy | ColorSpace::Cmyk) || space.is_n_color()
 }
 
 /// The darkest device tuple per space, as encoded `[0, 1]` channels — lcms2's

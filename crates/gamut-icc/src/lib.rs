@@ -59,13 +59,18 @@
 //! The current major's surface follows a few deliberate policies:
 //!
 //! - **Plain-data model.** The tag structs expose public fields and are *not* `#[non_exhaustive]`:
-//!   they mirror layouts ICC.1:2022 froze, so they will not grow fields. The two open sets —
-//!   [`TagData`] (new semantic decoders) and [`KnownTag`] (catalogue entries) — are
-//!   `#[non_exhaustive]` and grow additively.
-//! - **Exhaustive enums mirror closed spec registries**: [`DeviceClass`] (§7.2.5), [`ColorSpace`]
-//!   (§7.2.6, with [`ColorSpace::NColor`] covering the xCLR family), [`RenderingIntent`]
-//!   (§7.2.15), [`ClutPrecision`], [`Curve`] (the three count-selected §10.6 encodings),
-//!   [`CurveOrParametric`] and [`EmbeddedDescription`] (the only element types those slots admit).
+//!   they mirror layouts ICC.1:2022 froze, so they will not grow fields. The three open sets —
+//!   [`TagData`] (new semantic decoders), [`KnownTag`] (catalogue entries) and [`ColorSpace`]
+//!   (§7.2.6, whose Table 19 ICC revisions have grown before) — are `#[non_exhaustive]` and grow
+//!   additively.
+//! - **Exhaustive enums mirror closed spec registries**: [`DeviceClass`] (§7.2.5),
+//!   [`RenderingIntent`] (§7.2.15), [`ClutPrecision`], [`Curve`] (the three count-selected §10.6
+//!   encodings), [`CurveOrParametric`] and [`EmbeddedDescription`] (the only element types those
+//!   slots admit).
+//! - **Header enums are C-portable.** [`DeviceClass`], [`ColorSpace`] and [`RenderingIntent`] are
+//!   fieldless `#[repr(u32)]` enums whose discriminants are the header words themselves — a class
+//!   or colour-space signature as a big-endian `u32`, an intent's number — so `as u32` is the
+//!   value on disk. The `nCLR` family is one variant per colorant count.
 //! - **The `tags` vec is the model.** [`IccProfile::tags`] keeps file order (the byte-fidelity
 //!   contract for re-serialization); duplicate signatures are rejected at parse *and* write;
 //!   [`IccProfile::get`] is a linear first-match scan, sized for the dozens of tags real profiles
@@ -125,5 +130,5 @@ pub use sequence::{
 };
 pub use tag_types::TagData;
 pub use tags::KnownTag;
-pub use validate::Conformance;
+pub use validate::ConformanceIssue;
 pub use writer::IccWriter;

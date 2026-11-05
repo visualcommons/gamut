@@ -274,7 +274,7 @@ neutral axis at diffuse white.
 
 ## Conformance validation
 
-`IccProfile::validate` reports, as `Conformance` entries, the §8 required tags a profile's device
+`IccProfile::validate` reports, as `ConformanceIssue` entries, the §8 required tags a profile's device
 class is missing and — the one tag *content* rule it checks — §10.3's clause tying a `cicp` tag's
 `MatrixCoefficients` to the header's data colour space: `0` for RGB and XYZ, non-zero for YCbCr.
 Both directions are `shall`s, so a breach is reported with the same weight as a missing required

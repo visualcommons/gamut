@@ -16,10 +16,10 @@ use crate::tags::KnownTag;
 /// A single ICC.1:2022 requirement a profile does not satisfy: a §8 required tag that is absent,
 /// or the §10.3 `MatrixCoefficients` clause on a `cicpType` tag that is present.
 ///
-/// An empty [`Vec<Conformance>`] from [`IccProfile::validate`] means the profile carries every tag
+/// An empty [`Vec<ConformanceIssue>`] from [`IccProfile::validate`] means the profile carries every tag
 /// its device class requires and its `cicp` tag, if any, agrees with its data colour space.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Conformance {
+pub struct ConformanceIssue {
     /// A human-readable description of the unmet requirement (with its §8 or §10.3 subsection).
     /// For §10.3 it names the header's data colour space and the offending `MatrixCoefficients`.
     pub requirement: String,
@@ -79,7 +79,7 @@ impl IccProfile {
     /// YCbCr profile whose `MatrixCoefficients` is zero. Nothing refuses such a profile — it
     /// parses, round-trips and transforms as before; `validate` only names the clause it breaks.
     #[must_use]
-    pub fn validate(&self) -> Vec<Conformance> {
+    pub fn validate(&self) -> Vec<ConformanceIssue> {
         let mut issues = Vec::new();
 
         // §8.2 — every class except DeviceLink shares these three required tags.
@@ -131,7 +131,7 @@ impl IccProfile {
     /// MatrixCoefficients shall be non-zero." Every other data colour space is unconstrained by
     /// this clause (§9.2.17 forbids the tag there outright, a separate requirement not checked
     /// here). A `cicp` tag that did not decode as a `cicpType` has no field to read.
-    fn require_cicp_matrix_coefficients(&self, issues: &mut Vec<Conformance>) {
+    fn require_cicp_matrix_coefficients(&self, issues: &mut Vec<ConformanceIssue>) {
         let Some(TagData::Cicp(cicp)) = self.get(KnownTag::Cicp) else {
             return;
         };
@@ -142,7 +142,7 @@ impl IccProfile {
             ColorSpace::YCbCr if matrix == 0 => "shall be non-zero",
             _ => return,
         };
-        issues.push(Conformance {
+        issues.push(ConformanceIssue {
             requirement: format!(
                 "§10.3 cicpType with a '{}' data colour space: MatrixCoefficients {shall} (is {matrix})",
                 Signature::from(space)
@@ -156,11 +156,16 @@ impl IccProfile {
         self.get(Signature(code)).is_some()
     }
 
-    /// Records a [`Conformance`] for each named tag in `tags` that is absent.
-    fn require_each(&self, issues: &mut Vec<Conformance>, section: &str, tags: &[([u8; 4], &str)]) {
+    /// Records a [`ConformanceIssue`] for each named tag in `tags` that is absent.
+    fn require_each(
+        &self,
+        issues: &mut Vec<ConformanceIssue>,
+        section: &str,
+        tags: &[([u8; 4], &str)],
+    ) {
         for &(code, name) in tags {
             if !self.has(code) {
-                issues.push(Conformance {
+                issues.push(ConformanceIssue {
                     requirement: format!("{section}: {name} ({})", Signature(code)),
                     missing: vec![Signature(code)],
                 });
@@ -168,9 +173,9 @@ impl IccProfile {
         }
     }
 
-    /// Records a [`Conformance`] if none of the class's alternative models is complete, reporting the
+    /// Records a [`ConformanceIssue`] if none of the class's alternative models is complete, reporting the
     /// tags missing from the nearest-to-complete model.
-    fn require_model(&self, issues: &mut Vec<Conformance>, section: &str, models: &[Model]) {
+    fn require_model(&self, issues: &mut Vec<ConformanceIssue>, section: &str, models: &[Model]) {
         let mut nearest: Option<(&str, Vec<Signature>)> = None;
         for &(name, codes) in models {
             let missing: Vec<Signature> = codes
@@ -194,7 +199,7 @@ impl IccProfile {
                 .map(|&(name, _)| name)
                 .collect::<Vec<_>>()
                 .join(" | ");
-            issues.push(Conformance {
+            issues.push(ConformanceIssue {
                 requirement: format!(
                     "{section} profile requires a complete tag model (one of: {options}); nearest is \"{model_name}\""
                 ),
@@ -205,12 +210,9 @@ impl IccProfile {
 
     /// §8.5.2 — an N-component LUT-based Output profile with an xCLR data colour space also requires
     /// the `colorantTableTag`.
-    fn require_output_colorant_table(&self, issues: &mut Vec<Conformance>) {
-        if matches!(self.header.data_color_space, ColorSpace::NColor(_))
-            && self.has(*b"A2B0")
-            && !self.has(*b"clrt")
-        {
-            issues.push(Conformance {
+    fn require_output_colorant_table(&self, issues: &mut Vec<ConformanceIssue>) {
+        if self.header.data_color_space.is_n_color() && self.has(*b"A2B0") && !self.has(*b"clrt") {
+            issues.push(ConformanceIssue {
                 requirement:
                     "§8.5.2 Output profile with an xCLR data colour space: colorantTableTag (clrt)"
                         .to_owned(),
@@ -221,7 +223,7 @@ impl IccProfile {
 
     /// §8.6 — DeviceLink profiles have their own required-tag set (no `mediaWhitePointTag`), plus
     /// conditional colorant tables for xCLR data/PCS spaces.
-    fn require_device_link(&self, issues: &mut Vec<Conformance>) {
+    fn require_device_link(&self, issues: &mut Vec<ConformanceIssue>) {
         self.require_each(
             issues,
             "§8.6 DeviceLink profile",
@@ -232,16 +234,16 @@ impl IccProfile {
                 (*b"A2B0", "AToB0Tag"),
             ],
         );
-        if matches!(self.header.data_color_space, ColorSpace::NColor(_)) && !self.has(*b"clrt") {
-            issues.push(Conformance {
+        if self.header.data_color_space.is_n_color() && !self.has(*b"clrt") {
+            issues.push(ConformanceIssue {
                 requirement:
                     "§8.6 DeviceLink with an xCLR data colour space: colorantTableTag (clrt)"
                         .to_owned(),
                 missing: vec![Signature(*b"clrt")],
             });
         }
-        if matches!(self.header.pcs, ColorSpace::NColor(_)) && !self.has(*b"clot") {
-            issues.push(Conformance {
+        if self.header.pcs.is_n_color() && !self.has(*b"clot") {
+            issues.push(ConformanceIssue {
                 requirement: "§8.6 DeviceLink with an xCLR PCS: colorantTableOutTag (clot)"
                     .to_owned(),
                 missing: vec![Signature(*b"clot")],
@@ -382,8 +384,8 @@ mod tests {
         // clrt/clot requirements fire only on absence.
         let with = profile(
             DeviceClass::DeviceLink,
-            ColorSpace::NColor(4),
-            ColorSpace::NColor(4),
+            ColorSpace::NColor4,
+            ColorSpace::NColor4,
             &[b"desc", b"cprt", b"pseq", b"A2B0", b"clrt", b"clot"],
         );
         assert!(with.validate().is_empty());
@@ -391,8 +393,8 @@ mod tests {
         // Without them, both conditional requirements are reported.
         let without = profile(
             DeviceClass::DeviceLink,
-            ColorSpace::NColor(4),
-            ColorSpace::NColor(4),
+            ColorSpace::NColor4,
+            ColorSpace::NColor4,
             &[b"desc", b"cprt", b"pseq", b"A2B0"],
         );
         let issues = without.validate();
@@ -410,7 +412,7 @@ mod tests {
         // A 4-colorant (xCLR) Output profile without clrt is non-conformant...
         let without = profile(
             DeviceClass::Output,
-            ColorSpace::NColor(4),
+            ColorSpace::NColor4,
             ColorSpace::Xyz,
             tags,
         );
@@ -423,7 +425,7 @@ mod tests {
         with_tags.push(b"clrt");
         let with = profile(
             DeviceClass::Output,
-            ColorSpace::NColor(4),
+            ColorSpace::NColor4,
             ColorSpace::Xyz,
             &with_tags,
         );
@@ -454,8 +456,8 @@ mod tests {
     }
 
     /// The §10.3 finding for `space`, as `validate` words it.
-    fn matrix_finding(space: &str, shall: &str, is: u8) -> Conformance {
-        Conformance {
+    fn matrix_finding(space: &str, shall: &str, is: u8) -> ConformanceIssue {
+        ConformanceIssue {
             requirement: format!(
                 "§10.3 cicpType with a '{space}' data colour space: MatrixCoefficients {shall} (is {is})"
             ),
