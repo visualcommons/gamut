@@ -4,7 +4,7 @@
 //! These builders let the per-gamut `M1` tables in [`crate::oklab`] be *computed
 //! from first principles* rather than trusted as hand-copied literals: the
 //! `derived_matrices_match_literals` test checks
-//! `derive_m1(gamut) ≈ oklab::Gamut::m1_matrix()` to `1e-7`, so a typo in either
+//! `derive_m1(gamut) ≈ RgbGamut::m1_matrix()` to `1e-7`, so a typo in either
 //! place is caught. The factorization follows Ottosson:
 //! `M1[gamut] = M_LMS · M_XYZ[gamut]`, where `M_LMS = M1[sRGB] · M_XYZ[sRGB]⁻¹`
 //! is implied by Ottosson's published sRGB matrix.
@@ -13,7 +13,8 @@
 //! `references/color/README.md`.
 
 use crate::linalg::{mat_inv_3x3, mat_mul3, matvec3};
-use crate::oklab::{Gamut, M1_SRGB};
+use crate::oklab::M1_SRGB;
+use crate::primaries::RgbGamut;
 
 /// CIE standard illuminant **D65** chromaticity (x, y).
 pub const D65: [f64; 2] = [0.3127, 0.3290];
@@ -97,18 +98,19 @@ pub fn bradford_adapt(src_white: [f64; 2], dst_white: [f64; 2]) -> Option<[[f64;
 
 /// Derive the linear-RGB → LMS (`M1`) matrix for `gamut` from first principles,
 /// adapting non-D65 white points to D65 with Bradford. Returns `None` only for
-/// degenerate primaries (never for a [`Gamut`] variant).
+/// degenerate primaries (never for a [`RgbGamut`] variant).
 ///
 /// Use this to regenerate the literal `M1_*` tables in [`crate::oklab`]; the test
 /// suite checks the two agree.
 #[must_use]
-pub fn derive_m1(gamut: Gamut) -> Option<[[f64; 3]; 3]> {
+pub fn derive_m1(gamut: RgbGamut) -> Option<[[f64; 3]; 3]> {
     // M_LMS = M1[sRGB] · M_XYZ[sRGB]⁻¹  (implied by Ottosson's published sRGB M1).
     let m_xyz_srgb = rgb_to_xyz_matrix(&SRGB_PRIMARIES, D65)?;
     let m_lms = mat_mul3(&M1_SRGB, &mat_inv_3x3(&m_xyz_srgb)?);
 
-    let (primaries, white) = gamut.chromaticities();
-    let mut m_xyz = rgb_to_xyz_matrix(&primaries, white)?;
+    let c = gamut.chromaticities();
+    let white = c.white;
+    let mut m_xyz = rgb_to_xyz_matrix(&c.primaries, white)?;
     if white != D65 {
         let m_adapt = bradford_adapt(white, D65)?;
         m_xyz = mat_mul3(&m_adapt, &m_xyz);
@@ -172,11 +174,11 @@ mod tests {
     #[test]
     fn derived_matrices_match_literals() {
         for g in [
-            Gamut::Srgb,
-            Gamut::DisplayP3,
-            Gamut::AdobeRgb,
-            Gamut::Bt2020,
-            Gamut::ProPhotoRgb,
+            RgbGamut::Srgb,
+            RgbGamut::DisplayP3,
+            RgbGamut::AdobeRgb,
+            RgbGamut::Bt2020,
+            RgbGamut::ProPhotoRgb,
         ] {
             let derived = derive_m1(g).expect("derivable");
             let literal = g.m1_matrix();

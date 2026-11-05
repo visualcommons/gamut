@@ -6,7 +6,7 @@
 //!
 //! **Colorimetry `gamut-color` can supply is never retyped here**: the primaries and white point
 //! come from [`gamut_color::cicp::ColorPrimaries::chromaticities`] for a CICP code point and from
-//! [`gamut_color::Gamut::chromaticities`] for a named space, the RGB→XYZ construction and
+//! [`gamut_color::RgbGamut::chromaticities`] for a named space, the RGB→XYZ construction and
 //! the Bradford adaptation to the D50 PCS from [`gamut_color::matrix`], and the ST 2084 curve and
 //! the BT.709-family α and β ([`BT709_ALPHA`] / [`BT709_BETA`], H.273 §8.2) from
 //! [`gamut_color::transfer`].
@@ -34,7 +34,7 @@
 //! [`transfer_characteristics`](gamut_color::SourceProfile::transfer_characteristics) — so they
 //! are reachable only as the named [`BuiltinProfile::AdobeRgb`] and
 //! [`BuiltinProfile::ProPhotoRgb`], whose primaries come from the total
-//! [`Gamut::chromaticities`](gamut_color::Gamut::chromaticities), whose curves are each
+//! [`RgbGamut::chromaticities`](gamut_color::RgbGamut::chromaticities), whose curves are each
 //! encoding's standard one, and whose profiles carry no `cicpType` tag. ProPhoto is the one space
 //! whose own white is D50, so its `chad` is not a real adaptation — only the step from the CIE
 //! chromaticity `(0.3457, 0.3585)` to the PCS's rounded `XYZNumber` (see
@@ -221,7 +221,7 @@ use gamut_color::cicp::{ColorPrimaries, TransferCharacteristics};
 use gamut_color::linalg::mat_mul3;
 use gamut_color::matrix::{bradford_adapt, rgb_to_xyz_matrix};
 use gamut_color::transfer::{BT709_ALPHA, BT709_BETA, BT1886_GAMMA, pq_eotf};
-use gamut_color::{Gamut, SourceProfile};
+use gamut_color::{Chromaticities, RgbGamut, SourceProfile};
 
 use crate::cicp::Cicp;
 use crate::curve::{Curve, ParametricCurve};
@@ -247,10 +247,6 @@ const SAMPLED_TRC_POINTS: usize = 1024;
 
 /// A 3×3 matrix in row-major order — the shape `gamut_color::matrix` produces and consumes.
 type Matrix3 = [[f64; 3]; 3];
-
-/// CIE 1931 `([R, G, B], white)` chromaticities — the shape both
-/// [`ColorPrimaries::chromaticities`] and [`Gamut::chromaticities`] return.
-type Chromaticities = ([[f64; 2]; 3], [f64; 2]);
 
 /// Adobe RGB (1998) Color Image Encoding §4.3.1.2: the inverse colour component transfer is the
 /// pure power `X^2.19921875`, "obtained from 2 51/256" (hexadecimal `02.33`) — so `563 / 256`,
@@ -299,7 +295,7 @@ pub enum BuiltinProfile {
 struct Space {
     /// The colour-science gamut whose chromaticities give the colorants. Total, so every space
     /// has primaries whether or not ITU-T H.273 gives them a code point.
-    gamut: Gamut,
+    gamut: RgbGamut,
     /// The two CICP axes the space is defined by, when H.273 has a code point for both; this is
     /// what the `cicpType` tag records.
     axes: Option<(ColorPrimaries, TransferCharacteristics)>,
@@ -319,37 +315,37 @@ impl BuiltinProfile {
     fn parts(self) -> Space {
         let (gamut, axes, trc, description) = match self {
             BuiltinProfile::Srgb => (
-                Gamut::Srgb,
+                RgbGamut::Srgb,
                 Some((ColorPrimaries::Bt709, TransferCharacteristics::Srgb)),
                 Trc::Srgb,
                 "sRGB",
             ),
             BuiltinProfile::LinearSrgb => (
-                Gamut::Srgb,
+                RgbGamut::Srgb,
                 Some((ColorPrimaries::Bt709, TransferCharacteristics::Linear)),
                 Trc::Gamma(1.0),
                 "Linear sRGB",
             ),
             BuiltinProfile::DisplayP3 => (
-                Gamut::DisplayP3,
+                RgbGamut::DisplayP3,
                 Some((ColorPrimaries::DisplayP3, TransferCharacteristics::Srgb)),
                 Trc::Srgb,
                 "Display P3",
             ),
             BuiltinProfile::Bt2020Pq => (
-                Gamut::Bt2020,
+                RgbGamut::Bt2020,
                 Some((ColorPrimaries::Bt2020, TransferCharacteristics::Pq)),
                 Trc::Pq,
                 "BT.2100 PQ",
             ),
             BuiltinProfile::AdobeRgb => (
-                Gamut::AdobeRgb,
+                RgbGamut::AdobeRgb,
                 None,
                 Trc::Gamma(ADOBE_RGB_GAMMA),
                 "Adobe RGB (1998) compatible",
             ),
             BuiltinProfile::ProPhotoRgb => (
-                Gamut::ProPhotoRgb,
+                RgbGamut::ProPhotoRgb,
                 None,
                 Trc::Romm,
                 "ProPhoto RGB (ROMM) compatible",
@@ -719,7 +715,12 @@ fn pcs_d50_chromaticity() -> [f64; 2] {
 /// later variant `gamut-color` adds without them) never reaches here: [`IccProfile::from_cicp`]
 /// declines it on the `Option` [`ColorPrimaries::chromaticities`] returns, which is what stops a
 /// profile claiming the PCS axes as its primaries.
-fn colorants_d50((rgb, white): Chromaticities) -> Option<(Matrix3, Matrix3)> {
+fn colorants_d50(
+    Chromaticities {
+        primaries: rgb,
+        white,
+    }: Chromaticities,
+) -> Option<(Matrix3, Matrix3)> {
     let rgb_to_xyz = rgb_to_xyz_matrix(&rgb, white)?;
     let chad = bradford_adapt(white, pcs_d50_chromaticity())?;
     Some((mat_mul3(&chad, &rgb_to_xyz), chad))
@@ -1978,7 +1979,10 @@ mod tests {
     fn assert_colorants_match_lcms(
         label: &str,
         profile: &IccProfile,
-        (rgb, white): Chromaticities,
+        Chromaticities {
+            primaries: rgb,
+            white,
+        }: Chromaticities,
     ) {
         let reference = lcms2_oracle::rgb_matrix_shaper(white, rgb, [2.2, 2.2, 2.2]);
         let ours = opened_by_lcms(profile);

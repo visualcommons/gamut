@@ -25,7 +25,7 @@
 //! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`],
 //! [`Planar8`] / [`Planar16`] / [`Yuv420`] / [`YcbcrMatrix`] / [`RgbToYcbcr`], the decoders'
 //! [`ChromaUpsampling`] choice (its kernels live in [`upsample`]), the [`clip_pixel`] /
-//! [`rgb_to_ycbcr`] helpers, the colour-science entry types [`Gamut`] and [`SourceProfile`] /
+//! [`rgb_to_ycbcr`] helpers, the colour-science entry types [`RgbGamut`] / [`Chromaticities`] and [`SourceProfile`] /
 //! [`SourceTransfer`], and the headline colour-difference metrics [`delta_e_76`] /
 //! [`delta_e_2000`].
 //!
@@ -88,6 +88,7 @@ pub mod oklab;
 pub mod pixel;
 pub mod planar;
 pub mod planar16;
+pub mod primaries;
 pub mod profile;
 pub mod transfer;
 pub mod upsample;
@@ -98,7 +99,7 @@ pub use cct::cct_from_xy;
 pub use cicp::{ColorRange, ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
 pub use format::{BitDepth, ChromaSubsampling};
 pub use lab::{delta_e_76, delta_e_2000};
-pub use oklab::Gamut;
+pub use primaries::{Chromaticities, RgbGamut};
 pub use pixel::{clip_pixel, clip_pixel8};
 pub use planar::Planar8;
 pub use planar16::Planar16;

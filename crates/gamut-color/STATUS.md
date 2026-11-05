@@ -47,7 +47,7 @@ tolerance-level, not bit-for-bit.
   `ColorRange`), whatever its source spec spells it; H.273's `ColourPrimaries` survives only as
   a `doc(alias)` (issue #1066).
 - **Growth-bound enums are `#[non_exhaustive]`** (CICP code points, `BitDepth`,
-  `ChromaSubsampling`, `Gamut`, `SourceTransfer`); `ColorRange` is deliberately exhaustive (a
+  `ChromaSubsampling`, `RgbGamut`, `SourceTransfer`); `ColorRange` is deliberately exhaustive (a
   spec-complete single bit). New variants and `from_code_point` `None`→`Some` promotions are
   minor releases.
 - **`gamut_core::Error` is the error surface** — the crate's only fallible paths are

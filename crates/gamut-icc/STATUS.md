@@ -48,7 +48,7 @@ so no profile is rejected for carrying an unmodelled tag.
 spec-valid v4 three-component matrix/TRC display profiles (§8.4). All four return `Option`: the
 colorimetry they resolve is **gamut-color's, and whatever gamut-color can supply is never retyped
 here** — primaries and white point come from `ColorPrimaries::chromaticities` for a CICP code
-point and from `Gamut::chromaticities` for a named space, the RGB→XYZ
+point and from `RgbGamut::chromaticities` for a named space, the RGB→XYZ
 construction and Bradford adaptation from `gamut_color::matrix`, the ST 2084 curve and H.273
 §8.2's BT.709-family α and β (`BT709_ALPHA` / `BT709_BETA`) from `gamut_color::transfer` — and
 those constructors are themselves fallible, so an input whose colorimetry cannot be resolved is
@@ -80,7 +80,7 @@ parsing one; *describing* a colour space is a layer below.)
 (primaries, transfer) pair. Four built-in spaces are coded on the two CICP axes — sRGB, linear sRGB,
 Display P3 and BT.2100 PQ — and carry a `cicpType` tag. Two are not: Adobe RGB (1998) and ProPhoto
 RGB (`BuiltinProfile::AdobeRgb = 4`, `ProPhotoRgb = 5`, issue #537) have no ITU-T H.273 code point
-on either axis, so their primaries come from gamut-color's total `Gamut::chromaticities`, their
+on either axis, so their primaries come from gamut-color's total `RgbGamut::chromaticities`, their
 profiles carry **no** `cicpType` tag (§9.2.17 requires it to be equivalent to the encoding, and
 `Unspecified` is not), and `BuiltinProfile::cicp` returns `None` for them. Each carries its
 encoding's **standard** curve rather than gamut-color's encoder-exact one, because a profile is

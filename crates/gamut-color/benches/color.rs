@@ -7,7 +7,8 @@
 
 use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
-use gamut_color::oklab::{Gamut, linear_rgb_to_oklab};
+use gamut_color::RgbGamut;
+use gamut_color::oklab::linear_rgb_to_oklab;
 use gamut_color::transfer::srgb_eotf;
 use gamut_color::{ChromaUpsampling, ColorRange, Yuv420};
 
@@ -77,7 +78,7 @@ fn linear_rgb_to_oklab_slice(bencher: Bencher) {
     bencher.counter(ItemsCount::new(rgb.len())).bench_local(|| {
         let mut acc = [0.0f64; 3];
         for &px in &rgb {
-            let lab = linear_rgb_to_oklab(black_box(px), Gamut::Srgb);
+            let lab = linear_rgb_to_oklab(black_box(px), RgbGamut::Srgb);
             acc[0] += lab[0];
             acc[1] += lab[1];
             acc[2] += lab[2];

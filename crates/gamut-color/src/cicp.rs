@@ -11,6 +11,8 @@
 //! `ColourPrimaries` (searchable under that name as a doc alias), and [`ColorRange`] is AV1's
 //! `color_range`.
 
+use crate::primaries::Chromaticities;
+
 /// Matrix coefficients (CICP `MatrixCoefficients`). `Identity` (0) carries RGB directly with no
 /// colour transform and requires 4:4:4 — the basis for lossless RGB AVIF.
 ///
@@ -114,8 +116,9 @@ impl ColorPrimaries {
         }
     }
 
-    /// The CIE 1931 chromaticities this code point names: the `[R, G, B]` primaries as `(x, y)`
-    /// pairs, and the white point, exactly as [`crate::matrix::rgb_to_xyz_matrix`] takes them.
+    /// The CIE 1931 [`Chromaticities`] this code point names: the `[R, G, B]` primaries and the
+    /// white point, the same type [`RgbGamut::chromaticities`](crate::RgbGamut::chromaticities)
+    /// returns.
     ///
     /// `None` for [`ColorPrimaries::Unspecified`], which by definition names no chromaticities
     /// (a later minor release may turn a `None` into `Some` as further code points are modeled).
@@ -133,28 +136,33 @@ impl ColorPrimaries {
     /// use gamut_color::cicp::ColorPrimaries;
     /// use gamut_color::matrix::rgb_to_xyz_matrix;
     ///
-    /// let (primaries, white) = ColorPrimaries::Bt2020.chromaticities().unwrap();
-    /// let m = rgb_to_xyz_matrix(&primaries, white).unwrap();
+    /// let c = ColorPrimaries::Bt2020.chromaticities().unwrap();
+    /// let m = rgb_to_xyz_matrix(&c.primaries, c.white).unwrap();
     /// // Row 1 of an RGB→XYZ matrix is the luminance (Y) weighting, so it sums to 1.
     /// assert!((m[1].iter().sum::<f64>() - 1.0).abs() < 1e-12);
     ///
     /// assert_eq!(ColorPrimaries::Unspecified.chromaticities(), None);
     /// ```
     #[must_use]
-    pub fn chromaticities(self) -> Option<([[f64; 2]; 3], [f64; 2])> {
+    pub fn chromaticities(self) -> Option<Chromaticities> {
         use crate::matrix::{
             BT601_525_PRIMARIES, BT601_625_PRIMARIES, BT2020_PRIMARIES, D65, DISPLAY_P3_PRIMARIES,
             SRGB_PRIMARIES,
         };
-        match self {
+        let primaries = match self {
             // BT.709 and sRGB share one set of primaries.
-            ColorPrimaries::Bt709 => Some((SRGB_PRIMARIES, D65)),
-            ColorPrimaries::Bt601Pal => Some((BT601_625_PRIMARIES, D65)),
-            ColorPrimaries::Smpte170m => Some((BT601_525_PRIMARIES, D65)),
-            ColorPrimaries::Bt2020 => Some((BT2020_PRIMARIES, D65)),
-            ColorPrimaries::DisplayP3 => Some((DISPLAY_P3_PRIMARIES, D65)),
-            ColorPrimaries::Unspecified => None,
-        }
+            ColorPrimaries::Bt709 => SRGB_PRIMARIES,
+            ColorPrimaries::Bt601Pal => BT601_625_PRIMARIES,
+            ColorPrimaries::Smpte170m => BT601_525_PRIMARIES,
+            ColorPrimaries::Bt2020 => BT2020_PRIMARIES,
+            ColorPrimaries::DisplayP3 => DISPLAY_P3_PRIMARIES,
+            ColorPrimaries::Unspecified => return None,
+        };
+        // Every modeled code point is D65 (H.273 Table 2).
+        Some(Chromaticities {
+            primaries,
+            white: D65,
+        })
     }
 }
 
@@ -329,36 +337,54 @@ mod tests {
     /// mode here, and checking `matrix.rs`'s consts against `matrix.rs`'s consts proves nothing.
     #[test]
     fn chromaticities_match_h273_table_2() {
-        let (p, w) = ColorPrimaries::Bt709
+        let c = ColorPrimaries::Bt709
             .chromaticities()
             .expect("BT.709 is modeled");
-        assert_eq!(p, [[0.640, 0.330], [0.300, 0.600], [0.150, 0.060]]);
-        assert_eq!(w, [0.3127, 0.3290]);
+        assert_eq!(
+            c.primaries,
+            [[0.640, 0.330], [0.300, 0.600], [0.150, 0.060]]
+        );
+        assert_eq!(c.white, [0.3127, 0.3290]);
 
-        let (p, _) = ColorPrimaries::Bt601Pal
+        let c = ColorPrimaries::Bt601Pal
             .chromaticities()
             .expect("625-line is modeled");
-        assert_eq!(p, [[0.640, 0.330], [0.290, 0.600], [0.150, 0.060]]);
+        assert_eq!(
+            c.primaries,
+            [[0.640, 0.330], [0.290, 0.600], [0.150, 0.060]]
+        );
 
-        let (p, _) = ColorPrimaries::Smpte170m
+        let c = ColorPrimaries::Smpte170m
             .chromaticities()
             .expect("525-line is modeled");
-        assert_eq!(p, [[0.630, 0.340], [0.310, 0.595], [0.155, 0.070]]);
+        assert_eq!(
+            c.primaries,
+            [[0.630, 0.340], [0.310, 0.595], [0.155, 0.070]]
+        );
 
-        let (p, _) = ColorPrimaries::Bt2020
+        let c = ColorPrimaries::Bt2020
             .chromaticities()
             .expect("BT.2020 is modeled");
-        assert_eq!(p, [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]]);
+        assert_eq!(
+            c.primaries,
+            [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]]
+        );
 
-        let (p, _) = ColorPrimaries::DisplayP3
+        let c = ColorPrimaries::DisplayP3
             .chromaticities()
             .expect("P3 is modeled");
-        assert_eq!(p, [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]]);
+        assert_eq!(
+            c.primaries,
+            [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]]
+        );
 
         // Every modeled point is D65; a mutant substituting D50 would otherwise survive on the
         // four variants whose white point is not spelled out above.
         for cp in MODELED_PRIMARIES {
-            assert_eq!(cp.chromaticities().expect("modeled").1, [0.3127, 0.3290]);
+            assert_eq!(
+                cp.chromaticities().expect("modeled").white,
+                [0.3127, 0.3290]
+            );
         }
 
         // "Unspecified" names no chromaticities by definition.
@@ -372,10 +398,11 @@ mod tests {
     /// is shown to be observable downstream.
     #[test]
     fn bt601_625_and_525_are_distinct_primaries() {
-        let (p625, w) = ColorPrimaries::Bt601Pal.chromaticities().expect("modeled");
-        let (p525, _) = ColorPrimaries::Smpte170m
+        let pal = ColorPrimaries::Bt601Pal.chromaticities().expect("modeled");
+        let ntsc = ColorPrimaries::Smpte170m
             .chromaticities()
             .expect("modeled");
+        let (p625, p525, w) = (pal.primaries, ntsc.primaries, pal.white);
         assert_ne!(p625, p525);
 
         let m625 = crate::matrix::rgb_to_xyz_matrix(&p625, w).expect("non-degenerate");
@@ -388,8 +415,8 @@ mod tests {
     /// sRGB→XYZ matrix. Gate matches `matrix.rs`'s own Lindbloom comparison (5e-4).
     #[test]
     fn bt709_chromaticities_derive_the_published_srgb_matrix() {
-        let (primaries, white) = ColorPrimaries::Bt709.chromaticities().expect("modeled");
-        let m = crate::matrix::rgb_to_xyz_matrix(&primaries, white).expect("non-degenerate");
+        let c = ColorPrimaries::Bt709.chromaticities().expect("modeled");
+        let m = crate::matrix::rgb_to_xyz_matrix(&c.primaries, c.white).expect("non-degenerate");
         // Bruce Lindbloom's published sRGB (D65) RGB→XYZ matrix.
         let expected = [
             [0.412_456_4, 0.357_576_1, 0.180_437_5],
@@ -408,8 +435,8 @@ mod tests {
     #[test]
     fn every_modeled_primary_set_builds_a_matrix() {
         for cp in MODELED_PRIMARIES {
-            let (p, w) = cp.chromaticities().expect("modeled");
-            let m = crate::matrix::rgb_to_xyz_matrix(&p, w).expect("non-degenerate");
+            let c = cp.chromaticities().expect("modeled");
+            let m = crate::matrix::rgb_to_xyz_matrix(&c.primaries, c.white).expect("non-degenerate");
             // Row 1 is the luminance weighting: by construction it sums to 1 at the white point.
             let luma: f64 = m[1].iter().sum();
             assert!((luma - 1.0).abs() < 1e-12, "{cp:?} luma row sums to {luma}");
