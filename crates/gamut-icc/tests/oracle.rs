@@ -118,7 +118,11 @@ fn tag_set_matches_lcms() {
         let bytes = profile.to_bytes();
         let parsed = IccProfile::parse(&bytes).unwrap_or_else(|e| panic!("{label}: {e:?}"));
 
-        let mut got: Vec<u32> = parsed.tags.iter().map(|(s, _)| u32::from(*s)).collect();
+        let mut got: Vec<u32> = parsed
+            .tags
+            .iter()
+            .map(|tag| u32::from(tag.signature))
+            .collect();
         let mut want: Vec<u32> = (0..profile.tag_count())
             .map(|i| profile.tag_signature(i))
             .collect();
@@ -126,8 +130,8 @@ fn tag_set_matches_lcms() {
         want.sort_unstable();
         assert_eq!(got, want, "{label}: tag signature set");
 
-        for (_, data) in &parsed.tags {
-            if let TagData::Raw { type_sig, bytes } = data {
+        for tag in &parsed.tags {
+            if let TagData::Raw { type_sig, bytes } = &tag.data {
                 assert_eq!(&type_sig.0, &bytes[0..4], "{label}: raw type signature");
             }
         }
@@ -298,8 +302,8 @@ fn matrix_trc_profile_decodes_every_tag() {
     let undecoded: Vec<String> = parsed
         .tags
         .iter()
-        .filter(|(_, data)| matches!(data, TagData::Raw { .. }))
-        .map(|(sig, _)| sig.to_string())
+        .filter(|tag| matches!(tag.data, TagData::Raw { .. }))
+        .map(|tag| tag.signature.to_string())
         .collect();
     assert!(
         undecoded.is_empty(),
@@ -493,8 +497,9 @@ fn transform_oracle_corpus_parses_and_round_trips() {
             .unwrap_or_else(|e| panic!("{label}: serialize: {e:?}"));
         let reparsed =
             IccProfile::parse(&rewritten).unwrap_or_else(|e| panic!("{label}: reparse: {e:?}"));
-        let sigs =
-            |p: &IccProfile| -> Vec<u32> { p.tags.iter().map(|(s, _)| u32::from(*s)).collect() };
+        let sigs = |p: &IccProfile| -> Vec<u32> {
+            p.tags.iter().map(|t| u32::from(t.signature)).collect()
+        };
         assert_eq!(sigs(&parsed), sigs(&reparsed), "{label}: tag set survives");
         assert!(
             lcms2_oracle::Profile::from_bytes(&rewritten).is_some(),

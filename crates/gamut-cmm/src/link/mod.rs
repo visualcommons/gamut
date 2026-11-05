@@ -275,7 +275,7 @@ pub(crate) fn device_link_pipeline(
 mod tests {
     use gamut_icc::{
         Clut, ClutPrecision, ColorSpace, Curve, CurveOrParametric, DeviceClass, IccProfile,
-        LutAToB, ProfileHeader, Signature, TagData,
+        LutAToB, ProfileHeader, Signature, Tag, TagData,
     };
 
     use super::*;
@@ -314,7 +314,7 @@ mod tests {
     }
 
     /// A CMYK→Lab profile carrying the given `(signature, element)` LUT tags.
-    fn cmyk_profile(tags: Vec<(Signature, TagData)>) -> IccProfile {
+    fn cmyk_profile(tags: Vec<Tag>) -> IccProfile {
         let mut profile = bare_profile(ColorSpace::Cmyk, ColorSpace::Lab);
         profile.tags = tags;
         profile
@@ -331,9 +331,9 @@ mod tests {
         // Three distinct per-intent A2B tags: each intent must pick its own (distinguishable
         // by the constant CLUT value), and absolute must land on the *relative* tag.
         let profile = cmyk_profile(vec![
-            (Signature(*b"A2B0"), constant_mab(0)),
-            (Signature(*b"A2B1"), constant_mab(32768)),
-            (Signature(*b"A2B2"), constant_mab(65535)),
+            Tag::new(*b"A2B0", constant_mab(0)),
+            Tag::new(*b"A2B1", constant_mab(32768)),
+            Tag::new(*b"A2B2", constant_mab(65535)),
         ]);
         let l_of = |intent| {
             let pipeline = device_to_pcs(&profile, intent).unwrap();
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn absent_intent_tag_falls_back_to_perceptual() {
         // Only A2B0 exists: every intent must resolve to it (lcms2's tag16 fallback).
-        let profile = cmyk_profile(vec![(Signature(*b"A2B0"), constant_mab(32768))]);
+        let profile = cmyk_profile(vec![Tag::new(*b"A2B0", constant_mab(32768))]);
         for intent in [
             RenderingIntent::Perceptual,
             RenderingIntent::MediaRelativeColorimetric,
@@ -419,7 +419,7 @@ mod tests {
             },
         ] {
             let mut profile = bare_profile(ColorSpace::Rgb, ColorSpace::Xyz);
-            profile.tags = vec![(Signature(*b"A2B0"), data.clone())];
+            profile.tags = vec![Tag::new(*b"A2B0", data.clone())];
             let err = device_to_pcs(&profile, RenderingIntent::Perceptual).unwrap_err();
             assert_eq!(
                 err.to_string(),
@@ -450,7 +450,7 @@ mod tests {
             }),
             a_curves: None,
         });
-        let profile = cmyk_profile(vec![(Signature(*b"B2A0"), b2a)]);
+        let profile = cmyk_profile(vec![Tag::new(*b"B2A0", b2a)]);
         assert!(pcs_to_device(&profile, RenderingIntent::Perceptual).is_ok());
         let err = device_to_pcs(&profile, RenderingIntent::Perceptual).unwrap_err();
         assert_eq!(err.to_string(), "cmm: profile is missing required tag A2B0");
@@ -463,8 +463,8 @@ mod tests {
         // exist in LUT tags, and the absolute white scaling is applied by
         // IccTransform::between, not by a single profile's half).
         let mut profile = bare_profile(ColorSpace::Gray, ColorSpace::Xyz);
-        profile.tags.push((
-            Signature(*b"kTRC"),
+        profile.tags.push(Tag::new(
+            *b"kTRC",
             TagData::Curve(Curve::Gamma(gamut_icc::U8Fixed8(0x0233))),
         ));
         let baseline = device_to_pcs(&profile, RenderingIntent::MediaRelativeColorimetric).unwrap();
@@ -506,13 +506,13 @@ mod tests {
         });
         let mut profile = bare_profile(ColorSpace::Rgb, ColorSpace::Xyz);
         profile.tags = vec![
-            (Signature(*b"rXYZ"), xyz_tag(0.25)),
-            (Signature(*b"gXYZ"), xyz_tag(0.5)),
-            (Signature(*b"bXYZ"), xyz_tag(0.125)),
-            (Signature(*b"rTRC"), trc()),
-            (Signature(*b"gTRC"), trc()),
-            (Signature(*b"bTRC"), trc()),
-            (Signature(*b"A2B0"), lut),
+            Tag::new(*b"rXYZ", xyz_tag(0.25)),
+            Tag::new(*b"gXYZ", xyz_tag(0.5)),
+            Tag::new(*b"bXYZ", xyz_tag(0.125)),
+            Tag::new(*b"rTRC", trc()),
+            Tag::new(*b"gTRC", trc()),
+            Tag::new(*b"bTRC", trc()),
+            Tag::new(*b"A2B0", lut),
         ];
         let pipeline = device_to_pcs(&profile, RenderingIntent::Perceptual).unwrap();
         // Constant CLUT through the XYZ decode: (13107/65535)·(65535/32768) for ANY input —
@@ -560,7 +560,7 @@ mod tests {
         });
         let mut profile = bare_profile(ColorSpace::Rgb, ColorSpace::Rgb);
         profile.header.device_class = DeviceClass::DeviceLink;
-        profile.tags = vec![(Signature(*b"A2B0"), link)];
+        profile.tags = vec![Tag::new(*b"A2B0", link)];
         let pipeline = device_to_pcs(&profile, RenderingIntent::Perceptual).unwrap();
         let out = eval3(&pipeline, &[0.3, 0.6, 0.9]);
         for ch in 0..3 {

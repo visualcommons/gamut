@@ -1164,7 +1164,7 @@ fn multiprofile_chain_matches_lcms2() {
 /// perceptual-tag fallback, differentially against `_cmsReadDevicelinkLUT`.
 fn rgb_to_lab_lut16_link() -> IccProfile {
     use gamut_icc::{
-        ColorSpace, DeviceClass, Lut16, Matrix3x3, ProfileHeader, S15Fixed16, Signature, TagData,
+        ColorSpace, DeviceClass, Lut16, Matrix3x3, ProfileHeader, S15Fixed16, Tag, TagData,
     };
     let identity3x3 = {
         let mut elements = [S15Fixed16(0); 9];
@@ -1213,7 +1213,7 @@ fn rgb_to_lab_lut16_link() -> IccProfile {
     header.version.major = 2;
     IccProfile {
         header,
-        tags: vec![(Signature(*b"A2B0"), lut16)],
+        tags: vec![Tag::new(*b"A2B0", lut16)],
     }
 }
 
@@ -1789,7 +1789,7 @@ const SAMPLED_SRGB_ENTRIES: u16 = 1024;
 fn srgb_v2_sampled() -> IccProfile {
     use gamut_color::transfer::srgb_eotf;
     use gamut_icc::{
-        BuiltinProfile, Curve, KnownTag, ProfileVersion, Signature, TagData, TextDescription,
+        BuiltinProfile, Curve, KnownTag, ProfileVersion, Signature, Tag, TagData, TextDescription,
     };
     let mut profile = IccProfile::builtin(BuiltinProfile::Srgb).unwrap();
     profile.header.version = ProfileVersion {
@@ -1812,10 +1812,17 @@ fn srgb_v2_sampled() -> IccProfile {
         .collect();
     let trc = TagData::Curve(Curve::Sampled(table));
     let is = |sig: Signature, tags: &[KnownTag]| tags.iter().any(|&t| Signature::from(t) == sig);
-    profile
-        .tags
-        .retain(|&(sig, _)| !is(sig, &[KnownTag::ChromaticAdaptation, KnownTag::Cicp]));
-    for (sig, data) in &mut profile.tags {
+    profile.tags.retain(|tag| {
+        !is(
+            tag.signature,
+            &[KnownTag::ChromaticAdaptation, KnownTag::Cicp],
+        )
+    });
+    for Tag {
+        signature: sig,
+        data,
+    } in &mut profile.tags
+    {
         if is(
             *sig,
             &[KnownTag::RedTrc, KnownTag::GreenTrc, KnownTag::BlueTrc],

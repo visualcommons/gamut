@@ -16,7 +16,7 @@ use gamut::color::xyb::{
 use gamut::icc::{
     Clut, ClutPrecision, ColorSpace, CurveOrParametric, DeviceClass, IccProfile, IccWriter,
     LutAToB, LutBToA, Matrix3x4, Mluc, MlucRecord, ParametricCurve, ProfileHeader, S15Fixed16,
-    Signature, TagData, XyzNumber,
+    Signature, Tag, TagData, XyzNumber,
 };
 
 /// The `A2B0` matrix stage, transcribed from libjxl 0.12.0 (`jxl_cms_internal.h`,
@@ -183,12 +183,12 @@ fn build_xyb_icc() -> IccProfile {
     IccProfile {
         header,
         tags: vec![
-            (Signature(*b"desc"), mluc("XYB_Per")),
-            (Signature(*b"cprt"), mluc("CC0")),
-            (Signature(*b"wtpt"), TagData::Xyz(vec![XyzNumber::D50])),
-            (Signature(*b"chad"), chad_tag),
-            (Signature(*b"A2B0"), a2b),
-            (Signature(*b"B2A0"), b2a),
+            Tag::new(*b"desc", mluc("XYB_Per")),
+            Tag::new(*b"cprt", mluc("CC0")),
+            Tag::new(*b"wtpt", TagData::Xyz(vec![XyzNumber::D50])),
+            Tag::new(*b"chad", chad_tag),
+            Tag::new(*b"A2B0", a2b),
+            Tag::new(*b"B2A0", b2a),
         ],
     }
 }

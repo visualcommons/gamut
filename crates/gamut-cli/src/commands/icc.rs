@@ -168,8 +168,9 @@ fn print_report(path: &Path, format: Format, blob: &[u8], profile: &IccProfile, 
     }
 
     println!("  tags ({}):", profile.tags.len());
-    for (sig, data) in profile.tags.iter().take(MAX_TAGS) {
-        match KnownTag::from_signature(*sig) {
+    for tag in profile.tags.iter().take(MAX_TAGS) {
+        let (sig, data) = (tag.signature, &tag.data);
+        match KnownTag::from_signature(sig) {
             Some(known) => println!("    - {sig} — {known:?} — {}", summarize(data)),
             None => println!("    - {sig} — {}", summarize(data)),
         }

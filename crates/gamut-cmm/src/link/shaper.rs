@@ -202,7 +202,7 @@ pub(super) fn gray_pcs_to_device(profile: &IccProfile, prefer_cicp: bool) -> Res
 
 #[cfg(test)]
 mod tests {
-    use gamut_icc::{Curve, DeviceClass, ProfileHeader, U8Fixed8, XyzNumber};
+    use gamut_icc::{Curve, DeviceClass, ProfileHeader, Tag, U8Fixed8, XyzNumber};
 
     use super::*;
     use crate::transform::Transform as _;
@@ -225,12 +225,12 @@ mod tests {
         IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
             tags: vec![
-                (Signature(*b"rXYZ"), xyz_tag(r)),
-                (Signature(*b"gXYZ"), xyz_tag(g)),
-                (Signature(*b"bXYZ"), xyz_tag(b)),
-                (Signature(*b"rTRC"), r_trc),
-                (Signature(*b"gTRC"), g_trc),
-                (Signature(*b"bTRC"), b_trc),
+                Tag::new(*b"rXYZ", xyz_tag(r)),
+                Tag::new(*b"gXYZ", xyz_tag(g)),
+                Tag::new(*b"bXYZ", xyz_tag(b)),
+                Tag::new(*b"rTRC", r_trc),
+                Tag::new(*b"gTRC", g_trc),
+                Tag::new(*b"bTRC", b_trc),
             ],
         }
     }
@@ -241,7 +241,7 @@ mod tests {
         header.pcs = pcs;
         IccProfile {
             header,
-            tags: vec![(Signature(*b"kTRC"), ktrc)],
+            tags: vec![Tag::new(*b"kTRC", ktrc)],
         }
     }
 
@@ -345,13 +345,13 @@ mod tests {
     fn missing_and_mistyped_tags_report_their_signature() {
         // Missing bTRC.
         let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
-        profile.tags.retain(|(sig, _)| sig.0 != *b"bTRC");
+        profile.tags.retain(|tag| tag.signature.0 != *b"bTRC");
         let err = rgb_device_to_pcs(&profile, false).unwrap_err();
         assert_eq!(err.to_string(), "cmm: profile is missing required tag bTRC");
 
         // Colorant tag holding a curve.
         let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
-        profile.tags[0].1 = gamma_tag();
+        profile.tags[0].data = gamma_tag();
         let err = rgb_device_to_pcs(&profile, false).unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -360,7 +360,7 @@ mod tests {
 
         // Colorant tag with an empty XYZType.
         let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
-        profile.tags[1].1 = TagData::Xyz(Vec::new());
+        profile.tags[1].data = TagData::Xyz(Vec::new());
         let err = rgb_device_to_pcs(&profile, false).unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -374,7 +374,7 @@ mod tests {
             B_COL,
             [gamma_tag(), gamma_tag(), xyz_tag(B_COL)],
         );
-        profile.tags[3].1 = xyz_tag(R_COL);
+        profile.tags[3].data = xyz_tag(R_COL);
         let err = rgb_device_to_pcs(&profile, false).unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -517,7 +517,7 @@ mod tests {
     /// `None`.
     fn with_cicp_transfer(mut profile: IccProfile, transfer: Option<u8>) -> IccProfile {
         let sig = Signature::from(KnownTag::Cicp);
-        profile.tags.retain(|(tag, _)| *tag != sig);
+        profile.tags.retain(|tag| tag.signature != sig);
         if let Some(transfer_characteristics) = transfer {
             let cicp = gamut_icc::Cicp {
                 colour_primaries: 9,
@@ -525,7 +525,7 @@ mod tests {
                 matrix_coefficients: 0,
                 video_full_range_flag: 1,
             };
-            profile.tags.push((sig, TagData::Cicp(cicp)));
+            profile.tags.push(Tag::new(sig, TagData::Cicp(cicp)));
         }
         profile
     }
@@ -578,7 +578,7 @@ mod tests {
     fn prefer_cicp_still_requires_the_trc_tag() {
         // The closed form never stands in for a tag that is not there.
         let mut pq = pq_builtin();
-        pq.tags.retain(|(tag, _)| *tag != Signature(*b"rTRC"));
+        pq.tags.retain(|tag| tag.signature != Signature(*b"rTRC"));
         let err = read_trc(&pq, KnownTag::RedTrc, true).unwrap_err();
         assert!(matches!(err, CmmError::MissingTag(sig) if sig == Signature(*b"rTRC")));
     }

@@ -578,7 +578,7 @@ fn det3(m: &[[f64; 3]; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use gamut_icc::{
-        Clut, ClutPrecision, Curve, CurveOrParametric, LutAToB, LutBToA, ProfileHeader, Signature,
+        Clut, ClutPrecision, Curve, CurveOrParametric, LutAToB, LutBToA, ProfileHeader, Tag,
         TagData, U8Fixed8, XyzNumber,
     };
 
@@ -715,7 +715,7 @@ mod tests {
     // ---- gates and fixed paths -------------------------------------------------------------
 
     /// A v4 CMYK→Lab output profile carrying the given LUT tags.
-    fn cmyk_output(tags: Vec<(Signature, TagData)>) -> IccProfile {
+    fn cmyk_output(tags: Vec<Tag>) -> IccProfile {
         let mut header = ProfileHeader::new(DeviceClass::Output, ColorSpace::Cmyk);
         header.pcs = ColorSpace::Lab;
         IccProfile { header, tags }
@@ -746,7 +746,7 @@ mod tests {
             DeviceClass::Abstract,
             DeviceClass::NamedColor,
         ] {
-            let mut profile = cmyk_output(vec![(Signature(*b"A2B0"), constant_a2b(1000))]);
+            let mut profile = cmyk_output(vec![Tag::new(*b"A2B0", constant_a2b(1000))]);
             profile.header.device_class = class;
             assert_eq!(
                 detect_black_point(&profile, RenderingIntent::Perceptual),
@@ -759,7 +759,7 @@ mod tests {
                 "{class:?}"
             );
         }
-        let profile = cmyk_output(vec![(Signature(*b"A2B0"), constant_a2b(1000))]);
+        let profile = cmyk_output(vec![Tag::new(*b"A2B0", constant_a2b(1000))]);
         assert_eq!(
             detect_black_point(&profile, RenderingIntent::IccAbsoluteColorimetric),
             ZERO
@@ -772,7 +772,7 @@ mod tests {
 
     #[test]
     fn v4_clut_profile_returns_fixed_perceptual_black_for_perceptual_and_saturation() {
-        let profile = cmyk_output(vec![(Signature(*b"A2B0"), constant_a2b(1000))]);
+        let profile = cmyk_output(vec![Tag::new(*b"A2B0", constant_a2b(1000))]);
         assert_eq!(profile.header.version.major, 4);
         for intent in [RenderingIntent::Perceptual, RenderingIntent::Saturation] {
             assert_eq!(
@@ -795,7 +795,7 @@ mod tests {
         // Same tags, header downgraded to v2: perceptual routes to the darker-colorant probe
         // (constant CLUT at encoded L* = c/65535·100.390625 — v2? no: mAB stays v4-decoded;
         // the probe sees a mid-L CLUT, clips to 50, keeps chroma).
-        let mut profile = cmyk_output(vec![(Signature(*b"A2B0"), constant_a2b(1000))]);
+        let mut profile = cmyk_output(vec![Tag::new(*b"A2B0", constant_a2b(1000))]);
         profile.header.version.major = 2;
         let got = detect_black_point(&profile, RenderingIntent::Perceptual);
         assert_ne!(got, PERCEPTUAL_BLACK);
@@ -813,12 +813,12 @@ mod tests {
         let profile = IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
             tags: vec![
-                (Signature(*b"rXYZ"), xyz_tag([0.436, 0.2225, 0.0139])),
-                (Signature(*b"gXYZ"), xyz_tag([0.3851, 0.7169, 0.0971])),
-                (Signature(*b"bXYZ"), xyz_tag([0.1431, 0.0606, 0.7141])),
-                (Signature(*b"rTRC"), gamma()),
-                (Signature(*b"gTRC"), gamma()),
-                (Signature(*b"bTRC"), gamma()),
+                Tag::new(*b"rXYZ", xyz_tag([0.436, 0.2225, 0.0139])),
+                Tag::new(*b"gXYZ", xyz_tag([0.3851, 0.7169, 0.0971])),
+                Tag::new(*b"bXYZ", xyz_tag([0.1431, 0.0606, 0.7141])),
+                Tag::new(*b"rTRC", gamma()),
+                Tag::new(*b"gTRC", gamma()),
+                Tag::new(*b"bTRC", gamma()),
             ],
         };
         for intent in [RenderingIntent::Perceptual, RenderingIntent::Saturation] {
@@ -831,7 +831,7 @@ mod tests {
         }
         // Removing one TRC breaks the matrix-shaper test → the fixed black returns.
         let mut incomplete = profile;
-        incomplete.tags.retain(|(sig, _)| sig.0 != *b"bTRC");
+        incomplete.tags.retain(|tag| tag.signature.0 != *b"bTRC");
         assert_eq!(
             detect_black_point(&incomplete, RenderingIntent::Perceptual),
             PERCEPTUAL_BLACK
@@ -842,14 +842,14 @@ mod tests {
     fn unsupported_intent_or_space_zeroes_the_probe() {
         // No A2B1 tag and not a matrix shaper: media-relative is unsupported as input → zero
         // (cmsIsIntentSupported has NO perceptual fallback, unlike the link builders).
-        let profile = cmyk_output(vec![(Signature(*b"A2B0"), constant_a2b(1000))]);
+        let profile = cmyk_output(vec![Tag::new(*b"A2B0", constant_a2b(1000))]);
         assert_eq!(
             detect_black_point(&profile, RenderingIntent::MediaRelativeColorimetric),
             ZERO
         );
         // An XYZ device space has no endpoint tuple in lcms2 → zero even with a v2 header
         // (routes to the darker-colorant probe first).
-        let mut odd = cmyk_output(vec![(Signature(*b"A2B0"), constant_a2b(1000))]);
+        let mut odd = cmyk_output(vec![Tag::new(*b"A2B0", constant_a2b(1000))]);
         odd.header.version.major = 2;
         odd.header.data_color_space = ColorSpace::Xyz;
         assert_eq!(detect_black_point(&odd, RenderingIntent::Perceptual), ZERO);
@@ -918,10 +918,10 @@ mod tests {
             })
         };
         let mut profile = cmyk_output(vec![
-            (Signature(*b"A2B0"), a2b(curve0)),
-            (Signature(*b"A2B1"), a2b(curve1)),
-            (Signature(*b"B2A0"), b2a()),
-            (Signature(*b"B2A1"), b2a()),
+            Tag::new(*b"A2B0", a2b(curve0)),
+            Tag::new(*b"A2B1", a2b(curve1)),
+            Tag::new(*b"B2A0", b2a()),
+            Tag::new(*b"B2A1", b2a()),
         ]);
         profile.header.version.major = version_major;
         profile
@@ -932,7 +932,7 @@ mod tests {
         // v2 profile at perceptual with A2B0 only: cmsIsCLUT checks the intent's OWN B2A tag
         // (no fallback) — absent, so the destination delegates to source detection, whose
         // darker-colorant probe yields a distinctly non-zero value here.
-        let mut profile = cmyk_output(vec![(Signature(*b"A2B0"), constant_a2b(1000))]);
+        let mut profile = cmyk_output(vec![Tag::new(*b"A2B0", constant_a2b(1000))]);
         profile.header.version.major = 2;
         let source = detect_black_point(&profile, RenderingIntent::Perceptual);
         assert_ne!(source, ZERO, "probe value must be observable");
@@ -947,8 +947,13 @@ mod tests {
         // The relative-slot A2B collapses every device value to L* = 0 (CLUT ch0 zeroed):
         // outRamp is constant → !(outRamp[0] < outRamp[255]) → zero.
         let mut profile = roundtrip_profile(2, Curve::Identity, Curve::Identity);
-        if let Some((_, TagData::LutAToB(lut))) =
-            profile.tags.iter_mut().find(|(sig, _)| sig.0 == *b"A2B1")
+        if let Some(Tag {
+            data: TagData::LutAToB(lut),
+            ..
+        }) = profile
+            .tags
+            .iter_mut()
+            .find(|tag| tag.signature.0 == *b"A2B1")
             && let Some(clut) = lut.clut.as_mut()
         {
             for chunk in clut.samples.as_chunks_mut::<3>().0 {
@@ -971,8 +976,13 @@ mod tests {
         // would have fitted ≈ 0 instead, so this pin dies if the shortcut (or its 0.2 / 4.0
         // constants) is broken.
         let mut profile = roundtrip_profile(2, Curve::Identity, Curve::Identity);
-        if let Some((_, TagData::LutBToA(lut))) =
-            profile.tags.iter_mut().find(|(sig, _)| sig.0 == *b"B2A0")
+        if let Some(Tag {
+            data: TagData::LutBToA(lut),
+            ..
+        }) = profile
+            .tags
+            .iter_mut()
+            .find(|tag| tag.signature.0 == *b"B2A0")
         {
             let clut = lut.clut.as_mut().unwrap();
             // The L axis is slowest: the first 4 of 8 corners carry L = 0.
@@ -1070,12 +1080,12 @@ mod tests {
         let profile = IccProfile {
             header: ProfileHeader::new(DeviceClass::Output, ColorSpace::Rgb),
             tags: vec![
-                (Signature(*b"rXYZ"), xyz_tag([0.5, 0.25, 0.0625])),
-                (Signature(*b"gXYZ"), xyz_tag([0.375, 0.625, 0.125])),
-                (Signature(*b"bXYZ"), xyz_tag([0.125, 0.125, 0.625])),
-                (Signature(*b"rTRC"), trc()),
-                (Signature(*b"gTRC"), trc()),
-                (Signature(*b"bTRC"), trc()),
+                Tag::new(*b"rXYZ", xyz_tag([0.5, 0.25, 0.0625])),
+                Tag::new(*b"gXYZ", xyz_tag([0.375, 0.625, 0.125])),
+                Tag::new(*b"bXYZ", xyz_tag([0.125, 0.125, 0.625])),
+                Tag::new(*b"rTRC", trc()),
+                Tag::new(*b"gTRC", trc()),
+                Tag::new(*b"bTRC", trc()),
             ],
         };
         let got = detect_black_point(&profile, RenderingIntent::MediaRelativeColorimetric);
@@ -1135,7 +1145,7 @@ mod tests {
         header.version.major = 2; // keep clear of the v4 fixed-black branch
         let profile = IccProfile {
             header,
-            tags: vec![(Signature(*b"A2B1"), mab)],
+            tags: vec![Tag::new(*b"A2B1", mab)],
         };
         let got = detect_black_point(&profile, RenderingIntent::MediaRelativeColorimetric);
         // L = pedestal(0) · 100 (v4 Lab decode), a* = b* = 0 exactly.
@@ -1166,8 +1176,8 @@ mod tests {
             .collect();
         let gray = IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
-            tags: vec![(
-                Signature(*b"kTRC"),
+            tags: vec![Tag::new(
+                *b"kTRC",
                 TagData::Curve(Curve::Sampled(pedestal.clone())),
             )],
         };
@@ -1196,7 +1206,7 @@ mod tests {
         header.version.major = 2;
         let cmy = IccProfile {
             header,
-            tags: vec![(Signature(*b"A2B0"), cmy_lut)],
+            tags: vec![Tag::new(*b"A2B0", cmy_lut)],
         };
         let got = detect_black_point(&cmy, RenderingIntent::Perceptual);
         assert_ne!(got, ZERO, "CMY darkest tuple must reach the probe");
@@ -1209,8 +1219,8 @@ mod tests {
         // perceptual black.
         let gray = IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
-            tags: vec![(
-                Signature(*b"kTRC"),
+            tags: vec![Tag::new(
+                *b"kTRC",
                 TagData::Curve(Curve::Gamma(U8Fixed8(0x0233))),
             )],
         };
@@ -1233,7 +1243,7 @@ mod tests {
         // cmsIsIntentSupported has NO perceptual fallback, so the probe is refused (zero) —
         // even though the link builder itself WOULD fall back to A2B0 and produce the
         // decisively non-zero constant-CLUT value if the gate were bypassed.
-        let mut profile = cmyk_output(vec![(Signature(*b"A2B0"), constant_a2b(1000))]);
+        let mut profile = cmyk_output(vec![Tag::new(*b"A2B0", constant_a2b(1000))]);
         profile.header.device_class = DeviceClass::Display; // not Output: no ink round trip
         profile.header.version.major = 2; // keep perceptual on the probe path below
         assert_eq!(
@@ -1253,7 +1263,7 @@ mod tests {
         // The darker-colorant clip: L* > 95 ("synthetic negative profiles") zeroes the
         // black's L*, it does not clamp to 50 — pin the exact value so a broken clip
         // cascade (`>` vs `min(50)`) cannot pass. Constant CLUT 65000 → L ≈ 99.18 > 95.
-        let mut profile = cmyk_output(vec![(Signature(*b"A2B0"), constant_a2b(65000))]);
+        let mut profile = cmyk_output(vec![Tag::new(*b"A2B0", constant_a2b(65000))]);
         profile.header.version.major = 2; // darker-colorant path at perceptual
         let got = detect_black_point(&profile, RenderingIntent::Perceptual);
         // Expected: L → 0, chroma kept (a = b = 65000/65535·255 − 128).

@@ -24,7 +24,7 @@ use gamut_color::linalg::mat_mul3;
 use gamut_color::matrix::{D50, D65, bradford_adapt, rgb_to_xyz_matrix};
 use gamut_core::PixelFormat;
 use gamut_icc::{
-    Clut, ColorSpace, Curve, CurveOrParametric, IccProfile, KnownTag, RenderingIntent, TagData,
+    Clut, ColorSpace, Curve, CurveOrParametric, IccProfile, KnownTag, RenderingIntent, Tag, TagData,
 };
 
 use crate::profiles::{display_srgb, signature_text};
@@ -194,7 +194,11 @@ fn encoding(curve: &CurveOrParametric) -> String {
 /// [`CmmError`] if a curve cannot be built (an unsupported parametric type).
 pub fn trc_curves(profile: &IccProfile) -> Result<Vec<TrcCurve>, CmmError> {
     let mut out = Vec::new();
-    for (sig, data) in &profile.tags {
+    for Tag {
+        signature: sig,
+        data,
+    } in &profile.tags
+    {
         let curve = match data {
             TagData::Curve(c) => CurveOrParametric::Curve(c.clone()),
             TagData::ParametricCurve(p) => CurveOrParametric::Parametric(p.clone()),
@@ -359,14 +363,19 @@ pub fn inspect(profile: &IccProfile) -> Inspection {
     let tags = profile
         .tags
         .iter()
-        .map(|(sig, data)| {
-            let (element, summary) = describe(data);
-            TagRow {
-                signature: signature_text(*sig),
-                element,
-                summary,
-            }
-        })
+        .map(
+            |Tag {
+                 signature: sig,
+                 data,
+             }| {
+                let (element, summary) = describe(data);
+                TagRow {
+                    signature: signature_text(*sig),
+                    element,
+                    summary,
+                }
+            },
+        )
         .collect();
     let colorants = match (
         xyz_tag(profile, KnownTag::RedColorant),
@@ -461,14 +470,19 @@ pub fn clut_tags(profile: &IccProfile) -> Vec<(String, &Clut)> {
     profile
         .tags
         .iter()
-        .filter_map(|(sig, data)| {
-            let clut = match data {
-                TagData::LutAToB(l) => l.clut.as_ref(),
-                TagData::LutBToA(l) => l.clut.as_ref(),
-                _ => None,
-            }?;
-            Some((signature_text(*sig), clut))
-        })
+        .filter_map(
+            |Tag {
+                 signature: sig,
+                 data,
+             }| {
+                let clut = match data {
+                    TagData::LutAToB(l) => l.clut.as_ref(),
+                    TagData::LutBToA(l) => l.clut.as_ref(),
+                    _ => None,
+                }?;
+                Some((signature_text(*sig), clut))
+            },
+        )
         .collect()
 }
 

@@ -255,6 +255,7 @@ mod tests {
     use super::*;
     use crate::cicp::Cicp;
     use crate::header::ProfileHeader;
+    use crate::profile::Tag;
 
     /// A header for `class`/`data` space with otherwise-neutral fields.
     fn header(class: DeviceClass, data: ColorSpace, pcs: ColorSpace) -> ProfileHeader {
@@ -275,8 +276,8 @@ mod tests {
             tags: tags
                 .iter()
                 .map(|&&code| {
-                    (
-                        Signature(code),
+                    Tag::new(
+                        code,
                         TagData::Raw {
                             type_sig: Signature(code),
                             bytes: Vec::new(),
@@ -440,8 +441,8 @@ mod tests {
                 b"desc", b"cprt", b"wtpt", b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC", b"bTRC",
             ],
         );
-        p.tags.push((
-            KnownTag::Cicp.into(),
+        p.tags.push(Tag::new(
+            KnownTag::Cicp,
             TagData::Cicp(Cicp {
                 colour_primaries: 9,
                 transfer_characteristics: 16,

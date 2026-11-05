@@ -11,7 +11,7 @@ use gamut_cmm::{
 };
 use gamut_icc::{
     ColorSpace, Curve, CurveOrParametric, DeviceClass, IccProfile, ProfileHeader, RenderingIntent,
-    Signature, TagData, U8Fixed8, XyzNumber,
+    Tag, TagData, U8Fixed8, XyzNumber,
 };
 
 /// An RGB→XYZ matrix/TRC display shaper over exact-dyadic colorants at gamma `g`
@@ -20,15 +20,15 @@ fn rgb_shaper(g: u16, wtpt: Option<[f64; 3]>) -> IccProfile {
     let xyz_tag = |v: [f64; 3]| TagData::Xyz(vec![XyzNumber::from_f64(v)]);
     let trc = || TagData::Curve(Curve::Gamma(U8Fixed8(g)));
     let mut tags = vec![
-        (Signature(*b"rXYZ"), xyz_tag([0.5, 0.25, 0.0625])),
-        (Signature(*b"gXYZ"), xyz_tag([0.375, 0.625, 0.125])),
-        (Signature(*b"bXYZ"), xyz_tag([0.125, 0.125, 0.625])),
-        (Signature(*b"rTRC"), trc()),
-        (Signature(*b"gTRC"), trc()),
-        (Signature(*b"bTRC"), trc()),
+        Tag::new(*b"rXYZ", xyz_tag([0.5, 0.25, 0.0625])),
+        Tag::new(*b"gXYZ", xyz_tag([0.375, 0.625, 0.125])),
+        Tag::new(*b"bXYZ", xyz_tag([0.125, 0.125, 0.625])),
+        Tag::new(*b"rTRC", trc()),
+        Tag::new(*b"gTRC", trc()),
+        Tag::new(*b"bTRC", trc()),
     ];
     if let Some(white) = wtpt {
-        tags.push((Signature(*b"wtpt"), xyz_tag(white)));
+        tags.push(Tag::new(*b"wtpt", xyz_tag(white)));
     }
     IccProfile {
         header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),

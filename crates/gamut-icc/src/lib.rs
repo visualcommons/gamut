@@ -117,7 +117,7 @@ pub use measurement::{Chromaticity, Measurement, ViewingConditions};
 pub use mluc::{Mluc, MlucRecord, TextDescription};
 pub use named_color::{NamedColor, NamedColor2};
 pub use primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, U16Fixed16, XyzNumber};
-pub use profile::IccProfile;
+pub use profile::{IccProfile, Tag};
 pub use reader::IccReader;
 pub use sequence::{
     EmbeddedDescription, ProfileDescription, ProfileIdentifier, ProfileSequenceDesc,

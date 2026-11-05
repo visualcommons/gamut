@@ -228,7 +228,7 @@ use crate::curve::{Curve, ParametricCurve};
 use crate::header::{ColorSpace, DeviceClass, ProfileHeader};
 use crate::mluc::{Mluc, MlucRecord};
 use crate::primitives::{S15Fixed16, XyzNumber};
-use crate::profile::IccProfile;
+use crate::profile::{IccProfile, Tag};
 use crate::tag_types::TagData;
 use crate::tags::KnownTag;
 
@@ -767,21 +767,21 @@ fn rgb_matrix_trc(
     );
     let curve = trc.tag();
     let mut tags = vec![
-        (KnownTag::ProfileDescription.into(), mluc(description)),
-        (KnownTag::Copyright.into(), mluc(COPYRIGHT)),
-        (
-            KnownTag::MediaWhitePoint.into(),
+        Tag::new(KnownTag::ProfileDescription, mluc(description)),
+        Tag::new(KnownTag::Copyright, mluc(COPYRIGHT)),
+        Tag::new(
+            KnownTag::MediaWhitePoint,
             TagData::Xyz(vec![XyzNumber::D50]),
         ),
-        (KnownTag::ChromaticAdaptation.into(), chad_tag),
-        (KnownTag::RedColorant.into(), column(0)),
-        (KnownTag::GreenColorant.into(), column(1)),
-        (KnownTag::BlueColorant.into(), column(2)),
-        (KnownTag::RedTrc.into(), curve.clone()),
-        (KnownTag::GreenTrc.into(), curve.clone()),
-        (KnownTag::BlueTrc.into(), curve),
+        Tag::new(KnownTag::ChromaticAdaptation, chad_tag),
+        Tag::new(KnownTag::RedColorant, column(0)),
+        Tag::new(KnownTag::GreenColorant, column(1)),
+        Tag::new(KnownTag::BlueColorant, column(2)),
+        Tag::new(KnownTag::RedTrc, curve.clone()),
+        Tag::new(KnownTag::GreenTrc, curve.clone()),
+        Tag::new(KnownTag::BlueTrc, curve),
     ];
-    tags.extend(cicp.map(|cicp| (KnownTag::Cicp.into(), TagData::Cicp(cicp))));
+    tags.extend(cicp.map(|cicp| Tag::new(KnownTag::Cicp, TagData::Cicp(cicp))));
     Some(IccProfile {
         header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
         tags,
@@ -882,16 +882,16 @@ impl IccProfile {
         Some(IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
             tags: vec![
-                (
-                    KnownTag::ProfileDescription.into(),
+                Tag::new(
+                    KnownTag::ProfileDescription,
                     mluc(&format!("Grey gamma {gamma}")),
                 ),
-                (KnownTag::Copyright.into(), mluc(COPYRIGHT)),
-                (
-                    KnownTag::MediaWhitePoint.into(),
+                Tag::new(KnownTag::Copyright, mluc(COPYRIGHT)),
+                Tag::new(
+                    KnownTag::MediaWhitePoint,
                     TagData::Xyz(vec![XyzNumber::D50]),
                 ),
-                (KnownTag::GrayTrc.into(), Trc::Gamma(gamma).tag()),
+                Tag::new(KnownTag::GrayTrc, Trc::Gamma(gamma).tag()),
             ],
         })
     }

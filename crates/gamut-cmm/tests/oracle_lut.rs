@@ -35,7 +35,7 @@ mod common;
 
 use common::Lcg;
 use gamut_cmm::{ClutInterpolation, ClutTable, Pipeline, Stage, device_to_pcs, pcs_to_device};
-use gamut_icc::{IccProfile, KnownTag, ProfileVersion, RenderingIntent, Signature, TagData};
+use gamut_icc::{IccProfile, KnownTag, ProfileVersion, RenderingIntent, Tag, TagData};
 use lcms2_oracle::{
     FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, INTENT_PERCEPTUAL, INTENT_RELATIVE_COLORIMETRIC,
     INTENT_SATURATION, Profile, TYPE_CMYK_DBL, TYPE_Lab_DBL, TYPE_RGB_DBL, Transform, cmyk_prtr_v2,
@@ -372,7 +372,7 @@ fn fallback_to_perceptual_matches_lcms2_on_the_same_modified_profile() {
     // equal to the perceptual pipeline bit for bit — and lcms2, fed the SAME modified bytes,
     // must make the same choice (its tag16 fallback in `_cmsReadInputLUT`).
     let (mut parsed, _) = reopen(&cmyk_prtr_v4(9));
-    parsed.tags.retain(|(sig, _)| sig.0 != *b"A2B2");
+    parsed.tags.retain(|tag| tag.signature.0 != *b"A2B2");
     assert!(parsed.get(KnownTag::AToB2).is_none(), "A2B2 removed");
     let saturation = device_to_pcs(&parsed, RenderingIntent::Saturation).unwrap();
     let perceptual = device_to_pcs(&parsed, RenderingIntent::Perceptual).unwrap();
@@ -515,12 +515,12 @@ fn lab_pcs_rgb_shaper() -> (IccProfile, Profile) {
     let profile = IccProfile {
         header,
         tags: vec![
-            (Signature(*b"rXYZ"), xyz_tag([0.436, 0.2225, 0.0139])),
-            (Signature(*b"gXYZ"), xyz_tag([0.3851, 0.7169, 0.0971])),
-            (Signature(*b"bXYZ"), xyz_tag([0.1431, 0.0606, 0.7141])),
-            (Signature(*b"rTRC"), gamma()),
-            (Signature(*b"gTRC"), gamma()),
-            (Signature(*b"bTRC"), gamma()),
+            Tag::new(*b"rXYZ", xyz_tag([0.436, 0.2225, 0.0139])),
+            Tag::new(*b"gXYZ", xyz_tag([0.3851, 0.7169, 0.0971])),
+            Tag::new(*b"bXYZ", xyz_tag([0.1431, 0.0606, 0.7141])),
+            Tag::new(*b"rTRC", gamma()),
+            Tag::new(*b"gTRC", gamma()),
+            Tag::new(*b"bTRC", gamma()),
         ],
     };
     let bytes = profile.to_bytes().expect("serializes");

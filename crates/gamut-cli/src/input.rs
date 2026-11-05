@@ -843,19 +843,19 @@ mod tests {
         let mut profile = IccProfile::builtin(BuiltinProfile::DisplayP3).unwrap();
         profile
             .tags
-            .retain(|(signature, _)| *signature != KnownTag::Cicp.into());
+            .retain(|tag| tag.signature != KnownTag::Cicp.into());
         let table: Vec<u16> = (0..=16u32)
             .map(|i| {
                 let x = f64::from(i) / 16.0;
                 ((3.0 * x * x - 2.0 * x * x * x) * 65535.0).round() as u16
             })
             .collect();
-        for (signature, data) in &mut profile.tags {
+        for tag in &mut profile.tags {
             if [KnownTag::RedTrc, KnownTag::GreenTrc, KnownTag::BlueTrc]
                 .into_iter()
-                .any(|trc| *signature == trc.into())
+                .any(|trc| tag.signature == trc.into())
             {
-                *data = TagData::Curve(Curve::Sampled(table.clone()));
+                tag.data = TagData::Curve(Curve::Sampled(table.clone()));
             }
         }
         let icc = profile.to_bytes().unwrap();

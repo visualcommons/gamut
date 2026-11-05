@@ -53,16 +53,20 @@ pub(crate) fn write_profile(profile: &IccProfile, recompute_id: bool) -> Result<
     // The parser rejects duplicate tag signatures (§7.3), so serializing them would produce a
     // profile that cannot be re-read; catch the hand-built case here.
     let mut seen_sigs = HashSet::with_capacity(profile.tags.len());
-    if !profile.tags.iter().all(|(sig, _)| seen_sigs.insert(sig.0)) {
+    if !profile
+        .tags
+        .iter()
+        .all(|tag| seen_sigs.insert(tag.signature.0))
+    {
         return Err(IccError::Malformed("icc: duplicate tag signature"));
     }
 
     // Pass 1: encode every tag element.
     let mut elements: Vec<(Signature, Vec<u8>)> = Vec::with_capacity(profile.tags.len());
-    for (sig, data) in &profile.tags {
+    for tag in &profile.tags {
         let mut bytes = Vec::new();
-        encode_tag(data, &mut bytes)?;
-        elements.push((*sig, bytes));
+        encode_tag(&tag.data, &mut bytes)?;
+        elements.push((tag.signature, bytes));
     }
 
     // Pass 2: place element data after the header and tag table, 4-byte aligned, de-duplicating
