@@ -34,7 +34,7 @@
 //! cited in `references/jpeg/README.md`). It is an addition beside the frozen script, not a
 //! replacement: the default stream is unchanged.
 
-use gamut_bitstream::build_optimal_table;
+use gamut_bitstream::{HuffmanTable, build_optimal_table};
 
 use crate::bitwriter::BitWriter;
 use crate::encoder::{
@@ -289,7 +289,7 @@ fn encode_one_scan(
         let mut coder = ProgCoder::gather(&mut freq);
         run_scan(scan, comps, geom, restart_interval, &mut coder);
         coder.finish();
-        let (bits, values) = build_optimal_table(&freq);
+        let HuffmanTable { bits, values } = build_optimal_table(&freq);
         let class = if is_dc { 0 } else { 1 };
         emit_dht_dynamic(out, &[(class, 0u8, &bits, &values)]);
         Some(EncTable::from_bits_values(&bits, &values))
@@ -665,7 +665,7 @@ mod tests {
             f(&mut g);
             g.finish();
         }
-        let (bits, values) = build_optimal_table(&freq);
+        let HuffmanTable { bits, values } = build_optimal_table(&freq);
         let mut out = Vec::new();
         {
             let table = EncTable::from_bits_values(&bits, &values);

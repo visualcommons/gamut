@@ -119,7 +119,7 @@ fn encode_row(out: &mut BitWriter, row: &[u8], width: usize) -> Result<()> {
         run += 1;
     }
     encode_run(out, run, white)?;
-    out.byte_align();
+    out.align();
     Ok(())
 }
 
@@ -368,7 +368,7 @@ mod tests {
         encode_run(&mut zeros, 1, true).expect("one white pixel");
         encode_run(&mut zeros, 0, false).expect("zero black run");
         encode_run(&mut zeros, 0, true).expect("zero white run");
-        zeros.byte_align();
+        zeros.align();
         let error = mh_decode_strip(&zeros.into_bytes(), 1, 2)
             .expect_err("consecutive zero runs must not hang");
         assert_eq!(error.byte_offset(), Some(3));

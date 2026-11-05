@@ -41,7 +41,7 @@ pub(crate) fn split_tiles<'a>(payload: &'a [u8], info: &TileInfo) -> Result<Vec<
         let tile_bits = info.tile_cols_log2 + info.tile_rows_log2;
         (r.f(tile_bits)? as usize, r.f(tile_bits)? as usize)
     };
-    r.byte_alignment()?;
+    r.align()?;
 
     if tg_end < tg_start || tg_end >= num_tiles {
         return Err(Error::invalid_input(

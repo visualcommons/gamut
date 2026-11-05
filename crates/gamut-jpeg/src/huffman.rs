@@ -116,7 +116,7 @@ impl EncTable {
     /// tables).
     #[must_use]
     pub fn lookup(&self, symbol: u8) -> Option<(u16, u8)> {
-        self.0.lookup(symbol)
+        self.0.lookup(symbol).map(|c| (c.code, c.len))
     }
 }
 
@@ -615,7 +615,8 @@ mod tests {
         for (i, sym) in STD_LUMA_AC.values.iter().enumerate() {
             freq[usize::from(*sym)] = (i as u32 % 13) + 1;
         }
-        let (bits, values) = gamut_bitstream::build_optimal_table(&freq);
+        let gamut_bitstream::HuffmanTable { bits, values } =
+            gamut_bitstream::build_optimal_table(&freq);
         let enc = EncTable::from_bits_values(&bits, &values);
         let dec = DecTable::from_bits(&bits, &values).unwrap();
         for &sym in &values {

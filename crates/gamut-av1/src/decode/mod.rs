@@ -247,7 +247,7 @@ impl Av1Decoder {
                     // frame_obu (§5.10): the frame header, byte alignment, then the tile group.
                     let mut r = BitReader::new(obu.payload);
                     let fh = FrameHeader::parse(&mut r, sh)?;
-                    r.byte_alignment()?;
+                    r.align()?;
                     self.validate(sh, &fh)?;
                     let tiles = tilegroup::split_tiles(r.remaining_bytes(), &fh.tile_info)?;
                     frame = Some((fh, tiles));
@@ -636,7 +636,7 @@ pub(crate) mod testutil {
             }
             w.put_bit(u8::from(self.film_grain.is_some())); // film_grain_params_present
             w.put_bit(1); // trailing_bits
-            w.byte_align();
+            w.align();
             w.into_bytes()
         }
 
@@ -744,7 +744,7 @@ pub(crate) mod testutil {
                 self.film_grain_params(&mut w, grain);
             }
             let header_bits = w.bit_len();
-            w.byte_align(); // byte_alignment() before the tile group
+            w.align(); // byte_alignment() before the tile group
             let mut out = w.into_bytes();
             // One tile group carrying a single byte of (never-decoded) tile data per tile.
             let tiles = match self.explicit_tiles {

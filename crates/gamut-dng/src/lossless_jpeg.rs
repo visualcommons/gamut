@@ -20,7 +20,7 @@
 //! histogram, built by [`gamut_bitstream::build_optimal_table`] and written in the frame's `DHT`.
 //! Every DNG tile or strip is its own call, so each chunk carries its own table.
 
-use gamut_bitstream::{CanonicalCodes, build_optimal_table};
+use gamut_bitstream::{CanonicalCodes, Code, build_optimal_table};
 use gamut_core::{Error, Result};
 
 /// A decoded lossless-JPEG frame.
@@ -210,7 +210,11 @@ pub fn encode(
         ));
     }
     let diffs = differences(samples, width, height, components, precision);
-    let (bits, huffval) = build_optimal_table(&category_histogram(&diffs));
+    // gamut-bitstream's table, not this module's decode-side `HuffmanTable`.
+    let gamut_bitstream::HuffmanTable {
+        bits,
+        values: huffval,
+    } = build_optimal_table(&category_histogram(&diffs));
     let codes = CanonicalCodes::from_bits_values(&bits, &huffval);
     let mut out = Vec::new();
     out.extend_from_slice(&[MARKER, SOI]);
@@ -254,7 +258,7 @@ pub fn encode(
     for &diff in &diffs {
         let (ssss, mantissa) = magnitude(i32::from(diff));
         // The table codes every category the histogram counted, and `diffs` is what it counted.
-        let (code, len) = codes.lookup(ssss).unwrap_or_default();
+        let Code { code, len } = codes.lookup(ssss).unwrap_or(Code { code: 0, len: 0 });
         writer.put(u32::from(code), len);
         // Categories 0 and 16 carry no mantissa; only `1..16` has magnitude bits.
         if ssss != 0 && ssss < 16 {
@@ -1595,7 +1599,8 @@ mod tests {
                         );
                         let diff = reduce(actual - pred);
                         let (ssss, mantissa) = magnitude(diff);
-                        let (code, len) = codes[c].lookup(ssss).expect("table codes category");
+                        let Code { code, len } =
+                            codes[c].lookup(ssss).expect("table codes category");
                         bits.put(u32::from(code), len);
                         if ssss != 0 && ssss < 16 {
                             bits.put(mantissa, ssss);

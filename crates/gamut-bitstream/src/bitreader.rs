@@ -23,16 +23,20 @@ const UVLC_MAX_LEADING_ZEROS: u32 = 32;
 /// A most-significant-bit-first reader over a byte slice.
 ///
 /// Constructed with [`BitReader::new`], it tracks a bit position within `data`. Fixed-width fields
-/// are read with [`BitReader::f`]; the AV1 variable-width descriptors have their own methods. The
-/// reader never allocates and borrows its input.
+/// are read with [`BitReader::get_bits`] (the mirror of
+/// [`BitWriter::put_bits`](crate::BitWriter::put_bits)), and the reader realigns with [`BitReader::align`] (the mirror of
+/// [`BitWriter::align`](crate::BitWriter::align)). The AV1 descriptors keep their spec names —
+/// [`BitReader::f`] is `get_bits` under its `f(n)` spelling, and `su(n)`, `ns(n)`, `uvlc()`,
+/// `le(n)` and `leb128()` have their own methods. The reader never allocates and borrows its
+/// input.
 ///
 /// ```
 /// use gamut_bitstream::BitReader;
 ///
 /// // 0b1011_0010 — a 3-bit field then a 5-bit field.
 /// let mut r = BitReader::new(&[0b1011_0010]);
-/// assert_eq!(r.f(3).unwrap(), 0b101);
-/// assert_eq!(r.f(5).unwrap(), 0b1_0010);
+/// assert_eq!(r.get_bits(3).unwrap(), 0b101);
+/// assert_eq!(r.get_bits(5).unwrap(), 0b1_0010);
 /// assert_eq!(r.bits_remaining(), 0);
 /// ```
 #[derive(Debug, Clone)]
@@ -81,56 +85,66 @@ impl<'a> BitReader<'a> {
         &self.data[byte.min(self.data.len())..]
     }
 
-    /// Reads the `f(n)` descriptor: `n` bits, most-significant first (AV1 §4.10.2).
+    /// Reads `n` bits, most-significant first: the mirror of
+    /// [`BitWriter::put_bits`](crate::BitWriter::put_bits).
+    ///
+    /// A failed read leaves the cursor where it was.
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if fewer
     /// than `n` bits remain, or if `n > 32`.
-    pub fn f(&mut self, n: u32) -> Result<u32> {
+    pub fn get_bits(&mut self, n: u32) -> Result<u32> {
         if n > 32 {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 f(n): field wider than 32 bits",
-            ));
+            return Err(Error::invalid_input(ORIGIN, "bit field wider than 32 bits"));
         }
         if (n as usize) > self.bits_remaining() {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 f(n): bitstream truncated",
-            ));
+            return Err(Error::invalid_input(ORIGIN, "bitstream truncated"));
         }
         let mut x = 0u32;
         for _ in 0..n {
             let byte = self.data[self.bit_pos >> 3];
             let bit = (byte >> (7 - (self.bit_pos & 7))) & 1;
-            x = (x << 1) | u32::from(bit);
+            // `+`, not `|`: the shift vacates exactly the bit added, so the two agree on every
+            // input, and an `|` here would carry an equivalent `| -> ^` mutant (removed rather
+            // than excluded; the `+` mutants are each killable).
+            x = (x << 1) + u32::from(bit);
             self.bit_pos += 1;
         }
         Ok(x)
     }
 
-    /// Reads a 64-bit `f(n)` field, for the few syntax elements wider than 32 bits.
+    /// The AV1 spelling of [`BitReader::get_bits`]: the `f(n)` descriptor (AV1 §4.10.2), kept so
+    /// header parsers read as a transcription of the spec's syntax tables.
+    ///
+    /// # Errors
+    ///
+    /// As [`BitReader::get_bits`].
+    pub fn f(&mut self, n: u32) -> Result<u32> {
+        self.get_bits(n)
+    }
+
+    /// Reads an `n`-bit field into a `u64`, most-significant first, for the few syntax elements
+    /// wider than 32 bits (the 64-bit form of `f(n)`).
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if fewer
     /// than `n` bits remain, or if `n > 64`.
-    pub fn f64(&mut self, n: u32) -> Result<u64> {
+    pub fn f_u64(&mut self, n: u32) -> Result<u64> {
         if n > 64 {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 f(n): field wider than 64 bits",
-            ));
+            return Err(Error::invalid_input(ORIGIN, "bit field wider than 64 bits"));
         }
-        let mut x = 0u64;
-        let mut left = n;
-        while left > 0 {
-            let take = left.min(32);
-            x = (x << take) | u64::from(self.f(take)?);
-            left -= take;
-        }
-        Ok(x)
+        // At most two reads: the bits above the low 32, then the low `n - high_bits` (<= 32).
+        // Straight-line rather than a loop over 32-bit chunks, whose `while left > 0` guard had a
+        // non-terminating `>=` mutant that could only score as a TIMEOUT; the rewrite removes that
+        // site and its sibling loop-guard mutants with it. `+`, not `|`, for the reason given in
+        // `get_bits`: the low read is below `2^(n - high_bits)`, so the operands are disjoint.
+        let high_bits = n.saturating_sub(32);
+        let high = u64::from(self.get_bits(high_bits)?);
+        let low_bits = n - high_bits;
+        let low = u64::from(self.get_bits(low_bits)?);
+        Ok((high << low_bits) + low)
     }
 
     /// Reads a single bit as a flag.
@@ -140,7 +154,7 @@ impl<'a> BitReader<'a> {
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
     /// bitstream is exhausted.
     pub fn flag(&mut self) -> Result<bool> {
-        Ok(self.f(1)? != 0)
+        Ok(self.get_bits(1)? != 0)
     }
 
     /// Reads the `su(n)` descriptor: an `n`-bit two's-complement signed integer (AV1 §4.10.6).
@@ -151,9 +165,9 @@ impl<'a> BitReader<'a> {
     /// than `n` bits remain, or if `n` is 0 or `> 32`.
     pub fn su(&mut self, n: u32) -> Result<i32> {
         if n == 0 {
-            return Err(Error::invalid_input(ORIGIN, "AV1 su(n): zero-width field"));
+            return Err(Error::invalid_input(ORIGIN, "zero-width signed field"));
         }
-        let value = self.f(n)?;
+        let value = self.get_bits(n)?;
         let sign_mask = 1u32 << (n - 1);
         Ok(if value & sign_mask != 0 {
             // Sign-extend: subtract 2^n. Done in i64 so `n == 32` cannot overflow.
@@ -174,7 +188,10 @@ impl<'a> BitReader<'a> {
     /// bitstream is truncated or `n` is 0.
     pub fn ns(&mut self, n: u32) -> Result<u32> {
         if n == 0 {
-            return Err(Error::invalid_input(ORIGIN, "AV1 ns(n): empty range"));
+            return Err(Error::invalid_input(
+                ORIGIN,
+                "empty range for a non-symmetric value",
+            ));
         }
         let w = 32 - n.leading_zeros(); // FloorLog2(n) + 1
         // `w` reaches 32 once `n >= 2^31`, so the spec's `(1 << w) - n` and `(v << 1) - m` are
@@ -182,11 +199,11 @@ impl<'a> BitReader<'a> {
         // `debug_assertions` and otherwise masks to `1 << 0`, leaving `m` one too large. Every
         // result is `< n`, so it fits back in u32.
         let m = (1u64 << w) - u64::from(n);
-        let v = u64::from(self.f(w - 1)?);
+        let v = u64::from(self.get_bits(w - 1)?);
         if v < m {
             return Ok(v as u32);
         }
-        let extra = u64::from(self.f(1)?);
+        let extra = u64::from(self.get_bits(1)?);
         Ok(((v << 1) - m + extra) as u32)
     }
 
@@ -202,14 +219,14 @@ impl<'a> BitReader<'a> {
         // that one bit and desync every field after it. The loop is bounded by the input: `f(1)`
         // fails once the bitstream is exhausted.
         let mut leading_zeros = 0u32;
-        while self.f(1)? == 0 {
+        while self.get_bits(1)? == 0 {
             leading_zeros += 1;
         }
         if leading_zeros >= UVLC_MAX_LEADING_ZEROS {
             // No suffix is coded; the value saturates.
             return Ok(u32::MAX);
         }
-        let value = self.f(leading_zeros)?;
+        let value = self.get_bits(leading_zeros)?;
         Ok(value + (1u32 << leading_zeros) - 1)
     }
 
@@ -223,15 +240,18 @@ impl<'a> BitReader<'a> {
         if !self.is_byte_aligned() {
             return Err(Error::invalid_input(
                 ORIGIN,
-                "AV1 le(n): reader is not byte-aligned",
+                "little-endian field read off a byte boundary",
             ));
         }
         if n > 8 {
-            return Err(Error::invalid_input(ORIGIN, "AV1 le(n): more than 8 bytes"));
+            return Err(Error::invalid_input(
+                ORIGIN,
+                "little-endian field wider than 8 bytes",
+            ));
         }
         let mut value = 0u64;
         for i in 0..n {
-            value |= u64::from(self.f(8)?) << (i * 8);
+            value |= u64::from(self.get_bits(8)?) << (i * 8);
         }
         Ok(value)
     }
@@ -249,26 +269,23 @@ impl<'a> BitReader<'a> {
         if !self.is_byte_aligned() {
             return Err(Error::invalid_input(
                 ORIGIN,
-                "AV1 leb128(): reader is not byte-aligned",
+                "LEB128 value read off a byte boundary",
             ));
         }
         let mut value = 0u64;
         for i in 0..8u32 {
-            let byte = self.f(8)?;
+            let byte = self.get_bits(8)?;
             value |= u64::from(byte & 0x7f) << (i * 7);
             if byte & 0x80 == 0 {
                 if value > u64::from(u32::MAX) {
-                    return Err(Error::invalid_input(
-                        ORIGIN,
-                        "AV1 leb128(): value exceeds 32 bits",
-                    ));
+                    return Err(Error::invalid_input(ORIGIN, "LEB128 value exceeds 32 bits"));
                 }
                 return Ok(value);
             }
         }
         Err(Error::invalid_input(
             ORIGIN,
-            "AV1 leb128(): more than 8 bytes",
+            "LEB128 value longer than 8 bytes",
         ))
     }
 
@@ -280,40 +297,30 @@ impl<'a> BitReader<'a> {
     /// than `n` bits remain.
     pub fn skip_bits(&mut self, n: usize) -> Result<()> {
         if n > self.bits_remaining() {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 bit reader: skip past end of bitstream",
-            ));
+            return Err(Error::invalid_input(ORIGIN, "skip past end of bitstream"));
         }
         self.bit_pos += n;
         Ok(())
     }
 
-    /// Advances to the next byte boundary, requiring the skipped bits to be zero
-    /// (`byte_alignment()`, AV1 §5.3.5).
+    /// Advances to the next byte boundary, requiring the skipped bits to be zero: the mirror of
+    /// [`BitWriter::align`](crate::BitWriter::align), which pads with zeroes. This is AV1's
+    /// `byte_alignment()` (§5.3.5); a no-op when already aligned.
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
     /// padding bits are not zero or the input is truncated.
-    pub fn byte_alignment(&mut self) -> Result<()> {
+    pub fn align(&mut self) -> Result<()> {
         while !self.is_byte_aligned() {
-            if self.f(1)? != 0 {
+            if self.get_bits(1)? != 0 {
                 return Err(Error::invalid_input(
                     ORIGIN,
-                    "AV1 byte_alignment(): non-zero padding bit",
+                    "non-zero alignment padding bit",
                 ));
             }
         }
         Ok(())
-    }
-
-    /// Advances to the next byte boundary without inspecting the skipped bits.
-    ///
-    /// Use this where the spec aligns without asserting the padding (`trailing_bits` handles the
-    /// asserted case).
-    pub const fn align(&mut self) {
-        self.bit_pos = self.bit_pos.div_ceil(8) * 8;
     }
 
     /// Reads `trailing_bits()` (AV1 §5.3.4): a `1` bit followed by zeroes to the byte boundary.
@@ -323,13 +330,13 @@ impl<'a> BitReader<'a> {
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
     /// marker bit is absent or a padding bit is set.
     pub fn trailing_bits(&mut self) -> Result<()> {
-        if self.f(1)? != 1 {
+        if self.get_bits(1)? != 1 {
             return Err(Error::invalid_input(
                 ORIGIN,
-                "AV1 trailing_bits(): missing marker bit",
+                "missing trailing-bits marker bit",
             ));
         }
-        self.byte_alignment()
+        self.align()
     }
 }
 
@@ -339,49 +346,60 @@ mod tests {
     use crate::BitWriter;
 
     #[test]
-    fn f_reads_back_what_the_writer_wrote() {
+    fn get_bits_reads_back_what_put_bits_wrote() {
         let mut w = BitWriter::new();
         w.put_bits(0b101, 3);
         w.put_bits(0xdead_beef, 32);
         w.put_bits(0, 1);
-        w.byte_align();
+        w.align();
         let bytes = w.into_bytes();
 
         let mut r = BitReader::new(&bytes);
-        assert_eq!(r.f(3).unwrap(), 0b101);
-        assert_eq!(r.f(32).unwrap(), 0xdead_beef);
-        assert_eq!(r.f(1).unwrap(), 0);
+        assert_eq!(r.get_bits(3).unwrap(), 0b101);
+        assert_eq!(r.get_bits(32).unwrap(), 0xdead_beef);
+        assert_eq!(r.get_bits(1).unwrap(), 0);
     }
 
     #[test]
-    fn f_rejects_oversized_and_truncated_fields() {
+    fn f_is_get_bits_under_its_spec_name() {
+        let mut r = BitReader::new(&[0b1011_0010]);
+        assert_eq!(r.f(3).unwrap(), 0b101);
+        assert_eq!(r.f(5).unwrap(), 0b1_0010);
+        assert_eq!(
+            r.f(1).unwrap_err().static_message(),
+            Some("bitstream truncated")
+        );
+    }
+
+    #[test]
+    fn get_bits_rejects_oversized_and_truncated_fields() {
         let mut r = BitReader::new(&[0xff]);
         assert_eq!(
-            r.f(33).unwrap_err().static_message(),
-            Some("AV1 f(n): field wider than 32 bits")
+            r.get_bits(33).unwrap_err().static_message(),
+            Some("bit field wider than 32 bits")
         );
         assert_eq!(
-            r.f(9).unwrap_err().static_message(),
-            Some("AV1 f(n): bitstream truncated")
+            r.get_bits(9).unwrap_err().static_message(),
+            Some("bitstream truncated")
         );
         // The failed reads left the cursor untouched, so the field is still readable.
-        assert_eq!(r.f(8).unwrap(), 0xff);
+        assert_eq!(r.get_bits(8).unwrap(), 0xff);
         assert_eq!(r.bits_remaining(), 0);
     }
 
     #[test]
-    fn f64_spans_more_than_32_bits() {
+    fn f_u64_spans_more_than_32_bits() {
         let bytes = 0x0123_4567_89ab_cdefu64.to_be_bytes();
         let mut r = BitReader::new(&bytes);
-        assert_eq!(r.f64(64).unwrap(), 0x0123_4567_89ab_cdef);
+        assert_eq!(r.f_u64(64).unwrap(), 0x0123_4567_89ab_cdef);
 
         let mut r = BitReader::new(&bytes);
-        assert_eq!(r.f64(40).unwrap(), 0x0001_2345_6789);
+        assert_eq!(r.f_u64(40).unwrap(), 0x0001_2345_6789);
 
         let mut r = BitReader::new(&bytes);
         assert_eq!(
-            r.f64(65).unwrap_err().static_message(),
-            Some("AV1 f(n): field wider than 64 bits")
+            r.f_u64(65).unwrap_err().static_message(),
+            Some("bit field wider than 64 bits")
         );
     }
 
@@ -399,7 +417,7 @@ mod tests {
         let mut r = BitReader::new(&[0xff]);
         assert_eq!(
             r.su(0).unwrap_err().static_message(),
-            Some("AV1 su(n): zero-width field")
+            Some("zero-width signed field")
         );
     }
 
@@ -452,7 +470,7 @@ mod tests {
         for b in &bits {
             packed.put_bit(*b);
         }
-        packed.byte_align();
+        packed.align();
         let bytes = packed.into_bytes();
 
         let mut pos = 0;
@@ -480,7 +498,7 @@ mod tests {
         let mut r = BitReader::new(&[0xff]);
         assert_eq!(
             r.ns(0).unwrap_err().static_message(),
-            Some("AV1 ns(n): empty range")
+            Some("empty range for a non-symmetric value")
         );
     }
 
@@ -518,7 +536,7 @@ mod tests {
         w.put_bits(0b010, 3);
         w.put_bits(0b011, 3);
         w.put_bits(0b00100, 5);
-        w.byte_align();
+        w.align();
         let bytes = w.into_bytes();
 
         let mut r = BitReader::new(&bytes);
@@ -555,7 +573,7 @@ mod tests {
         w.put_bits(0, 31);
         w.put_bits(1, 1);
         w.put_bits(0, 31);
-        w.byte_align();
+        w.align();
         let bytes = w.into_bytes();
         let mut r = BitReader::new(&bytes);
         assert_eq!(r.uvlc().unwrap(), (1u32 << 31) - 1);
@@ -568,7 +586,7 @@ mod tests {
         let mut r = BitReader::new(&[0b0000_0000]);
         assert_eq!(
             r.uvlc().unwrap_err().static_message(),
-            Some("AV1 f(n): bitstream truncated")
+            Some("bitstream truncated")
         );
 
         // A complete prefix whose suffix is cut short is also refused: four leading zeroes and
@@ -576,7 +594,7 @@ mod tests {
         let mut r = BitReader::new(&[0b0000_1000]);
         assert_eq!(
             r.uvlc().unwrap_err().static_message(),
-            Some("AV1 f(n): bitstream truncated")
+            Some("bitstream truncated")
         );
     }
 
@@ -593,26 +611,56 @@ mod tests {
         let mut r = BitReader::new(&[0xff; 9]);
         assert_eq!(
             r.le(9).unwrap_err().static_message(),
-            Some("AV1 le(n): more than 8 bytes")
+            Some("little-endian field wider than 8 bytes")
         );
 
         let mut r = BitReader::new(&[0xff; 4]);
-        r.f(1).unwrap();
+        r.get_bits(1).unwrap();
         assert_eq!(
             r.le(1).unwrap_err().static_message(),
-            Some("AV1 le(n): reader is not byte-aligned")
+            Some("little-endian field read off a byte boundary")
         );
     }
 
     #[test]
-    fn leb128_round_trips_against_the_writer() {
+    fn leb128_reads_back_what_put_leb128_wrote() {
         for &v in &[0u64, 1, 127, 128, 300, 0xffff, 0x10_0000, u32::MAX as u64] {
-            let mut out = Vec::new();
-            crate::write_leb128(&mut out, v);
+            let mut w = BitWriter::new();
+            w.put_leb128(v);
+            let out = w.into_bytes();
             let mut r = BitReader::new(&out);
             assert_eq!(r.leb128().unwrap(), v, "leb128 round-trip for {v}");
             assert_eq!(r.bits_remaining(), 0);
         }
+    }
+
+    #[test]
+    fn leb128_accepts_a_padded_encoding() {
+        // §4.10.5 allows a non-minimal encoding: `0x83 0x00` is 3 with an empty high group. The
+        // minimal writer never emits one, so only a hand-built input reaches this; the reader
+        // must take both bytes, or every field after the OBU size desyncs.
+        let mut r = BitReader::new(&[0x83, 0x00, 0xaa]);
+        assert_eq!(r.leb128().unwrap(), 3);
+        assert_eq!(
+            r.bit_position(),
+            16,
+            "both bytes of the padded encoding are consumed"
+        );
+    }
+
+    #[test]
+    fn leb128_reports_a_truncated_encoding() {
+        // A continuation bit on the last byte promises a byte the input does not hold.
+        let mut r = BitReader::new(&[0x80]);
+        assert_eq!(
+            r.leb128().unwrap_err().static_message(),
+            Some("bitstream truncated")
+        );
+        let mut r = BitReader::new(&[]);
+        assert_eq!(
+            r.leb128().unwrap_err().static_message(),
+            Some("bitstream truncated")
+        );
     }
 
     #[test]
@@ -621,7 +669,7 @@ mod tests {
         let mut r = BitReader::new(&[0x80; 9]);
         assert_eq!(
             r.leb128().unwrap_err().static_message(),
-            Some("AV1 leb128(): more than 8 bytes")
+            Some("LEB128 value longer than 8 bytes")
         );
 
         // A value above u32::MAX is refused rather than silently truncated.
@@ -630,14 +678,14 @@ mod tests {
         let mut r = BitReader::new(&out);
         assert_eq!(
             r.leb128().unwrap_err().static_message(),
-            Some("AV1 leb128(): value exceeds 32 bits")
+            Some("LEB128 value exceeds 32 bits")
         );
 
         let mut r = BitReader::new(&[0x00, 0x00]);
-        r.f(1).unwrap();
+        r.get_bits(1).unwrap();
         assert_eq!(
             r.leb128().unwrap_err().static_message(),
-            Some("AV1 leb128(): reader is not byte-aligned")
+            Some("LEB128 value read off a byte boundary")
         );
     }
 
@@ -645,7 +693,7 @@ mod tests {
     fn trailing_bits_accepts_the_marker_and_rejects_padding() {
         // Three data bits, then the marker 1, then zeroes to the boundary.
         let mut r = BitReader::new(&[0b0001_0000]);
-        r.f(3).unwrap();
+        r.get_bits(3).unwrap();
         r.trailing_bits().unwrap();
         assert_eq!(r.bits_remaining(), 0);
 
@@ -653,32 +701,44 @@ mod tests {
         let mut r = BitReader::new(&[0b1000_0001]);
         assert_eq!(
             r.trailing_bits().unwrap_err().static_message(),
-            Some("AV1 byte_alignment(): non-zero padding bit")
+            Some("non-zero alignment padding bit")
         );
 
         // No marker bit at all.
         let mut r = BitReader::new(&[0b0000_0000]);
         assert_eq!(
             r.trailing_bits().unwrap_err().static_message(),
-            Some("AV1 trailing_bits(): missing marker bit")
+            Some("missing trailing-bits marker bit")
         );
     }
 
     #[test]
+    fn align_requires_zero_padding() {
+        let mut r = BitReader::new(&[0b1010_0001]);
+        r.get_bits(3).unwrap();
+        assert_eq!(
+            r.align().unwrap_err().static_message(),
+            Some("non-zero alignment padding bit")
+        );
+        // The error is raised at the set bit, the last of the byte.
+        assert_eq!(r.bit_position(), 8);
+    }
+
+    #[test]
     fn alignment_helpers_track_the_cursor() {
-        let mut r = BitReader::new(&[0xff, 0x0f, 0xaa]);
+        let mut r = BitReader::new(&[0xe0, 0x0f, 0xaa]);
         assert!(r.is_byte_aligned());
-        r.f(3).unwrap();
+        r.get_bits(3).unwrap();
         assert!(!r.is_byte_aligned());
         assert_eq!(r.remaining_bytes(), &[0x0f, 0xaa]);
-        r.align();
+        r.align().unwrap();
         assert_eq!(r.bit_position(), 8);
-        r.align();
+        r.align().unwrap();
         assert_eq!(r.bit_position(), 8, "align on a boundary is a no-op");
 
         assert_eq!(
             r.skip_bits(17).unwrap_err().static_message(),
-            Some("AV1 bit reader: skip past end of bitstream")
+            Some("skip past end of bitstream")
         );
         r.skip_bits(16).unwrap();
         assert_eq!(r.bits_remaining(), 0);

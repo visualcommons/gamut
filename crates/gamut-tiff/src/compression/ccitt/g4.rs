@@ -129,7 +129,7 @@ pub fn g4_encode_strip(
     }
     out.put_bits(EOL, 12);
     out.put_bits(EOL, 12);
-    out.byte_align();
+    out.align();
     Ok(out.into_bytes())
 }
 
