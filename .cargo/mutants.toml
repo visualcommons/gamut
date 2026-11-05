@@ -401,6 +401,12 @@ exclude_re = [
     #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
     '^crates/gamut-webp/src/vp8/frame\.rs:914:20: replace < with <= in encode_bpred_luma$',
     '^crates/gamut-webp/src/vp8/frame\.rs:920:19: replace \+= with \*= in encode_bpred_luma$',
+    #   (Line anchors on `SEGMENT_QUANT_DELTAS`' two signs and on `encode_frame_filtered`'s segment
+    #   assignment, segment-map index and B_PRED threshold had drifted off their lines and matched
+    #   nothing. #1054 re-surveyed those operators where they now stand — the deltas, the `/ 64`
+    #   segment pick, the `mb_y * mb_cols` index, and `bpred_beats_whole_block`, the threshold's own
+    #   function since — and the segmentation fixtures and the threshold test caught every one, so
+    #   no entry returns.)
     # gamut-webp VP8L encoder — correctness-preserving free choices. The lossless encode->decode
     # round-trip and the libwebp oracle BOTH run on these paths, so any mutant that produced an invalid
     # prefix code, an out-of-range backward reference, or a residual the inverse transform cannot undo
@@ -480,6 +486,11 @@ exclude_re = [
     # Token::green_symbol is, per its doc, "a cheap per-block signature for grouping" — it feeds only
     # assign_groups, so any value just regroups blocks.
     '^crates/gamut-webp/src/vp8l/encoder\.rs:\d+:\d+: .* in Token::green_symbol$',
+    # (Line anchors on the colour-cache `cache_bits > 0` choice, `build_length_limited_lengths`'
+    # `h > 0` count and `write_main_image`'s meta-prefix signalling had drifted off their lines and
+    # matched nothing. #1054 re-surveyed every comparison and subtraction at those sites where they
+    # now stand, in `write_main_image` and `build_length_limited_lengths`, and the effort byte-pins
+    # caught all of them, so no entry returns.)
     # forward_predictor / forward_color block geometry (`1 << size_bits`, the sub-image index): a
     # mutated block size or write index just makes the encoder choose predictor/colour elements the
     # decoder reads back identically (the per-pixel residual/colour math is asymmetric and IS caught).
@@ -659,6 +670,9 @@ exclude_re = [
     # `(acc << 8) | usize::from(b)`: identical disjoint-byte shape as `Reader::u48`, so `| -> ^` is
     # equivalent.
     '^crates/gamut-heic/src/nal\.rs:195:48: replace \| with \^ in <impl Iterator for NalUnitIter<.a>>::next$',
+    # (The `seen_ftyp && seen_meta` trailer guard this list used to exclude as unreachable through
+    # `HeifContainer::parse` now lives in gamut-isobmff's public `walk_segments`, whose own tests
+    # call it directly; #1054's survey scored its `&&` → `||` caught there, so no entry returns.)
     # (The gamut-png typed-decoder bit-depth match guards are gone: `DecodeImage<P>` delegates the
     # layout change to gamut-core's `convert` module now, so the guards the entry argued about no
     # longer exist and it matched nothing.)
