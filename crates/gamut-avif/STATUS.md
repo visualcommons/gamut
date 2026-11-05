@@ -54,8 +54,10 @@ and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color
 `gamut_metadata::TypedMetadata` over the primary item's `Exif` item (through
 `gamut_isobmff::Item::exif_tiff_stream`, the lens `gamut-heic` shares, which applies the
 `exif_tiff_header_offset`), XMP `mime` item and
-`colr` ICC profile, and `AvifEncoder::with_metadata` / `with_encoded_metadata` embed a facade
-`Metadata`, refusing IPTC-IIM and a C2PA store as `Unsupported`. exiv2's BMFF reader is the
+`colr` ICC profile, and `AvifEncoder` implements `gamut_metadata::MetadataSink` over its EXIF,
+XMP and ICC setters, so the trait's `with_metadata` / `with_encoded_metadata` embed a facade
+`Metadata`, refusing IPTC-IIM (HEIF has no item type for it) and a C2PA store as `Unsupported`
+under the trait's shared precedence (#1149). exiv2's BMFF reader is the
 container-level oracle for what is embedded; exiv2 writes no BMFF, so the reverse direction has
 no oracle. The offset lens duplicates `gamut-heic`'s and is to move into `gamut-isobmff` (#872).
 

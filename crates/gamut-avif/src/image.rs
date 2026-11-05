@@ -332,7 +332,7 @@ impl AvifImage {
 /// stream in an `exif_tiff_header_offset` — so here, as in `gamut-heic`, `blocks` can fail.
 ///
 /// ```
-/// use gamut_avif::{AvifContainer, AvifEncoder, TypedMetadata};
+/// use gamut_avif::{AvifContainer, AvifEncoder, MetadataSink, TypedMetadata};
 /// use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 /// use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 /// use gamut_metadata::Metadata;
