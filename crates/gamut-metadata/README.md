@@ -311,4 +311,4 @@ type apart from it (`with_png_metadata`, `with_tiff_metadata`).
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

@@ -27,10 +27,8 @@ is:
   it is auditable and forkable rather than a wrapper over libaom/libavif.
 - **Permissively licensed** (MIT OR Apache-2.0), matching the royalty-free AV1/AVIF formats.
 
-It builds on the workspace's shared primitives: [`gamut-color`](../gamut-color) (pixel formats /
-CICP), [`gamut-dsp`](../gamut-dsp) (transforms), [`gamut-bitstream`](../gamut-bitstream) (bit
-writer + AV1 symbol coder), [`gamut-av1`](../gamut-av1) (the AV1 keyframe encoder), and
-[`gamut-isobmff`](../gamut-isobmff) (the container).
+It wraps the AV1 keyframes [`gamut-av1`](../gamut-av1) encodes in the container
+[`gamut-isobmff`](../gamut-isobmff) writes.
 
 ## Usage
 
@@ -108,7 +106,7 @@ worked example.
 
 ## Status
 
-**v1 surface.** The encoder produces **lossless** (the default) and **lossy**
+**Current major's surface.** The encoder produces **lossless** (the default) and **lossy**
 (`AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 planes and wrapped as a
 single `av01` item in a conformant MIAF/AVIF container. Lossless codes the identity matrix at
 4:4:4, so its output is bit-exact to the input; lossy codes **BT.709 YCbCr at 4:2:0** by default —
@@ -119,7 +117,7 @@ studio range and 4:4:4 / 4:2:2 selectable via `with_matrix` / `with_color_range`
 taller-than-wide partitions there — so it costs the encoder half its rectangular partition set and
 is offered for pipelines that need it rather than as a default. Lossy trades fidelity for size on a
 `0..=100` quality scale (higher = closer to the source; the `quality → base_q_idx` mapping and its
-silent clamp above 100 are a frozen v1 contract, defined in
+silent clamp above 100 are a contract of the current major, defined in
 [`references/avif`](../../references/avif/README.md)). `irot`/`imir` display orientation is
 supported.
 
@@ -165,10 +163,10 @@ libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
 specs: **deferred, planned** features (10/12-bit, the HDR
 metadata properties beyond CICP tagging and `clli`/`mdcv`, gain maps, layered/progressive images,
-the pure-Rust AV1 codestream decoder, the decoder backend registry, …) all land semver-minor on the frozen v1
-surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per
+the pure-Rust AV1 codestream decoder, the decoder backend registry, …) all land semver-minor on the
+current major's surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per
 the image-first workspace charter.
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

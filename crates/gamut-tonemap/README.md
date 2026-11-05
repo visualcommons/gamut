@@ -67,4 +67,4 @@ functions, and curve-composition combinators. See [STATUS.md](STATUS.md).
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

@@ -48,7 +48,7 @@ explicit `code_point`/`from_code_point` API rather than serde's representation.
 
 ## Status
 
-Released as **v1** (issue #179); see [`STATUS.md`](STATUS.md) for the phase history, the frozen
+Stable at the current major (first released as 1.0 under issue #179); see [`STATUS.md`](STATUS.md) for the phase history, the frozen
 API policies, and the deferrals. Implemented today: 8-bit RGB ↔ identity 4:4:4 conversion
 ([`Planar8::from_rgb8_identity`] / [`Planar8::to_rgb8_identity`]), the CICP tables the AVIF
 `colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP), the decoders' reference-exact chroma
@@ -66,4 +66,4 @@ for the precise split.
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

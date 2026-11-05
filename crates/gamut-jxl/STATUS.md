@@ -1,6 +1,6 @@
 # gamut-jxl — JPEG XL implementation status
 
-Tracking GitHub issue [#243](https://github.com/justin13888/gamut/issues/243): integrate a JPEG XL
+Tracking GitHub issue [#243](https://github.com/visualcommons/gamut/issues/243): integrate a JPEG XL
 **encoder and decoder** into gamut. Unlike every other codec here, gamut-jxl **wraps the format's
 reference implementations** rather than implementing the ISO/IEC 18181 bitstream clean-slate —
 libjxl for encode, jxl-rs for decode — a deliberate, maintainer-confirmed departure justified in the

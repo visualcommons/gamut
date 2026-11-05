@@ -7,8 +7,8 @@
 //!
 //! # Scope and design notes
 //!
-//! The surface is deliberately small and frozen; the following are intentional decisions rather
-//! than omissions:
+//! The surface is deliberately small and stable within the current major; the following are
+//! intentional decisions rather than omissions:
 //!
 //! - **Interleaved `u8` / `u16` layouts only.** [`Sample`] is sealed over `u8` and `u16`; planar
 //!   layouts and codec-side concerns such as coded bit depth live in `gamut-color`

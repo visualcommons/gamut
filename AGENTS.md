@@ -20,13 +20,13 @@ its name without the `gamut-` prefix (`gamut` for the umbrella), an external cra
 and `nothing` for none. A parenthesis after a name that opens with `optional` or `build` marks
 that kind of edge; any other parenthesis is a note. The clause ends at the first `.` or `;`
 outside parentheses and code spans. `mise run check-agents-edges` holds the list to the graph.
+The list is the one place edges are written; each crate's oracle is kept in the per-crate table of
+[`docs/testing.md`](docs/testing.md#the-per-crate-selection-table), not restated here.
 
-- **gamut** — umbrella; optional deps on format crates gated by features (`avif`, `jxl`,
-  `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `png`, `jpeg`, `isobmff`, `metadata`,
-  `cmm`, `codec-abi`, `all`); `default = []`. `primitives` re-exports shared `color`/`dsp`/`bitstream`;
-  `isobmff`/`metadata`/`tonemap`/`codec-abi` re-export their respective primitive crates;
-  `all` includes all of these. ← core, av1 (optional), av2 (optional), avif (optional),
-  bitstream (optional), cmm (optional), codec-abi (optional), color (optional), dng (optional),
+- **gamut** — umbrella; re-exports the other library crates behind Cargo features, with
+  `default = []`. The feature-to-crate map is kept once, in
+  [`crates/gamut/README.md`](crates/gamut/README.md#features). ← core, av1 (optional), av2
+  (optional), avif (optional), bitstream (optional), cmm (optional), codec-abi (optional), color (optional), dng (optional),
   dsp (optional), exif (optional), heic (optional), icc (optional), ifd (optional), iptc
   (optional), isobmff (optional), jpeg (optional), jxl (optional), metadata (optional), png
   (optional), tiff (optional), tonemap (optional), vvc (optional), webp (optional), xmp
@@ -54,8 +54,7 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
   ← nothing.
 - **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core.
 - **gamut-av1** — AV1 codec. ← core, color, dsp, bitstream.
-- **gamut-av2** / **gamut-vvc** — placeholder codecs: module docs only, no items, outside the
-  v1 freeze. ← nothing.
+- **gamut-av2** / **gamut-vvc** — placeholder codecs: module docs only, no items. ← nothing.
 - **gamut-jxl** — JPEG XL, uniquely a **wrapper** over the format's reference implementations
   rather than clean-slate (maintainer-approved departure from the pure-Rust rule): encode
   wraps **libjxl 0.12.0** statically via `gamut-jxl-sys` (off wasm32), decode wraps the
@@ -74,7 +73,7 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
 - **gamut-jpeg** — JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec: baseline sequential DCT
   Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0/4:4:0, JFIF; opt-in jpegli-style XYB colour mode
   with a static vendored ICC profile), sequential/progressive decoder and progressive encoder
-  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only), plus jpegli for the XYB mode.
+  phased in per its STATUS.md.
   ← core, bitstream (the T.81 Annex K.2 optimal-table builder and Annex C canonical codes),
   codec-abi, color, dsp, cmm (optional, `cmm` feature: `decode_srgb` applies the embedded ICC
   profile), icc (optional, `cmm` feature), metadata (optional, `metadata` feature).
@@ -88,18 +87,16 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
 - **gamut-heic** — decode-only HEIF/HEIC container: full-fidelity byte-accounting parse
   (every input byte maps to a box, appended motion-photo stream, or explicit trailer), typed
   `hvcC`/NAL layer, pluggable `HevcDecoder` hook for platform HEVC decoders (HEVC bitstream
-  decode itself is out of scope here). Differential oracle: libheif+libde265 (+kvazaar
-  fixture generation), dev-only. ← isobmff, core, codec-abi, color, metadata (optional,
+  decode itself is out of scope here). ← isobmff, core, codec-abi, color, metadata (optional,
   `metadata` feature).
 - **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png,
   gamut-tiff and gamut-dng; deliberately encoder-only — workspace decoders inflate via
-  `miniz_oxide`. ← nothing. No dependency at all, not even `gamut-core` (`src/lib.rs:6`).
+  `miniz_oxide`. ← nothing. No dependency at all, not even `gamut-core`.
 - **gamut-png** — PNG codec (3rd edition, W3C): space-efficient encoder and spec-compliant
   decoder — all colour types/bit depths, Adam7 *decoding*, all filters, decode limits for
   hostile input, ancillary metadata surfaced as raw `MetadataBlock`-ready payloads
   (eXIf/iCCP/XMP/text) plus parsed gAMA/cHRM/sRGB/cICP. APNG out of scope (decodes as the
-  default image). Differential oracle both directions: libpng, which also *generates* the
-  decoder's conformance fixtures. ← core, codec-abi, deflate, `miniz_oxide` (for inflate),
+  default image). ← core, codec-abi, deflate, `miniz_oxide` (for inflate),
   `crc32fast` (**maintainer-approved** for the chunk CRC that every encode pays on its critical
   path — hardware CRC-32 on x86-64/aarch64, table fallback elsewhere including wasm32, and it
   keeps its `unsafe` to itself, so gamut-png stays `#![deny(unsafe_code)]`), metadata
@@ -117,8 +114,7 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
 - **gamut-metadata** — the metadata facade. ← core, exif, icc, iptc, xmp, `thiserror`.
 - **gamut-cmm** — ICC colour management module (epic #323): the transform engine — a
   validated pipeline/stage model behind the object-safe `Transform` trait — that builds and
-  applies colour transforms from the profiles `gamut-icc` parses; f64 Tier-1, behavioural
-  oracle Little-CMS (`references/cmm/`, dev-only `tooling/lcms2-oracle`). ← icc, color, core,
+  applies colour transforms from the profiles `gamut-icc` parses; f64 Tier-1. ← icc, color, core,
   `thiserror`.
 - **gamut-tiff** — natively still-image TIFF 6.0; its IFD/tag container is the shared
   **gamut-ifd** primitive (with `bigtiff`), not isobmff/riff. Adds pixel modes plus
@@ -128,9 +124,8 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
 - **gamut-dng** — DNG (Adobe Digital Negative) 1.7.1 raw encoder + decoder, a TIFF/EP
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw
   photometry, uncompressed/Deflate/lossless-JPEG/JPEG XL, colour-calibration profile,
-  EXIF/XMP/ICC metadata. Conformance-gated against the headless-built **Adobe DNG SDK**.
-  ← ifd, bitstream, color, metadata, core, deflate (Deflate encode), `miniz_oxide` (Deflate
-  decode), jxl (JPEG XL, `Compression = 52546`). MSB-first sub-byte packing reuses
+  EXIF/XMP/ICC metadata. ← ifd, bitstream, color, metadata, core, deflate (Deflate encode),
+  `miniz_oxide` (Deflate decode), jxl (JPEG XL, `Compression = 52546`). MSB-first sub-byte packing reuses
   `gamut-bitstream`; the DNG §6 `AsShotWhiteXY` → camera-neutral conversion reuses
   `gamut-color`'s chromaticity/3×3/CCT math; `DngMetadata` carries the facade's own models — a
   DNG `ExifIFD` *is* an EXIF sub-IFD, so it is `gamut-exif`'s `Exif` over the same `gamut-ifd`
@@ -139,7 +134,7 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
   PNG/JPEG/WebP/JXL input with gamut's own decoders (only PPM uses the third-party `image`
   crate) and encodes only with gamut crates, and exposes `primitives` re-exports as inspection
   subcommands. ← gamut, `clap`, `image`, `thiserror`, `tracing`, `tracing-subscriber`.
-- **gamut-wasm** (cdylib) — placeholder, outside the v1 freeze. ← nothing.
+- **gamut-wasm** (cdylib) — placeholder. ← nothing.
 - **gamut-ffi** (cdylib/staticlib). ← gamut, codec-abi, color.
 
 ## Code correctness
@@ -241,7 +236,7 @@ All codec implementations must follow the official specs, vendored/documented un
 
 Dev tooling (hk, convco, cargo-llvm-cov, CMake/Ninja/Meson, …) is provisioned by
 [mise](https://mise.jdx.dev): run `mise install` and activate mise in your shell.
-`mise tasks` lists all tasks (formerly `just` recipes). Validate changes:
+`mise tasks` lists all tasks. Validate changes:
 
 ```bash
 mise run test          # correctness
@@ -250,7 +245,7 @@ mise run lint          # lint (Clippy, warnings as errors)
 mise run coverage      # coverage (minimum 80%)
 mise run mutants       # mutation testing (needs submodules + C toolchain; run `mise install` once).
                        # Takes a selection: `--diff`, `--crate <name>` or `--shard i/n`; an
-                       # unsharded whole-workspace run (24k mutants) is refused. Every dial is
+                       # unsharded whole-workspace run is refused. Every dial is
                        # derived from a memory budget — see docs/mutation-testing.md. Never call
                        # `cargo mutants` directly; the guards live in the mise task.
 mise run fetch-av1-oracles # fetch the `update = none` aom/dav1d submodules (~440 MiB); needed
@@ -307,7 +302,7 @@ repo — nothing here sets file modes — so do not work around it by editing bu
   encapsulates the `unsafe` (`crc32fast`, `wide`), and note that since Rust 1.87
   `#[target_feature]` on a *safe* `fn` makes most `core::arch` intrinsics safe to call — on
   aarch64 (NEON always on) and wasm32 (`+simd128` is build-time) hand-written SIMD needs no
-  `unsafe` at all, and only x86 runtime dispatch does. The other twenty-one crates keep
+  `unsafe` at all, and only x86 runtime dispatch does. Every other crate keeps
   `#![forbid(unsafe_code)]`: for the offset-driven parsers and the metadata crates, memory
   safety on hostile input is the product guarantee, not a means to speed. Separately,
   `gamut-codec-abi`, `gamut-ffi`, `gamut-jxl-sys` and `gamut-jxl`'s `ffi` are `extern "C"`
@@ -317,8 +312,8 @@ repo — nothing here sets file modes — so do not work around it by editing bu
   paths, and document each format's space/time tradeoff.
 - Stub crates stay region-free for the coverage gate: a placeholder `lib.rs` holds only
   module docs + declarations (traits/types without bodies), **no placeholder `fn` bodies**
-  (a `todo!()`-bodied fn adds an uncovered region). `gamut-(cli|wasm|ffi)` are excluded from
-  coverage via `--ignore-filename-regex`.
+  (a `todo!()`-bodied fn adds an uncovered region). `gamut-(cli|wasm|ffi|jxl-sys)` are excluded
+  from coverage via `--ignore-filename-regex`.
 - C portability: keep the public API mechanically portable to C while staying idiomatic
   Rust. Codec entry points go through the object-safe `EncodeImage`/`DecodeImage` pair over
   the sealed `Pixel` matrix (runtime tag: `gamut_core::PixelFormat`); configs are plain data —

@@ -156,4 +156,4 @@ spec-exact behaviour. Running the gate builds the C oracle, so the tests need th
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

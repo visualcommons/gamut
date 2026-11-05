@@ -2,7 +2,7 @@
 //!
 //! T.81 defines only the `APPn` marker syntax (§B.2.4.6); the payload layouts come from the
 //! metadata standards, pinned with the framing constants in
-//! [`references/jpeg`](https://github.com/justin13888/gamut/tree/master/references/jpeg):
+//! [`references/jpeg`](https://github.com/visualcommons/gamut/tree/master/references/jpeg):
 //!
 //! - **APP1 EXIF** (Exif 3.0, CIPA DC-008 §4.7.2): the signature `"Exif\0\0"` followed by a TIFF
 //!   stream. A single segment.

@@ -142,7 +142,7 @@ and off by default — classic-only consumers (EXIF) stay lean; `gamut-tiff` ena
 
 ## Status
 
-**v1 — surface frozen** (issue #181): the structural core (issue #107), sub-IFD tree read/write,
+**Stable at the current major** (first stabilised in issue #181): the structural core (issue #107), sub-IFD tree read/write,
 byte-range coverage accounting, and a malformed-input robustness corpus. The shared read/write
 paths are differentially gated through the consuming codecs' oracles — `gamut-tiff` vs **libtiff**
 (byte-level container round-trips) and `gamut-exif` vs **exiv2** (bare TIFF streams through the
@@ -150,4 +150,4 @@ same IFD machinery). See [STATUS.md](STATUS.md).
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

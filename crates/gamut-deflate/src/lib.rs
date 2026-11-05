@@ -1,9 +1,8 @@
 //! `gamut-deflate` — a pure-Rust **DEFLATE** (RFC 1951) and **zlib** (RFC 1950) *encoder*.
 //!
 //! DEFLATE is the compression engine behind PNG's `IDAT`/`zTXt`/`iCCP`, TIFF's `Compression=8`,
-//! gzip, and zlib streams generally. This crate provides it as a shared primitive, sitting below the
-//! codec crates alongside [`gamut-bitstream`](https://docs.rs/gamut-bitstream) in the workspace's
-//! dependency graph, with no internal dependencies of its own.
+//! gzip, and zlib streams generally. This crate provides it as a shared primitive beneath the codec
+//! crates.
 //!
 //! # Space efficiency
 //!

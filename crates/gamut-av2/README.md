@@ -11,9 +11,8 @@ encoding** that is:
 - **Memory-safe on hostile input.** `#![forbid(unsafe_code)]`.
 - **Clean-slate from the spec.** Implemented directly from the AV2 bitstream specification (see
   [`../../references/`](../../references)) rather than wrapping a C reference encoder.
-- **Layered on shared crates.** It will build on [`gamut-color`](../gamut-color),
-  [`gamut-dsp`](../gamut-dsp), and [`gamut-bitstream`](../gamut-bitstream) (which will grow the ANS
-  entropy coder AV2 needs), the same primitives [`gamut-av1`](../gamut-av1) uses.
+- **Layered on shared crates.** It will reuse the workspace's shared primitives, as
+  [`gamut-av1`](../gamut-av1) does, rather than carry its own copies.
 - **Permissively licensed**, matching the royalty-free AV2 format.
 
 This crate is forward-looking scaffolding; AV2 is still stabilizing, so it may move or be dropped as
@@ -36,4 +35,4 @@ Placeholder — implementation pending.
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

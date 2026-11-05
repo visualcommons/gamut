@@ -39,7 +39,7 @@ workaround.
 
 Every other gamut codec is implemented clean-slate from its spec, precisely so the encode/parse
 path is auditable, forkable, and free of C. gamut-jxl departs from that on a maintainer decision
-(issue [#243](https://github.com/justin13888/gamut/issues/243)) for reasons specific to JPEG XL:
+(issue [#243](https://github.com/visualcommons/gamut/issues/243)) for reasons specific to JPEG XL:
 
 - **A conformant JXL encoder is a multi-year effort.** VarDCT, Modular, the ANS/context-modelling
   entropy stack, XYB, splines/patches/noise — reproducing libjxl's rate/quality at reference
@@ -260,10 +260,10 @@ a binary that links the encoder therefore means honouring those upstream notices
 
 ## Status
 
-The v1 surface — supported pixel layouts, lossless/lossy modes, container framing, the differential
+The current surface — supported pixel layouts, lossless/lossy modes, container framing, the differential
 oracle regime, and the full deferred/out-of-scope ledger (including the jxl-rs spec-coverage
 analysis mandated by issue #243) — is dispositioned row by row in [STATUS.md](STATUS.md).
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

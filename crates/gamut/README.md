@@ -15,20 +15,22 @@ consumers depend on:
 - **One dependency, opt-in codecs.** Add `gamut` and turn on only the formats you use; everything is
   feature-gated and `default = []`, so a bare dependency compiles just [`gamut-core`](../gamut-core).
 - **A consistent API across formats.** [`gamut::core`] is always available and provides the shared
-  [`Encoder`]/[`Decoder`] traits and the common `Error` type, regardless of which formats are
-  enabled.
+  `EncodeImage`/`DecodeImage` traits and the common `Error` type, regardless of which formats
+  are enabled.
 - **Tooling access to the primitives.** The `primitives` feature additionally re-exports the shared
   building blocks — `gamut::color`, `gamut::dsp`, `gamut::bitstream` — for inspection and sandbox use
   (this is what the [`gamut` CLI](../gamut-cli) is built on).
 
 ## Features
 
-`default = []` — a bare dependency compiles only `gamut-core`.
+`default = []` — a bare dependency compiles only `gamut-core`, re-exported unconditionally as
+`gamut::core`. This table is the one place the feature-to-crate map is kept; the workspace
+documents link here rather than restating it.
 
 | Feature      | Enables                                                                  |
 | ------------ | ------------------------------------------------------------------------ |
-| `avif`       | AVIF encoding (`gamut-avif` + `gamut-av1`)                               |
-| `av1`        | Standalone AV1 still-image encoding (`gamut-av1`)                        |
+| `avif`       | AVIF encoder + container decoder (`gamut-avif` + `gamut-av1`)            |
+| `av1`        | Standalone AV1 still-image encoder + header-layer decoder (`gamut-av1`)  |
 | `webp`       | WebP VP8/VP8L encoder + decoder (`gamut-webp`)                           |
 | `jxl`        | JPEG XL encoder (libjxl wrap) + decoder (`gamut-jxl`)                    |
 | `heic`       | HEIC/HEIF decode-only container (`gamut-heic`)                           |
@@ -39,7 +41,7 @@ consumers depend on:
 | `png`        | PNG encoder + decoder (`gamut-png`)                                      |
 | `jpeg`       | JPEG-1 (ITU-T T.81) codec (`gamut-jpeg`)                                 |
 | `isobmff`    | ISOBMFF/HEIF still-image container primitive (`gamut-isobmff`)           |
-| `metadata`   | Metadata facade + primitives (`gamut-metadata` + `exif`/`xmp`/`icc`/`iptc`/`ifd`) |
+| `metadata`   | Metadata facade + primitives (`gamut-metadata` + `exif`/`xmp`/`icc`/`iptc`/`ifd`), plus the `metadata` feature of every enabled format crate that has one |
 | `exif-describe` | `metadata` plus EXIF tag-value descriptions (`gamut_metadata::exif::describe`, via `gamut-metadata/exif-describe`) |
 | `cmm`        | ICC colour management module over `gamut-icc` profiles (`gamut-cmm`); with `jpeg`, also `JpegDecoder::decode_srgb` |
 | `tonemap`    | Scalar tone-mapping curves for HDR→SDR (`gamut-tonemap`)                 |
@@ -67,11 +69,10 @@ AvifEncoder::new().encode_image(ImageRef::<Rgb8>::new(&rgb, dims)?, &mut out)?;
 
 ## Status
 
-`avif` and `av1` are functional for M0 lossless still images; the other format features currently
-gate placeholder crates that return `Unsupported`. The implemented surface tracks
-[`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md). See the [workspace README](../../README.md) for the
-per-crate status table.
+Every format feature above gates an implemented crate except `vvc` and `av2`, whose crates are
+placeholders with no items yet. What each format crate implements is its own `STATUS.md`'s to
+say; the [workspace README](../../README.md#crates) carries the per-crate status table.
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).

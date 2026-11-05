@@ -3,7 +3,7 @@
 Low-level `-sys` crate for the [gamut](../../README.md) workspace: it statically builds the
 reference **libjxl v0.12.0** and exposes hand-written FFI declarations for the subset of its C API
 that [`gamut-jxl`](../gamut-jxl) needs. This is the native foundation of gamut-jxl's JPEG XL
-**encoder** (issue [#243](https://github.com/justin13888/gamut/issues/243)).
+**encoder** (issue [#243](https://github.com/visualcommons/gamut/issues/243)).
 
 ## What & why
 
