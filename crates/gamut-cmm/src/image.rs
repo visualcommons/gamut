@@ -1,6 +1,13 @@
 //! Typed pixel-buffer application: run any [`Transform`] over interleaved or planar
 //! `u8`/`u16` image buffers tagged with [`gamut_core::PixelFormat`].
 //!
+//! Three entry points, each generic over the sample width ([`ImageSample`]: `u8` or `u16`):
+//! [`transform_interleaved`] reads a [`RawImage`] (an [`ImageRef`](gamut_core::ImageRef) gives
+//! one through `as_raw`) into a caller-owned destination, [`transform_in_place`] rewrites an
+//! [`ImageBuf`] without a second raster, and [`transform_planar`] walks one slice per channel.
+//! Every format a call names must store samples of the call's width — the same rule
+//! [`RawImage::new`] enforces on the source.
+//!
 //! # Semantics
 //!
 //! - **Colour channels** go through the transform's integer entry point at the buffer's
@@ -32,7 +39,7 @@
 //! per-channel planes into the same interleaved scratch (and scatter back), trading one extra
 //! copy for reuse of the identical conversion core.
 
-use gamut_core::{ColorModel, PixelFormat};
+use gamut_core::{ColorModel, ImageBuf, Pixel, PixelFormat, RawImage, Sample};
 
 use crate::error::{CmmError, Result};
 use crate::transform::Transform;
@@ -40,26 +47,39 @@ use crate::transform::Transform;
 /// Pixels processed per scratch-buffer refill (the module's space/time tradeoff).
 const CHUNK_PIXELS: usize = 256;
 
-/// The integer sample scalar of a buffer: its full-scale value and the [`Transform`] entry
-/// point at its width.
-trait Sample: Copy + Default {
-    /// The full-scale (and opaque-alpha) code value, e.g. `255` for `u8`.
-    const OPAQUE: Self;
-    /// Runs gathered colour samples through the transform's entry point at this width.
-    fn run(transform: &dyn Transform, src: &[Self], dst: &mut [Self]) -> Result<()>;
-}
+/// A sample width the pixel-buffer entry points run at: `u8` or `u16`, each through the
+/// [`Transform`] entry point of its own width ([`Transform::transform_u8`] /
+/// [`Transform::transform_u16`]).
+///
+/// Every [`gamut_core::Sample`] is one — the two traits cover the same two types — but the
+/// width-specific dispatch is this crate's, so the bound is spelled here. Sealed: it is
+/// implemented for `u8` and `u16` and cannot be implemented outside this crate.
+pub trait ImageSample: Sample + sealed::Run {}
 
-impl Sample for u8 {
-    const OPAQUE: Self = u8::MAX;
-    fn run(transform: &dyn Transform, src: &[Self], dst: &mut [Self]) -> Result<()> {
-        transform.transform_u8(src, dst)
+impl ImageSample for u8 {}
+impl ImageSample for u16 {}
+
+mod sealed {
+    use crate::error::Result;
+    use crate::transform::Transform;
+
+    /// The [`Transform`] entry point at a sample width; the seal on
+    /// [`ImageSample`](super::ImageSample).
+    pub trait Run: Sized {
+        /// Runs gathered colour samples through the transform's entry point at this width.
+        fn run(transform: &dyn Transform, src: &[Self], dst: &mut [Self]) -> Result<()>;
     }
-}
 
-impl Sample for u16 {
-    const OPAQUE: Self = u16::MAX;
-    fn run(transform: &dyn Transform, src: &[Self], dst: &mut [Self]) -> Result<()> {
-        transform.transform_u16(src, dst)
+    impl Run for u8 {
+        fn run(transform: &dyn Transform, src: &[Self], dst: &mut [Self]) -> Result<()> {
+            transform.transform_u8(src, dst)
+        }
+    }
+
+    impl Run for u16 {
+        fn run(transform: &dyn Transform, src: &[Self], dst: &mut [Self]) -> Result<()> {
+            transform.transform_u16(src, dst)
+        }
     }
 }
 
@@ -109,6 +129,15 @@ fn check_formats(
     Ok((src, dst))
 }
 
+/// Rejects a `format` whose samples are not `S` wide, with `message` naming the side — the
+/// check [`RawImage::new`] makes on the source, applied to a format no constructor vouched for.
+fn check_width<S: Sample>(format: PixelFormat, message: &'static str) -> Result<()> {
+    if format.bytes_per_sample() != size_of::<S>() {
+        return Err(CmmError::ImageGeometry(message));
+    }
+    Ok(())
+}
+
 /// The reused colour-only scratch pair, sized for `min(pixels, CHUNK_PIXELS)` pixels.
 fn scratch<S: Sample>(pixels: usize, src: Shape, dst: Shape) -> (Vec<S>, Vec<S>) {
     let chunk = pixels.min(CHUNK_PIXELS);
@@ -119,7 +148,7 @@ fn scratch<S: Sample>(pixels: usize, src: Shape, dst: Shape) -> (Vec<S>, Vec<S>)
 }
 
 /// Transforms `count` gathered pixels sitting in `cin` into `cout`.
-fn run_chunk<S: Sample>(
+fn run_chunk<S: ImageSample>(
     transform: &dyn Transform,
     cin: &[S],
     cout: &mut [S],
@@ -134,25 +163,26 @@ fn run_chunk<S: Sample>(
     )
 }
 
-/// Applies `transform` to an interleaved buffer (both sides `u8`).
+/// Applies `transform` to the interleaved image `src`, writing `dst_format` pixels to `dst`.
 ///
-/// `src` holds whole `src_format` pixels; `dst` must hold exactly the same number of
-/// `dst_format` pixels. See the module docs for the normalization, rounding, and
-/// alpha-passthrough rules.
+/// `dst` must hold exactly as many `dst_format` pixels as `src` holds. `u8` and `u16` samples
+/// run through the transform's entry point of that width ([`ImageSample`]); see the module
+/// docs for the normalization, rounding, and alpha-passthrough rules. An
+/// [`ImageRef`](gamut_core::ImageRef) is passed through its `as_raw` view.
 ///
 /// # Errors
 ///
 /// [`CmmError::UnsupportedPixelFormat`] for [`PixelFormat::Bilevel`]/
 /// [`PixelFormat::Indexed8`]; [`CmmError::ImageGeometry`] when a format's colour channel
-/// count differs from the transform's; [`CmmError::BufferLength`] when `src` is not a whole
-/// number of pixels or `dst` does not hold the matching pixel count; plus any error the
-/// transform itself returns.
+/// count differs from the transform's, or when `dst_format` does not store `S`-wide samples;
+/// [`CmmError::BufferLength`] when `dst` does not hold the matching pixel count; plus any
+/// error the transform itself returns.
 ///
 /// # Example
 ///
 /// ```
-/// use gamut_cmm::{Pipeline, Stage, transform_interleaved_u8};
-/// use gamut_core::PixelFormat;
+/// use gamut_cmm::{Pipeline, Stage, transform_interleaved};
+/// use gamut_core::{Dimensions, PixelFormat, RawImage};
 ///
 /// // A toy transform halving each RGB channel.
 /// let halve = Stage::Matrix {
@@ -161,192 +191,27 @@ fn run_chunk<S: Sample>(
 /// };
 /// let pipeline = Pipeline::new(3, 3, vec![halve])?;
 ///
-/// let src = [200u8, 100, 0, 255, 255, 255]; // two RGB pixels
+/// let samples = [200u8, 100, 0, 255, 255, 255]; // two RGB pixels
+/// let src = RawImage::new(&samples, PixelFormat::Rgb8, Dimensions::new(2, 1)?)?;
 /// let mut dst = [0u8; 6];
-/// transform_interleaved_u8(&pipeline, PixelFormat::Rgb8, &src, PixelFormat::Rgb8, &mut dst)?;
+/// transform_interleaved(&pipeline, src, PixelFormat::Rgb8, &mut dst)?;
 /// assert_eq!(dst, [100, 50, 0, 128, 128, 128]); // 127.5 rounds half-up to 128
-/// # Ok::<(), gamut_cmm::CmmError>(())
+/// # Ok::<(), gamut_core::Error>(())
 /// ```
-pub fn transform_interleaved_u8(
+pub fn transform_interleaved<S: ImageSample>(
     transform: &dyn Transform,
-    src_format: PixelFormat,
-    src: &[u8],
-    dst_format: PixelFormat,
-    dst: &mut [u8],
-) -> Result<()> {
-    interleaved(transform, src_format, src, dst_format, dst)
-}
-
-/// [`transform_interleaved_u8`] for 16-bit samples (normalization by 65535; identical
-/// geometry and alpha rules).
-///
-/// # Errors
-///
-/// As [`transform_interleaved_u8`].
-pub fn transform_interleaved_u16(
-    transform: &dyn Transform,
-    src_format: PixelFormat,
-    src: &[u16],
-    dst_format: PixelFormat,
-    dst: &mut [u16],
-) -> Result<()> {
-    interleaved(transform, src_format, src, dst_format, dst)
-}
-
-/// Applies `transform` to planar buffers (both sides `u8`): one slice per channel, each
-/// holding exactly `pixels` samples, in the format's channel order (alpha plane last for
-/// the alpha-bearing formats). Chunks are gathered into the interleaved scratch, run
-/// through the same core as [`transform_interleaved_u8`], and scattered back — identical
-/// numeric results, one extra copy (module docs).
-///
-/// # Errors
-///
-/// As [`transform_interleaved_u8`], with [`CmmError::ImageGeometry`] additionally raised
-/// when a side's plane count differs from its format's channel count or any plane's length
-/// differs from `pixels`.
-pub fn transform_planar_u8(
-    transform: &dyn Transform,
-    src_format: PixelFormat,
-    src_planes: &[&[u8]],
-    dst_format: PixelFormat,
-    dst_planes: &mut [&mut [u8]],
-    pixels: usize,
-) -> Result<()> {
-    planar(
-        transform, src_format, src_planes, dst_format, dst_planes, pixels,
-    )
-}
-
-/// [`transform_planar_u8`] for 16-bit samples.
-///
-/// # Errors
-///
-/// As [`transform_planar_u8`].
-pub fn transform_planar_u16(
-    transform: &dyn Transform,
-    src_format: PixelFormat,
-    src_planes: &[&[u16]],
-    dst_format: PixelFormat,
-    dst_planes: &mut [&mut [u16]],
-    pixels: usize,
-) -> Result<()> {
-    planar(
-        transform, src_format, src_planes, dst_format, dst_planes, pixels,
-    )
-}
-
-/// Applies `transform` to an interleaved `u8` buffer **in place**: each pixel of `buf` is
-/// replaced by its transformed value.
-///
-/// The results are byte-for-byte those of [`transform_interleaved_u8`] with `format` on both
-/// sides — the same normalization, rounding and alpha rules (an alpha channel is left as it
-/// is) — but without a second buffer: the pixels pass through the same constant-size chunk
-/// scratch (module docs), so a caller that owns a decoded raster converts it without doubling
-/// its peak memory. The transform must therefore map `format`'s colour channels onto as many
-/// (an `Rgb8` → `Cmyk8` conversion cannot be in place).
-///
-/// # Errors
-///
-/// As [`transform_interleaved_u8`] with `format` on both sides, all raised before any sample
-/// is written. An error the transform itself returns stops the walk at that chunk, leaving the
-/// earlier chunks transformed.
-///
-/// # Example
-///
-/// ```
-/// use gamut_cmm::{Pipeline, Stage, transform_in_place_u8};
-/// use gamut_core::PixelFormat;
-///
-/// let halve = Stage::Matrix {
-///     m: [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]],
-///     offset: [0.0; 3],
-/// };
-/// let pipeline = Pipeline::new(3, 3, vec![halve])?;
-///
-/// let mut pixels = [200u8, 100, 0, 9, 255, 255, 255, 77]; // two RGBA pixels
-/// transform_in_place_u8(&pipeline, PixelFormat::Rgba8, &mut pixels)?;
-/// assert_eq!(pixels, [100, 50, 0, 9, 128, 128, 128, 77]); // alpha untouched
-/// # Ok::<(), gamut_cmm::CmmError>(())
-/// ```
-pub fn transform_in_place_u8(
-    transform: &dyn Transform,
-    format: PixelFormat,
-    buf: &mut [u8],
-) -> Result<()> {
-    in_place(transform, format, buf)
-}
-
-/// [`transform_in_place_u8`] for 16-bit samples (normalization by 65535; identical geometry
-/// and alpha rules).
-///
-/// # Errors
-///
-/// As [`transform_in_place_u8`].
-pub fn transform_in_place_u16(
-    transform: &dyn Transform,
-    format: PixelFormat,
-    buf: &mut [u16],
-) -> Result<()> {
-    in_place(transform, format, buf)
-}
-
-/// Copies the colour samples of the whole pixels in `chunk` into the colour-only scratch `cin`.
-fn gather<S: Sample>(chunk: &[S], shape: Shape, cin: &mut [S]) {
-    for (p, pixel) in chunk.chunks_exact(shape.channels).enumerate() {
-        for (c, &sample) in pixel.iter().take(shape.color).enumerate() {
-            cin[p * shape.color + c] = sample;
-        }
-    }
-}
-
-/// The in-place core: [`interleaved`]'s chunk walk with the destination chunk being the source
-/// chunk, so only the colour samples are written back (the alpha rule for equal formats is to
-/// copy it through, and in place it is already there).
-fn in_place<S: Sample>(
-    transform: &dyn Transform,
-    format: PixelFormat,
-    buf: &mut [S],
-) -> Result<()> {
-    let (shape, _) = check_formats(transform, format, format)?;
-    if !buf.len().is_multiple_of(shape.channels) {
-        return Err(CmmError::BufferLength {
-            channels: channel_count_u8(shape),
-            found: buf.len(),
-        });
-    }
-    // Always one full chunk of scratch (≤ 2 × 256 × 4 samples), not `min(pixels, chunk)`: the
-    // trim is a capacity hint no output can observe, so computing it here only bred an
-    // unkillable mutant. A tiny buffer pays at most 4 KiB.
-    let (mut cin, mut cout) = scratch::<S>(CHUNK_PIXELS, shape, shape);
-    for chunk in buf.chunks_mut(CHUNK_PIXELS * shape.channels) {
-        let count = chunk.len() / shape.channels;
-        gather(chunk, shape, &mut cin);
-        run_chunk(transform, &cin, &mut cout, count, shape, shape)?;
-        for (pixel, colour) in chunk
-            .chunks_exact_mut(shape.channels)
-            .zip(cout.chunks_exact(shape.color))
-        {
-            pixel[..shape.color].copy_from_slice(colour);
-        }
-    }
-    Ok(())
-}
-
-/// The shared interleaved core.
-fn interleaved<S: Sample>(
-    transform: &dyn Transform,
-    src_format: PixelFormat,
-    src: &[S],
+    src: RawImage<'_, S>,
     dst_format: PixelFormat,
     dst: &mut [S],
 ) -> Result<()> {
+    let src_format = src.format();
+    let src = src.as_samples();
     let (src_shape, dst_shape) = check_formats(transform, src_format, dst_format)?;
-    if !src.len().is_multiple_of(src_shape.channels) {
-        return Err(CmmError::BufferLength {
-            channels: channel_count_u8(src_shape),
-            found: src.len(),
-        });
-    }
+    check_width::<S>(
+        dst_format,
+        "destination format's sample width differs from the buffer's",
+    )?;
+    // `RawImage` guarantees `src` is whole pixels of `src_format`.
     let pixels = src.len() / src_shape.channels;
     if dst.len() != pixels * dst_shape.channels {
         return Err(CmmError::BufferLength {
@@ -369,7 +234,7 @@ fn interleaved<S: Sample>(
                 pixel[dst_shape.channels - 1] = if src_shape.alpha {
                     src_chunk[p * src_shape.channels + src_shape.channels - 1]
                 } else {
-                    S::OPAQUE
+                    S::MAX_VALUE
                 };
             }
         }
@@ -377,8 +242,18 @@ fn interleaved<S: Sample>(
     Ok(())
 }
 
-/// The shared planar core: per-chunk gather → interleaved transform → scatter.
-fn planar<S: Sample>(
+/// Applies `transform` to planar buffers: one slice per channel, each holding exactly
+/// `pixels` samples, in the format's channel order (alpha plane last for the alpha-bearing
+/// formats). Chunks are gathered into the interleaved scratch, run through the same
+/// conversion as [`transform_interleaved`], and scattered back — identical numeric results,
+/// one extra copy (module docs).
+///
+/// # Errors
+///
+/// As [`transform_interleaved`], with [`CmmError::ImageGeometry`] additionally raised when
+/// `src_format` does not store `S`-wide samples, when a side's plane count differs from its
+/// format's channel count, or when any plane's length differs from `pixels`.
+pub fn transform_planar<S: ImageSample>(
     transform: &dyn Transform,
     src_format: PixelFormat,
     src_planes: &[&[S]],
@@ -387,6 +262,14 @@ fn planar<S: Sample>(
     pixels: usize,
 ) -> Result<()> {
     let (src_shape, dst_shape) = check_formats(transform, src_format, dst_format)?;
+    check_width::<S>(
+        src_format,
+        "source format's sample width differs from the planes'",
+    )?;
+    check_width::<S>(
+        dst_format,
+        "destination format's sample width differs from the planes'",
+    )?;
     if src_planes.len() != src_shape.channels {
         return Err(CmmError::ImageGeometry(
             "source plane count differs from the format's channel count",
@@ -426,12 +309,87 @@ fn planar<S: Sample>(
                 } else if src_shape.alpha {
                     src_planes[src_shape.channels - 1][start + p]
                 } else {
-                    S::OPAQUE
+                    S::MAX_VALUE
                 };
             }
         }
     }
     Ok(())
+}
+
+/// Applies `transform` to `image` **in place**: each pixel is replaced by its transformed
+/// value.
+///
+/// The results are sample-for-sample those of [`transform_interleaved`] with `P`'s format on
+/// both sides — the same normalization, rounding and alpha rules (an alpha channel is left as
+/// it is) — but without a second buffer: the pixels pass through the same constant-size chunk
+/// scratch (module docs), so a caller that owns a decoded raster converts it without doubling
+/// its peak memory. The transform must therefore map `P`'s colour channels onto as many (an
+/// `Rgb8` → `Cmyk8` conversion cannot be in place).
+///
+/// # Errors
+///
+/// [`CmmError::UnsupportedPixelFormat`] for a [`Bilevel`](gamut_core::Bilevel) or
+/// [`Indexed8`](gamut_core::Indexed8) image and [`CmmError::ImageGeometry`] when `P`'s colour
+/// channel count differs from the transform's input or output, both raised before any sample
+/// is written. An error the transform itself returns stops the walk at that chunk, leaving the
+/// earlier chunks transformed.
+///
+/// # Example
+///
+/// ```
+/// use gamut_cmm::{Pipeline, Stage, transform_in_place};
+/// use gamut_core::{Dimensions, ImageBuf, Rgba8};
+///
+/// let halve = Stage::Matrix {
+///     m: [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]],
+///     offset: [0.0; 3],
+/// };
+/// let pipeline = Pipeline::new(3, 3, vec![halve])?;
+///
+/// let pixels = vec![200u8, 100, 0, 9, 255, 255, 255, 77]; // two RGBA pixels
+/// let mut image = ImageBuf::<Rgba8>::new(pixels, Dimensions::new(2, 1)?)?;
+/// transform_in_place(&pipeline, &mut image)?;
+/// assert_eq!(image.as_samples(), [100, 50, 0, 9, 128, 128, 128, 77]); // alpha untouched
+/// # Ok::<(), gamut_core::Error>(())
+/// ```
+pub fn transform_in_place<P: Pixel>(
+    transform: &dyn Transform,
+    image: &mut ImageBuf<P>,
+) -> Result<()>
+where
+    P::Sample: ImageSample,
+{
+    let (shape, _) = check_formats(transform, P::FORMAT, P::FORMAT)?;
+    // Always one full chunk of scratch (≤ 2 × 256 × 4 samples), not `min(pixels, chunk)`: the
+    // trim is a capacity hint no output can observe, so computing it here only bred an
+    // unkillable mutant. A tiny buffer pays at most 4 KiB.
+    let (mut cin, mut cout) = scratch::<P::Sample>(CHUNK_PIXELS, shape, shape);
+    // `ImageBuf` guarantees whole pixels, so every chunk is too.
+    for chunk in image
+        .as_mut_samples()
+        .chunks_mut(CHUNK_PIXELS * shape.channels)
+    {
+        let count = chunk.len() / shape.channels;
+        gather(chunk, shape, &mut cin);
+        run_chunk(transform, &cin, &mut cout, count, shape, shape)?;
+        for (pixel, colour) in chunk
+            .chunks_exact_mut(shape.channels)
+            .zip(cout.chunks_exact(shape.color))
+        {
+            pixel[..shape.color].copy_from_slice(colour);
+        }
+    }
+    Ok(())
+}
+
+/// Copies the colour samples of the whole pixels in `chunk` into the colour-only scratch `cin`.
+fn gather<S: Sample>(chunk: &[S], shape: Shape, cin: &mut [S]) {
+    for (p, pixel) in chunk.chunks_exact(shape.channels).enumerate() {
+        for (c, &sample) in pixel.iter().take(shape.color).enumerate() {
+            cin[p * shape.color + c] = sample;
+        }
+    }
 }
 
 /// The `u8` channel count for [`CmmError::BufferLength`] (formats top out at 4 channels).
@@ -441,9 +399,23 @@ fn channel_count_u8(shape: Shape) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use gamut_core::{Dimensions, Rgb8, Rgba8, Rgba16};
+
     use super::*;
     use crate::pipeline::{Pipeline, Stage};
     use crate::transform::{encode_u8, encode_u16};
+
+    /// `samples` as a one-row `format` image.
+    fn raw<S: Sample>(samples: &[S], format: PixelFormat) -> RawImage<'_, S> {
+        let pixels = u32::try_from(samples.len() / format.channels()).unwrap();
+        RawImage::new(samples, format, Dimensions::new(pixels, 1).unwrap()).unwrap()
+    }
+
+    /// `samples` as an owned one-row `P` image.
+    fn buf<P: Pixel>(samples: Vec<P::Sample>) -> ImageBuf<P> {
+        let pixels = u32::try_from(samples.len() / P::CHANNELS).unwrap();
+        ImageBuf::new(samples, Dimensions::new(pixels, 1).unwrap()).unwrap()
+    }
 
     /// A 3→3 halving matrix transform.
     fn halve3() -> Pipeline {
@@ -492,10 +464,9 @@ mod tests {
             .flat_map(|i| [u8::try_from(i % 256).unwrap(); 3])
             .collect();
         let mut dst = vec![0u8; src.len()];
-        transform_interleaved_u8(
+        transform_interleaved(
             &transform,
-            PixelFormat::Rgb8,
-            &src,
+            raw(&src, PixelFormat::Rgb8),
             PixelFormat::Rgb8,
             &mut dst,
         )
@@ -520,10 +491,9 @@ mod tests {
             })
             .collect();
         let mut dst = vec![0u16; src.len()];
-        transform_interleaved_u16(
+        transform_interleaved(
             &transform,
-            PixelFormat::Rgb16,
-            &src,
+            raw(&src, PixelFormat::Rgb16),
             PixelFormat::Rgb16,
             &mut dst,
         )
@@ -543,10 +513,9 @@ mod tests {
         let transform = rgb_to_cmyk();
         let src = [255u8, 0, 128];
         let mut dst = [0u8; 4];
-        transform_interleaved_u8(
+        transform_interleaved(
             &transform,
-            PixelFormat::Rgb8,
-            &src,
+            raw(&src, PixelFormat::Rgb8),
             PixelFormat::Cmyk8,
             &mut dst,
         )
@@ -561,10 +530,9 @@ mod tests {
         let transform = halve3();
         let src = [200u8, 100, 50, 7, 255, 255, 255, 250];
         let mut dst = [0u8; 8];
-        transform_interleaved_u8(
+        transform_interleaved(
             &transform,
-            PixelFormat::Rgba8,
-            &src,
+            raw(&src, PixelFormat::Rgba8),
             PixelFormat::Rgba8,
             &mut dst,
         )
@@ -572,20 +540,18 @@ mod tests {
         assert_eq!(dst, [100, 50, 25, 7, 128, 128, 128, 250]);
         // Rgba8 → Rgb8 drops the alpha; Rgb8 → Rgba8 fills opaque.
         let mut rgb = [0u8; 6];
-        transform_interleaved_u8(
+        transform_interleaved(
             &transform,
-            PixelFormat::Rgba8,
-            &src,
+            raw(&src, PixelFormat::Rgba8),
             PixelFormat::Rgb8,
             &mut rgb,
         )
         .unwrap();
         assert_eq!(rgb, [100, 50, 25, 128, 128, 128]);
         let mut rgba = [0u8; 8];
-        transform_interleaved_u8(
+        transform_interleaved(
             &transform,
-            PixelFormat::Rgb8,
-            &rgb,
+            raw(&rgb, PixelFormat::Rgb8),
             PixelFormat::Rgba8,
             &mut rgba,
         )
@@ -595,10 +561,9 @@ mod tests {
         let gray = identity1();
         let src16 = [40000u16, 1234, 65535, 60000];
         let mut dst16 = [0u16; 4];
-        transform_interleaved_u16(
+        transform_interleaved(
             &gray,
-            PixelFormat::GrayAlpha16,
-            &src16,
+            raw(&src16, PixelFormat::GrayAlpha16),
             PixelFormat::GrayAlpha16,
             &mut dst16,
         )
@@ -623,7 +588,7 @@ mod tests {
         {
             let mut dst_planes: Vec<&mut [u8]> =
                 planes_out.iter_mut().map(Vec::as_mut_slice).collect();
-            transform_planar_u8(
+            transform_planar(
                 &transform,
                 PixelFormat::Rgb8,
                 &[&r, &g, &b],
@@ -635,10 +600,9 @@ mod tests {
         }
         let interleaved_src: Vec<u8> = (0..pixels).flat_map(|i| [r[i], g[i], b[i]]).collect();
         let mut interleaved_dst = vec![0u8; pixels * 4];
-        transform_interleaved_u8(
+        transform_interleaved(
             &transform,
-            PixelFormat::Rgb8,
-            &interleaved_src,
+            raw(&interleaved_src, PixelFormat::Rgb8),
             PixelFormat::Cmyk8,
             &mut interleaved_dst,
         )
@@ -664,7 +628,7 @@ mod tests {
         let mut out = [vec![0u16; 3], vec![0u16; 3]];
         {
             let mut dst: Vec<&mut [u16]> = out.iter_mut().map(Vec::as_mut_slice).collect();
-            transform_planar_u16(
+            transform_planar(
                 &gray,
                 PixelFormat::GrayAlpha16,
                 &[&luma, &alpha],
@@ -679,7 +643,7 @@ mod tests {
         let mut out = [vec![0u16; 3], vec![0u16; 3]];
         {
             let mut dst: Vec<&mut [u16]> = out.iter_mut().map(Vec::as_mut_slice).collect();
-            transform_planar_u16(
+            transform_planar(
                 &gray,
                 PixelFormat::Gray16,
                 &[&luma[..]],
@@ -700,14 +664,14 @@ mod tests {
         let mut dst = [0u8; 4];
         for format in [PixelFormat::Bilevel, PixelFormat::Indexed8] {
             let err =
-                transform_interleaved_u8(&transform, format, &src, PixelFormat::Gray8, &mut dst)
+                transform_interleaved(&transform, raw(&src, format), PixelFormat::Gray8, &mut dst)
                     .unwrap_err();
             assert!(
                 matches!(err, CmmError::UnsupportedPixelFormat(f) if f == format),
                 "{err}"
             );
             let err =
-                transform_interleaved_u8(&transform, PixelFormat::Gray8, &src, format, &mut dst)
+                transform_interleaved(&transform, raw(&src, PixelFormat::Gray8), format, &mut dst)
                     .unwrap_err();
             assert!(matches!(err, CmmError::UnsupportedPixelFormat(f) if f == format));
         }
@@ -717,10 +681,9 @@ mod tests {
     fn geometry_errors_are_typed() {
         let transform = halve3(); // 3 → 3
         // Colour-channel mismatches, both sides.
-        let err = transform_interleaved_u8(
+        let err = transform_interleaved(
             &transform,
-            PixelFormat::Gray8,
-            &[0; 3],
+            raw(&[0u8; 3], PixelFormat::Gray8),
             PixelFormat::Rgb8,
             &mut [0; 9],
         )
@@ -730,10 +693,9 @@ mod tests {
             "cmm: image geometry mismatch (source format's colour channels differ from the \
              transform's input channels)"
         );
-        let err = transform_interleaved_u8(
+        let err = transform_interleaved(
             &transform,
-            PixelFormat::Rgb8,
-            &[0; 3],
+            raw(&[0u8; 3], PixelFormat::Rgb8),
             PixelFormat::Cmyk8,
             &mut [0; 4],
         )
@@ -743,13 +705,13 @@ mod tests {
             "cmm: image geometry mismatch (destination format's colour channels differ from \
              the transform's output channels)"
         );
-        // Length divisibility and pixel-count agreement reuse BufferLength.
-        let err = transform_interleaved_u8(
+        // Pixel-count agreement reuses BufferLength (a partial source pixel cannot reach the
+        // call: `RawImage::new` refuses it).
+        let err = transform_interleaved(
             &transform,
+            raw(&[0u8; 3], PixelFormat::Rgb8),
             PixelFormat::Rgb8,
-            &[0; 4],
-            PixelFormat::Rgb8,
-            &mut [0; 3],
+            &mut [0; 4],
         )
         .unwrap_err();
         assert!(matches!(
@@ -759,10 +721,9 @@ mod tests {
                 found: 4
             }
         ));
-        let err = transform_interleaved_u8(
+        let err = transform_interleaved(
             &transform,
-            PixelFormat::Rgb8,
-            &[0; 6],
+            raw(&[0u8; 6], PixelFormat::Rgb8),
             PixelFormat::Rgb8,
             &mut [0; 9],
         )
@@ -779,7 +740,7 @@ mod tests {
         let mut o1 = [0u8; 3];
         let mut o2 = [0u8; 3];
         let mut o3 = [0u8; 3];
-        let err = transform_planar_u8(
+        let err = transform_planar(
             &transform,
             PixelFormat::Rgb8,
             &[&r, &r],
@@ -794,7 +755,7 @@ mod tests {
              channel count)"
         );
         let short = [0u8; 2];
-        let err = transform_planar_u8(
+        let err = transform_planar(
             &transform,
             PixelFormat::Rgb8,
             &[&r, &r, &short],
@@ -808,7 +769,7 @@ mod tests {
             "cmm: image geometry mismatch (source plane length differs from the pixel count)"
         );
         let mut two = [0u8; 3];
-        let err = transform_planar_u8(
+        let err = transform_planar(
             &transform,
             PixelFormat::Rgb8,
             &[&r, &r, &r],
@@ -823,7 +784,7 @@ mod tests {
              channel count)"
         );
         let mut shorter = [0u8; 2];
-        let err = transform_planar_u8(
+        let err = transform_planar(
             &transform,
             PixelFormat::Rgb8,
             &[&r, &r, &r],
@@ -853,48 +814,45 @@ mod tests {
         .unwrap()
     }
 
+    /// Asserts the in-place walk over a 300-pixel `P` image (crossing the 256-pixel chunk
+    /// boundary) leaves exactly what the interleaved walk writes.
+    fn assert_in_place_equals_interleaved<P: Pixel>(src: Vec<P::Sample>)
+    where
+        P::Sample: ImageSample,
+    {
+        let transform = mix3();
+        let mut want = vec![P::Sample::default(); src.len()];
+        transform_interleaved(&transform, raw(&src, P::FORMAT), P::FORMAT, &mut want).unwrap();
+        let mut image = buf::<P>(src);
+        transform_in_place(&transform, &mut image).unwrap();
+        assert_eq!(image.as_samples(), want, "{:?}", P::FORMAT);
+    }
+
     #[test]
     fn in_place_u8_equals_interleaved_u8() {
-        // 300 pixels cross the 256-pixel chunk boundary; Rgba8 pins that alpha stays put.
-        let transform = mix3();
-        for format in [PixelFormat::Rgb8, PixelFormat::Rgba8] {
-            let channels = format.channels();
-            let src: Vec<u8> = (0..300 * channels)
+        // Rgba8 pins that alpha stays put.
+        let samples = |channels: usize| -> Vec<u8> {
+            (0..300 * channels)
                 .map(|i| u8::try_from((i * 37 + i / 7) % 256).unwrap())
-                .collect();
-            let mut want = vec![0u8; src.len()];
-            transform_interleaved_u8(&transform, format, &src, format, &mut want).unwrap();
-            let mut buf = src.clone();
-            transform_in_place_u8(&transform, format, &mut buf).unwrap();
-            assert_eq!(buf, want, "{format:?}");
-        }
+                .collect()
+        };
+        assert_in_place_equals_interleaved::<Rgb8>(samples(3));
+        assert_in_place_equals_interleaved::<Rgba8>(samples(4));
     }
 
     #[test]
     fn in_place_u16_equals_interleaved_u16() {
-        let transform = mix3();
         let src: Vec<u16> = (0..300 * 4u32)
             .map(|i| u16::try_from((i * 9973 + i / 5) % 65536).unwrap())
             .collect();
-        let mut want = vec![0u16; src.len()];
-        transform_interleaved_u16(
-            &transform,
-            PixelFormat::Rgba16,
-            &src,
-            PixelFormat::Rgba16,
-            &mut want,
-        )
-        .unwrap();
-        let mut buf = src.clone();
-        transform_in_place_u16(&transform, PixelFormat::Rgba16, &mut buf).unwrap();
-        assert_eq!(buf, want);
+        assert_in_place_equals_interleaved::<Rgba16>(src);
     }
 
     #[test]
     fn in_place_rejects_a_channel_changing_transform() {
         // RGB → CMYK has nowhere to put its fourth channel in an Rgb8 buffer.
-        let mut buf = [0u8; 3];
-        let err = transform_in_place_u8(&rgb_to_cmyk(), PixelFormat::Rgb8, &mut buf).unwrap_err();
+        let mut image = buf::<Rgb8>(vec![0; 3]);
+        let err = transform_in_place(&rgb_to_cmyk(), &mut image).unwrap_err();
         assert_eq!(
             err.to_string(),
             "cmm: image geometry mismatch (destination format's colour channels differ from \
@@ -903,29 +861,66 @@ mod tests {
     }
 
     #[test]
-    fn in_place_rejects_a_partial_pixel_untouched() {
-        let mut buf = [200u8; 4];
-        let err = transform_in_place_u8(&halve3(), PixelFormat::Rgb8, &mut buf).unwrap_err();
-        assert!(matches!(
-            err,
-            CmmError::BufferLength {
-                channels: 3,
-                found: 4
-            }
-        ));
-        assert_eq!(buf, [200; 4]);
+    fn a_format_of_another_sample_width_is_rejected() {
+        // `RawImage::new` holds the interleaved source to its width; every other format a
+        // call names is checked here.
+        let transform = halve3();
+        let err = transform_interleaved(
+            &transform,
+            raw(&[0u8; 3], PixelFormat::Rgb8),
+            PixelFormat::Rgb16,
+            &mut [0u8; 3],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cmm: image geometry mismatch (destination format's sample width differs from the \
+             buffer's)"
+        );
+        let plane = [0u8; 1];
+        let (mut o1, mut o2, mut o3) = ([0u8; 1], [0u8; 1], [0u8; 1]);
+        let err = transform_planar(
+            &transform,
+            PixelFormat::Rgb16,
+            &[&plane, &plane, &plane],
+            PixelFormat::Rgb8,
+            &mut [&mut o1, &mut o2, &mut o3],
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cmm: image geometry mismatch (source format's sample width differs from the \
+             planes')"
+        );
+        let err = transform_planar(
+            &transform,
+            PixelFormat::Rgb8,
+            &[&plane, &plane, &plane],
+            PixelFormat::Rgb16,
+            &mut [&mut o1, &mut o2, &mut o3],
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cmm: image geometry mismatch (destination format's sample width differs from the \
+             planes')"
+        );
     }
 
     #[test]
-    fn empty_buffers_are_a_valid_no_op() {
-        let transform = halve3();
-        let mut dst: [u8; 0] = [];
-        transform_interleaved_u8(
-            &transform,
+    fn empty_planes_are_a_valid_no_op() {
+        // The one empty image left to express: `RawImage` and `ImageBuf` have non-zero
+        // dimensions.
+        let (mut o1, mut o2, mut o3) = ([0u8; 0], [0u8; 0], [0u8; 0]);
+        transform_planar(
+            &halve3(),
             PixelFormat::Rgb8,
-            &[],
+            &[&[], &[], &[]],
             PixelFormat::Rgb8,
-            &mut dst,
+            &mut [&mut o1, &mut o2, &mut o3],
+            0,
         )
         .unwrap();
     }

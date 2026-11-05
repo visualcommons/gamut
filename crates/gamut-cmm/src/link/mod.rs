@@ -178,7 +178,7 @@ fn dispatch(
 /// [`CmmError::UnsupportedProfile`] for a shaper profile whose PCS is neither XYZ nor Lab;
 /// [`CmmError::StageChannelMismatch`]/[`CmmError::PipelineEndsMismatch`] for a LUT element
 /// whose stage channel counts cannot chain; and any
-/// [`ToneCurve::new`](crate::ToneCurve::new) or [`ClutTable`](crate::ClutTable) construction
+/// [`IccCurve::new`](crate::IccCurve::new) or [`ClutTable`](crate::ClutTable) construction
 /// error for malformed curve or CLUT data.
 pub fn device_to_pcs(profile: &IccProfile, intent: RenderingIntent) -> Result<Pipeline> {
     hop_device_to_pcs(profile, intent, false)

@@ -1,10 +1,10 @@
 //! 1-D tone curves: evaluation and inversion of the curves ICC profiles carry.
 //!
-//! [`ToneCurve`] wraps a parsed [`gamut_icc::CurveOrParametric`] — a `curveType` or
+//! [`IccCurve`] wraps a parsed [`gamut_icc::CurveOrParametric`] — a `curveType` or
 //! `parametricCurveType` element (ICC.1:2022 §10.6/§10.18) — and adds what a CMM needs beyond
 //! parsing: forward evaluation over `[0, 1]`, monotonicity detection, and functional inversion
 //! (analytic closed forms where the parameterization permits, an lcms2-shaped numeric table
-//! reversal otherwise). [`Stage::Curves`](crate::Stage::Curves) applies one [`ToneCurve`] per
+//! reversal otherwise). [`Stage::Curves`](crate::Stage::Curves) applies one [`IccCurve`] per
 //! channel inside a [`Pipeline`](crate::Pipeline).
 
 use gamut_color::cicp::TransferCharacteristics;
@@ -17,18 +17,18 @@ use crate::error::{CmmError, Result};
 /// (`cmsgamma.c`), so numeric inverses resolve identically to the oracle's.
 const INVERSE_SAMPLES: usize = 4096;
 
-/// Probe count for [`ToneCurve::is_monotonic`]'s dense sampling — matched to
+/// Probe count for [`IccCurve::is_monotonic`]'s dense sampling — matched to
 /// [`INVERSE_SAMPLES`] so monotonicity is judged at exactly the resolution the numeric inverse
 /// resolves.
 const MONOTONICITY_PROBES: usize = 4096;
 
-/// Sample count of a curve table built by [`ToneCurve::joined`] — lcms2's
+/// Sample count of a curve table built by [`IccCurve::joined`] — lcms2's
 /// `PRELINEARIZATION_POINTS` (`cmsopt.c:418`), the resolution its own curve-joining
 /// optimization tabulates at, and the same 4096 this crate already reverses curves at
 /// ([`INVERSE_SAMPLES`]).
 const JOIN_POINTS: usize = 4096;
 
-/// The internal representation of a [`ToneCurve`].
+/// The internal representation of an [`IccCurve`].
 #[derive(Debug, Clone)]
 enum Repr {
     /// A forward curve as parsed: evaluation delegates to `gamut-icc` (never resampled).
@@ -56,7 +56,7 @@ enum Repr {
         table: Vec<f64>,
     },
     /// A curve tabulated from computed samples at uniform positions, evaluated by linear
-    /// interpolation — what [`ToneCurve::joined`] builds when it collapses a curve pair.
+    /// interpolation — what [`IccCurve::joined`] builds when it collapses a curve pair.
     /// Distinct from [`SampledInverse`](Repr::SampledInverse), which shares the evaluation
     /// but carries the inverse-specific construction contract.
     Table {
@@ -64,7 +64,7 @@ enum Repr {
         table: Vec<f64>,
     },
     /// A transfer function evaluated in closed form — an ITU-T H.273 code point's curve from
-    /// `gamut-color`, built by [`ToneCurve::cicp_transfer`]. Carries its own inverse, so
+    /// `gamut-color`, built by [`IccCurve::cicp_transfer`]. Carries its own inverse, so
     /// inverting it is a swap: exact in both directions, with no table in either.
     Closed {
         /// The curve this representation evaluates.
@@ -74,7 +74,7 @@ enum Repr {
     },
 }
 
-/// The largest absolute difference, anywhere on [`ToneCurve::agrees_with`]'s probe grid, at
+/// The largest absolute difference, anywhere on [`IccCurve::agrees_with`]'s probe grid, at
 /// which a profile's tone curve still counts as an encoding of the transfer function its `cicp`
 /// tag names.
 ///
@@ -88,8 +88,8 @@ const CICP_AGREEMENT: f64 = 1.0 / 256.0;
 
 /// A one-dimensional tone curve: a monotonicity-aware, invertible view of a parsed ICC curve.
 ///
-/// Built from a [`gamut_icc::CurveOrParametric`] by [`ToneCurve::new`]; evaluated by
-/// [`ToneCurve::eval`]; inverted by [`ToneCurve::inverse`], which yields another `ToneCurve`.
+/// Built from a [`gamut_icc::CurveOrParametric`] by [`IccCurve::new`]; evaluated by
+/// [`IccCurve::eval`]; inverted by [`IccCurve::inverse`], which yields another `IccCurve`.
 /// Both evaluation directions clamp domain **and** range to `[0, 1]` (the convention of
 /// `gamut_icc::Curve::eval`, extended to parametric curves whose raw closed forms can leave the
 /// range).
@@ -97,22 +97,22 @@ const CICP_AGREEMENT: f64 = 1.0 / 256.0;
 /// # Example
 ///
 /// ```
-/// use gamut_cmm::ToneCurve;
+/// use gamut_cmm::IccCurve;
 /// use gamut_icc::{Curve, CurveOrParametric, U8Fixed8};
 ///
 /// // A pure-gamma 2.0 curve (u8Fixed8 0x0200 is exactly 2.0).
-/// let gamma = ToneCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0200))))?;
+/// let gamma = IccCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0200))))?;
 /// assert_eq!(gamma.eval(0.5), 0.25);
 /// let inverse = gamma.inverse()?;
 /// assert!((inverse.eval(0.25) - 0.5).abs() < 1e-12);
 /// # Ok::<(), gamut_cmm::CmmError>(())
 /// ```
 #[derive(Debug, Clone)]
-pub struct ToneCurve {
+pub struct IccCurve {
     repr: Repr,
 }
 
-impl ToneCurve {
+impl IccCurve {
     /// Wraps a parsed curve for evaluation and inversion.
     ///
     /// # Errors
@@ -162,17 +162,17 @@ impl ToneCurve {
     /// at 4096 evenly spaced points (a wiggle confined strictly between adjacent probes is below
     /// this CMM's resolution — the same posture as lcms2, whose `cmsIsToneCurveMonotonic`
     /// inspects a shadow table of the same size). A constant curve is monotonic under this
-    /// definition (it is non-decreasing and non-increasing at once), but [`ToneCurve::inverse`]
+    /// definition (it is non-decreasing and non-increasing at once), but [`IccCurve::inverse`]
     /// still rejects it.
     ///
     /// ```
-    /// use gamut_cmm::ToneCurve;
+    /// use gamut_cmm::IccCurve;
     /// use gamut_icc::{Curve, CurveOrParametric};
     ///
-    /// let up = ToneCurve::new(&CurveOrParametric::Curve(Curve::Sampled(vec![0, 30000, 65535])))?;
+    /// let up = IccCurve::new(&CurveOrParametric::Curve(Curve::Sampled(vec![0, 30000, 65535])))?;
     /// assert!(up.is_monotonic());
     /// let wiggle =
-    ///     ToneCurve::new(&CurveOrParametric::Curve(Curve::Sampled(vec![0, 40000, 20000, 65535])))?;
+    ///     IccCurve::new(&CurveOrParametric::Curve(Curve::Sampled(vec![0, 40000, 20000, 65535])))?;
     /// assert!(!wiggle.is_monotonic());
     /// # Ok::<(), gamut_cmm::CmmError>(())
     /// ```
@@ -221,7 +221,7 @@ impl ToneCurve {
     /// [`is_monotonic`](Self::is_monotonic), or is **constant** (equal endpoints — including
     /// one-entry tables and parameterizations that collapse to a constant after `[0, 1]` range
     /// clamping): a constant curve has no functional inverse.
-    pub fn inverse(&self) -> Result<ToneCurve> {
+    pub fn inverse(&self) -> Result<IccCurve> {
         if !self.is_monotonic() {
             return Err(CmmError::NonMonotonicCurve);
         }
@@ -265,7 +265,7 @@ impl ToneCurve {
                 inverse: *forward,
             },
         };
-        Ok(ToneCurve { repr })
+        Ok(IccCurve { repr })
     }
 
     /// The transfer function ITU-T H.273 assigns to `TransferCharacteristics` code point
@@ -276,15 +276,15 @@ impl ToneCurve {
     /// Linear (code point 8) is returned as the structural identity rather than as a closed
     /// form of `x ↦ x`: the two evaluate identically, and only the structural one is elided
     /// by [`crate::optimize`] ([`is_identity`](Self::is_identity)).
-    pub(crate) fn cicp_transfer(code_point: u16) -> Option<ToneCurve> {
+    pub(crate) fn cicp_transfer(code_point: u16) -> Option<IccCurve> {
         let tc = TransferCharacteristics::from_code_point(code_point)?;
         if tc == TransferCharacteristics::Linear {
-            return Some(ToneCurve {
+            return Some(IccCurve {
                 repr: Repr::Icc(CurveOrParametric::Curve(Curve::Identity)),
             });
         }
         let (forward, inverse) = (standard_eotf_for(tc)?, standard_oetf_for(tc)?);
-        Some(ToneCurve {
+        Some(IccCurve {
             repr: Repr::Closed { forward, inverse },
         })
     }
@@ -293,7 +293,7 @@ impl ToneCurve {
     /// point of the probe grid [`is_monotonic`](Self::is_monotonic) samples — the test of
     /// ICC.1:2022 §10.3's requirement that a `cicp` tag name an encoding *equivalent* to the
     /// profile's own, applied before the tag's closed form may stand in for the profile's curve.
-    pub(crate) fn agrees_with(&self, other: &ToneCurve) -> bool {
+    pub(crate) fn agrees_with(&self, other: &IccCurve) -> bool {
         probes().all(|x| (self.eval(x) - other.eval(x)).abs() <= CICP_AGREEMENT)
     }
 
@@ -325,7 +325,7 @@ impl ToneCurve {
     /// steepest: an inverse-gamma toe near black is the worst case (see the crate's
     /// `STATUS.md` precision budget).
     #[must_use]
-    pub(crate) fn joined(first: &ToneCurve, second: &ToneCurve) -> ToneCurve {
+    pub(crate) fn joined(first: &IccCurve, second: &IccCurve) -> IccCurve {
         if first.is_identity() {
             return second.clone();
         }
@@ -336,7 +336,7 @@ impl ToneCurve {
         let table = (0..JOIN_POINTS)
             .map(|i| second.eval(first.eval(i as f64 / last)))
             .collect();
-        ToneCurve {
+        IccCurve {
             repr: Repr::Table { table },
         }
     }
@@ -364,7 +364,7 @@ fn expand_params(params: &[gamut_icc::S15Fixed16]) -> [f64; 7] {
 /// branch strictly increasing and its inverse well-defined; types 3–4 additionally need a
 /// strictly increasing linear toe (`c > 0`) over a real split point (`d ∈ [0, 1]`). Everything
 /// else — already vetted as monotonic and non-constant by the caller — reverses numerically.
-fn parametric_inverse_repr(function_type: u16, params: &[f64; 7], forward: &ToneCurve) -> Repr {
+fn parametric_inverse_repr(function_type: u16, params: &[f64; 7], forward: &IccCurve) -> Repr {
     let [g, a, _b, c, d, _e, _f] = *params;
     match function_type {
         // No guard needed: with g ≤ 0 the range-clamped x^g is constant (`powf` maps every
@@ -386,7 +386,7 @@ fn parametric_inverse_repr(function_type: u16, params: &[f64; 7], forward: &Tone
 
 /// Numerically inverts `forward` by sampling it at [`INVERSE_SAMPLES`] points and reversing the
 /// sampled table.
-fn numeric_inverse_repr(forward: &ToneCurve) -> Repr {
+fn numeric_inverse_repr(forward: &IccCurve) -> Repr {
     let samples: Vec<f64> = (0..INVERSE_SAMPLES)
         .map(|i| forward.eval(i as f64 / (INVERSE_SAMPLES - 1) as f64))
         .collect();
@@ -402,7 +402,7 @@ fn numeric_inverse_repr(forward: &ToneCurve) -> Repr {
 /// cases `-2`/`-3`/`-4`/`-5` — lcms2 numbers types ICC + 1), including their threshold
 /// conventions: type 2's inverse returns `0` (not `-b/a`) exactly at `y == c`, and type 4's
 /// split point is the *linear* branch value `c·d + f` where type 3's is the *power* branch
-/// value `(a·d + b)^g`. Range clamping is left to the caller ([`ToneCurve::eval`]).
+/// value `(a·d + b)^g`. Range clamping is left to the caller ([`IccCurve::eval`]).
 fn eval_inverse_parametric(function_type: u16, params: &[f64; 7], y: f64) -> f64 {
     let [g, a, b, c, d, e, f] = *params;
     match function_type {
@@ -454,7 +454,7 @@ fn eval_inverse_parametric(function_type: u16, params: &[f64; 7], y: f64) -> f64
 }
 
 /// The [`MONOTONICITY_PROBES`] evenly spaced points of `[0, 1]`, both ends included — the grid
-/// [`ToneCurve::is_monotonic`] and [`ToneCurve::agrees_with`] judge a curve on.
+/// [`IccCurve::is_monotonic`] and [`IccCurve::agrees_with`] judge a curve on.
 fn probes() -> impl Iterator<Item = f64> {
     (0..MONOTONICITY_PROBES).map(|i| i as f64 / (MONOTONICITY_PROBES - 1) as f64)
 }
@@ -495,7 +495,7 @@ fn samples_monotonic(samples: impl IntoIterator<Item = f64>) -> bool {
 ///
 /// `table` holds ≥ 2 forward samples in `[0, 1]` at uniform positions; entry `i` of the result
 /// is the `x ∈ [0, 1]` whose forward value is `i / (INVERSE_SAMPLES − 1)`. See
-/// [`ToneCurve::inverse`] for the scan-direction, flat-run, and out-of-range conventions.
+/// [`IccCurve::inverse`] for the scan-direction, flat-run, and out-of-range conventions.
 fn reverse_table(table: &[f64]) -> Vec<f64> {
     let last = table.len() - 1;
     let ascending = table[0] <= table[last];
@@ -526,7 +526,7 @@ fn reverse_table(table: &[f64]) -> Vec<f64> {
                 }
             }
             // `y` outside the curve's range: clamp to the domain end on that side (see
-            // `ToneCurve::inverse` for the one deliberate deviation from lcms2 this implies).
+            // `IccCurve::inverse` for the one deliberate deviation from lcms2 this implies).
             None => {
                 if ascending {
                     if y < table[0] { 0.0 } else { 1.0 }
@@ -552,16 +552,16 @@ mod tests {
         S15Fixed16::from_f64(v)
     }
 
-    fn parametric(function_type: u16, params: &[f64]) -> ToneCurve {
-        ToneCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
+    fn parametric(function_type: u16, params: &[f64]) -> IccCurve {
+        IccCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
             function_type,
             params: params.iter().copied().map(s15).collect(),
         }))
         .unwrap()
     }
 
-    fn sampled(table: Vec<u16>) -> ToneCurve {
-        ToneCurve::new(&CurveOrParametric::Curve(Curve::Sampled(table))).unwrap()
+    fn sampled(table: Vec<u16>) -> IccCurve {
+        IccCurve::new(&CurveOrParametric::Curve(Curve::Sampled(table))).unwrap()
     }
 
     #[test]
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn unknown_parametric_type_is_rejected_at_construction() {
-        let err = ToneCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
+        let err = IccCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
             function_type: 5,
             params: vec![s15(2.0)],
         }))
@@ -739,7 +739,7 @@ mod tests {
         for curve in [
             sampled(vec![32768]),
             sampled(vec![20000, 20000, 20000]),
-            ToneCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0)))).unwrap(),
+            IccCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0)))).unwrap(),
             parametric(0, &[0.0]),
         ] {
             assert!(
@@ -767,7 +767,7 @@ mod tests {
 
     #[test]
     fn identity_inverts_to_identity() {
-        let identity = ToneCurve::new(&CurveOrParametric::Curve(Curve::Identity)).unwrap();
+        let identity = IccCurve::new(&CurveOrParametric::Curve(Curve::Identity)).unwrap();
         assert!(identity.is_monotonic());
         let inv = identity.inverse().unwrap();
         assert_eq!(inv.eval(0.3), 0.3);
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn double_inversion_of_gamma_recovers_the_exponent() {
         let gamma =
-            ToneCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0233)))).unwrap(); // 2.19921875
+            IccCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0233)))).unwrap(); // 2.19921875
         let inv = gamma.inverse().unwrap();
         let back = inv.inverse().unwrap();
         assert!(matches!(
@@ -861,7 +861,7 @@ mod tests {
         // at 0, so compare away from the origin.
         let analytic = parametric(0, &[2.0]).inverse().unwrap();
         let square = parametric(0, &[2.0]);
-        let numeric = ToneCurve {
+        let numeric = IccCurve {
             repr: numeric_inverse_repr(&square),
         };
         let mut worst: f64 = 0.0;
@@ -981,7 +981,7 @@ mod tests {
             (18, hlg_inverse_oetf, hlg_oetf),
         ];
         for (code_point, forward, inverse) in cases {
-            let curve = ToneCurve::cicp_transfer(code_point).expect("modelled code point");
+            let curve = IccCurve::cicp_transfer(code_point).expect("modelled code point");
             let inverted = curve.inverse().expect("a transfer function inverts");
             for x in [0.1, 0.5, 0.9] {
                 assert_eq!(curve.eval(x), forward(x), "code point {code_point} at {x}");
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn cicp_linear_transfer_is_the_structural_identity() {
-        let linear = ToneCurve::cicp_transfer(8).expect("code point 8 is modelled");
+        let linear = IccCurve::cicp_transfer(8).expect("code point 8 is modelled");
         assert!(linear.is_identity());
     }
 
@@ -1006,14 +1006,14 @@ mod tests {
         // reserved.
         for code_point in [2, 4, 200] {
             assert!(
-                ToneCurve::cicp_transfer(code_point).is_none(),
+                IccCurve::cicp_transfer(code_point).is_none(),
                 "code point {code_point}"
             );
         }
     }
 
-    fn table(table: Vec<f64>) -> ToneCurve {
-        ToneCurve {
+    fn table(table: Vec<f64>) -> IccCurve {
+        IccCurve {
             repr: Repr::Table { table },
         }
     }

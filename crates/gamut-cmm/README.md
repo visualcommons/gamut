@@ -22,8 +22,9 @@ over [`gamut-icc`](../gamut-icc)'s parsed profiles:
 
 - **Colour-correct decoding** — convert decoded pixels through an embedded profile (a PNG
   `iCCP`, a JPEG `APP2`, a TIFF/DNG tag 34675) into a display or working space, straight over
-  `gamut_core::PixelFormat` buffers (`transform_interleaved_u8` and friends, or in place with
-  `transform_in_place_u8`); `IccTransform::embedded_to_srgb` builds the embedded profile →
+  `gamut-core` image buffers (`transform_interleaved` from a `RawImage`, `transform_planar`, or
+  in place over an `ImageBuf` with `transform_in_place`, each at `u8` or `u16`);
+  `IccTransform::embedded_to_srgb` builds the embedded profile →
   sRGB transform at the intent that keeps the image's colorimetry.
 - **Profile-accurate encoding** — bring working-space pixels into the space an embedded profile
   describes before encoding.
@@ -65,7 +66,7 @@ assert_eq!(dst, [0.75, 0.5, 1.0]);
 The architectural keystone (epic #323, scaffold #324): the `Pipeline`/`Stage` evaluation model
 with construction-time channel validation, the object-safe `Transform` entry trait, and the
 typed `CmmError`. Stages cover identity, clamp, the 3×3 affine matrix and its rectangular
-`MatrixN` sibling, per-channel tone curves (#325) — `ToneCurve` evaluates and inverts
+`MatrixN` sibling, per-channel tone curves (#325) — `IccCurve` evaluates and inverts
 `curveType`/`parametricCurveType` elements (analytic closed forms plus an lcms2-shaped numeric
 reversal) behind `Stage::Curves` — and multi-dimensional CLUTs (#326): `ClutTable`
 interpolates 1–15-input grids behind `Stage::Clut`, with lcms2's exact tetrahedral
@@ -79,7 +80,7 @@ from **LUT profiles**: `lut8`/`lut16`/`lutAToB`/`lutBToA` tags (CMYK printers, c
 profiles, device links), selected per rendering intent with lcms2's intent→tag tables and
 perceptual fallback, the lut16 v2-Lab encoding rule, and trilinear interpolation for
 Lab-indexed CLUTs. Rendering intents and black-point compensation (#329): `IccTransform::between(&src, &dst,
-TransformOptions { intent, black_point_compensation })` links a pair end to end, applying
+TransformOptions::default().with_intent(intent).with_black_point_compensation(bpc))` links a pair end to end, applying
 the ICC-absolute media-white scaling (`diag(wIn/wOut)` at the XYZ seam, with lcms2's
 v2-display and missing-`wtpt` quirks) or black-point compensation (the ISO 18619/WP40
 linear XYZ scaling over `bpc::{detect_black_point, detect_destination_black_point}` —
@@ -98,8 +99,8 @@ max-ΔE₀₀ bounds (see STATUS.md's threshold table) — all documented in
 
 ## Pipeline optimization
 
-Transforms evaluate **stage by stage by default**. `TransformOptions::optimization` (and its
-`ProofingOptions` twin) opts into collapsing the linked pipeline first — the passes lcms2
+Transforms evaluate **stage by stage by default**. `TransformOptions::optimization` (which
+`ProofingOptions` embeds) opts into collapsing the linked pipeline first — the passes lcms2
 applies by default in `cmsopt.c`:
 
 | level | passes | cost |
@@ -111,12 +112,13 @@ applies by default in `cmsopt.c`:
 | `PrecalculateFixed16` | `Precalculate`, resampled CLUT at 16-bit fixed point | + 16-bit quantization (≤ 7.1e-3 ΔE₀₀); lcms2's integer interpolators bit for bit, integer end to end under the `u8`/`u16` buffer functions — the throughput tier. Under the `u8` functions an RGB→RGB matrix/TRC transform runs lcms2's 8-bit matrix-shaper instead (≤ 2 codes from `None`; lcms2's `TYPE_RGB_8` path bit for bit when the TRCs are parametric or pure gamma and the link has no seam adjustment — perceptual or relative intent without BPC; sampled TRCs can differ by a code, and an absolute-intent or BPC offset keeps its correct scale where lcms2's is `2¹⁴` too small — see STATUS.md) |
 
 ```rust,ignore
-let fast = IccTransform::between(&src, &dst, TransformOptions {
-    intent: RenderingIntent::MediaRelativeColorimetric,
-    black_point_compensation: false,
-    optimization: PipelineOptimization::Precalculate,
-    ..TransformOptions::default()
-})?;
+let fast = IccTransform::between(
+    &src,
+    &dst,
+    TransformOptions::default()
+        .with_intent(RenderingIntent::MediaRelativeColorimetric)
+        .with_optimization(PipelineOptimization::Precalculate),
+)?;
 ```
 
 On a 256×256 buffer that is 2.8× the default path's throughput for a shaper pair and 4.6×

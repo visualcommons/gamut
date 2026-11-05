@@ -1,4 +1,4 @@
-//! Differential tests of [`gamut_cmm::ToneCurve`] against Little-CMS.
+//! Differential tests of [`gamut_cmm::IccCurve`] against Little-CMS.
 //!
 //! Type mapping: an lcms2 parametric curve type is the **ICC function type + 1**
 //! (`cmsgamma.c`: "Type is the ICC type +1"), with parameters in the *same* order
@@ -10,7 +10,7 @@
 mod common;
 
 use common::Lcg;
-use gamut_cmm::ToneCurve;
+use gamut_cmm::IccCurve;
 use gamut_icc::{Curve, CurveOrParametric, ParametricCurve, S15Fixed16, U8Fixed8};
 use lcms2_oracle::ToneCurve as OracleCurve;
 
@@ -37,9 +37,9 @@ fn parametric_cases() -> Vec<(u16, Vec<f64>)> {
 
 /// Builds the same ICC parametric curve for both sides: ours from the `s15Fixed16`-quantized
 /// parameters, the oracle's from the identical quantized values at lcms2 type `icc_type + 1`.
-fn parametric_pair(icc_type: u16, params: &[f64]) -> (ToneCurve, OracleCurve) {
+fn parametric_pair(icc_type: u16, params: &[f64]) -> (IccCurve, OracleCurve) {
     let quantized: Vec<S15Fixed16> = params.iter().map(|&p| S15Fixed16::from_f64(p)).collect();
-    let ours = ToneCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
+    let ours = IccCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
         function_type: icc_type,
         params: quantized.clone(),
     }))
@@ -59,13 +59,13 @@ fn gamma_u16_table(n: usize, g: f64) -> Vec<u16> {
         .collect()
 }
 
-fn tone_curve(curve: Curve) -> ToneCurve {
-    ToneCurve::new(&CurveOrParametric::Curve(curve)).unwrap()
+fn tone_curve(curve: Curve) -> IccCurve {
+    IccCurve::new(&CurveOrParametric::Curve(curve)).unwrap()
 }
 
 /// Worst absolute difference between our curve and the oracle's over `points + 1` evenly
 /// spaced inputs in `[0, 1]`.
-fn worst_forward_diff(ours: &ToneCurve, oracle: &OracleCurve, points: usize) -> f64 {
+fn worst_forward_diff(ours: &IccCurve, oracle: &OracleCurve, points: usize) -> f64 {
     let mut worst: f64 = 0.0;
     for i in 0..=points {
         let x = i as f64 / points as f64;
@@ -316,7 +316,7 @@ fn non_monotonic_tables_are_rejected_in_both_directions() {
 
 #[test]
 fn unknown_parametric_type_is_a_typed_error() {
-    let err = ToneCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
+    let err = IccCurve::new(&CurveOrParametric::Parametric(ParametricCurve {
         function_type: 5,
         params: vec![S15Fixed16::from_f64(2.0); 7],
     }))

@@ -25,16 +25,16 @@
 //! proofing vs `cmsCreateProofingTransform(SOFTPROOFING)`, and the gamut check vs
 //! `cmsFLAGS_GAMUTCHECK` alarm-code substitution (classification agreement — lcms2
 //! quantizes its ΔE excess into a 16-bit CLUT, so magnitudes are deliberately not compared;
-//! see `src/gamut.rs`).
+//! see `src/gamut_check.rs`).
 
 mod common;
 
 use common::Lcg;
 use gamut_cmm::{
     GamutCheck, IccTransform, PipelineOptimization, ProofingOptions, Transform as _,
-    TransformOptions, transform_in_place_u8, transform_interleaved_u8,
+    TransformOptions, transform_in_place, transform_interleaved,
 };
-use gamut_core::PixelFormat;
+use gamut_core::{Dimensions, ImageBuf, PixelFormat, RawImage, Rgb8};
 use gamut_icc::{IccProfile, RenderingIntent};
 use lcms2_oracle::{
     FLAGS_BLACKPOINTCOMPENSATION, FLAGS_GAMUTCHECK, FLAGS_NOCACHE, FLAGS_NOOPTIMIZE,
@@ -50,10 +50,7 @@ use lcms2_oracle::{
 /// point of the gate, pipeline optimization **off**: every bound in this file is measured
 /// against the crate's stage-by-stage evaluation.
 fn intent_options(intent: RenderingIntent) -> TransformOptions {
-    TransformOptions {
-        intent,
-        ..TransformOptions::default()
-    }
+    TransformOptions::default().with_intent(intent)
 }
 
 /// D65 chromaticity and a wide (Adobe-ish) primary set for the synthesized shapers.
@@ -213,7 +210,7 @@ fn lens_delta_e(lens: &Transform, a: &[f64], b: &[f64], ink_scale: f64) -> f64 {
     cie2000_delta_e(la, lb, 1.0, 1.0, 1.0)
 }
 
-/// Clamps lcms2's raw double outputs into `[0, 1]` device range (this crate's `ToneCurve`
+/// Clamps lcms2's raw double outputs into `[0, 1]` device range (this crate's `IccCurve`
 /// convention — see `tests/oracle_intents.rs`).
 fn clamp01(v: Vec<f64>) -> Vec<f64> {
     v.into_iter().map(|s| s.clamp(0.0, 1.0)).collect()
@@ -266,12 +263,9 @@ fn measure_pair(src: &Member, dst: &Member, lab: &Profile, tight: &mut Worst, lo
             let ours = IccTransform::between(
                 &src.parsed,
                 &dst.parsed,
-                TransformOptions {
-                    intent: our_intent,
-                    black_point_compensation: bpc,
-                    optimization: PipelineOptimization::None,
-                    prefer_cicp_transfer: false,
-                },
+                TransformOptions::default()
+                    .with_intent(our_intent)
+                    .with_black_point_compensation(bpc),
             )
             .unwrap();
             let lcms_tight = Transform::new(
@@ -511,12 +505,9 @@ fn optimized_transforms_stay_inside_the_precision_budget() {
                 IccTransform::between(
                     &src.parsed,
                     &dst.parsed,
-                    TransformOptions {
-                        intent: our_intent,
-                        black_point_compensation: false,
-                        optimization,
-                        prefer_cicp_transfer: false,
-                    },
+                    TransformOptions::default()
+                        .with_intent(our_intent)
+                        .with_optimization(optimization),
                 )
                 .unwrap()
             };
@@ -719,12 +710,9 @@ fn precision_tiers_stay_inside_their_budget() {
                 IccTransform::between(
                     &src.parsed,
                     &dst.parsed,
-                    TransformOptions {
-                        intent: our_intent,
-                        black_point_compensation: false,
-                        optimization,
-                        prefer_cicp_transfer: false,
-                    },
+                    TransformOptions::default()
+                        .with_intent(our_intent)
+                        .with_optimization(optimization),
                 )
                 .unwrap()
             };
@@ -858,11 +846,9 @@ fn mat_shaper_8_matches_lcms2_rgb8_bit_for_bit() {
             let transform = IccTransform::between(
                 &src.parsed,
                 &dst.parsed,
-                TransformOptions {
-                    intent: our_intent,
-                    optimization: PipelineOptimization::PrecalculateFixed16,
-                    ..TransformOptions::default()
-                },
+                TransformOptions::default()
+                    .with_intent(our_intent)
+                    .with_optimization(PipelineOptimization::PrecalculateFixed16),
             )
             .unwrap();
             transform.transform_u8(&cube, &mut ours).unwrap();
@@ -940,11 +926,9 @@ fn mat_shaper_8_stays_inside_its_budget() {
                 IccTransform::between(
                     &src.parsed,
                     &dst.parsed,
-                    TransformOptions {
-                        intent: our_intent,
-                        optimization,
-                        ..TransformOptions::default()
-                    },
+                    TransformOptions::default()
+                        .with_intent(our_intent)
+                        .with_optimization(optimization),
                 )
                 .unwrap()
             };
@@ -1073,12 +1057,9 @@ fn multiprofile_chain_matches_lcms2() {
             for bpc in [false, true] {
                 let ours = IccTransform::chain(
                     &[src, &lab_parsed, dst],
-                    TransformOptions {
-                        intent: our_intent,
-                        black_point_compensation: bpc,
-                        optimization: PipelineOptimization::None,
-                        prefer_cicp_transfer: false,
-                    },
+                    TransformOptions::default()
+                        .with_intent(our_intent)
+                        .with_black_point_compensation(bpc),
                 )
                 .unwrap();
                 assert_eq!(usize::from(ours.input_channels()), n_in);
@@ -1104,12 +1085,9 @@ fn multiprofile_chain_matches_lcms2() {
                 // in-range pixel must track lcms2 tightly.
                 let mid_chain = IccTransform::chain(
                     &[src, &lab_parsed],
-                    TransformOptions {
-                        intent: our_intent,
-                        black_point_compensation: bpc,
-                        optimization: PipelineOptimization::None,
-                        prefer_cicp_transfer: false,
-                    },
+                    TransformOptions::default()
+                        .with_intent(our_intent)
+                        .with_black_point_compensation(bpc),
                 )
                 .unwrap();
                 let mut worst = 0.0_f64;
@@ -1344,13 +1322,12 @@ fn proofing_matches_lcms2() {
                     &src_parsed,
                     &dst_parsed,
                     &proof_parsed,
-                    ProofingOptions {
-                        intent: our_intent,
-                        proofing_intent: our_proof_intent,
-                        black_point_compensation: bpc,
-                        optimization: PipelineOptimization::None,
-                        prefer_cicp_transfer: false,
-                    },
+                    ProofingOptions::new(
+                        TransformOptions::default()
+                            .with_intent(our_intent)
+                            .with_black_point_compensation(bpc),
+                        our_proof_intent,
+                    ),
                 )
                 .unwrap();
                 let flags = FLAGS_SOFTPROOFING
@@ -1393,24 +1370,16 @@ fn proofing_matches_lcms2() {
         &src_parsed,
         &dst_parsed,
         &proof_parsed,
-        ProofingOptions {
-            intent: RenderingIntent::MediaRelativeColorimetric,
-            proofing_intent: RenderingIntent::MediaRelativeColorimetric,
-            black_point_compensation: false,
-            optimization: PipelineOptimization::None,
-            prefer_cicp_transfer: false,
-        },
+        ProofingOptions::new(
+            intent_options(RenderingIntent::MediaRelativeColorimetric),
+            RenderingIntent::MediaRelativeColorimetric,
+        ),
     )
     .unwrap();
     let plain = IccTransform::between(
         &src_parsed,
         &dst_parsed,
-        TransformOptions {
-            intent: RenderingIntent::MediaRelativeColorimetric,
-            black_point_compensation: false,
-            optimization: PipelineOptimization::None,
-            prefer_cicp_transfer: false,
-        },
+        intent_options(RenderingIntent::MediaRelativeColorimetric),
     )
     .unwrap();
     let mut gap = 0.0_f64;
@@ -1529,7 +1498,8 @@ fn pixel_buffers_ride_the_conformance_transforms() {
         })
         .collect();
     let mut dst = vec![0u8; 240];
-    transform_interleaved_u8(&ours, PixelFormat::Rgb8, &src, PixelFormat::Cmyk8, &mut dst).unwrap();
+    let image = RawImage::new(&src, PixelFormat::Rgb8, Dimensions::new(60, 1).unwrap()).unwrap();
+    transform_interleaved(&ours, image, PixelFormat::Cmyk8, &mut dst).unwrap();
     for (px, out) in src.as_chunks::<3>().0.iter().zip(dst.as_chunks::<4>().0) {
         let device: Vec<f64> = px.iter().map(|&v| f64::from(v) / 255.0).collect();
         let mut want = [0.0; 4];
@@ -1569,8 +1539,10 @@ fn embedded_to_srgb_in_place_agrees_with_lcms2_relative() {
     for (name, profile) in [("p3", display_p3_srgb_trc()), ("scnr-lut", scnr_lut(9))] {
         let (parsed, oracle) = reopen(&profile);
         let ours = IccTransform::embedded_to_srgb(&parsed).unwrap();
-        let mut buf = src.clone();
-        transform_in_place_u8(&ours, PixelFormat::Rgb8, &mut buf).unwrap();
+        let mut image =
+            ImageBuf::<Rgb8>::new(src.clone(), Dimensions::new(600, 1).unwrap()).unwrap();
+        transform_in_place(&ours, &mut image).unwrap();
+        let buf = image.into_samples();
         let want = Transform::new(
             &oracle,
             TYPE_RGB_8,
@@ -1646,12 +1618,10 @@ fn cicp_pairs(pairs: &[(&str, &str)], prefer_cicp_transfer: bool) -> (Worst, Wor
                 let ours = IccTransform::between(
                     src_parsed,
                     dst_parsed,
-                    TransformOptions {
-                        intent: our_intent,
-                        black_point_compensation: bpc,
-                        prefer_cicp_transfer,
-                        ..TransformOptions::default()
-                    },
+                    TransformOptions::default()
+                        .with_intent(our_intent)
+                        .with_black_point_compensation(bpc)
+                        .with_prefer_cicp_transfer(prefer_cicp_transfer),
                 )
                 .unwrap();
                 let lcms_tight = Transform::new(
@@ -1858,13 +1828,13 @@ fn srgb_v2_sampled() -> IccProfile {
 // bits and evaluates in 16 bits even inside a `TYPE_*_DBL` transform — at the sRGB toe, an
 // inverse slope of 12.92 times a 1/65535 step.
 //
-// Two experiments, each a one-line local change to `ToneCurve::inverse`'s table, separate the
+// Two experiments, each a one-line local change to `IccCurve::inverse`'s table, separate the
 // engines. Refining this crate's reversal 64× (262 144 entries, a near-exact pseudo-inverse of
 // the piecewise-linear table) leaves the measured TIGHT at 3.199e-2 to four digits: the
 // inversion here contributes nothing the gate can see. Quantizing this crate's reversed-table
 // evaluation to 16 bits the way lcms2 does (input, table and output, rounded) drops it to
 // 1.95e-2, inside TIGHT_LUT_BOUND. The excess is lcms2's quantization, not a defect here, so
-// `ToneCurve::inverse` is left as it is: copying the oracle's quantization would make this crate
+// `IccCurve::inverse` is left as it is: copying the oracle's quantization would make this crate
 // less accurate to match it.
 //
 // Re-derived with these pairs, TIGHT_LUT_BOUND would rise to 8e-2 — 9× over the 8.77e-3 every

@@ -38,7 +38,7 @@
 //! - [`pipeline`] — the keystone: [`Stage`] (the evaluation primitive) and [`Pipeline`] (a
 //!   validated chain of stages), plus the [`MAX_CHANNELS`] bound that keeps evaluation
 //!   allocation-free.
-//! - [`curve`] — [`ToneCurve`]: 1-D tone-curve evaluation, monotonicity detection, and
+//! - [`curve`] — [`IccCurve`]: 1-D tone-curve evaluation, monotonicity detection, and
 //!   inversion over `gamut-icc`'s parsed `curveType`/`parametricCurveType` elements, applied
 //!   per channel by [`Stage::Curves`].
 //! - [`clut`] — [`ClutTable`]: multi-dimensional CLUT interpolation (lcms2's tetrahedral
@@ -63,12 +63,12 @@
 //!   ([`IccTransform::device_link`]), and soft-proofing
 //!   ([`IccTransform::proofing`]/[`ProofingOptions`]) — lcms2's `DefaultICCintents`
 //!   transcribed, and the one seam implementation [`IccTransform::between`] also uses.
-//! - [`gamut`] — [`GamutCheck`]: lcms2's double-round-trip gamut test as a [`Transform`]
-//!   (source device channels in, one in-gamut/ΔE-excess channel out).
-//! - [`image`] — typed pixel-buffer application over [`gamut_core::PixelFormat`]:
-//!   [`transform_interleaved_u8`]/[`transform_interleaved_u16`], their in-place twins
-//!   [`transform_in_place_u8`]/[`transform_in_place_u16`] and their planar siblings,
-//!   with alpha passthrough and lcms2-style round-half-up re-encoding.
+//! - [`gamut_check`] — [`GamutCheck`]: lcms2's double-round-trip gamut test as a
+//!   [`Transform`] (source device channels in, one in-gamut/ΔE-excess channel out).
+//! - [`image`] — typed pixel-buffer application over [`gamut_core`]'s image types, generic
+//!   over the sample width ([`ImageSample`]): [`transform_interleaved`] from a
+//!   [`gamut_core::RawImage`], [`transform_in_place`] over a [`gamut_core::ImageBuf`], and
+//!   [`transform_planar`], with alpha passthrough and lcms2-style round-half-up re-encoding.
 //! - [`bpc`] — black-point **detection** ([`detect_black_point`],
 //!   [`detect_destination_black_point`] — lcms2's estimators transcribed) and the
 //!   compensation scaling [`IccTransform`] applies.
@@ -113,7 +113,7 @@ pub mod chain;
 pub mod clut;
 pub mod curve;
 pub mod error;
-pub mod gamut;
+pub mod gamut_check;
 pub mod image;
 mod intent;
 pub mod link;
@@ -128,16 +128,13 @@ pub use chain::ProofingOptions;
 #[doc(inline)]
 pub use clut::{ClutInterpolation, ClutTable, NodePrecision};
 #[doc(inline)]
-pub use curve::ToneCurve;
+pub use curve::IccCurve;
 #[doc(inline)]
 pub use error::{CmmError, Result};
 #[doc(inline)]
-pub use gamut::GamutCheck;
+pub use gamut_check::GamutCheck;
 #[doc(inline)]
-pub use image::{
-    transform_in_place_u8, transform_in_place_u16, transform_interleaved_u8,
-    transform_interleaved_u16, transform_planar_u8, transform_planar_u16,
-};
+pub use image::{ImageSample, transform_in_place, transform_interleaved, transform_planar};
 #[doc(inline)]
 pub use link::{device_to_pcs, pcs_to_device};
 #[doc(inline)]

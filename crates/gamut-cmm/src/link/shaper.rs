@@ -14,7 +14,7 @@ use gamut_color::lab::D50_XYZ;
 use gamut_color::linalg::mat_inv_3x3;
 use gamut_icc::{ColorSpace, CurveOrParametric, IccProfile, KnownTag, Signature, TagData};
 
-use crate::curve::ToneCurve;
+use crate::curve::IccCurve;
 use crate::error::{CmmError, Result};
 use crate::pipeline::{Pipeline, Stage};
 
@@ -32,15 +32,15 @@ fn read_colorant(profile: &IccProfile, tag: KnownTag) -> Result<[f64; 3]> {
     }
 }
 
-/// Reads one TRC tag (`curveType` or `parametricCurveType`) as a [`ToneCurve`].
+/// Reads one TRC tag (`curveType` or `parametricCurveType`) as an [`IccCurve`].
 ///
 /// With `prefer_cicp` (`TransformOptions::prefer_cicp_transfer`), the transfer function the
 /// profile's `cicp` tag names stands in for the tag's curve — evaluated in closed form — when
 /// `gamut-color` evaluates that code point **and** the two curves agree
-/// ([`ToneCurve::agrees_with`]). The tag is still read and validated first, so the option
+/// ([`IccCurve::agrees_with`]). The tag is still read and validated first, so the option
 /// never turns a malformed profile into a buildable one; and a profile whose `cicp` tag names
 /// a different curve than its TRC (a §10.3 violation) keeps rendering through its TRC.
-fn read_trc(profile: &IccProfile, tag: KnownTag, prefer_cicp: bool) -> Result<ToneCurve> {
+fn read_trc(profile: &IccProfile, tag: KnownTag, prefer_cicp: bool) -> Result<IccCurve> {
     let sig = Signature::from(tag);
     let curve = match profile.get(tag) {
         None => return Err(CmmError::MissingTag(sig)),
@@ -48,10 +48,10 @@ fn read_trc(profile: &IccProfile, tag: KnownTag, prefer_cicp: bool) -> Result<To
         Some(TagData::ParametricCurve(curve)) => CurveOrParametric::Parametric(curve.clone()),
         Some(_) => return Err(CmmError::BadTagType(sig)),
     };
-    let curve = ToneCurve::new(&curve)?;
+    let curve = IccCurve::new(&curve)?;
     if prefer_cicp
         && let Some(TagData::Cicp(cicp)) = profile.get(KnownTag::Cicp)
-        && let Some(closed) = ToneCurve::cicp_transfer(cicp.transfer_characteristics)
+        && let Some(closed) = IccCurve::cicp_transfer(cicp.transfer_characteristics)
         && closed.agrees_with(&curve)
     {
         return Ok(closed);
@@ -72,7 +72,7 @@ fn colorant_matrix(profile: &IccProfile) -> Result<[[f64; 3]; 3]> {
 }
 
 /// Reads the three RGB TRC tags, in channel order.
-fn rgb_trcs(profile: &IccProfile, prefer_cicp: bool) -> Result<Vec<ToneCurve>> {
+fn rgb_trcs(profile: &IccProfile, prefer_cicp: bool) -> Result<Vec<IccCurve>> {
     Ok(vec![
         read_trc(profile, KnownTag::RedTrc, prefer_cicp)?,
         read_trc(profile, KnownTag::GreenTrc, prefer_cicp)?,
@@ -124,7 +124,7 @@ pub(super) fn rgb_pcs_to_device(profile: &IccProfile, prefer_cicp: bool) -> Resu
     let inverse = invert_colorants(&colorant_matrix(profile)?)?;
     let inverted = rgb_trcs(profile, prefer_cicp)?
         .iter()
-        .map(ToneCurve::inverse)
+        .map(IccCurve::inverse)
         .collect::<Result<Vec<_>>>()?;
     let mut stages = Vec::new();
     if profile.header.pcs == ColorSpace::Lab {

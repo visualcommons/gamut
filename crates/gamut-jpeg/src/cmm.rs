@@ -12,11 +12,11 @@
 //! transform is `gamut-cmm`'s `IccTransform::embedded_to_srgb` (media-relative colorimetric, no
 //! black-point compensation — that constructor's docs carry the measurement that rules out the
 //! perceptual intent), and it runs over the decoded raster in place through
-//! `gamut_cmm::transform_in_place_u8`. What this module owns is the JPEG side: reading the
+//! `gamut_cmm::transform_in_place`. What this module owns is the JPEG side: reading the
 //! profile, deciding which streams it applies to, and typing the failures.
 
-use gamut_cmm::{IccTransform, transform_in_place_u8};
-use gamut_core::{DecodeImage, Error, ImageBuf, PixelFormat, Result, Rgb8};
+use gamut_cmm::{IccTransform, transform_in_place};
+use gamut_core::{DecodeImage, Error, ImageBuf, Result, Rgb8};
 use gamut_icc::{ColorSpace, IccProfile};
 
 use crate::JpegDecoder;
@@ -74,15 +74,13 @@ impl JpegDecoder {
             return Ok(image);
         };
         // In place: a second raster would double the peak memory the decoder's limits bound.
-        transform_in_place_u8(&transform, PixelFormat::Rgb8, image.as_mut_samples()).map_err(
-            |e| {
-                Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "JPEG: the colour transform failed on the decoded samples",
-                )
-                .with_detail(e.to_string())
-            },
-        )?;
+        transform_in_place(&transform, &mut image).map_err(|e| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: the colour transform failed on the decoded samples",
+            )
+            .with_detail(e.to_string())
+        })?;
         Ok(image)
     }
 }

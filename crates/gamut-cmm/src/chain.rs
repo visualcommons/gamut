@@ -35,7 +35,6 @@
 use gamut_icc::{ColorSpace, DeviceClass, IccProfile, RenderingIntent};
 
 use crate::error::{CmmError, Result};
-use crate::optimize::PipelineOptimization;
 use crate::pipeline::{Pipeline, Stage};
 use crate::transform::{IccTransform, TransformOptions, is_empty_layer};
 use crate::{bpc, intent, link};
@@ -252,30 +251,44 @@ fn reject_named_color(profile: &IccProfile) -> Result<()> {
 
 /// Options for building an [`IccTransform::proofing`] transform.
 ///
-/// The three knobs of lcms2's `cmsCreateProofingTransform`: `intent` renders source colours
-/// onto the simulated (proof) device, `proofing_intent` renders the simulation onto the
-/// actual destination, and `black_point_compensation` applies to the source→proof leg only
-/// (as in lcms2 — BPC on the return legs would double-compensate).
+/// The knobs of lcms2's `cmsCreateProofingTransform`: the embedded [`TransformOptions`]
+/// configure the source→proof simulation, and `proofing_intent` renders the simulation onto
+/// the actual destination.
+///
+/// The struct is `#[non_exhaustive]` so a further option can be added without a breaking
+/// change: build it with [`ProofingOptions::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProofingOptions {
-    /// The rendering intent for the source→proof simulation (lcms2's `nIntent` — the intent
-    /// whose rendition is being previewed).
-    pub intent: RenderingIntent,
+    /// The source→proof simulation, read field by field:
+    ///
+    /// - [`intent`](TransformOptions::intent) — the rendering intent onto the simulated
+    ///   (proof) device (lcms2's `nIntent` — the intent whose rendition is being previewed);
+    /// - [`black_point_compensation`](TransformOptions::black_point_compensation) — applied
+    ///   on the source→proof leg only (hops 1–2 of the internal chain; the proof→destination
+    ///   legs never compensate, as in lcms2's `cmsCreateProofingTransform` BPC array — BPC on
+    ///   the return legs would double-compensate);
+    /// - [`optimization`](TransformOptions::optimization) — how far to collapse the
+    ///   assembled four-hop pipeline before evaluating it;
+    /// - [`prefer_cicp_transfer`](TransformOptions::prefer_cicp_transfer) — evaluate the
+    ///   shaper profiles' tone curves from their `cicp` tags, on every hop.
+    pub transform: TransformOptions,
     /// The rendering intent for bringing the simulated colours to the destination device
     /// (lcms2's `ProofingIntent`; typically media-relative or ICC-absolute for a faithful
     /// preview).
     pub proofing_intent: RenderingIntent,
-    /// Apply black-point compensation on the source→proof leg (hops 1–2 of the internal
-    /// chain; the proof→destination legs never compensate, as in lcms2's
-    /// `cmsCreateProofingTransform` BPC array).
-    pub black_point_compensation: bool,
-    /// How far to collapse the assembled four-hop pipeline before evaluating it — as
-    /// [`TransformOptions::optimization`], and defaulting the same way (off).
-    pub optimization: PipelineOptimization,
-    /// Evaluate the shaper profiles' tone curves from their `cicp` tags, on every hop — as
-    /// [`TransformOptions::prefer_cicp_transfer`], whose docs carry the conditions and the
-    /// measured trade.
-    pub prefer_cicp_transfer: bool,
+}
+
+impl ProofingOptions {
+    /// Proofing with `transform` configuring the source→proof simulation and
+    /// `proofing_intent` rendering it onto the destination.
+    #[must_use]
+    pub const fn new(transform: TransformOptions, proofing_intent: RenderingIntent) -> Self {
+        Self {
+            transform,
+            proofing_intent,
+        }
+    }
 }
 
 impl IccTransform {
@@ -363,7 +376,7 @@ impl IccTransform {
     /// `cmsFLAGS_SOFTPROOFING`, which is exactly the four-profile chain
     /// `[src, proof, proof, dst]` at per-hop intents `[intent, intent, media-relative,
     /// proofing_intent]` with BPC on the first two hops only (`cmsxform.c:1365-1395`): the
-    /// source is rendered onto the proof device at `options.intent`, read back
+    /// source is rendered onto the proof device at `options.transform.intent`, read back
     /// colorimetrically (media-relative), and carried to the destination at
     /// `options.proofing_intent`.
     ///
@@ -381,16 +394,17 @@ impl IccTransform {
         for profile in [src, dst, proof] {
             reject_named_color(profile)?;
         }
+        let simulation = options.transform;
         let profiles = [src, proof, proof, dst];
         let intents = [
-            options.intent,
-            options.intent,
+            simulation.intent,
+            simulation.intent,
             RenderingIntent::MediaRelativeColorimetric,
             options.proofing_intent,
         ];
         let bpc_flags = [
-            options.black_point_compensation,
-            options.black_point_compensation,
+            simulation.black_point_compensation,
+            simulation.black_point_compensation,
             false,
             false,
         ];
@@ -399,9 +413,9 @@ impl IccTransform {
                 &profiles,
                 &intents,
                 &bpc_flags,
-                options.prefer_cicp_transfer,
+                simulation.prefer_cicp_transfer,
             )?,
-            options.optimization,
+            simulation.optimization,
         )
     }
 }
@@ -414,6 +428,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::optimize::PipelineOptimization;
     use crate::transform::Transform as _;
 
     const D65: [f64; 3] = [0.9504, 1.0, 1.0889];
@@ -715,25 +730,15 @@ mod tests {
         // BPC collapses to (numerically) the plain src→dst transform.
         let src = rgb_shaper(None);
         let dst = rgb_shaper(Some(D65));
-        let options = ProofingOptions {
+        let relative = TransformOptions {
             intent: RenderingIntent::MediaRelativeColorimetric,
-            proofing_intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
             prefer_cicp_transfer: false,
         };
+        let options = ProofingOptions::new(relative, RenderingIntent::MediaRelativeColorimetric);
         let proofed = IccTransform::proofing(&src, &dst, &src, options).unwrap();
-        let plain = IccTransform::between(
-            &src,
-            &dst,
-            TransformOptions {
-                intent: RenderingIntent::MediaRelativeColorimetric,
-                black_point_compensation: false,
-                optimization: PipelineOptimization::None,
-                prefer_cicp_transfer: false,
-            },
-        )
-        .unwrap();
+        let plain = IccTransform::between(&src, &dst, relative).unwrap();
         assert_eq!(proofed.input_channels(), 3);
         assert_eq!(proofed.output_channels(), 3);
         for rgb in [[0.1, 0.5, 0.9], [1.0; 3]] {
@@ -821,13 +826,14 @@ mod tests {
     fn proofing_honours_prefer_cicp_transfer() {
         let (srgb, pq) = srgb_and_pq();
         for prefer_cicp_transfer in [false, true] {
-            let options = ProofingOptions {
+            let simulation = TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
-                proofing_intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer,
             };
+            let options =
+                ProofingOptions::new(simulation, RenderingIntent::MediaRelativeColorimetric);
             let proofed = IccTransform::proofing(&srgb, &pq, &srgb, options).unwrap();
             assert_pq_black(eval3(&proofed, &[0.0; 3]), prefer_cicp_transfer);
         }

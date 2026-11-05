@@ -737,7 +737,7 @@ exclude_re = [
     #   Equivalent. (The analogous Icc(Sampled) arm deletion IS killable — tables of other
     #   lengths diverge — and is killed by
     #   `sampled_monotonicity_is_judged_on_entries_not_probes`.)
-    '^crates/gamut-cmm/src/curve\.rs:185:13: delete match arm Repr::SampledInverse\{table\} \| Repr::Table\{table\} in ToneCurve::is_monotonic$',
+    '^crates/gamut-cmm/src/curve\.rs:185:13: delete match arm Repr::SampledInverse\{table\} \| Repr::Table\{table\} in IccCurve::is_monotonic$',
     #   reverse_table's no-interval arm (the only bare `<`/`>` in the function): reached only
     #   when the interval scan fails, and for the monotonic tables reverse_table receives, a
     #   target exactly equal to table[0] is always bracketed by segment 0 (`table[0] <= y &&
@@ -773,7 +773,7 @@ exclude_re = [
     #   clip_probe_l (the darker-colorant L* clip, cmssamp.c:129-134): `> 95` vs `>= 95` is
     #   decided only at L* == 95.0 exactly, which no 16-bit Lab encoding produces (v4 needs
     #   raw 62258.25, v2 the non-representable 62016/652.8 quotient); the `< 0` arm is dead
-    #   in this crate's decoded pipelines (every PCS decode yields L* ≥ 0 — ToneCurve clamps
+    #   in this crate's decoded pipelines (every PCS decode yields L* ≥ 0 — IccCurve clamps
     #   encodings to [0, 1] and XYZ decodes are non-negative), kept as lcms2 transcription
     #   fidelity, and at the one reachable disagreement point (L* == 0) both variants of both
     #   mutations still return 0. The `> `→`==`, `||`→`&&`, and body mutants ARE killed
@@ -781,7 +781,7 @@ exclude_re = [
     '^crates/gamut-cmm/src/bpc\.rs:240:10: replace > with >= in clip_probe_l$',
     '^crates/gamut-cmm/src/bpc\.rs:240:22: replace < with <= in clip_probe_l$',
     '^crates/gamut-cmm/src/bpc\.rs:240:22: replace < with == in clip_probe_l$',
-    # gamut-cmm gamut.rs — the one boundary twin of the transcribed GamutSampler decision
+    # gamut-cmm gamut_check.rs — the one boundary twin of the transcribed GamutSampler decision
     # table (#330). ratio_excess isolates the table's ratio arm precisely so this can be
     # excluded without shadowing the killable threshold mutants in GamutCheck::excess (all
     # killed by decision_table_arms_are_transcribed_verbatim's exact-threshold pins): at
@@ -789,7 +789,7 @@ exclude_re = [
     # the untaken one returns 0.0 — bitwise the same output, so `>` vs `>=` cannot change
     # observable behaviour. Every other mutant in ratio_excess (the dE2 == 0 guard, the
     # division, the subtraction, the branch bodies) IS killed by the same test's exact pins.
-    '^crates/gamut-cmm/src/gamut\.rs:193:14: replace > with >= in ratio_excess$',
+    '^crates/gamut-cmm/src/gamut_check\.rs:193:14: replace > with >= in ratio_excess$',
     # gamut-webp VP8 sign reconstruction (tokens.rs / quant.rs) — two `x < 0` sign tests whose
     # `<=` twin differs only at zero, which neither can reach. `walk_block`'s sign bit is written
     # inside `if token != DCT_0`, and `token_for_abs` returns `DCT_0` exactly when the level is

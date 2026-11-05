@@ -8,7 +8,7 @@
 use gamut_color::lab::{D50_XYZ, lab_to_xyz, xyz_to_lab};
 
 use crate::clut::{ClutTable, Fixed16};
-use crate::curve::ToneCurve;
+use crate::curve::IccCurve;
 use crate::error::{CmmError, Result};
 use crate::transform::{
     Transform, check_buffers, encode_u8, encode_u16, narrow_u16, through_f64, widen_u8,
@@ -58,9 +58,9 @@ pub enum Stage {
     ///
     /// The stage form of the "curve set" every ICC LUT transform carries (the input/output
     /// tables of `lut8`/`lut16`, the A/M/B curves of `lutAToB`/`lutBToA`, and the
-    /// matrix-shaper TRCs). Each [`ToneCurve`] clamps its channel to `[0, 1]` on both sides
-    /// (see [`ToneCurve::eval`]).
-    Curves(Vec<ToneCurve>),
+    /// matrix-shaper TRCs). Each [`IccCurve`] clamps its channel to `[0, 1]` on both sides
+    /// (see [`IccCurve::eval`]).
+    Curves(Vec<IccCurve>),
     /// A multi-dimensional colour lookup table: interpolates
     /// [`input_channels`](ClutTable::input_channels) samples through a validated grid to
     /// [`output_channels`](ClutTable::output_channels) samples.
@@ -735,7 +735,7 @@ mod tests {
     /// `[Clamp, Curves(gamma 2.2)]` on three channels, resampled at `level`.
     fn resampled_gamma(level: crate::PipelineOptimization) -> Pipeline {
         // 563/256 ≈ 2.2 in u8Fixed8Number.
-        let gamma = ToneCurve::new(&gamut_icc::CurveOrParametric::Curve(
+        let gamma = IccCurve::new(&gamut_icc::CurveOrParametric::Curve(
             gamut_icc::Curve::Gamma(gamut_icc::U8Fixed8(563)),
         ))
         .unwrap();

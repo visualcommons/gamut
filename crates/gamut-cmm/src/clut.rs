@@ -224,8 +224,10 @@ fn linear16(a: i64, l: u16, h: u16) -> u16 {
 
 /// How a [`ClutTable`] interpolates between grid nodes.
 ///
-/// The discriminants are permanent and append-only (workspace C-portability convention).
+/// The discriminants are permanent and append-only (workspace C-portability convention), and
+/// the enum is `#[non_exhaustive]`, so appending one is not a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u32)]
 pub enum ClutInterpolation {
     /// Classic 2ᴺ-corner multilinear (linear/bilinear/trilinear/…) for any dimension count.
@@ -251,8 +253,10 @@ pub enum ClutInterpolation {
 /// [`PipelineOptimization::PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16);
 /// each carries its own budget in the conformance gate (`STATUS.md`).
 ///
-/// The discriminants are permanent and append-only (workspace C-portability convention).
+/// The discriminants are permanent and append-only (workspace C-portability convention), and
+/// the enum is `#[non_exhaustive]`, so appending one is not a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u32)]
 pub enum NodePrecision {
     /// `f64` nodes, `f64` interpolation: the Tier-1 reference arithmetic, transcribed from
