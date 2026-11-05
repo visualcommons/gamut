@@ -169,7 +169,7 @@ from the Exif sub-IFD — so a name for them would only invite a write that is s
 (One written into some other directory is not one the writer looks for: it survives as an ordinary
 field that no accessor reads.) The crate also gives full read/write
 round-trips over `gamut-ifd`, the typed [`GpsInfo`] projection, and both JPEG and uncompressed
-strip thumbnails. Intentionally deferred (and designed to be added without breaking the 1.0 API —
+strip thumbnails. Intentionally deferred (and designed to be added without breaking the current major's API —
 the catalogue and vendor enums are `#[non_exhaustive]`):
 
 - **Per-vendor MakerNote tag decoding.** The `MakerNote` block is preserved verbatim, its vendor
@@ -203,7 +203,7 @@ the catalogue and vendor enums are `#[non_exhaustive]`):
 
 ## Status
 
-Implemented and released as **v1** (issue #194). See [STATUS.md](STATUS.md).
+Implemented and stable at the current major (first released as 1.0 under issue #194). See [STATUS.md](STATUS.md).
 
 ## License
 

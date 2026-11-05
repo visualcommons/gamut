@@ -92,7 +92,7 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   `metadata` feature).
 - **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png,
   gamut-tiff and gamut-dng; deliberately encoder-only — workspace decoders inflate via
-  `miniz_oxide`. ← nothing. No dependency at all, not even `gamut-core` (`src/lib.rs:6`).
+  `miniz_oxide`. ← nothing. No dependency at all, not even `gamut-core`.
 - **gamut-png** — PNG codec (3rd edition, W3C): space-efficient encoder and spec-compliant
   decoder — all colour types/bit depths, Adam7 *decoding*, all filters, decode limits for
   hostile input, ancillary metadata surfaced as raw `MetadataBlock`-ready payloads

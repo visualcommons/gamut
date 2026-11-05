@@ -52,7 +52,7 @@ name (for example, `ColorModel::Rgba` is `"Rgba"` in JSON). The feature is disab
 
 ## Status
 
-Stable foundation with a frozen public surface: the [`EncodeImage`] / [`DecodeImage`] traits, the
+Stable foundation whose public surface changes incompatibly only in a new major release: the [`EncodeImage`] / [`DecodeImage`] traits, the
 branded [`ImageRef`] / [`ImageBuf`] buffers and [`Pixel`] markers, [`Dimensions`], [`Result`], and
 the structured [`Error`] / [`ErrorKind`] surface. Every codec in the workspace is built on it.
 

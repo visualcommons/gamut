@@ -10,9 +10,8 @@ encoding** that is:
 - **Memory-safe on hostile input.** `#![forbid(unsafe_code)]`.
 - **Clean-slate from the spec.** Implemented directly from the H.266/VVC specification (see
   [`../../references/`](../../references)) rather than wrapping a C reference encoder.
-- **Layered on shared crates.** It will build on [`gamut-color`](../gamut-color),
-  [`gamut-dsp`](../gamut-dsp), and [`gamut-bitstream`](../gamut-bitstream), and wrap output via
-  [`gamut-isobmff`](../gamut-isobmff) for the container.
+- **Layered on shared crates.** It will reuse the workspace's shared primitives and container
+  crates rather than carry its own copies.
 
 Note: VVC is patent-encumbered, unlike gamut's royalty-free focus formats; this crate is scaffolding
 and may move or be dropped as the project's scope sharpens (see the workspace README's "Scope").

@@ -122,7 +122,9 @@ exercises tools this crate's encoder never emits.
 - M1: lossy intra (DCT/ADST + quantization), adaptive CDFs ✅, more intra prediction modes.
 - #259: the pure-Rust decoder — headers ✅, then tile parsing, reconstruction, the in-loop
   filters, and the 10/12-bit + 4:2:0/4:2:2 pixel-format matrix.
-- Later: in-loop filters, multi-tile, and inter coding for animated AVIF.
+
+The encoder already emits the in-loop filters and uniform multi-tile frames. Inter coding is out
+of scope: gamut is image-first, so animated AVIF is not planned.
 
 ## License
 

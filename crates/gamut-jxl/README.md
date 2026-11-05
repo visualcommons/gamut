@@ -260,7 +260,7 @@ a binary that links the encoder therefore means honouring those upstream notices
 
 ## Status
 
-The v1 surface — supported pixel layouts, lossless/lossy modes, container framing, the differential
+The current surface — supported pixel layouts, lossless/lossy modes, container framing, the differential
 oracle regime, and the full deferred/out-of-scope ledger (including the jxl-rs spec-coverage
 analysis mandated by issue #243) — is dispositioned row by row in [STATUS.md](STATUS.md).
 

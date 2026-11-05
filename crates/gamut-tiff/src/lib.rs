@@ -19,7 +19,7 @@
 //! Adobe/Aldus, Final — June 3 1992), Adobe Photoshop TIFF Technical Note 3 (Deflate), and the
 //! BigTIFF extension (`references/tiff/bigtiff.html`) rather than wrapping libtiff.
 //!
-//! The v1 surface (built in issue #107, frozen in issue #187): [`TiffEncoder`] writes 8- and
+//! The current major's surface (built in issue #107, first stabilised in issue #187): [`TiffEncoder`] writes 8- and
 //! 16-bit grayscale/RGB/RGBA, 8-bit CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles,
 //! single- or multi-page) — uncompressed, PackBits, LZW/Deflate (optionally with the
 //! horizontal-differencing [`Predictor`]), or (for bilevel) Modified Huffman / Group 4 fax —
