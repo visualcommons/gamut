@@ -89,6 +89,9 @@ enum Outcome {
     /// Return a YUV raster of the given constant luma over [`scripted_yuv`]'s varying chroma —
     /// used to prove discriminant mismatches are rejected as well as to serve genuine `VP8 ` jobs.
     Yuv(u8),
+    /// Return a mid-grey YUV raster laid out in this subsampling — used to prove a decode backend
+    /// cannot hand VP8 anything but 4:2:0 planes.
+    Planes(ChromaSubsampling),
     /// Return these bytes as the encoded chunk payload.
     Bytes(Vec<u8>),
     /// Fail with this error.
@@ -178,6 +181,19 @@ impl WebpCodestreamDecoder for ScriptedDecoder {
                 d.height(),
                 *luma,
             )?)),
+            Outcome::Planes(layout) => {
+                let (cw, ch) = layout.chroma_dimensions(d.width(), d.height());
+                let chroma = vec![128; (cw * ch) as usize];
+                Ok(DecodedRaster::Yuv420(Planar8::from_planes_subsampled(
+                    d,
+                    *layout,
+                    [
+                        vec![128; (d.width() * d.height()) as usize],
+                        chroma.clone(),
+                        chroma,
+                    ],
+                )?))
+            }
             Outcome::Bytes(_) => panic!("byte outcome is encode-only"),
             Outcome::Fail(msg) => Err(Error::invalid_input(env!("CARGO_PKG_NAME"), msg)),
             Outcome::Unsupported(msg) => Err(Error::unsupported(env!("CARGO_PKG_NAME"), msg)),
@@ -406,6 +422,28 @@ fn decode_routing_is_per_codestream() {
     let _: ImageBuf<Rgb8> = dec2.decode_image(&lossy).expect("lossy via tail");
     assert_eq!(log2.supports(), vec!["vp8lonly"]);
     assert!(log2.ran().is_empty(), "VP8L backend ran on a VP8 stream");
+}
+
+/// A pushed backend's VP8 raster is admitted only as 4:2:0, the layout the `Yuv420` variant
+/// documents, and anything else is refused as invalid input before conversion is attempted.
+#[test]
+fn decode_rejects_a_backends_non_420_vp8_raster_as_invalid_input() {
+    let (file, _) = lossy_fixture();
+    let log = Arc::new(Log::default());
+    let mut dec = WebpDecoder::new();
+    dec.push_backend(ScriptedDecoder::new(
+        "yuv444",
+        Some(WebpCodestream::Vp8),
+        Outcome::Planes(ChromaSubsampling::Cs444),
+        &log,
+    ));
+    let err: Result<ImageBuf<Rgb8>> = dec.decode_image(&file);
+    assert_error(
+        err,
+        ErrorKind::InvalidInput,
+        "WebP: a VP8 raster must be 4:2:0 planes",
+    );
+    assert_eq!(log.ran(), vec!["yuv444"]);
 }
 
 #[test]

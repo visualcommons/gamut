@@ -231,10 +231,15 @@ impl WebpDecoder {
         }
     }
 
-    /// Unwraps a lossy decode result, which is YUV 4:2:0 by construction.
-    fn expect_yuv(raster: DecodedRaster) -> Result<Planar8> {
+    /// Unwraps a lossy decode result with its dimensions.
+    ///
+    /// The built-in tail produces 4:2:0 planes by construction, but a pushed backend's raster is
+    /// admitted only through [`DecodedRaster::dimensions`], which refuses any other layout as
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput).
+    fn expect_yuv(raster: DecodedRaster) -> Result<(Dimensions, Planar8)> {
+        let dims = raster.dimensions()?;
         match raster {
-            DecodedRaster::Yuv420(yuv) => Ok(yuv),
+            DecodedRaster::Yuv420(yuv) => Ok((dims, yuv)),
             DecodedRaster::Argb { .. } => Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "WebP: VP8 decode produced an ARGB raster",
@@ -309,8 +314,8 @@ impl WebpDecoder {
                 Ok((dims, format, out))
             }
             WebpCodestream::Vp8 => {
-                let yuv = Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
-                let dims = Dimensions::new(yuv.width(), yuv.height())?;
+                let (dims, yuv) =
+                    Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
                 // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
                 let rgb = yuv.to_rgb8_bt601(ColorRange::Limited, self.upsampling)?;
                 // A lossy bitstream carries no alpha of its own: it exists only when the extended
