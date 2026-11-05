@@ -92,8 +92,12 @@ impl CanonicalCode {
 /// each loop used to stand here, and every relaxation of it was a mutant no input could tell apart.
 /// A length beyond [`MAX_CODE_LEN`] — which [`build_lengths`] never produces — is skipped by the
 /// `get_mut`s, as that guard skipped it.
+///
+/// `bl_count` stops at `MAX_CODE_LEN - 1`: `next_code[bits]` reads only `bl_count[bits - 1]`, so
+/// the count of the longest codes is never needed, and the `get_mut` drops it. Sized `MAX_CODE_LEN
+/// + 1`, its `+ 1` had a `* 1` twin that shrank the array to exactly this and changed nothing.
 fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
-    let mut bl_count = [0u32; MAX_CODE_LEN + 1];
+    let mut bl_count = [0u32; MAX_CODE_LEN];
     for &len in lengths {
         if let Some(count) = bl_count.get_mut(usize::from(len)) {
             *count += 1;
