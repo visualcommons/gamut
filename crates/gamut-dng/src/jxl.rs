@@ -67,8 +67,8 @@ pub(crate) fn decode_chunk(bytes: &[u8], cols: usize, rows: usize, spp: usize) -
 }
 
 /// Encodes one chunk of `cols × rows` pixels at `spp` full-range 16-bit samples each as a bare
-/// JPEG XL codestream (the spec's recommendation for tiled image data). `distance` 0.0 is
-/// lossless (the default); `effort` is the libjxl effort level `1..=10`.
+/// JPEG XL codestream (the spec's recommendation for tiled image data). `distance` `None` is
+/// lossless (the default), `Some` lossy at that distance.
 #[cfg(all(
     feature = "jxl-encode",
     any(not(target_arch = "wasm32"), target_os = "emscripten")
@@ -78,24 +78,15 @@ pub(crate) fn encode_chunk(
     cols: usize,
     rows: usize,
     spp: usize,
-    distance: f32,
-    effort: u8,
+    distance: Option<gamut_jxl::Distance>,
+    effort: gamut_jxl::Effort,
 ) -> Result<Vec<u8>> {
     use gamut_core::{Dimensions, EncodeImage, ImageRef};
-    use gamut_jxl::{Distance, Effort, JxlEncoder};
+    use gamut_jxl::JxlEncoder;
 
-    let effort = Effort::from_level(effort).ok_or_else(|| {
-        Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "DNG: JPEG XL effort must be in 1..=10",
-        )
-    })?;
-    let encoder = if distance == 0.0 {
-        JxlEncoder::lossless()
-    } else {
-        JxlEncoder::lossy(Distance::new(distance)?)
-    };
-    let encoder = encoder.with_effort(effort);
+    let encoder = distance
+        .map_or_else(JxlEncoder::lossless, JxlEncoder::lossy)
+        .with_effort(effort);
     let dims = Dimensions::new(cols as u32, rows as u32)?;
     let mut out = Vec::new();
     match spp {

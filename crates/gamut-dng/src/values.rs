@@ -3,20 +3,21 @@
 //! `NewSubFileType` bit values.
 //!
 //! Values come from the **DNG 1.7.1.0** specification and the Adobe DNG SDK's `dng_tag_values.h`.
-//! Each enum mirrors the structural-codec pattern used elsewhere in the workspace: a `from_code`
-//! that rejects unknown codes (`None`) and a `code` that returns the on-disk value.
+//! Each enum follows gamut-ifd's tag-value idiom: an explicit `#[repr]` of the tag's own on-disk
+//! type (`u16` for a `SHORT` tag, `u32` for a `LONG` one) with the code as the permanent
+//! discriminant, read with one `TryFrom` that refuses an unassigned code and written with
+//! `u16::from` / `u32::from`.
 //!
 //! The `Compression`, `PhotometricInterpretation`, `Predictor` and `SampleFormat` codes are
 //! gamut-ifd's, shared with gamut-tiff and re-exported here: each is a `#[repr(u16)]` enum read
 //! with `TryFrom<u16>` and written with `u16::from`. Their union carries codes only TIFF assigns
 //! (CCITT, LZW and PackBits compression, the palette and CMYK photometries, …), and what stays
 //! here is which of them a DNG reader admits. What gamut-dng does with a `Compression` is asked
-//! through the free functions [`is_decodable`] and [`is_lossy`], which replace the inherent
-//! methods of the same names the crate-local enum carried.
+//! through the free functions [`is_decodable`](crate::is_decodable) and
+//! [`is_lossy`](crate::is_lossy), which replace the inherent methods of the same names the
+//! crate-local enum carried.
 
 pub use gamut_ifd::tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat};
-
-pub use crate::compression::{is_decodable, is_lossy};
 
 /// Reads an on-disk `Compression` code (tag 259) as one of the five DNG 1.7.1.0 assigns —
 /// uncompressed, JPEG, Deflate, lossy JPEG and JPEG XL — or `None`.
@@ -57,65 +58,77 @@ pub(crate) fn dng_photometric(code: u16) -> Option<PhotometricInterpretation> {
         })
 }
 
+/// The `unsupported` error every `TryFrom` below returns for an unassigned code.
+fn unassigned(message: &'static str) -> gamut_core::Error {
+    gamut_core::Error::unsupported(env!("CARGO_PKG_NAME"), message)
+}
+
 /// A calibration illuminant, stored in `CalibrationIlluminant1/2/3` (and equal to the EXIF
 /// `LightSource` codes).
 ///
 /// [`Other`](Self::Other) (`255`) signals that spectral data is supplied separately via the
 /// `IlluminantData1/2/3` tags instead of a named illuminant.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+#[non_exhaustive]
 pub enum CalibrationIlluminant {
     /// `0` — unknown.
-    Unknown,
+    Unknown = 0,
     /// `1` — daylight.
-    Daylight,
+    Daylight = 1,
     /// `2` — fluorescent.
-    Fluorescent,
+    Fluorescent = 2,
     /// `3` — tungsten (incandescent).
-    Tungsten,
+    Tungsten = 3,
     /// `4` — flash.
-    Flash,
+    Flash = 4,
     /// `9` — fine weather.
-    FineWeather,
+    FineWeather = 9,
     /// `10` — cloudy weather.
-    CloudyWeather,
+    CloudyWeather = 10,
     /// `11` — shade.
-    Shade,
+    Shade = 11,
     /// `12` — daylight fluorescent (D, 5700–7100 K).
-    DaylightFluorescent,
+    DaylightFluorescent = 12,
     /// `13` — day-white fluorescent (N, 4600–5500 K).
-    DayWhiteFluorescent,
+    DayWhiteFluorescent = 13,
     /// `14` — cool-white fluorescent (W, 3800–4500 K).
-    CoolWhiteFluorescent,
+    CoolWhiteFluorescent = 14,
     /// `15` — white fluorescent (WW, 3250–3800 K).
-    WhiteFluorescent,
+    WhiteFluorescent = 15,
     /// `16` — warm-white fluorescent (L, 2600–3250 K).
-    WarmWhiteFluorescent,
+    WarmWhiteFluorescent = 16,
     /// `17` — Standard Light A.
-    StandardLightA,
+    StandardLightA = 17,
     /// `18` — Standard Light B.
-    StandardLightB,
+    StandardLightB = 18,
     /// `19` — Standard Light C.
-    StandardLightC,
+    StandardLightC = 19,
     /// `20` — D55.
-    D55,
+    D55 = 20,
     /// `21` — D65.
-    D65,
+    D65 = 21,
     /// `22` — D75.
-    D75,
+    D75 = 22,
     /// `23` — D50.
-    D50,
+    D50 = 23,
     /// `24` — ISO studio tungsten.
-    IsoStudioTungsten,
+    IsoStudioTungsten = 24,
     /// `255` — other (spectral data given via `IlluminantData`).
-    Other,
+    Other = 255,
 }
 
-impl CalibrationIlluminant {
-    /// Returns the illuminant for an on-disk tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u16) -> Option<Self> {
-        Some(match code {
+impl TryFrom<u16> for CalibrationIlluminant {
+    type Error = gamut_core::Error;
+
+    /// Maps an on-disk `CalibrationIlluminant` code to its illuminant.
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a code the
+    /// specification does not assign.
+    fn try_from(code: u16) -> Result<Self, Self::Error> {
+        Ok(match code {
             0 => CalibrationIlluminant::Unknown,
             1 => CalibrationIlluminant::Daylight,
             2 => CalibrationIlluminant::Fluorescent,
@@ -138,37 +151,15 @@ impl CalibrationIlluminant {
             23 => CalibrationIlluminant::D50,
             24 => CalibrationIlluminant::IsoStudioTungsten,
             255 => CalibrationIlluminant::Other,
-            _ => return None,
+            _ => return Err(unassigned("unrecognised CalibrationIlluminant code")),
         })
     }
+}
 
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u16 {
-        match self {
-            CalibrationIlluminant::Unknown => 0,
-            CalibrationIlluminant::Daylight => 1,
-            CalibrationIlluminant::Fluorescent => 2,
-            CalibrationIlluminant::Tungsten => 3,
-            CalibrationIlluminant::Flash => 4,
-            CalibrationIlluminant::FineWeather => 9,
-            CalibrationIlluminant::CloudyWeather => 10,
-            CalibrationIlluminant::Shade => 11,
-            CalibrationIlluminant::DaylightFluorescent => 12,
-            CalibrationIlluminant::DayWhiteFluorescent => 13,
-            CalibrationIlluminant::CoolWhiteFluorescent => 14,
-            CalibrationIlluminant::WhiteFluorescent => 15,
-            CalibrationIlluminant::WarmWhiteFluorescent => 16,
-            CalibrationIlluminant::StandardLightA => 17,
-            CalibrationIlluminant::StandardLightB => 18,
-            CalibrationIlluminant::StandardLightC => 19,
-            CalibrationIlluminant::D55 => 20,
-            CalibrationIlluminant::D65 => 21,
-            CalibrationIlluminant::D75 => 22,
-            CalibrationIlluminant::D50 => 23,
-            CalibrationIlluminant::IsoStudioTungsten => 24,
-            CalibrationIlluminant::Other => 255,
-        }
+impl From<CalibrationIlluminant> for u16 {
+    /// The on-disk code, the `SHORT` written to `CalibrationIlluminant1/2/3`.
+    fn from(illuminant: CalibrationIlluminant) -> Self {
+        illuminant as u16
     }
 }
 
@@ -176,35 +167,42 @@ impl CalibrationIlluminant {
 ///
 /// `1` is the common rectangular (square) grid (e.g. ordinary Bayer); `2`–`9` are the staggered
 /// layouts where alternate rows or columns are offset by half a pixel.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u16)]
+#[non_exhaustive]
 pub enum CfaLayout {
     /// `1` — rectangular (square) layout.
     #[default]
-    Rectangular,
+    Rectangular = 1,
     /// `2` — staggered layout A (even columns shifted down by 1/2 row).
-    StaggeredA,
+    StaggeredA = 2,
     /// `3` — staggered layout B (even columns shifted up by 1/2 row).
-    StaggeredB,
+    StaggeredB = 3,
     /// `4` — staggered layout C (even rows shifted right by 1/2 column).
-    StaggeredC,
+    StaggeredC = 4,
     /// `5` — staggered layout D (even rows shifted left by 1/2 column).
-    StaggeredD,
+    StaggeredD = 5,
     /// `6` — staggered layout E.
-    StaggeredE,
+    StaggeredE = 6,
     /// `7` — staggered layout F.
-    StaggeredF,
+    StaggeredF = 7,
     /// `8` — staggered layout G.
-    StaggeredG,
+    StaggeredG = 8,
     /// `9` — staggered layout H.
-    StaggeredH,
+    StaggeredH = 9,
 }
 
-impl CfaLayout {
-    /// Returns the layout for an on-disk tag value, or `None` if out of range.
-    #[must_use]
-    pub fn from_code(code: u16) -> Option<Self> {
-        Some(match code {
+impl TryFrom<u16> for CfaLayout {
+    type Error = gamut_core::Error;
+
+    /// Maps an on-disk `CFALayout` code to its layout.
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a code outside
+    /// `1..=9`.
+    fn try_from(code: u16) -> Result<Self, Self::Error> {
+        Ok(match code {
             1 => CfaLayout::Rectangular,
             2 => CfaLayout::StaggeredA,
             3 => CfaLayout::StaggeredB,
@@ -214,108 +212,108 @@ impl CfaLayout {
             7 => CfaLayout::StaggeredF,
             8 => CfaLayout::StaggeredG,
             9 => CfaLayout::StaggeredH,
-            _ => return None,
+            _ => return Err(unassigned("unrecognised CFALayout code")),
         })
     }
+}
 
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u16 {
-        match self {
-            CfaLayout::Rectangular => 1,
-            CfaLayout::StaggeredA => 2,
-            CfaLayout::StaggeredB => 3,
-            CfaLayout::StaggeredC => 4,
-            CfaLayout::StaggeredD => 5,
-            CfaLayout::StaggeredE => 6,
-            CfaLayout::StaggeredF => 7,
-            CfaLayout::StaggeredG => 8,
-            CfaLayout::StaggeredH => 9,
-        }
+impl From<CfaLayout> for u16 {
+    /// The on-disk code, the `SHORT` written to `CFALayout`.
+    fn from(layout: CfaLayout) -> Self {
+        layout as u16
     }
 }
 
 /// The embedding/usage policy of a camera profile, stored in `ProfileEmbedPolicy` (50941).
-#[non_exhaustive]
+///
+/// `#[repr(u32)]`: the tag is a `LONG`, so its code is the 32-bit value on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+#[non_exhaustive]
 pub enum ProfileEmbedPolicy {
     /// `0` — the profile may be freely copied.
     #[default]
-    AllowCopying,
+    AllowCopying = 0,
     /// `1` — embed the profile only in files it was used to render.
-    EmbedIfUsed,
+    EmbedIfUsed = 1,
     /// `2` — never embed the profile.
-    EmbedNever,
+    EmbedNever = 2,
     /// `3` — no restrictions.
-    NoRestrictions,
+    NoRestrictions = 3,
 }
 
-impl ProfileEmbedPolicy {
-    /// Returns the policy for an on-disk tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u32) -> Option<Self> {
-        Some(match code {
+impl TryFrom<u32> for ProfileEmbedPolicy {
+    type Error = gamut_core::Error;
+
+    /// Maps an on-disk `ProfileEmbedPolicy` code to its policy.
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a code the
+    /// specification does not assign.
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        Ok(match code {
             0 => ProfileEmbedPolicy::AllowCopying,
             1 => ProfileEmbedPolicy::EmbedIfUsed,
             2 => ProfileEmbedPolicy::EmbedNever,
             3 => ProfileEmbedPolicy::NoRestrictions,
-            _ => return None,
+            _ => return Err(unassigned("unrecognised ProfileEmbedPolicy code")),
         })
     }
+}
 
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u32 {
-        match self {
-            ProfileEmbedPolicy::AllowCopying => 0,
-            ProfileEmbedPolicy::EmbedIfUsed => 1,
-            ProfileEmbedPolicy::EmbedNever => 2,
-            ProfileEmbedPolicy::NoRestrictions => 3,
-        }
+impl From<ProfileEmbedPolicy> for u32 {
+    /// The on-disk code, the `LONG` written to `ProfileEmbedPolicy`.
+    fn from(policy: ProfileEmbedPolicy) -> Self {
+        policy as u32
     }
 }
 
 /// The colour space of a preview image, stored in `PreviewColorSpace` (50970).
-#[non_exhaustive]
+///
+/// `#[repr(u32)]`: the tag is a `LONG`, so its code is the 32-bit value on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+#[non_exhaustive]
 pub enum PreviewColorSpace {
     /// `0` — unknown.
     #[default]
-    Unknown,
+    Unknown = 0,
     /// `1` — grayscale, gamma 2.2.
-    GrayGamma22,
+    GrayGamma22 = 1,
     /// `2` — sRGB.
-    Srgb,
+    Srgb = 2,
     /// `3` — Adobe RGB (1998).
-    AdobeRgb,
+    AdobeRgb = 3,
     /// `4` — ProPhoto RGB.
-    ProPhotoRgb,
+    ProPhotoRgb = 4,
 }
 
-impl PreviewColorSpace {
-    /// Returns the colour space for an on-disk tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u32) -> Option<Self> {
-        Some(match code {
+impl TryFrom<u32> for PreviewColorSpace {
+    type Error = gamut_core::Error;
+
+    /// Maps an on-disk `PreviewColorSpace` code to its colour space.
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a code the
+    /// specification does not assign.
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        Ok(match code {
             0 => PreviewColorSpace::Unknown,
             1 => PreviewColorSpace::GrayGamma22,
             2 => PreviewColorSpace::Srgb,
             3 => PreviewColorSpace::AdobeRgb,
             4 => PreviewColorSpace::ProPhotoRgb,
-            _ => return None,
+            _ => return Err(unassigned("unrecognised PreviewColorSpace code")),
         })
     }
+}
 
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u32 {
-        match self {
-            PreviewColorSpace::Unknown => 0,
-            PreviewColorSpace::GrayGamma22 => 1,
-            PreviewColorSpace::Srgb => 2,
-            PreviewColorSpace::AdobeRgb => 3,
-            PreviewColorSpace::ProPhotoRgb => 4,
-        }
+impl From<PreviewColorSpace> for u32 {
+    /// The on-disk code, the `LONG` written to `PreviewColorSpace`.
+    fn from(space: PreviewColorSpace) -> Self {
+        space as u32
     }
 }
 
@@ -323,36 +321,41 @@ impl PreviewColorSpace {
 /// and `ProfileLookTableEncoding` (51108).
 ///
 /// Both tags default to [`Linear`](Self::Linear) when absent, and neither applies to a 2.5D table
-/// (one whose value division count is 1).
-#[non_exhaustive]
+/// (one whose value division count is 1). `#[repr(u32)]`: both tags are `LONG`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+#[non_exhaustive]
 pub enum TableEncoding {
     /// `0` — the table is indexed by linear ProPhoto RGB converted straight to HSV.
     #[default]
-    Linear,
+    Linear = 0,
     /// `1` — the value coordinate is sRGB-encoded before indexing, giving shadows more table
     /// precision.
-    Srgb,
+    Srgb = 1,
 }
 
-impl TableEncoding {
-    /// Returns the encoding for an on-disk tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u32) -> Option<Self> {
-        Some(match code {
+impl TryFrom<u32> for TableEncoding {
+    type Error = gamut_core::Error;
+
+    /// Maps an on-disk table-encoding code to its encoding.
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a code other
+    /// than `0` or `1`.
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        Ok(match code {
             0 => TableEncoding::Linear,
             1 => TableEncoding::Srgb,
-            _ => return None,
+            _ => return Err(unassigned("unrecognised table encoding code")),
         })
     }
+}
 
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u32 {
-        match self {
-            TableEncoding::Linear => 0,
-            TableEncoding::Srgb => 1,
-        }
+impl From<TableEncoding> for u32 {
+    /// The on-disk code, the `LONG` written to the table-encoding tags.
+    fn from(encoding: TableEncoding) -> Self {
+        encoding as u32
     }
 }
 

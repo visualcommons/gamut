@@ -17,15 +17,12 @@
 use std::collections::BTreeMap;
 
 use gamut_core::{Error, Result};
-// The report vocabulary is gamut-ifd's, shared with gamut-tiff; re-exported so this module's
-// public paths still name it.
-pub use gamut_ifd::{Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag};
+// The report vocabulary is gamut-ifd's, shared with gamut-tiff (re-exported at the crate root).
 use gamut_ifd::{
-    AuditFinding, Auditor, ByteOrder, Claim, DataLabel, Ifd, SkipReason, SpanKind,
-    StandardAuditSpec, Value, Variant,
+    Anomaly, AuditFinding, Auditor, ByteOrder, Claim, DataLabel, DeconstructReport, Ifd, Severity,
+    SkipReason, SpanKind, StandardAuditSpec, UnknownFieldType, UnknownTag, Value, Variant,
 };
 
-use crate::decoder::{DecodedDng, DngDecoder};
 use crate::tags;
 use crate::values::{dng_compression, dng_photometric};
 
@@ -310,22 +307,6 @@ fn audit_camera_profile(auditor: &mut Auditor<&[u8]>, base: u64) -> Result<Vec<I
         Claim::Parsed,
     );
     auditor.walk_embedded(base, first, order, Variant::Classic)
-}
-
-impl DngDecoder {
-    /// Decodes `data` to its [`DecodedDng`] *and* returns a whole-file [`DeconstructReport`] that
-    /// classifies every byte and flags anything unrecognised.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`gamut_core::Error`] if the container is unreadable or the raw image cannot be
-    /// decoded (e.g. an out-of-scope compression) — a strict superset of [`DngDecoder::decode`].
-    /// Use the free [`deconstruct`] function for a report without decoding.
-    pub fn deconstruct(&self, data: &[u8]) -> Result<(DecodedDng, DeconstructReport)> {
-        let report = deconstruct(data)?;
-        let decoded = self.decode(data)?;
-        Ok((decoded, report))
-    }
 }
 
 #[cfg(test)]

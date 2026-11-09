@@ -454,7 +454,7 @@ mod tests {
                 illuminant_temperature(illuminant),
                 expected,
                 "{illuminant:?} ({})",
-                illuminant.code()
+                u16::from(illuminant)
             );
         }
     }

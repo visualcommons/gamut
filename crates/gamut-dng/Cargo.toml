@@ -16,6 +16,13 @@ categories.workspace = true
 workspace = true
 
 [features]
+default = []
+# Typed metadata wiring over the `gamut-metadata` facade: `DngMetadata`'s `TypedMetadata` impl
+# (`blocks` / `metadata`) and `DngEncoder`'s `MetadataSink` impl (`with_metadata` /
+# `with_encoded_metadata`). Off by default, like every other codec's: without it `DngMetadata`
+# carries the Exif sub-IFD as a plain `gamut-ifd` directory and the XMP / IPTC-IIM / ICC payloads
+# as raw bytes, and the facade is not built.
+metadata = ["dep:gamut-metadata"]
 # JPEG XL (Compression = 52546) *encoding* via gamut-jxl's libjxl backend (cmake + a C++
 # toolchain at build time; inert on wasm32 targets other than emscripten, mirroring gamut-jxl).
 # Decoding JPEG XL DNGs is always available — the pure-Rust jxl-rs decode path is a normal
@@ -33,12 +40,16 @@ gamut-color.workspace = true
 gamut-ifd = { workspace = true, features = ["bigtiff"] }
 # Shared MSB-first sample bit-packing for sub-byte depths (10/12/14-bit); see `bitpack`.
 gamut-bitstream.workspace = true
-# Embedded metadata comes from the workspace facade rather than a DNG-local restatement of it: a
-# DNG's `ExifIFD` *is* an EXIF sub-IFD, so `gamut-exif`'s `Exif` (reached through the facade, the
-# one entry point format crates consume) models it exactly, over the very same `gamut-ifd`
-# directory type this crate already speaks. The XMP/IPTC-IIM/ICC payloads stay verbatim bytes and
-# are handed over as the facade's `MetadataBlock`s.
-gamut-metadata.workspace = true
+# The typed metadata models come from the workspace facade rather than a DNG-local restatement of
+# them: a DNG's `ExifIFD` *is* an EXIF sub-IFD, so `gamut-exif`'s `Exif` (reached through the
+# facade, the one entry point format crates consume) models it exactly, over the very same
+# `gamut-ifd` directory type `DngMetadata` carries it as. Optional (the `metadata` feature above)
+# and a *normal* dependency, never dev-only, so release ordering follows it.
+gamut-metadata = { workspace = true, optional = true }
+# The DNG raw-image digests (`NewRawImageDigest`, 51111) are MD5 by specification; the digest is
+# the maintainer-approved `md-5` crate gamut-icc already uses for the ICC profile ID, rather than
+# a second hand-written RFC 1321 here.
+md-5.workspace = true
 # Lossless JPEG (Compression = 7): the T.81 SOF3 coder is gamut-jpeg's, which owns all of T.81
 # (issue #1083), rather than a second copy of the JPEG entropy layer here.
 gamut-jpeg.workspace = true

@@ -21,8 +21,15 @@
 //! The SDK folds a raw transparency mask into the digest when one exists; gamut-dng never
 //! writes one, so that branch is not modelled.
 
-use crate::md5::md5;
+use md5::{Digest, Md5};
+
 use crate::raw::RawImage;
+
+/// The MD5 (RFC 1321) digest of `data`. MD5 is used only because the DNG specification defines
+/// its digests over it: an integrity checksum, not a security boundary.
+fn md5(data: &[u8]) -> [u8; 16] {
+    Md5::digest(data).into()
+}
 
 /// Computes the `NewRawImageDigest` of `raw` (see the module docs).
 #[must_use]

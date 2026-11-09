@@ -326,7 +326,7 @@ fn illuminant<S: TagSource>(src: &S, tag: u16) -> Option<CalibrationIlluminant> 
     match value
         .as_u32()
         .and_then(|c| u16::try_from(c).ok())
-        .and_then(CalibrationIlluminant::from_code)
+        .and_then(|c| CalibrationIlluminant::try_from(c).ok())
     {
         Some(illuminant) => Some(illuminant),
         None => {
@@ -370,7 +370,7 @@ fn table_encoding<S: TagSource>(src: &S, tag: u16) -> TableEncoding {
     let Some(value) = src.value(tag) else {
         return TableEncoding::default();
     };
-    match value.as_u32().and_then(TableEncoding::from_code) {
+    match value.as_u32().and_then(|c| TableEncoding::try_from(c).ok()) {
         Some(encoding) => encoding,
         None => {
             src.reject(tag);

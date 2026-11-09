@@ -75,39 +75,38 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
-pub mod color_profile;
-pub mod decoder;
-pub mod deconstruct;
-pub mod encoder;
-pub mod gain_map;
-pub mod levels;
-pub mod linearize;
-pub mod metadata;
-pub mod opcode;
-pub mod profile;
-pub mod raw;
-pub mod rewrite;
-pub mod subimage;
+// One canonical path per item: every module is private and its public items are re-exported
+// flat below. `tags` is the one namespace kept public — a deliberately low-level table of tag
+// codes, not re-exported item by item.
 pub mod tags;
-pub mod values;
 
 mod bitpack;
+mod color_profile;
 mod compression;
+mod decoder;
+mod deconstruct;
 mod digest;
+mod encoder;
+mod gain_map;
 mod jxl;
-mod md5;
+mod levels;
+mod linearize;
+mod metadata;
+mod opcode;
 mod predictor;
 mod preview;
+mod profile;
+mod raw;
+mod rewrite;
+mod subimage;
+mod values;
 mod whitebalance;
 mod writer;
 
-// The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
-// not also depend on `gamut-core` directly, along with the byte-order selector from the IFD core.
 pub use color_profile::{ColorProfileInfo, HsvDelta, HsvTable, NoiseModel, NoiseProfile};
+pub use compression::{is_decodable, is_lossy};
 pub use decoder::{DecodedDng, DigestCheck, DngDecoder, PageExtra, RawTag, SubIfdExtra};
-pub use deconstruct::{
-    Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag, deconstruct,
-};
+pub use deconstruct::deconstruct;
 pub use encoder::{DngEncodeReport, DngEncoder};
 pub use gain_map::{GainValues, ProfileGainTableMap};
 // The C2PA surface (C2PA 2.4 §A.3.6, §18.5.5) is `gamut-ifd`'s — the placement and exclusion
@@ -118,24 +117,34 @@ pub use gain_map::{GainValues, ProfileGainTableMap};
 // The non-validating report a host prints — `c2pa_summary`, the store `DecodedDng::c2pa_exclusions`
 // names plus every tag-52545 entry that yields none, with the reason — is gamut-ifd's too, so it
 // is stated once for TIFF and DNG alike (issue #530).
+pub use gamut_core::Dimensions;
 pub use gamut_core::c2pa::MIN_STORE_LEN;
-pub use gamut_core::{Dimensions, Error, Result};
-// `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum;
-// `Segment`/`SpanKind` are part of the preservation surface, naming the byte runs a real camera
-// file carries that its own structures do not account for (their ranges, like the ones
-// `C2paExclusions` measures in, are plain `core::ops::Range<u64>`).
-pub use gamut_ifd::{ByteOrder, Segment, SpanKind, Value};
+// The structural IFD core is gamut-ifd's; the same subset gamut-tiff re-exports, so no direct
+// gamut-ifd dependency is needed to name any type this crate's own items reach. `Value` (with
+// `UnknownValue`) is the decode surface `RawTag` carries unmodelled fields as; `Ifd` (with
+// `Field`/`FieldType`/`SubIfd`) is the directory `DngMetadata::exif` holds and `DngRewrite`
+// edits inside a `TiffFile`; `Variant` selects BigTIFF on the encoder; the deconstruct report
+// (`DeconstructReport` and its `Anomaly`/`Severity`/`UnknownTag`/`UnknownFieldType` findings,
+// `SegmentReport` with its `Segment`/`SpanKind`/`DataLabel`/`Conflict`/`SharedSpan`) is shared
+// with gamut-tiff, its ranges plain `core::ops::Range<u64>`.
+pub use gamut_ifd::{
+    Anomaly, ByteOrder, Conflict, DataLabel, DeconstructReport, Field, FieldType, Ifd, Segment,
+    SegmentReport, Severity, SharedSpan, SpanKind, SubIfd, TiffFile, UnknownFieldType, UnknownTag,
+    UnknownValue, Value, Variant,
+};
 pub use gamut_ifd::{
     C2PA_MANIFEST_STORE, C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary,
     C2paUnreadEntry, C2paUnreadReason, c2pa_summary,
 };
-// The shared metadata facade supplies this crate's metadata models rather than a DNG-local
-// restatement of them: `DngMetadata::exif` *is* the facade's `Exif`, and its `TypedMetadata` impl
-// hands the byte carriers over as `MetadataBlock`s. Re-exported so a caller can build and read
-// that surface without also depending on `gamut-metadata` directly.
-pub use gamut_metadata::exif::{Exif, ExifTag, Rational};
-pub use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
-pub use levels::RawLevels;
+// The JPEG XL encoder knobs are gamut-jxl's own validated types, re-exported because
+// `DngEncoder::with_jxl_distance` / `with_jxl_effort` take them.
+pub use gamut_jxl::{Distance, Effort};
+// The facade types named in the `metadata`-feature signatures — `DngMetadata`'s `TypedMetadata`
+// impl and `DngEncoder`'s `MetadataSink` impl — so a caller can spell them without a direct
+// gamut-metadata dependency.
+#[cfg(feature = "metadata")]
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataSink, TypedMetadata};
+pub use levels::{MAX_BLACK_REPEAT, RawLevels};
 pub use linearize::LinearImage;
 pub use metadata::DngMetadata;
 pub use opcode::{Opcode, OpcodeList, opcode_id};

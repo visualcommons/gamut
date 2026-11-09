@@ -1,24 +1,21 @@
-//! Optional metadata embedded in a DNG: an EXIF sub-IFD plus XMP / IPTC / ICC / C2PA blocks.
+//! Optional metadata embedded in a DNG: an EXIF sub-IFD plus XMP / IPTC / ICC blocks.
 //!
-//! The models are the workspace's, not this crate's. EXIF is
-//! [`gamut_metadata::exif::Exif`] — DNG's `ExifIFD` (34665) *is* an EXIF sub-IFD, so the facade's
-//! model describes it exactly and this crate no longer redefines a hand-picked subset of its
-//! fields. XMP (700), IPTC-IIM (33723), ICC (34675) and the C2PA manifest store (52545) are
-//! single opaque payloads in the file, so they are carried verbatim as the byte blocks the
-//! facade consumes — the same shape `gamut-png` and `gamut-webp` hand over — and
-//! [`DngMetadata::blocks`] presents them as [`MetadataBlock`]s ready for
-//! [`gamut_metadata::Metadata::parse_blocks`].
+//! DNG's `ExifIFD` (34665) *is* an EXIF sub-IFD, so it is carried as the shared [`Ifd`]
+//! directory model — the same shape `gamut-tiff`'s `TiffMetadata` carries its own in, and the
+//! very directory the facade's `Exif` model holds as its Exif sub-IFD. XMP (700), IPTC-IIM
+//! (33723) and ICC (34675) are single opaque payloads in the file, carried verbatim as bytes.
+//! With the `metadata` feature, [`DngMetadata`] implements the facade's `TypedMetadata` and
+//! [`DngEncoder`](crate::DngEncoder) its `MetadataSink`; without it, nothing here depends on the
+//! facade.
 //!
-//! The C2PA store is the one carrier with a placement rule of its own (C2PA 2.4 §A.3.6: the
-//! last main IFD, at the end of the file) and a signer's exclusion contract (§18.5.5); both are
-//! gamut-ifd's ([`gamut_ifd::append_c2pa_store`], [`gamut_ifd::C2paExclusions`]), and the
-//! encoder applies them — see
-//! [`DngEncoder::encode_with_report`](crate::DngEncoder::encode_with_report).
+//! The C2PA manifest store is not a `DngMetadata` carrier: it has a placement rule of its own
+//! (C2PA 2.4 §A.3.6: the last main IFD, at the end of the file) and a signer's exclusion contract
+//! (§18.5.5), so it is set on the encoder
+//! ([`DngEncoder::with_c2pa`](crate::DngEncoder::with_c2pa)) and read beside its exclusion ranges
+//! ([`DecodedDng::c2pa`](crate::DecodedDng::c2pa)).
 
 use gamut_core::{Error, Result};
-use gamut_ifd::{Ifd, Value};
-use gamut_metadata::exif::Exif;
-use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
+use gamut_ifd::{ByteOrder, Ifd, Value};
 
 use crate::tags;
 
@@ -28,139 +25,100 @@ use crate::tags;
 /// emit a directory a conforming reader may reject.
 const DEFAULT_EXIF_VERSION: &[u8; 4] = b"0230";
 
-/// Metadata to embed in a DNG: an EXIF sub-IFD and/or opaque XMP / IPTC / ICC / C2PA blocks.
+/// Metadata to embed in a DNG, or read back from one: an EXIF sub-IFD and/or opaque XMP /
+/// IPTC-IIM / ICC payloads.
 ///
-/// Construct one as a struct literal — it is deliberately exhaustive (see `STATUS.md`), so the
-/// five carriers a DNG holds are visible at the point of use:
+/// `#[non_exhaustive]`, so a later carrier is an additive change: build one from
+/// [`DngMetadata::new`] and the `with_*` builders, or assign the public fields of a value you
+/// already hold.
 ///
 /// ```
-/// use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, Value};
+/// use gamut_dng::{DngMetadata, Ifd, Value};
 ///
-/// let mut exif = Exif::new(ByteOrder::LittleEndian);
-/// exif.set_tag(ExifTag::FNumber, Value::Rational(vec![(28, 10)]));
-/// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+/// let mut exif = Ifd::new();
+/// exif.set(33437, Value::Rational(vec![(28, 10)])); // FNumber
+/// exif.set(34855, Value::Short(vec![400])); // PhotographicSensitivity
 ///
-/// let meta = DngMetadata {
-///     exif: Some(exif),
-///     xmp: None,
-///     iptc: None,
-///     icc: None,
-///     c2pa: None,
-/// };
+/// let meta = DngMetadata::new()
+///     .with_exif(exif)
+///     .with_xmp(b"<x:xmpmeta/>".to_vec());
+/// assert_eq!(meta.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct DngMetadata {
-    /// EXIF capture settings, as the shared [`Exif`] model.
+    /// The Exif private sub-IFD (`ExifIFD`, 34665), as the shared directory model — the
+    /// directory the facade's `Exif` model holds as its Exif sub-IFD.
     ///
-    /// Only the model's **Exif sub-IFD** ([`Exif::exif_ifd`]) crosses into the file, as the DNG's
-    /// `ExifIFD` (34665) — that directory is the one this container owns a slot for. The model's
-    /// 0th IFD, GPS sub-IFD and thumbnail describe directories the DNG container builds itself
-    /// (IFD 0, and previews as `SubIFDs` entries), so the encoder does not write them and the
-    /// decoder does not populate them; a DNG's own IFD-0 fields reach the caller through
-    /// [`DecodedDng`](crate::DecodedDng) instead.
-    pub exif: Option<Exif>,
+    /// Only this one EXIF directory crosses into a DNG: the EXIF 0th IFD, GPS sub-IFD and
+    /// thumbnail describe directories the DNG container builds itself (IFD 0, and previews as
+    /// `SubIFDs` entries), so a DNG's own IFD-0 fields reach the caller through
+    /// [`DecodedDng`](crate::DecodedDng) instead. Its standard pointer fields (a camera's
+    /// `InteroperabilityIFD`) are sub-IFD groups, never raw offsets.
+    pub exif: Option<Ifd>,
+    /// The byte order of the file [`exif`](Self::exif) was read from: `Some` exactly when the
+    /// decoder returned an Exif directory, and `None` on a value built by hand.
+    ///
+    /// **Read-side provenance only.** An `ExifIFD` has no byte order of its own — it is written in
+    /// the file's, which [`DngEncoder::with_byte_order`](crate::DngEncoder::with_byte_order)
+    /// chooses — so the encoder ignores this field. It exists so the typed EXIF model the
+    /// `metadata` feature builds states the order the directory was actually stored in.
+    pub exif_byte_order: Option<ByteOrder>,
     /// An XMP packet (UTF-8 RDF/XML), stored in the `XMP` tag (700), verbatim.
     pub xmp: Option<Vec<u8>>,
     /// A legacy IPTC-IIM dataset stream, stored in the `IPTC/NAA` tag (33723), verbatim.
     ///
     /// Kept as its own carrier rather than folded into [`xmp`](Self::xmp): IIM is a genuinely
     /// separate serialization that DNG files really do hold, and reconciling it into an XMP graph
-    /// is a policy decision (see [`gamut_metadata::iptc::ConflictPolicy`]) that belongs to the caller,
-    /// not to the container. [`blocks`](Self::blocks) hands it over for exactly that.
+    /// is a policy decision that belongs to the caller, not to the container.
     pub iptc: Option<Vec<u8>>,
     /// An ICC profile, stored in the `ICCProfile` tag (34675), verbatim.
     pub icc: Option<Vec<u8>>,
-    /// A C2PA manifest store, stored in the `C2PA` tag
-    /// ([`gamut_ifd::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`), verbatim.
-    ///
-    /// **Opaque, and bound to one exact file.** A manifest store is a signed hash over the
-    /// bytes *around* it (C2PA 2.4 §18.5), so the only store valid here is one an external
-    /// signer computed over this encoder's own output — through
-    /// [`DngEncoder::with_c2pa_reserved`](crate::DngEncoder::with_c2pa_reserved) and the
-    /// exclusion ranges [`DngEncoder::encode_with_report`](crate::DngEncoder::encode_with_report)
-    /// reports. A store copied out of another file is invalid by construction, which is why
-    /// [`gamut_metadata::Metadata::to_blocks`] never hands one back
-    /// ([`gamut_metadata::C2paPolicy`]). The bytes are written exactly as given: the TIFF byte
-    /// order does not govern them (§A.3.6). On decode this is the store the file carries in the
-    /// last IFD of its main chain; its byte ranges are
-    /// [`DecodedDng::c2pa_exclusions`](crate::DecodedDng::c2pa_exclusions).
-    pub c2pa: Option<Vec<u8>>,
-}
-
-/// The facade's [`TypedMetadata`] over the five carriers. Unlike a container whose carriers are
-/// all bytes, [`exif`](DngMetadata::exif) is already the facade's typed model, so
-/// [`blocks`](TypedMetadata::blocks) hands over only the four byte carriers and
-/// [`metadata`](TypedMetadata::metadata) assigns the EXIF model straight onto
-/// [`Metadata::exif`] rather than re-serialising it to bytes and parsing it back.
-///
-/// ```
-/// use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, TypedMetadata, Value};
-///
-/// let mut exif = Exif::new(ByteOrder::LittleEndian);
-/// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
-/// let meta = DngMetadata { exif: Some(exif.clone()), ..Default::default() };
-///
-/// assert!(meta.blocks()?.is_empty()); // EXIF is a model here, not a byte block...
-/// assert_eq!(meta.metadata()?.exif, Some(exif)); // ...and reaches the unified model as one.
-/// # Ok::<(), gamut_metadata::MetadataError>(())
-/// ```
-impl TypedMetadata for DngMetadata {
-    /// The byte-carried blocks — XMP, IPTC-IIM, ICC and the C2PA store — as [`MetadataBlock`]s.
-    /// [`exif`](DngMetadata::exif) is deliberately absent; see the impl's docs.
-    ///
-    /// # Errors
-    ///
-    /// Never: every carrier is already held as bytes. The signature is the trait's, shared with
-    /// containers that resolve payloads lazily.
-    fn blocks(&self) -> gamut_metadata::Result<Vec<MetadataBlock<'_>>> {
-        let mut blocks = Vec::new();
-        if let Some(xmp) = &self.xmp {
-            blocks.push(MetadataBlock::Xmp(xmp));
-        }
-        if let Some(iptc) = &self.iptc {
-            blocks.push(MetadataBlock::IptcIim(iptc));
-        }
-        if let Some(icc) = &self.icc {
-            blocks.push(MetadataBlock::Icc(icc));
-        }
-        if let Some(c2pa) = &self.c2pa {
-            blocks.push(MetadataBlock::C2pa(c2pa));
-        }
-        Ok(blocks)
-    }
-
-    /// The unified model: [`Metadata::parse_blocks`] over [`blocks`](TypedMetadata::blocks) (the
-    /// IPTC-IIM block reconciled into the XMP graph under the default
-    /// [`ConflictPolicy`](gamut_metadata::iptc::ConflictPolicy)), with [`exif`](DngMetadata::exif)
-    /// assigned onto [`Metadata::exif`].
-    ///
-    /// # Errors
-    ///
-    /// The [`MetadataError`](gamut_metadata::MetadataError) naming the byte carrier whose parse
-    /// failed.
-    fn metadata(&self) -> gamut_metadata::Result<Metadata> {
-        let mut unified = Metadata::parse_blocks(&self.blocks()?)?;
-        unified.exif.clone_from(&self.exif);
-        Ok(unified)
-    }
 }
 
 impl DngMetadata {
+    /// Creates an empty metadata set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a copy carrying `exif` as the file's `ExifIFD` sub-IFD.
+    #[must_use]
+    pub fn with_exif(mut self, exif: Ifd) -> Self {
+        self.exif = Some(exif);
+        self
+    }
+
+    /// Returns a copy carrying `packet` as the file's XMP.
+    #[must_use]
+    pub fn with_xmp(mut self, packet: Vec<u8>) -> Self {
+        self.xmp = Some(packet);
+        self
+    }
+
+    /// Returns a copy carrying `iim` as the file's IPTC-IIM block.
+    #[must_use]
+    pub fn with_iptc(mut self, iim: Vec<u8>) -> Self {
+        self.iptc = Some(iim);
+        self
+    }
+
+    /// Returns a copy carrying `profile` as the file's embedded ICC profile.
+    #[must_use]
+    pub fn with_icc(mut self, profile: Vec<u8>) -> Self {
+        self.icc = Some(profile);
+        self
+    }
+
     /// The EXIF sub-IFD to write, or `None` when there is no EXIF content worth a directory.
     fn exif_ifd(&self) -> Option<&Ifd> {
-        self.exif
-            .as_ref()
-            .and_then(Exif::exif_ifd)
-            .filter(|ifd| !ifd.fields().is_empty())
+        self.exif.as_ref().filter(|ifd| !ifd.fields().is_empty())
     }
 
     /// Whether there is nothing to embed.
     pub(crate) fn is_empty(&self) -> bool {
-        self.exif_ifd().is_none()
-            && self.xmp.is_none()
-            && self.iptc.is_none()
-            && self.icc.is_none()
-            && self.c2pa.is_none()
+        self.exif_ifd().is_none() && self.xmp.is_none() && self.iptc.is_none() && self.icc.is_none()
     }
 
     /// Refuses two shapes of EXIF sub-IFD this crate would otherwise write into a file its own
@@ -205,6 +163,103 @@ impl DngMetadata {
             );
         }
         Some(exif)
+    }
+}
+
+/// The facade wiring behind the `metadata` feature: [`DngMetadata`]'s `TypedMetadata` impl, and
+/// the EXIF carrier [`DngEncoder`](crate::DngEncoder)'s `MetadataSink` impl writes.
+#[cfg(feature = "metadata")]
+pub(crate) mod typed {
+    use gamut_core::Result;
+    use gamut_ifd::tags::INTEROPERABILITY_IFD;
+    use gamut_ifd::{ByteOrder, Ifd};
+    use gamut_metadata::exif::Exif;
+    use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
+
+    use super::DngMetadata;
+
+    /// The `ExifIFD` directory a DNG writes for the bare TIFF stream `tiff` (the
+    /// `MetadataSink::write_exif` payload), or `None` when the stream holds no Exif sub-IFD
+    /// content.
+    ///
+    /// The model's Interoperability sub-IFD is attached to the directory as the
+    /// `InteroperabilityIFD` group the decoder hands back. Its 0th IFD, GPS sub-IFD and thumbnail
+    /// are not carried: the DNG container builds those directories itself (see
+    /// [`DngMetadata::exif`]).
+    ///
+    /// # Errors
+    ///
+    /// The [`ExifError`](gamut_metadata::exif::ExifError), converted, when `tiff` is not a
+    /// readable EXIF TIFF stream.
+    pub(crate) fn exif_directory(tiff: &[u8]) -> Result<Option<Ifd>> {
+        let exif = Exif::parse(tiff)?;
+        Ok(match (exif.exif_ifd(), exif.interop_ifd()) {
+            (None, None) => None,
+            (directory, interop) => {
+                let mut directory = directory.cloned().unwrap_or_default();
+                if let Some(interop) = interop {
+                    directory.set_sub_ifd(INTEROPERABILITY_IFD, vec![interop.clone()]);
+                }
+                Some(directory)
+            }
+        })
+    }
+
+    /// The facade's [`TypedMetadata`] over the four carriers. The EXIF carrier is a parsed
+    /// directory rather than bytes, so [`blocks`](TypedMetadata::blocks) hands over only the
+    /// three byte carriers and [`metadata`](TypedMetadata::metadata) assigns the EXIF model
+    /// straight onto [`Metadata::exif`] rather than re-serialising it to bytes and parsing it
+    /// back.
+    ///
+    /// ```
+    /// use gamut_dng::{DngMetadata, Ifd, TypedMetadata, Value};
+    ///
+    /// let mut exif = Ifd::new();
+    /// exif.set(34855, Value::Short(vec![400])); // PhotographicSensitivity
+    /// let meta = DngMetadata::new().with_exif(exif.clone());
+    ///
+    /// assert!(meta.blocks()?.is_empty()); // EXIF is a directory here, not a byte block...
+    /// let model = meta.metadata()?.exif.expect("an EXIF model");
+    /// assert_eq!(model.exif_ifd(), Some(&exif)); // ...and reaches the unified model as one.
+    /// # Ok::<(), gamut_metadata::MetadataError>(())
+    /// ```
+    impl TypedMetadata for DngMetadata {
+        /// The byte-carried blocks — XMP, IPTC-IIM and ICC — as [`MetadataBlock`]s.
+        /// [`exif`](DngMetadata::exif) is deliberately absent; see the impl's docs.
+        ///
+        /// # Errors
+        ///
+        /// Never: every carrier is already held as bytes. The signature is the trait's, shared
+        /// with containers that resolve payloads lazily.
+        fn blocks(&self) -> gamut_metadata::Result<Vec<MetadataBlock<'_>>> {
+            let mut blocks = Vec::new();
+            blocks.extend(self.xmp.as_deref().map(MetadataBlock::Xmp));
+            blocks.extend(self.iptc.as_deref().map(MetadataBlock::IptcIim));
+            blocks.extend(self.icc.as_deref().map(MetadataBlock::Icc));
+            Ok(blocks)
+        }
+
+        /// The unified model: [`Metadata::parse_blocks`] over
+        /// [`blocks`](TypedMetadata::blocks) (the IPTC-IIM block reconciled into the XMP graph
+        /// under the default [`ConflictPolicy`](gamut_metadata::iptc::ConflictPolicy)), with
+        /// [`exif`](DngMetadata::exif) assigned onto [`Metadata::exif`] as the Exif sub-IFD of a
+        /// model in [`exif_byte_order`](DngMetadata::exif_byte_order) — or little-endian,
+        /// [`DngEncoder`](crate::DngEncoder)'s default, on a value built by hand.
+        ///
+        /// # Errors
+        ///
+        /// The [`MetadataError`](gamut_metadata::MetadataError) naming the byte carrier whose
+        /// parse failed.
+        fn metadata(&self) -> gamut_metadata::Result<Metadata> {
+            let mut unified = Metadata::parse_blocks(&self.blocks()?)?;
+            unified.exif = self.exif.as_ref().map(|directory| {
+                let mut exif =
+                    Exif::new(self.exif_byte_order.unwrap_or(ByteOrder::LittleEndian));
+                exif.set_exif_ifd(directory.clone());
+                exif
+            });
+            Ok(unified)
+        }
     }
 }
 

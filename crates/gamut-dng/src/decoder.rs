@@ -15,7 +15,6 @@ use gamut_ifd::{
     Variant, ZeroRowsPerStrip, c2pa_exclusions, extent_slices, read, read_ifd_at, resolve_subtree,
     rows_per_strip,
 };
-use gamut_metadata::exif::Exif;
 
 use crate::color_profile::{ColorProfileInfo, NoiseProfile, TagSource};
 use crate::gain_map::ProfileGainTableMap;
@@ -203,7 +202,7 @@ pub struct DecodedDng {
     pub dng_version: [u8; 4],
     /// Embedded metadata (EXIF sub-IFD + XMP/IPTC/ICC blocks), reconstructed from IFD 0.
     ///
-    /// The `ExifIFD` arrives whole, as the shared [`Exif`] model —
+    /// The `ExifIFD` arrives whole, as a directory —
     /// every entry of the directory, not a chosen subset — so nothing in it needs a separate
     /// verbatim escape hatch. Its standard pointer fields (a camera's `InteroperabilityIFD`)
     /// arrive resolved, as sub-IFD groups [`DngEncoder`](crate::DngEncoder) writes back; one whose
@@ -300,7 +299,16 @@ pub struct DecodedDng {
     ///
     /// Empty for every file this crate writes, whose `SubIFDs` children all carry images.
     pub sub_ifd_extra: Vec<SubIfdExtra>,
-    /// Where the C2PA manifest store in [`metadata.c2pa`](DngMetadata::c2pa) sits in the file:
+    /// The C2PA manifest store the file carries in the last IFD of its main chain (C2PA 2.4
+    /// §A.3.6), as the `UNDEFINED` bytes of its `C2PA` tag
+    /// ([`gamut_ifd::C2PA_MANIFEST_STORE`], 52545), verbatim — the file's byte order does not
+    /// apply to them. `Some` exactly when [`c2pa_exclusions`](Self::c2pa_exclusions) is.
+    ///
+    /// A store is bound to the exact file it was signed over (§18.5), so one copied into another
+    /// file through [`DngEncoder::with_c2pa`](crate::DngEncoder::with_c2pa) is invalid by
+    /// construction.
+    pub c2pa: Option<Vec<u8>>,
+    /// Where the C2PA manifest store in [`c2pa`](Self::c2pa) sits in the file:
     /// the two ranges a `c2pa.hash.data` binding excludes (C2PA 2.4 §18.5.5), located by
     /// [`gamut_ifd::c2pa_exclusions`] in the last IFD of the main chain (§A.3.6). `Some` exactly
     /// when the store is; a `C2PA` tag of a type other than `UNDEFINED` is not a store and stays
@@ -463,7 +471,7 @@ impl DngDecoder {
         // once. (Reading the bytes independently is what let a duplicated entry report bytes
         // from the eager `Ifd`, which keeps the last duplicate, while the ranges reported none.)
         let c2pa_exclusions = c2pa_exclusions(data)?;
-        let metadata = decode_metadata(
+        let (metadata, c2pa) = decode_metadata(
             ifd0,
             &tracked[last_main],
             c2pa_exclusions.is_some(),
@@ -561,6 +569,7 @@ impl DngDecoder {
             trailing_extra,
             interior_extra,
             sub_ifd_extra,
+            c2pa,
             c2pa_exclusions,
         })
     }
@@ -569,13 +578,12 @@ impl DngDecoder {
 /// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD —
 /// and the C2PA manifest store from `store_ifd`, the last IFD of the main chain.
 ///
-/// The `ExifIFD` is handed over whole, as the shared [`Exif`] model's Exif sub-IFD: every entry
-/// the directory holds survives, so no field of it is "unmodelled". The one exception is a
-/// standard pointer field (`InteroperabilityIFD` in a camera file): it arrives as the sub-IFD
-/// group it points at, or — when its target cannot be read — not at all, never as a raw offset
-/// into this file ([`resolve_exif_pointers`]). The DNG's
-/// own IFD 0 is *not* copied into the model's 0th IFD — [`DecodedDng`] already carries those
-/// fields, typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
+/// The `ExifIFD` is handed over whole, as a directory: every entry it holds survives, so no field
+/// of it is "unmodelled". The one exception is a standard pointer field (`InteroperabilityIFD`
+/// in a camera file): it arrives as the sub-IFD group it points at, or — when its target cannot
+/// be read — not at all, never as a raw offset into this file ([`resolve_exif_pointers`]). The
+/// DNG's own IFD 0 is *not* returned as EXIF — [`DecodedDng`] already carries those fields,
+/// typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
 ///
 /// The store is taken as the `UNDEFINED` bytes C2PA 2.4 §A.3.6 mandates, verbatim — the file's
 /// byte order does not apply to them — and only when `located` says
@@ -594,7 +602,7 @@ fn decode_metadata(
     data: &[u8],
     order: ByteOrder,
     variant: Variant,
-) -> DngMetadata {
+) -> (DngMetadata, Option<Vec<u8>>) {
     let c2pa = match store_ifd.get(C2PA_MANIFEST_STORE) {
         Some(Value::Undefined(store)) if located => Some(store.clone()),
         Some(_) => {
@@ -610,17 +618,16 @@ fn decode_metadata(
             resolve_exif_pointers(&mut exif_ifd, |offset| {
                 read_ifd_at(data, offset, order, variant)
             });
-            let mut exif = Exif::new(order);
-            exif.set_exif_ifd(exif_ifd);
-            exif
+            exif_ifd
         });
-    DngMetadata {
+    let metadata = DngMetadata {
+        exif_byte_order: exif.as_ref().map(|_| order),
         exif,
         xmp: bytes_value(ifd0.get(tags::XMP)),
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
         icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
-        c2pa,
-    }
+    };
+    (metadata, c2pa)
 }
 
 /// The deepest level below the Exif directory [`resolve_exif_pointers`] follows: **one**, the
@@ -977,7 +984,7 @@ fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<R
             if let Some(layout) = ifd
                 .get_u32(tags::CFA_LAYOUT)
                 .and_then(|c| u16::try_from(c).ok())
-                .and_then(crate::values::CfaLayout::from_code)
+                .and_then(|c| crate::values::CfaLayout::try_from(c).ok())
             {
                 raw = raw.with_cfa_layout(layout);
             }
@@ -1691,7 +1698,7 @@ fn decode_profile(ifd0: &TrackedIfd) -> Result<Option<CameraProfile>> {
     }
     if let Some(policy) = ifd0
         .get_u32(tags::PROFILE_EMBED_POLICY)
-        .and_then(ProfileEmbedPolicy::from_code)
+        .and_then(|c| ProfileEmbedPolicy::try_from(c).ok())
     {
         profile = profile.with_profile_embed_policy(policy);
     }
@@ -1775,7 +1782,7 @@ fn matrix9(ifd: &TrackedIfd, tag: u16) -> Result<[f64; 9]> {
 fn illuminant(ifd: &TrackedIfd, tag: u16) -> Option<CalibrationIlluminant> {
     ifd.get_u32(tag)
         .and_then(|c| u16::try_from(c).ok())
-        .and_then(CalibrationIlluminant::from_code)
+        .and_then(|c| CalibrationIlluminant::try_from(c).ok())
 }
 
 #[cfg(test)]

@@ -91,7 +91,7 @@ fn linear_raw_dng_is_accounted() {
 /// stays true rather than reporting the file's own manifest store as a private tag.
 #[test]
 fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
-    use gamut_dng::{DngMetadata, Segment, SpanKind};
+    use gamut_dng::{Segment, SpanKind};
     use gamut_ifd::C2PA_MANIFEST_STORE;
 
     for &order in &[ByteOrder::LittleEndian, ByteOrder::BigEndian] {
@@ -100,11 +100,8 @@ fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
         let mut dng = Vec::new();
         let report = DngEncoder::new()
             .with_byte_order(order)
-            .with_metadata(DngMetadata {
-                c2pa: Some((0u8..40).collect()),
-                ..Default::default()
-            })
-            .encode_with_report(&raw, &common::sample_profile(), &mut dng)
+            .with_c2pa(&(0u8..40).collect::<Vec<_>>())
+            .encode(&raw, &common::sample_profile(), &mut dng)
             .expect("encode");
         let excl = report.c2pa.expect("ranges");
         let ifd0 = gamut_ifd::read_header(&dng).expect("header").first_ifd;
@@ -130,19 +127,6 @@ fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
             "{order:?}: a store at the end of the file is not a trailer"
         );
     }
-}
-
-#[test]
-fn decoder_deconstruct_returns_image_and_report() {
-    let raw = common::sample_raw(16, 16, 16);
-    let mut dng = Vec::new();
-    DngEncoder::new()
-        .encode(&raw, &common::sample_profile(), &mut dng)
-        .expect("encode");
-    let (decoded, report) = DngDecoder::new().deconstruct(&dng).expect("deconstruct");
-    // The decoded raw matches a plain decode, and the report comes alongside it.
-    assert_eq!(decoded.raw, raw);
-    assert_clean(&report);
 }
 
 /// A strip declared past the end of the file leaves the verdict false.
