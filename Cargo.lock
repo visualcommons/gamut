@@ -810,6 +810,7 @@ dependencies = [
  "gamut-jxl",
  "gamut-metadata",
  "libtiff-oracle",
+ "md-5",
  "miniz_oxide 0.8.9",
 ]
 
