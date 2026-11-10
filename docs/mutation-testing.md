@@ -204,7 +204,12 @@ mise run check-mutants-anchors      # CI's Format & Metadata job runs it on ever
 
 It is pure text, no cargo: for every entry it checks that the path exists, that the operator the
 description names (`<`, `+=`, `match guard r.start`, `match arm Predictor::None`, …) starts at
-LINE:COLUMN, and that the line sits inside the function the description names. So a change that
+LINE:COLUMN, and that the line sits inside the function the description names. A whole-body
+replacement (`replace FN -> T with V`) has no operator to find, and cargo-mutants names it by the
+**first token of the body**, not the `fn` line: so its LINE:COLUMN must be exactly where the body
+starts, after the `{` that closes the signature and any comments. Before #1162 the check accepted
+any line inside the function, and six whole-body entries sat on the signature or a line away from
+the body — each passed and excluded nothing. So a change that
 moves an excluded site fails in the change that moved it, and the fix is to re-anchor the entry on
 the name `cargo mutants --list` now prints for it — after checking the comment's argument still
 holds for the code that moved. What it cannot check is the argument itself; that stays the
