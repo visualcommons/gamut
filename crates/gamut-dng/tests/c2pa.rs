@@ -9,8 +9,8 @@ mod common;
 use core::ops::Range;
 
 use gamut_dng::{
-    ByteOrder, C2PA_MANIFEST_STORE, DngDecoder, DngEncodeReport, DngEncoder, MIN_STORE_LEN,
-    RawTag, Value, Variant,
+    ByteOrder, C2PA_MANIFEST_STORE, DngDecoder, DngEncodeReport, DngEncoder, MIN_STORE_LEN, RawTag,
+    Value, Variant,
 };
 use gamut_ifd::{align_word, read_header};
 

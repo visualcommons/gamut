@@ -346,7 +346,8 @@ pub const PROFILE_GAIN_TABLE_MAP2: u16 = 52544;
 /// The C2PA manifest store (52545, 0xCD41) — C2PA 2.4 §A.3.6, not a DNG tag.
 ///
 /// A DNG may carry a content-credentials manifest store, and this crate writes and reads one
-/// ([`DngMetadata::c2pa`](crate::DngMetadata::c2pa)), so a file carrying it is *recognised*
+/// ([`DngEncoder::with_c2pa`](crate::DngEncoder::with_c2pa),
+/// [`DecodedDng::c2pa`](crate::DecodedDng::c2pa)), so a file carrying it is *recognised*
 /// rather than flagged as private by [`is_known_tag`]. The number itself is
 /// [`gamut_ifd::C2PA_MANIFEST_STORE`] — the clause is stated once, in the crate shared by
 /// every TIFF-based codec — and is aliased here only so the crate-private `KNOWN_TAGS` list can name it.

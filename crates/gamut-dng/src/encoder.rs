@@ -595,7 +595,10 @@ impl DngEncoder {
             ifd.set(tags::PROFILE_NAME, Value::Ascii(name.to_owned()));
         }
         if let Some(policy) = profile.profile_embed_policy() {
-            ifd.set(tags::PROFILE_EMBED_POLICY, Value::Long(vec![u32::from(policy)]));
+            ifd.set(
+                tags::PROFILE_EMBED_POLICY,
+                Value::Long(vec![u32::from(policy)]),
+            );
         }
         // The extended gain-table map lives in IFD 0 (its v1 sibling lives in the raw IFD).
         if let Some(map) = &self.gain_table_map2 {
@@ -1653,6 +1656,50 @@ mod tests {
             Variant::Big,
             "with_compression must keep earlier settings"
         );
+    }
+
+    /// The sink names the four carriers `DngMetadata` holds, and never the C2PA store, which
+    /// only [`DngEncoder::with_c2pa`] writes.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn the_metadata_sink_names_the_four_dng_metadata_carriers() {
+        use gamut_metadata::{Carrier, MetadataSink};
+        assert_eq!(
+            <DngEncoder as MetadataSink>::CARRIERS,
+            [Carrier::Exif, Carrier::Xmp, Carrier::Icc, Carrier::IptcIim]
+        );
+    }
+
+    /// Each sink setter writes its own `DngMetadata` carrier and leaves the others alone.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn each_metadata_sink_setter_writes_its_own_carrier() {
+        use gamut_metadata::MetadataSink;
+        use gamut_metadata::exif::Exif;
+
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.exif_ifd_mut()
+            .set(tags::ISO_SPEED_RATINGS, Value::Short(vec![200]));
+        let enc = DngEncoder::new()
+            .write_exif(&exif.to_bytes().unwrap())
+            .unwrap()
+            .write_xmp(b"<x:xmpmeta/>")
+            .unwrap()
+            .write_icc(&[1, 2])
+            .unwrap()
+            .write_iptc_iim(&[0x1c, 0x02])
+            .unwrap();
+        let mut expected = Ifd::new();
+        expected.set(tags::ISO_SPEED_RATINGS, Value::Short(vec![200]));
+        assert_eq!(
+            enc.metadata,
+            DngMetadata::new()
+                .with_exif(expected)
+                .with_xmp(b"<x:xmpmeta/>".to_vec())
+                .with_icc(vec![1, 2])
+                .with_iptc(vec![0x1c, 0x02])
+        );
+        assert_eq!(enc.c2pa, None);
     }
 
     /// A C2PA reservation's length is a caller's number that `with_c2pa_reserved` cannot refuse,

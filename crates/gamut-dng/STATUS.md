@@ -41,17 +41,17 @@ internal encode→decode round-trips guard every lossless path.
 | P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope and published the `lossless_jpeg` module; per-chunk geometry follows the spec's total-sample-count rule, and #584 made the encoder use it: a CFA chunk is declared as `repeat-cols` interleaved components at `width / repeat-cols` so predictor 1 differences like colours (DNG 1.7.1.0 p. 20), falling back to the chunk's own geometry past four components or on a width the repeat does not divide. The T.81 65535 line limit now binds the *frame* width, so an untiled Bayer strip encodes up to 131 070 photosites wide (previously refused past 65 535) and decodes back exactly. #1083 moved the SOF3 coder into `gamut-jpeg` (its `lossless` module, on that crate's shared entropy layer), output byte-identical across the move | ✅ done |
 | P14 | Ch2     | Tiled raw layout (`TileWidth`/`TileLength`/`TileOffsets`/`TileByteCounts`): decode with edge-crop reassembly + `with_tiling` encode (zero-padded edge tiles), all schemes, Adobe pixel-exact | ✅ done |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
-| P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) — embed + decode, Adobe-validated. #353 replaced the crate-local models with the workspace facade's: `DngMetadata::exif` is `gamut-exif`'s `Exif`, and the byte carriers hand over as `gamut-metadata` `MetadataBlock`s | ✅ done |
+| P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) — embed + decode, Adobe-validated. #353 replaced the crate-local models with the workspace facade's; since #1087 `DngMetadata::exif` is the `ExifIFD` as a `gamut-ifd` `Ifd` (the directory `gamut-exif`'s `Exif` holds as its Exif sub-IFD), and the facade wiring (`TypedMetadata`, `MetadataSink`) is the optional `metadata` feature | ✅ done |
 | P17 | Ch2     | Digests: the encoder writes `NewRawImageDigest` (51111), bit-matching the SDK's `FindNewRawImageDigest` (256×256 digest tiles, planar LE serialisation, the ≤256-entry-table byte mode); `RawImage::new_raw_image_digest` is public and the decoder surfaces the stored digest | ✅ done |
 | P18 | Ch7     | `OpcodeList1/2/3` container + standard opcode library. Container done via #253: typed `OpcodeList`/`Opcode` parse + pass-through write + `DNGBackwardVersion` raising; the standard opcode *processing* library remains deferred | ◑ partial |
 | P19 | —       | Finalization: JPEG XL, sub-images, gain maps, extra-tag explicitness, version auto-computation, docs + API freeze (v1.0.0) | ✅ done |
 | P20 | Ch3–4   | **JPEG XL** (Compression 52546, DNG 1.7): decode always available (pure-Rust jxl-rs; bare codestream + container, full-range 16-bit per the SDK's semantics, fp16 rejected typed); encode behind the `jxl-encode` feature (libjxl; lossless or lossy, `JXLDistance`/`JXLEffort` written); `RowInterleaveFactor`/`ColumnInterleaveFactor` de-interleave on decode | ✅ done |
 | P21 | Ch2,4   | **Sub-images**: every non-raw image IFD as a typed `SubImage` (previews, transparency masks, **semantic masks** with `SemanticName`/`SemanticInstanceID`/`MaskSubArea`, depth maps + `DepthInfo`), best-effort decoded with verbatim-chunk fallback | ✅ done |
 | P22 | Ch4     | **Gain maps**: typed `ProfileGainTableMap` (52525) + `ProfileGainTableMap2` (52544) — parse, byte-exact re-serialise, embed on encode; gated against Adobe's PGTM sample files | ✅ done |
-| P23 | —       | **Explicitness**: every unmodelled IFD field surfaces verbatim as a typed `RawTag` (`ifd0_extra`/`raw_extra`/per-sub-image), via a consumption-tracking reader — issue #109's "all metadata explicitly represented" clause. The EXIF sub-IFD needs no extras list of its own since #353: it arrives whole, inside `Exif` | ✅ done |
+| P23 | —       | **Explicitness**: every unmodelled IFD field surfaces verbatim as a typed `RawTag` (`ifd0_extra`/`raw_extra`/per-sub-image), via a consumption-tracking reader — issue #109's "all metadata explicitly represented" clause. The EXIF sub-IFD needs no extras list of its own since #353: it arrives whole, as `DngMetadata::exif` | ✅ done |
 | P24 | Ch2-4   | **Real camera conformance** (#174): the `gamut-dng-samples` corpus + `tooling/gamut-dng-real-conformance`; `Predictor`/`PlanarConfiguration` honoured, byte accounting and the preserving rewrite fixed for real files, optional camera profile | ✅ done |
 | P25 | Ch6     | **Colour projection** (#353): the camera-profile colour tags `CameraProfile` does not model — hue/sat and look tables (dims/data/encoding), `ProfileToneCurve`, `BaselineExposureOffset`, the DNG 1.6 third calibration set, `ReductionMatrix1/2/3` — as a typed read-direction `ColorProfileInfo`, plus the raw IFD's `NoiseProfile` as a typed `NoiseProfile`; a value outside the spec's domain stays in the extras | ✅ done |
-| P26 | C2PA §A.3.6, §18.5.5 | **C2PA manifest store** (#442): typed on both sides (`DngMetadata::c2pa`), entry in IFD 0 with the value last in the file, a zero-filled reservation (`with_c2pa_reserved`), both exclusion ranges reported (`encode_with_report` / `DecodedDng::c2pa_exclusions`), bytes verbatim in either byte order, Adobe-validated | ✅ done |
+| P26 | C2PA §A.3.6, §18.5.5 | **C2PA manifest store** (#442): typed on both sides (`DngEncoder::with_c2pa` / `DecodedDng::c2pa` since #1087), entry in IFD 0 with the value last in the file, a zero-filled reservation (`with_c2pa_reserved`), both exclusion ranges reported (`encode`'s `DngEncodeReport` / `DecodedDng::c2pa_exclusions`), bytes verbatim in either byte order, Adobe-validated | ✅ done |
 
 ## Apple ProRAW (DNG 1.7 + JPEG XL): fully covered for decode
 
@@ -124,6 +124,41 @@ What the corpus fixed:
   reports each in `RewrittenDng::preserved`. Bytes survive; original absolute offsets generally do
   not, because the directory layout is rebuilt — the runs are appended after the payload region in
   file order, which leaves a trailer last.
+
+## Pre-freeze API narrowing (#1087)
+
+One path per item, ahead of the API freeze. Every change below is breaking:
+
+- **Flat crate root.** Every module is private except `tags`, the low-level tag-code table, and
+  each public item is re-exported once at the root. `Error`/`Result` are no longer re-exported:
+  they are `gamut_core`'s. The root carries the same `gamut-ifd` subset `gamut-tiff` does, plus
+  `gamut_jxl::{Distance, Effort}`. It no longer re-exports `Exif`, `ExifTag` or `Rational`.
+- **`metadata` is an optional feature, off by default.** It is the same as every other codec's
+  `metadata` feature. Without it, `gamut-metadata` is not built, `DngMetadata::exif` is the
+  `ExifIFD` as a plain `gamut_ifd::Ifd` (plus `exif_byte_order`, the read-side provenance), and
+  the XMP / IPTC-IIM / ICC payloads are bytes. With it, `DngMetadata` implements
+  `TypedMetadata` and `DngEncoder` implements `MetadataSink`. The field type is the same in
+  every build, because a type that changed with a feature would break other crates' code under
+  Cargo feature unification.
+- **`DngMetadata` is `#[non_exhaustive]`.** Build one with `DngMetadata::new()` and
+  `with_exif`/`with_xmp`/`with_iptc`/`with_icc`, which is the `TiffMetadata` shape.
+- **The C2PA store leaves `DngMetadata`.** It is written with `DngEncoder::with_c2pa(&[u8])`
+  (or reserved with `with_c2pa_reserved`) and read from `DecodedDng::c2pa`, beside its
+  `c2pa_exclusions`. `TypedMetadata::blocks` therefore yields no C2PA block.
+- **One encode.** `DngEncoder::encode` returns `DngEncodeReport`, and `encode_with_report` is
+  gone. `with_metadata(DngMetadata)` is now `with_dng_metadata`. `with_big_tiff(bool)` is now
+  `with_variant(Variant)`. `with_jxl_distance` takes `Distance`, and lossless is its unset
+  state. `with_jxl_effort` takes `Effort`.
+- **`DngDecoder::deconstruct` is removed.** The free `deconstruct` remains.
+- **The tag-value enums are `repr`'d.** `CalibrationIlluminant` and `CfaLayout` are
+  `repr(u16)`. `ProfileEmbedPolicy`, `PreviewColorSpace` and `TableEncoding` are `repr(u32)`,
+  because their tags are `LONG`. Each one is read with `TryFrom` and written with `From`, in
+  place of `from_code`/`code`.
+- **MD5 is the `md-5` crate**, which `gamut-icc` already uses. The hand-written RFC 1321 module
+  is gone.
+
+The sections below describe the surface at the release they name. Where this section changes a
+name they use, this section wins.
 
 ## v2.0.0: what changed and why
 
@@ -319,18 +354,17 @@ separate path (below).
   structs (`DecodedDng`, `SubImage`, `LinearImage`, `DeconstructReport`,
   `UnknownTag`, `SemanticMaskInfo`, `DepthInfo`, `SubImageData`) are `#[non_exhaustive]` —
   future spec codes and fields are additive.
-- Encoder-input data structs (`DngMetadata`, `Opcode`, `ProfileGainTableMap`, `RawTag`,
-  `MaskSubArea`) keep literal construction (no `non_exhaustive`); adding a field there — or, as
-  #353 did to `DngMetadata::exif`, changing one's type — is accepted as semver-major.
-  `ExifMetadata` was on this list until #353 retired it in favour of `gamut-exif`'s `Exif`, whose
-  own construction is `Exif::new(order)` plus `set_tag`/`exif_ifd_mut`; `DngMetadata` itself is
-  still a struct literal, so the carriers (five since #442 added `c2pa`) stay visible at the
-  point of use. `GainValues`
-  stays exhaustive — its four variants are the spec's closed `DataType` set.
+- Encoder-input data structs (`Opcode`, `ProfileGainTableMap`, `RawTag`, `MaskSubArea`) keep
+  literal construction (no `non_exhaustive`); adding a field there — or changing one's type — is
+  accepted as semver-major. `DngMetadata` left this list in #1087: it is `#[non_exhaustive]`,
+  built from `DngMetadata::new()` and its `with_*` builders, so a later carrier is additive.
+  `GainValues` stays exhaustive — its four variants are the spec's closed `DataType` set.
 - Re-export closure: everything on the crate root, including `RawPhotometry`, `cfa_color`,
-  `opcode_id`, `new_subfile_type`, `gamut_ifd::Value` (the `RawTag` payload type), the
-  metadata surface's own types — `Exif`, `ExifTag`, `Rational` and `MetadataBlock` — so a caller
-  builds and reads `DngMetadata` without a direct `gamut-metadata` dependency, and (since #442)
+  `opcode_id`, `new_subfile_type`, `gamut_ifd::{Ifd, Value}` (the `DngMetadata::exif` directory
+  and the `RawTag` payload type) — so a caller builds and reads `DngMetadata` without a direct
+  `gamut-ifd` or `gamut-metadata` dependency (the facade's `MetadataBlock`, `Metadata`,
+  `TypedMetadata`, `MetadataSink` and `EncodedMetadata` are re-exported behind the `metadata`
+  feature) — and (since #442)
   the whole C2PA surface this crate's docs name: `C2paExclusions`, `C2PA_MANIFEST_STORE` and
   `MIN_STORE_LEN`, so a signer needs no direct `gamut-ifd` dependency either. The lossless-JPEG
   coder (`encode`/`decode`/`LosslessJpeg`) left this crate for `gamut_jpeg::lossless` (issue
@@ -338,9 +372,9 @@ separate path (below).
 - `Compression::is_supported` became `is_decodable` (every decodable scheme encodes, with the
   documented `jxl-encode`/Deflate-depth caveats). Since #1133, `Compression`,
   `PhotometricInterpretation`, `Predictor` and `SampleFormat` are `gamut-ifd`'s shared
-  `#[repr(u16)]` enums, re-exported from `values` under their TIFF names (`Compression::None`
+  `#[repr(u16)]` enums, re-exported at the crate root under their TIFF names (`Compression::None`
   and `Jpeg`, `Predictor::HorizontalDifferencing{,X2,X4}`), and `is_decodable`/`is_lossy` are
-  public free functions `values::{is_decodable, is_lossy}(Compression)`, since an inherent
+  public free functions `is_decodable(Compression)`/`is_lossy(Compression)`, since an inherent
   method on gamut-ifd's type is impossible here.
 - JPEG XL range semantics are frozen to the reference SDK's: decoded JXL data is full-range
   16-bit; a JXL IFD's `BitsPerSample` records codestream precision; encode requires 16-bit
@@ -702,10 +736,11 @@ use; additions are semver-additive.
   Undecoded`); decoding them needs the baseline DCT codec above.
 - **Advanced 1.7 metadata without a typed surface** (`RGBTables`, `ImageStats`,
   `ImageSequenceInfo`, `ProfileDynamicRange`) — explicitly surfaced as typed `RawTag`s. (The
-  C2PA manifest store left this list in #442: `DngMetadata::c2pa`.)
+  C2PA manifest store left this list in #442; since #1087 it is `DngEncoder::with_c2pa` /
+  `DecodedDng::c2pa`.)
 - **The GPS sub-IFD (`GPSInfo`, 34853) and an EXIF 0th IFD / thumbnail** — `DngMetadata::exif`
-  is a whole `gamut_exif::Exif`, so those directories are *expressible* in the encoder input,
-  but only its Exif sub-IFD is written: IFD 0 and the preview sub-IFDs are the DNG container's
+  is the Exif sub-IFD alone, and the `MetadataSink` path drops a facade `Exif` model's other
+  directories, so only its Exif sub-IFD (with its Interoperability sub-IFD) is written: IFD 0 and the preview sub-IFDs are the DNG container's
   own, built from the raw image and the camera profile, and merging a caller's TIFF tags into
   them could contradict the file's geometry. A GPS pointer in a decoded file therefore still
   surfaces in `ifd0_extra`. Wiring `GPSInfo` through symmetrically is additive.

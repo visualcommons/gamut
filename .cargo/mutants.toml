@@ -126,7 +126,7 @@ exclude_re = [
     #
     # The *other* direction is NOT excluded: `with false` is killed by
     # `typed_wiring_names_every_format`.
-    '^crates/gamut/src/capability\.rs:228:5: replace typed_wiring -> bool with true$',
+    '^crates/gamut/src/capability\.rs:226:5: replace typed_wiring -> bool with true$',
     # gamut-ifd track::subtract — disabling the merge guard is equivalent by construction: the
     # skip loop discards every claim with `end <= pos`, and the covered arm advances `pos` to
     # `r.end.min(end)`, strictly greater than `pos`, so an unmerged sorted-but-overlapping list
@@ -166,13 +166,13 @@ exclude_re = [
     # comparison is equivalent. The *stricter* mutations (`==`/`<`, generated separately) skip a
     # real factor-2 deinterleave and are killed by the single-axis interleave goldens. (gamut-webp
     # has a `decode_image_data` too; its comparisons are not this claim and stay in the survey.)
-    '^crates/gamut-dng/src/decoder\.rs:(1439:19|1439:37): replace > with >= in decode_image_data$',
+    '^crates/gamut-dng/src/decoder\.rs:(1446:19|1446:37): replace > with >= in decode_image_data$',
     # gamut-dng version computation — `if v > *version { *version = v }` (and the analogous
     # `if backward_version > required` pick in encode): at equality both branches produce the
     # same version value, so `>=` cannot change the written tag: equivalent.
-    '^crates/gamut-dng/src/encoder\.rs:620:14: replace > with >= in backward_version_for$',
-    '^crates/gamut-dng/src/encoder\.rs:650:14: replace > with >= in required_dng_version$',
-    '^crates/gamut-dng/src/encoder\.rs:409:33: replace > with >= in DngEncoder::encode_with_report$',
+    '^crates/gamut-dng/src/encoder\.rs:660:14: replace > with >= in backward_version_for$',
+    '^crates/gamut-dng/src/encoder\.rs:690:14: replace > with >= in required_dng_version$',
+    '^crates/gamut-dng/src/encoder\.rs:411:33: replace > with >= in DngEncoder::encode$',
     # gamut-av1 quant::dequant — `sign = if dq < 0 { -1 } else { 1 }`. The sign multiplies
     # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
     # `<` and `<=` disagree. `±0 == 0`, so the reconstruction is identical: equivalent.

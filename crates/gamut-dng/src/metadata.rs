@@ -253,8 +253,7 @@ pub(crate) mod typed {
         fn metadata(&self) -> gamut_metadata::Result<Metadata> {
             let mut unified = Metadata::parse_blocks(&self.blocks()?)?;
             unified.exif = self.exif.as_ref().map(|directory| {
-                let mut exif =
-                    Exif::new(self.exif_byte_order.unwrap_or(ByteOrder::LittleEndian));
+                let mut exif = Exif::new(self.exif_byte_order.unwrap_or(ByteOrder::LittleEndian));
                 exif.set_exif_ifd(directory.clone());
                 exif
             });
@@ -566,7 +565,8 @@ mod tests {
     fn dng_is_empty_only_when_every_block_is_unset() {
         assert!(DngMetadata::default().is_empty());
         let singles = [
-            DngMetadata::new().with_exif(exif_with(tags::ISO_SPEED_RATINGS, Value::Short(vec![100]))),
+            DngMetadata::new()
+                .with_exif(exif_with(tags::ISO_SPEED_RATINGS, Value::Short(vec![100]))),
             DngMetadata::new().with_xmp(vec![1]),
             DngMetadata::new().with_iptc(vec![1]),
             DngMetadata::new().with_icc(vec![1]),

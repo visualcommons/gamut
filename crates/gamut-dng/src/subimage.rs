@@ -86,7 +86,8 @@ impl SubImageKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubImageData {
     /// Decoded samples, `width * height * samples_per_pixel` long. JPEG XL data is full-range
-    /// 16-bit (see [`crate::decoder`]); other schemes carry code values at the IFD's bit depth.
+    /// 16-bit (see [`DngDecoder`](crate::DngDecoder)); other schemes carry code values at the
+    /// IFD's bit depth.
     Decoded(Vec<u16>),
     /// The stored chunks (strips or tiles, in offset order), verbatim.
     Undecoded {
