@@ -300,17 +300,16 @@ exclude_re = [
     # order, skip-on-false, short-circuit) is fully covered by `tests/backend.rs`, and the overriding
     # implementations' `supports` mutants are not excluded.
     '^crates/gamut-heic/src/decode\.rs:108:9: replace HevcDecoder::supports -> bool with true$',
-    # gamut-avif `AvifEncoder::lossless`: a named, intent-revealing alias for the default encoder
-    # (the default mode is already lossless), so its body *is* `Self::default()` and the
-    # `-> Default::default()` replacement is byte-identical — provably equivalent, unkillable. It
-    # exists to pair with `lossy()` and make the call site explicit; `new()` (also `Self::default()`)
-    # generates no such mutant. This is the only mutant the function produces.
-    '^crates/gamut-avif/src/encoder\.rs:438:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
+    # (gamut-avif `AvifEncoder::lossless` has no entry. One argued its `-> Default::default()`
+    # replacement byte-identical when its body was `Self::default()`; the body now builds the
+    # struct and `Default::default` is defined as `Self::lossless()`, so the replacement recurses
+    # until the stack overflows and every test that constructs an encoder catches it. The entry
+    # had been anchored a line below the body and matched nothing (#1162).)
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
     # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
     # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
-    '^crates/gamut-webp/src/encoder\.rs:125:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
+    '^crates/gamut-webp/src/encoder\.rs:124:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `alpha::write_compressed_alph`: `0xff00_0000 | (u32::from(a) << 8)` ORs the opaque
     # alpha byte (bits 24-31) with the green byte (bits 8-15); the operands are disjoint, so `|` == `^`.
     # Its ALPH header byte `method.code() << 2 | 0x01` is the same shape: the shift clears the two
@@ -366,9 +365,9 @@ exclude_re = [
     '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in block_sad$',
     #   select_luma_mode / select_chroma_mode — lowest-SAD whole-block mode pickers (any mode is legal);
     '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in select_luma_mode$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:701:5: replace select_luma_mode -> usize with .*$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:706:5: replace select_luma_mode -> usize with .*$',
     '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in select_chroma_mode$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:727:5: replace select_chroma_mode -> usize with .*$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:732:5: replace select_chroma_mode -> usize with .*$',
     #   encode_bpred_luma — the submode tie-break (`sad < best`) and the running prediction-cost
     #   accumulator (`total_sad +=`, used only for the B_PRED-vs-whole-block decision); both pick
     #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
@@ -399,8 +398,10 @@ exclude_re = [
     #   (both deferred-optimization knobs, issue #31; any choice is faithfully signalled);
     '^crates/gamut-webp/src/vp8l/encoder\.rs:\d+:\d+: .* in pick_cache_bits$',
     '^crates/gamut-webp/src/vp8l/encoder\.rs:689:5: replace pick_cache_bits -> u32 with .*$',
+    #   (`assign_groups`' whole-body `-> Default::default()` has no entry: `GroupAssignment` has no
+    #   `Default`, so that mutant does not build and scores unviable, not survived. The entry had
+    #   been anchored above the body and matched nothing, #1162.)
     '^crates/gamut-webp/src/vp8l/encoder\.rs:\d+:\d+: .* in assign_groups$',
-    '^crates/gamut-webp/src/vp8l/encoder\.rs:528:5: replace assign_groups -> GroupAssignment with Default::default\(\)$',
     #   huffman_pass — one length-limited Huffman construction pass; a suboptimal-but-valid tree only
     #   costs bits (a malformed tree fails the round-trip and is caught). gamut-webp's only: the bare
     #   name used to reach gamut-deflate's own `huffman_pass` as well, which nobody argued for here.
@@ -916,7 +917,7 @@ exclude_re = [
     # `decode_symbol` as well, which nobody argued for here.)
     '^crates/gamut-jpeg/src/scan/reader\.rs:328:5: replace decode_symbol -> Result<u8> with Ok\(0\)$',
     '^crates/gamut-jpeg/src/scan/sequential\.rs:52:9: replace Ctx<._>::decode_block -> Result<\(\)> with Ok\(\(\)\)$',
-    '^crates/gamut-jpeg/src/huffman\.rs:278:9: replace DecTable::walk -> \(u32, Result<u8>\) with \(0, Ok\(0\)\)$',
+    '^crates/gamut-jpeg/src/huffman\.rs:279:9: replace DecTable::walk -> \(u32, Result<u8>\) with \(0, Ok\(0\)\)$',
     '^crates/gamut-jpeg/src/scan/reader\.rs:171:9: replace BitReader<.a>::consume -> Result<\(\)> with Ok\(\(\)\)$',
     # syntax::Reader::u8 — the segment cursor. `self.pos += 1` mutated to `*= 1` pins `pos`, so the
     # `while r.remaining() > 0` table loops in parse_dqt/parse_dht never make progress and never
