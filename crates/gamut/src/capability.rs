@@ -179,14 +179,14 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
         // 0th-IFD field outside `gamut_tiff::IFD0_EXIF_TAGS`, which a `TiffMetadata` has no
         // carrier for — #876).
         // gamut-dng STATUS.md P16: EXIF sub-IFD + XMP (700) / IPTC-IIM (33723) / ICC (34675),
-        // embedded and decoded (`DngMetadata`, `DngMetadata::blocks`).
+        // embedded and decoded (`DngMetadata`, `DngEncoder::with_dng_metadata`).
         (
             Format::Tiff | Format::Dng,
             Carrier::Exif | Carrier::Xmp | Carrier::Icc | Carrier::IptcIim,
         ) => true,
         // The TIFF C2PA store (52545) is written only as a signing workflow (see
         // `Carrier::C2pa`); gamut-dng STATUS.md P26 (#442): the store is decoded as
-        // `DngMetadata::c2pa`, likewise written only as a signing workflow.
+        // `DecodedDng::c2pa`, likewise written only as a signing workflow.
         (Format::Tiff | Format::Dng, Carrier::C2pa) => read,
 
         // Every other cell is `false`, in one arm because they share the answer:
@@ -216,20 +216,19 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
 ///
 /// # How a `true` cell is switched on
 ///
-/// Seven of the eight wired crates put that surface behind an optional `metadata` Cargo feature of
-/// their own — `gamut-jpeg`, `gamut-png`, `gamut-webp`, `gamut-avif`, `gamut-heic`, `gamut-jxl`
-/// and `gamut-tiff`, each off by default, and each forwarded weakly by this umbrella's
-/// `metadata` feature. `gamut-dng` has **no such feature**: it depends on the facade
-/// unconditionally, because its `DngMetadata` holds the facade's `Exif` by value, so
-/// `gamut-dng/metadata` is not a feature that can be asked for. As with [`supports`], the answer
-/// describes what the crate defines, not what a given build compiled.
+/// Every wired crate puts that surface behind an optional `metadata` Cargo feature of its own —
+/// `gamut-jpeg`, `gamut-png`, `gamut-webp`, `gamut-avif`, `gamut-heic`, `gamut-jxl`, `gamut-tiff`
+/// and `gamut-dng`, each off by default, and each forwarded weakly by this umbrella's `metadata`
+/// feature. As with [`supports`], the answer describes what the crate defines, not what a given
+/// build compiled.
 #[must_use]
 pub const fn typed_wiring(format: Format) -> bool {
     match format {
-        // gamut-dng STATUS.md P16 (#353): `DngMetadata::exif` is the facade's `Exif`, its
-        // `TypedMetadata` impl hands over the byte carriers. gamut-jpeg / gamut-jxl / gamut-heic:
-        // the `metadata` feature (issue #420); gamut-png / gamut-webp / gamut-avif / gamut-tiff:
-        // the `metadata` feature (issue #510). Every format is named, so one appended to `Format`
+        // gamut-dng STATUS.md P16 (#353): the `metadata` feature (issue #1087), whose
+        // `TypedMetadata` impl assigns the Exif sub-IFD onto the facade's `Exif` and hands over
+        // the byte carriers. gamut-jpeg / gamut-jxl / gamut-heic: the `metadata` feature (issue
+        // #420); gamut-png / gamut-webp / gamut-avif / gamut-tiff: the `metadata` feature (issue
+        // #510). Every format is named, so one appended to `Format`
         // does not compile until its cell is decided here.
         Format::Dng
         | Format::Jpeg
