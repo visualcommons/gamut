@@ -368,11 +368,7 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
     let excl = report.c2pa.expect("nine bytes are writable in BigTIFF");
     assert_eq!(excl.store().end, dng.len() as u64);
     assert_eq!(
-        DngDecoder::new()
-            .decode(&dng)
-            .expect("decode")
-            .metadata
-            .c2pa,
+        DngDecoder::new().decode(&dng).expect("decode").c2pa,
         Some(nine)
     );
 }
@@ -381,9 +377,9 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
 /// admissible store — and both decode surfaces must say so *together*.
 ///
 /// Reading the bytes and the ranges through different paths is what made them disagree: the
-/// eager `Ifd` keeps the last duplicate, so `metadata.c2pa` reported that entry's bytes while
-/// `c2pa_exclusions` reported nothing. Re-encoding such a `DngMetadata` silently produced a
-/// one-entry file carrying only the last duplicate.
+/// eager `Ifd` keeps the last duplicate, so the decoded store reported that entry's bytes while
+/// `c2pa_exclusions` reported nothing. Re-encoding that store silently produced a one-entry file
+/// carrying only the last duplicate.
 #[test]
 fn a_duplicated_store_entry_is_absent_from_both_decode_surfaces() {
     let first = store(40);
@@ -566,9 +562,9 @@ fn an_accepted_store_is_not_also_a_trailing_extra() {
 }
 
 /// A foreign file whose tag-52545 value is too short to hold a JUMBF box header carries no
-/// manifest store (`references/c2pa/README.md`): it decodes to `None`, and the decoded
-/// `DngMetadata` therefore re-encodes — which it could not if the decoder had handed back a
-/// store its own encoder refuses.
+/// manifest store (`references/c2pa/README.md`): it decodes to `None`, so the decoded file
+/// re-encodes — which it could not if the decoder had handed back a store its own encoder
+/// refuses.
 #[test]
 fn a_too_short_store_decodes_as_absent_and_still_re_encodes() {
     let short = store(MIN_STORE_LEN - 1);

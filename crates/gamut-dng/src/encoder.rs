@@ -1254,11 +1254,12 @@ mod tests {
         let raw = sample_raw(8, 6, bits);
         let profile = sample_profile();
         let mut out = Vec::new();
-        let n = DngEncoder::new()
+        let report = DngEncoder::new()
             .with_byte_order(order)
             .encode(&raw, &profile, &mut out)
             .expect("encode");
-        assert_eq!(n, out.len());
+        assert_eq!(report.len, out.len());
+        assert_eq!(report.c2pa, None);
 
         // The container parses as a TIFF, IFD 0 is the preview + DNG/profile tags.
         let file = gamut_ifd::read(&out).expect("parse DNG");

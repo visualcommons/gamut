@@ -133,7 +133,7 @@ impl DngMetadata {
     ///
     /// # Errors
     ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) errorif the Exif sub-IFD, or any directory nested in it,
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the Exif sub-IFD, or any directory nested in it,
     /// carries a pointer-typed field under a standard pointer tag, or stores one tag twice (a
     /// field and a sub-IFD group, or two groups).
     pub(crate) fn check(&self) -> Result<()> {
@@ -261,6 +261,98 @@ pub(crate) mod typed {
             Ok(unified)
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use gamut_ifd::Value;
+
+        use super::*;
+        use crate::tags;
+
+        /// A directory carrying one ordinary field.
+        fn iso(speed: u16) -> Ifd {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::ISO_SPEED_RATINGS, Value::Short(vec![speed]));
+            ifd
+        }
+
+        #[test]
+        fn exif_directory_carries_the_exif_sub_ifd_with_its_interop_group() {
+            let mut model = Exif::new(ByteOrder::LittleEndian);
+            model.set_exif_ifd(iso(400));
+            model.set_interop_ifd(iso(1));
+            model.image_mut().set(271, Value::Ascii("gamut".into()));
+            let directory = exif_directory(&model.to_bytes().unwrap())
+                .unwrap()
+                .expect("an Exif sub-IFD");
+            assert_eq!(
+                directory.get(tags::ISO_SPEED_RATINGS),
+                Some(&Value::Short(vec![400]))
+            );
+            // The 0th-IFD `Make` does not cross into the DNG's `ExifIFD`.
+            assert!(directory.get(271).is_none());
+            let groups = directory.sub_ifds();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].tag, INTEROPERABILITY_IFD);
+            assert_eq!(groups[0].ifds, vec![iso(1)]);
+        }
+
+        #[test]
+        fn exif_directory_without_an_interop_ifd_attaches_no_group() {
+            let mut model = Exif::new(ByteOrder::LittleEndian);
+            model.set_exif_ifd(iso(400));
+            let directory = exif_directory(&model.to_bytes().unwrap())
+                .unwrap()
+                .expect("an Exif sub-IFD");
+            assert!(directory.sub_ifds().is_empty());
+        }
+
+        #[test]
+        fn exif_directory_of_a_stream_with_no_exif_sub_ifd_is_none() {
+            let mut model = Exif::new(ByteOrder::LittleEndian);
+            model.image_mut().set(271, Value::Ascii("gamut".into()));
+            assert_eq!(exif_directory(&model.to_bytes().unwrap()).unwrap(), None);
+        }
+
+        #[test]
+        fn exif_directory_refuses_a_stream_that_is_not_tiff() {
+            assert!(exif_directory(b"not a TIFF stream").is_err());
+        }
+
+        #[test]
+        fn blocks_expose_the_three_byte_carriers_in_order() {
+            let meta = DngMetadata::new()
+                .with_exif(iso(100))
+                .with_icc(vec![7u8; 4])
+                .with_iptc(vec![0x1c, 0x02, 0x05])
+                .with_xmp(b"<x:xmpmeta/>".to_vec());
+            assert_eq!(
+                meta.blocks().unwrap(),
+                vec![
+                    MetadataBlock::Xmp(b"<x:xmpmeta/>"),
+                    MetadataBlock::IptcIim(&[0x1c, 0x02, 0x05]),
+                    MetadataBlock::Icc(&[7u8; 4]),
+                ]
+            );
+            assert!(DngMetadata::new().blocks().unwrap().is_empty());
+        }
+
+        #[test]
+        fn metadata_assigns_the_exif_directory_in_its_read_byte_order() {
+            for (read, expected) in [
+                (None, ByteOrder::LittleEndian),
+                (Some(ByteOrder::BigEndian), ByteOrder::BigEndian),
+            ] {
+                let mut meta = DngMetadata::new().with_exif(iso(100));
+                meta.exif_byte_order = read;
+                let exif = meta.metadata().unwrap().exif.expect("an EXIF model");
+                assert_eq!(exif.byte_order(), expected);
+                assert_eq!(exif.exif_ifd(), Some(&iso(100)));
+                assert!(exif.image().fields().is_empty());
+            }
+            assert_eq!(DngMetadata::new().metadata().unwrap().exif, None);
+        }
+    }
 }
 
 /// The pointer tags [`DngRewrite::open`](crate::DngRewrite::open) resolves inside the Exif
@@ -328,7 +420,7 @@ const TAG_STORED_TWICE_REFUSAL: &str = "DNG: an Exif sub-IFD may not store one t
 ///
 /// # Errors
 ///
-/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) errorfor either refusal, at the first offender.
+/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for either refusal, at the first offender.
 fn check_exif_subtree(ifd: &Ifd) -> Result<()> {
     for &tag in EXIF_SUBTREE_POINTER_TAGS {
         if ifd
@@ -358,16 +450,15 @@ fn check_exif_subtree(ifd: &Ifd) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use gamut_ifd::Variant;
     use gamut_ifd::tags::INTEROPERABILITY_IFD;
-    use gamut_ifd::{ByteOrder, Variant};
-    use gamut_metadata::exif::ExifTag;
 
     use super::*;
 
-    /// An [`Exif`] whose Exif sub-IFD carries `tag`.
-    fn exif_with(tag: ExifTag, value: Value) -> Exif {
-        let mut exif = Exif::new(ByteOrder::LittleEndian);
-        exif.set_tag(tag, value);
+    /// An Exif sub-IFD carrying `tag` = `value`.
+    fn exif_with(tag: u16, value: Value) -> Ifd {
+        let mut exif = Ifd::new();
+        exif.set(tag, value);
         exif
     }
 
@@ -378,37 +469,58 @@ mod tests {
         assert!(meta.is_empty());
         assert!(meta.apply(&mut ifd).is_none());
         assert!(ifd.fields().is_empty());
-        assert!(meta.blocks().unwrap().is_empty());
     }
 
     #[test]
-    fn an_exif_model_with_no_sub_ifd_content_is_empty() {
-        // A bare model, and one whose *0th* IFD is populated, both leave the DNG's `ExifIFD`
-        // slot with nothing to write — only the Exif sub-IFD crosses into the file.
-        let mut image_only = Exif::new(ByteOrder::LittleEndian);
-        image_only
-            .image_mut()
-            .set(271, Value::Ascii("gamut".into()));
-        for exif in [Exif::new(ByteOrder::LittleEndian), image_only] {
-            let meta = DngMetadata {
+    fn an_exif_directory_with_no_fields_is_empty() {
+        // An `ExifIFD` holding nothing is not worth a directory, so it is not written.
+        let meta = DngMetadata::new().with_exif(Ifd::new());
+        assert!(meta.is_empty());
+        assert!(meta.apply(&mut Ifd::new()).is_none());
+    }
+
+    #[test]
+    fn the_builders_set_one_carrier_each() {
+        let exif = exif_with(tags::ISO_SPEED_RATINGS, Value::Short(vec![100]));
+        assert_eq!(
+            DngMetadata::new().with_exif(exif.clone()),
+            DngMetadata {
                 exif: Some(exif),
                 ..Default::default()
-            };
-            assert!(meta.is_empty());
-            assert!(meta.apply(&mut Ifd::new()).is_none());
-        }
+            }
+        );
+        assert_eq!(
+            DngMetadata::new().with_xmp(vec![1]),
+            DngMetadata {
+                xmp: Some(vec![1]),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            DngMetadata::new().with_iptc(vec![2]),
+            DngMetadata {
+                iptc: Some(vec![2]),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            DngMetadata::new().with_icc(vec![3]),
+            DngMetadata {
+                icc: Some(vec![3]),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
     fn applies_blocks_and_carries_the_exif_sub_ifd() {
         let mut ifd = Ifd::new();
-        let mut exif = exif_with(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
-        exif.set_tag(ExifTag::ExposureTime, Value::Rational(vec![(1, 250)]));
+        let mut exif = exif_with(tags::ISO_SPEED_RATINGS, Value::Short(vec![400]));
+        exif.set(tags::EXPOSURE_TIME, Value::Rational(vec![(1, 250)]));
         let meta = DngMetadata {
             exif: Some(exif),
             xmp: Some(b"<x:xmpmeta/>".to_vec()),
             icc: Some(vec![0u8; 8]),
-            c2pa: Some(vec![0u8; 16]),
             ..Default::default()
         };
         assert!(!meta.is_empty());
@@ -418,8 +530,6 @@ mod tests {
             Some(&Value::Byte(b"<x:xmpmeta/>".to_vec()))
         );
         assert!(ifd.get(tags::ICC_PROFILE).is_some());
-        // The store is the encoder's to place, so `apply` leaves the directory without it.
-        assert!(ifd.get(gamut_ifd::C2PA_MANIFEST_STORE).is_none());
         assert_eq!(
             written.get(tags::ISO_SPEED_RATINGS),
             Some(&Value::Short(vec![400]))
@@ -440,7 +550,7 @@ mod tests {
     fn a_supplied_exif_version_is_not_overwritten() {
         let meta = DngMetadata {
             exif: Some(exif_with(
-                ExifTag::ExifVersion,
+                tags::EXIF_VERSION,
                 Value::Undefined(b"0300".to_vec()),
             )),
             ..Default::default()
@@ -456,71 +566,14 @@ mod tests {
     fn dng_is_empty_only_when_every_block_is_unset() {
         assert!(DngMetadata::default().is_empty());
         let singles = [
-            DngMetadata {
-                exif: Some(exif_with(
-                    ExifTag::PhotographicSensitivity,
-                    Value::Short(vec![100]),
-                )),
-                ..Default::default()
-            },
-            DngMetadata {
-                xmp: Some(vec![1]),
-                ..Default::default()
-            },
-            DngMetadata {
-                iptc: Some(vec![1]),
-                ..Default::default()
-            },
-            DngMetadata {
-                icc: Some(vec![1]),
-                ..Default::default()
-            },
-            DngMetadata {
-                c2pa: Some(vec![1]),
-                ..Default::default()
-            },
+            DngMetadata::new().with_exif(exif_with(tags::ISO_SPEED_RATINGS, Value::Short(vec![100]))),
+            DngMetadata::new().with_xmp(vec![1]),
+            DngMetadata::new().with_iptc(vec![1]),
+            DngMetadata::new().with_icc(vec![1]),
         ];
         for (i, meta) in singles.iter().enumerate() {
             assert!(!meta.is_empty(), "block {i} alone must be non-empty");
         }
-    }
-
-    #[test]
-    fn blocks_expose_every_byte_carrier_in_facade_form() {
-        let meta = DngMetadata {
-            exif: Some(exif_with(
-                ExifTag::PhotographicSensitivity,
-                Value::Short(vec![100]),
-            )),
-            xmp: Some(b"<x:xmpmeta/>".to_vec()),
-            iptc: Some(vec![0x1c, 0x02, 0x05]),
-            icc: Some(vec![7u8; 4]),
-            c2pa: Some(b"\0\0\0\x14jumbc2pa".to_vec()),
-        };
-        assert_eq!(
-            meta.blocks().unwrap(),
-            vec![
-                MetadataBlock::Xmp(b"<x:xmpmeta/>"),
-                MetadataBlock::IptcIim(&[0x1c, 0x02, 0x05]),
-                MetadataBlock::Icc(&[7u8; 4]),
-                MetadataBlock::C2pa(b"\0\0\0\x14jumbc2pa"),
-            ]
-        );
-    }
-
-    #[test]
-    fn metadata_assigns_the_exif_model_beside_the_parsed_byte_carriers() {
-        // The EXIF model is assigned, not re-parsed; the C2PA store is the byte carrier whose
-        // extraction is the identity, so the whole unified model is predictable.
-        let exif = exif_with(ExifTag::PhotographicSensitivity, Value::Short(vec![100]));
-        let meta = DngMetadata {
-            exif: Some(exif.clone()),
-            c2pa: Some(b"\0\0\0\x14jumbc2pa".to_vec()),
-            ..Default::default()
-        };
-        let unified = meta.metadata().unwrap();
-        assert_eq!(unified.exif, Some(exif));
-        assert_eq!(unified.c2pa.as_deref(), Some(&b"\0\0\0\x14jumbc2pa"[..]));
     }
 
     /// An Exif sub-IFD carrying one ordinary field, so [`DngMetadata::check`] has a directory to
@@ -533,12 +586,7 @@ mod tests {
 
     /// The metadata carrying `exif` as its Exif sub-IFD.
     fn carrying(exif: Ifd) -> DngMetadata {
-        let mut model = Exif::new(ByteOrder::LittleEndian);
-        model.set_exif_ifd(exif);
-        DngMetadata {
-            exif: Some(model),
-            ..Default::default()
-        }
+        DngMetadata::new().with_exif(exif)
     }
 
     /// The message [`DngMetadata::check`] refused `meta` with.

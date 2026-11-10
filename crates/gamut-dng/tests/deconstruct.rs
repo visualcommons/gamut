@@ -4,7 +4,7 @@
 mod common;
 
 use gamut_core::segment::tiles;
-use gamut_dng::{Anomaly, ByteOrder, DeconstructReport, DngDecoder, DngEncoder, deconstruct};
+use gamut_dng::{Anomaly, ByteOrder, DeconstructReport, DngEncoder, deconstruct};
 
 /// Asserts the structural walk classified the whole file with nothing unrecognised —
 /// **zero tolerance**: word-alignment padding must come back as typed `Padding` segments,

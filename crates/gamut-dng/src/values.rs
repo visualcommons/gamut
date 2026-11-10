@@ -429,22 +429,22 @@ mod tests {
     fn illuminant_codes_round_trip() {
         // Spot-check the boundary and skipped codes plus the spectral-data sentinel.
         for code in [0u16, 1, 4, 9, 17, 21, 23, 24, 255] {
-            let i = CalibrationIlluminant::from_code(code).expect("known illuminant");
-            assert_eq!(i.code(), code);
+            let i = CalibrationIlluminant::try_from(code).expect("known illuminant");
+            assert_eq!(u16::from(i), code);
         }
-        assert_eq!(CalibrationIlluminant::from_code(5), None); // 5..=8 are unused
-        assert_eq!(CalibrationIlluminant::D65.code(), 21);
-        assert_eq!(CalibrationIlluminant::D50.code(), 23);
+        assert_eq!(CalibrationIlluminant::try_from(5).ok(), None); // 5..=8 are unused
+        assert_eq!(u16::from(CalibrationIlluminant::D65), 21);
+        assert_eq!(u16::from(CalibrationIlluminant::D50), 23);
     }
 
     #[test]
     fn cfa_layout_codes_round_trip() {
         for code in 1..=9u16 {
-            let l = CfaLayout::from_code(code).expect("known layout");
-            assert_eq!(l.code(), code);
+            let l = CfaLayout::try_from(code).expect("known layout");
+            assert_eq!(u16::from(l), code);
         }
-        assert_eq!(CfaLayout::from_code(0), None);
-        assert_eq!(CfaLayout::from_code(10), None);
+        assert_eq!(CfaLayout::try_from(0).ok(), None);
+        assert_eq!(CfaLayout::try_from(10).ok(), None);
         assert_eq!(CfaLayout::default(), CfaLayout::Rectangular);
     }
 
@@ -456,9 +456,9 @@ mod tests {
             ProfileEmbedPolicy::EmbedNever,
             ProfileEmbedPolicy::NoRestrictions,
         ] {
-            assert_eq!(ProfileEmbedPolicy::from_code(p.code()), Some(p));
+            assert_eq!(ProfileEmbedPolicy::try_from(u32::from(p)).ok(), Some(p));
         }
-        assert_eq!(ProfileEmbedPolicy::from_code(4), None);
+        assert_eq!(ProfileEmbedPolicy::try_from(4).ok(), None);
 
         for c in [
             PreviewColorSpace::Unknown,
@@ -467,15 +467,15 @@ mod tests {
             PreviewColorSpace::AdobeRgb,
             PreviewColorSpace::ProPhotoRgb,
         ] {
-            assert_eq!(PreviewColorSpace::from_code(c.code()), Some(c));
+            assert_eq!(PreviewColorSpace::try_from(u32::from(c)).ok(), Some(c));
         }
-        assert_eq!(PreviewColorSpace::from_code(5), None);
+        assert_eq!(PreviewColorSpace::try_from(5).ok(), None);
 
         for e in [TableEncoding::Linear, TableEncoding::Srgb] {
-            assert_eq!(TableEncoding::from_code(e.code()), Some(e));
+            assert_eq!(TableEncoding::try_from(u32::from(e)).ok(), Some(e));
         }
         assert_eq!(TableEncoding::default(), TableEncoding::Linear);
-        assert_eq!(TableEncoding::from_code(2), None);
+        assert_eq!(TableEncoding::try_from(2).ok(), None);
     }
 
     #[test]
@@ -505,14 +505,14 @@ mod tests {
             CalibrationIlluminant::Other,
         ] {
             assert_eq!(
-                CalibrationIlluminant::from_code(illum.code()),
+                CalibrationIlluminant::try_from(u16::from(illum)).ok(),
                 Some(illum),
                 "{illum:?} (code {})",
-                illum.code()
+                u16::from(illum)
             );
         }
         // Codes between the named ones (e.g. 5..=8) and out-of-range values are unrecognised.
-        assert_eq!(CalibrationIlluminant::from_code(5), None);
-        assert_eq!(CalibrationIlluminant::from_code(100), None);
+        assert_eq!(CalibrationIlluminant::try_from(5).ok(), None);
+        assert_eq!(CalibrationIlluminant::try_from(100).ok(), None);
     }
 }
