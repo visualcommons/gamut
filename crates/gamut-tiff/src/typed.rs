@@ -296,6 +296,10 @@ mod tests {
         c2pa.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
         let err = TiffEncoder::new().with_encoded_metadata(&c2pa).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            err.static_message(),
+            Some("metadata: a C2PA manifest store is not embedded from metadata blocks")
+        );
     }
 
     #[test]
@@ -389,6 +393,7 @@ mod tests {
         let model = Metadata::from_carriers(None, None, Some(bad_icc));
         let err = TiffEncoder::new().with_metadata(&model).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(err.detail(), Some("icc: duplicate tag signature"));
     }
 
     #[test]
