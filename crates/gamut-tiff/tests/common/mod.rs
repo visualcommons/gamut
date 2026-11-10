@@ -36,3 +36,38 @@ pub fn gray_pattern(w: u32, h: u32) -> Vec<u8> {
         .map(|i| (i.wrapping_mul(97) >> 1) as u8)
         .collect()
 }
+
+/// Lays out hand-built pages — each a directory and the strips its `StripOffsets` /
+/// `StripByteCounts` point at — through gamut-ifd's shared block writer, the same one the encoder
+/// uses, for fixtures the encoder deliberately never writes.
+pub fn write_pages(
+    order: gamut_ifd::ByteOrder,
+    variant: gamut_ifd::Variant,
+    pages: &[(gamut_ifd::Ifd, Vec<Vec<u8>>)],
+) -> gamut_core::Result<Vec<u8>> {
+    let runs: Vec<_> = pages
+        .iter()
+        .map(|(_, strips)| gamut_ifd::BlockRun::strips(strips))
+        .collect();
+    gamut_ifd::write_with_blocks(order, variant, &runs, |placed| {
+        pages
+            .iter()
+            .zip(placed)
+            .map(|((ifd, _), run)| {
+                let mut ifd = ifd.clone();
+                run.install(&mut ifd);
+                ifd
+            })
+            .collect()
+    })
+}
+
+/// [`write_pages`] for one page.
+pub fn write_image(
+    order: gamut_ifd::ByteOrder,
+    variant: gamut_ifd::Variant,
+    ifd: &gamut_ifd::Ifd,
+    strips: &[Vec<u8>],
+) -> gamut_core::Result<Vec<u8>> {
+    write_pages(order, variant, &[(ifd.clone(), strips.to_vec())])
+}

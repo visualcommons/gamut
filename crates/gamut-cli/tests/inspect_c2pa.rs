@@ -631,17 +631,16 @@ fn a_file_that_is_not_a_webp_is_refused_by_the_riff_walk_when_forced() {
 #[test]
 fn a_tiff_reports_its_store_beside_the_accounting_without_moving_the_verdict() {
     let rgb = [0x40u8; 8 * 8 * 3];
-    let encode = |metadata: gamut::tiff::TiffMetadata| {
+    let encode = |encoder: gamut::tiff::TiffEncoder| {
         let mut file = Vec::new();
-        let report = gamut::tiff::TiffEncoder::new()
-            .with_tiff_metadata(metadata)
+        let report = encoder
             .encode_with_report(rgb_image(&rgb), &mut file)
             .expect("encode");
         (file, report)
     };
-    let (plain, _) = encode(gamut::tiff::TiffMetadata::new());
+    let (plain, _) = encode(gamut::tiff::TiffEncoder::new());
     let (signed, report) =
-        encode(gamut::tiff::TiffMetadata::new().with_c2pa(b"STORE-BYTES-NEVER-PRINTED".to_vec()));
+        encode(gamut::tiff::TiffEncoder::new().with_c2pa(b"STORE-BYTES-NEVER-PRINTED"));
     let store = report.c2pa.expect("a store was written").store();
 
     let plain_out = run_inspect("plain.tif", &plain, None);
@@ -680,7 +679,7 @@ fn a_tiff_whose_store_entry_is_mistyped_is_not_reported_as_without_provenance() 
     let mut ifd = gamut::tiff::Ifd::new();
     ifd.set(256, gamut::tiff::Value::Short(vec![1]));
     ifd.set(52545, gamut::tiff::Value::Byte(vec![0x10; 12]));
-    let file = gamut::tiff::write(&gamut::tiff::TiffFile {
+    let file = gamut::ifd::write(&gamut::ifd::TiffFile {
         order: gamut::tiff::ByteOrder::LittleEndian,
         variant: gamut::tiff::Variant::Classic,
         ifds: vec![ifd],
@@ -1135,9 +1134,7 @@ fn json_output_reports_a_tiff_store_beside_its_accounting() {
     let rgb = [0x40u8; 8 * 8 * 3];
     let mut file = Vec::new();
     let report = gamut::tiff::TiffEncoder::new()
-        .with_tiff_metadata(
-            gamut::tiff::TiffMetadata::new().with_c2pa(b"STORE-BYTES-NEVER-PRINTED".to_vec()),
-        )
+        .with_c2pa(b"STORE-BYTES-NEVER-PRINTED")
         .encode_with_report(rgb_image(&rgb), &mut file)
         .expect("encode");
     let exclusions = report.c2pa.expect("a store was written");
@@ -1170,7 +1167,7 @@ fn json_output_lists_a_mistyped_tiff_store_entry_as_unread_with_its_reason() {
     let mut ifd = gamut::tiff::Ifd::new();
     ifd.set(256, gamut::tiff::Value::Short(vec![1]));
     ifd.set(52545, gamut::tiff::Value::Byte(vec![0x10; 12]));
-    let file = gamut::tiff::write(&gamut::tiff::TiffFile {
+    let file = gamut::ifd::write(&gamut::ifd::TiffFile {
         order: gamut::tiff::ByteOrder::LittleEndian,
         variant: gamut::tiff::Variant::Classic,
         ifds: vec![ifd],

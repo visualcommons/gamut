@@ -52,7 +52,8 @@ fn libtiff_decodes_a_gamut_image_carrying_a_c2pa_manifest_store() {
     for &(w, h) in SIZES {
         let src = rgb_pattern(w, h);
         let tiff = TiffEncoder::new()
-            .with_tiff_metadata(metadata().with_c2pa(store.clone()))
+            .with_tiff_metadata(metadata())
+            .with_c2pa(&store)
             .encode_to_vec(
                 ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).expect("image"),
             )

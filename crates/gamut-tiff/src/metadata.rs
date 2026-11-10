@@ -43,14 +43,15 @@
 //! makes an external signer exclude two disjoint ranges from its hard binding. All of that is
 //! gamut-ifd's ([`gamut_ifd::append_c2pa_store`], [`gamut_ifd::c2pa_exclusions`]) — the one
 //! place the workspace states §A.3.6, shared with `gamut-dng`
-//! rather than re-derived here. This module only wires it to the encoder
-//! ([`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved)) and exposes the
-//! read-side locator as [`c2pa_exclusions`].
+//! rather than re-derived here. The encoder places a store set with
+//! [`TiffEncoder::with_c2pa`](crate::TiffEncoder::with_c2pa) or reserved with
+//! [`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved); this module
+//! reports the store a file carries as [`TiffMetadata::c2pa`], gated on the shared locator
+//! [`c2pa_exclusions`](crate::c2pa_exclusions).
 
 use gamut_core::{Error, Result};
 use gamut_ifd::{
-    ByteOrder, C2paExclusions, C2paSummary, Ifd, SubtreeScope, Value, read, read_header,
-    read_ifd_at, resolve_subtree,
+    ByteOrder, Ifd, SubtreeScope, Value, read, read_header, read_ifd_at, resolve_subtree,
 };
 
 use crate::tags;
@@ -167,16 +168,17 @@ pub struct TiffMetadata {
     pub iptc: Option<Vec<u8>>,
     /// An ICC profile, stored in the `ICCProfile` tag (34675) as `UNDEFINED`, verbatim.
     pub icc: Option<Vec<u8>>,
-    /// A C2PA manifest store, stored in the `C2PA` tag
-    /// ([`gamut_ifd::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`), verbatim.
+    /// The C2PA manifest store the file carries, from the `C2PA` tag
+    /// ([`gamut_ifd::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`) of the last IFD of its main
+    /// chain (C2PA 2.4 §A.3.6), verbatim; [`c2pa_exclusions`](crate::c2pa_exclusions) gives
+    /// its byte ranges.
     ///
-    /// **Opaque, and bound to one exact file.** A manifest store is signed over the bytes
-    /// *around* it (C2PA 2.4 §18.5), so the only store valid here is one an external signer
-    /// computed over this encoder's own output — through
-    /// [`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved) and the
-    /// exclusion ranges [`c2pa_exclusions`] reports. A store copied out of another file is
-    /// invalid by construction. The bytes are written exactly as given: the TIFF header's
-    /// `ByteOrder` does not govern them (§A.3.6).
+    /// **Read-side only.** A manifest store is signed over the bytes *around* it (§18.5), so a
+    /// store read from one file is invalid in any other by construction:
+    /// [`TiffEncoder::with_tiff_metadata`](crate::TiffEncoder::with_tiff_metadata) leaves it
+    /// behind with [`MetadataNotice::C2paManifestStore`](crate::MetadataNotice::C2paManifestStore)
+    /// rather than write it. A store computed for an encoder's own output goes through
+    /// [`TiffEncoder::with_c2pa`](crate::TiffEncoder::with_c2pa).
     pub c2pa: Option<Vec<u8>>,
     /// The byte order of the file the Exif carriers — [`exif`](Self::exif), [`ifd0`](Self::ifd0)
     /// and [`gps`](Self::gps) — were read from: `Some` exactly when
@@ -238,14 +240,6 @@ impl TiffMetadata {
     #[must_use]
     pub fn with_icc(mut self, profile: Vec<u8>) -> Self {
         self.icc = Some(profile);
-        self
-    }
-
-    /// Returns a copy carrying `store` as the file's C2PA manifest store — see
-    /// [`c2pa`](Self::c2pa) for what makes a store valid.
-    #[must_use]
-    pub fn with_c2pa(mut self, store: Vec<u8>) -> Self {
-        self.c2pa = Some(store);
         self
     }
 
@@ -341,9 +335,10 @@ impl TiffMetadata {
     /// The 0th-IFD fields are set after the encoder's own and cannot replace one, because
     /// [`check`](Self::check) admits only [`IFD0_EXIF_TAGS`], none of which the encoder writes.
     ///
-    /// The C2PA store is deliberately **not** written here: its bytes must land at the end of
-    /// the file (C2PA 2.4 §A.3.6), after the image data, which only the encoder can arrange once
-    /// the rest of the file exists ([`gamut_ifd::append_c2pa_store`]).
+    /// The C2PA store is **never** written from here: one read from another file is signed over
+    /// that file's bytes ([`notices`](Self::notices) reports it left behind), and one computed for
+    /// this output is the encoder's own, placed at the end of the file (C2PA 2.4 §A.3.6) once the
+    /// rest of it exists ([`gamut_ifd::append_c2pa_store`]).
     pub(crate) fn apply(&self, ifd0: &mut Ifd) {
         if let Some(xmp) = &self.xmp {
             ifd0.set(tags::XMP, Value::Byte(xmp.clone()));
@@ -365,6 +360,56 @@ impl TiffMetadata {
         if let Some(gps) = self.gps_ifd() {
             ifd0.set_sub_ifd(tags::GPS_INFO, vec![gps.clone()]);
         }
+    }
+
+    /// What an encoder handed this set leaves behind, in a fixed order — empty when everything
+    /// it holds is written.
+    pub(crate) fn notices(&self) -> Vec<MetadataNotice> {
+        let mut notices = Vec::new();
+        if self.c2pa.is_some() {
+            notices.push(MetadataNotice::C2paManifestStore);
+        }
+        notices
+    }
+}
+
+/// Something [`TiffEncoder`](crate::TiffEncoder) could not carry from the
+/// [`TiffMetadata`] it was handed, and so left behind.
+///
+/// Preservation exists to stop metadata disappearing quietly, so what a carry cannot take is
+/// named rather than passed over: read them back with
+/// [`TiffEncoder::metadata_notices`](crate::TiffEncoder::metadata_notices) and tell the user, as
+/// `gamut convert` does. This is deliberately **not** an error channel — `gamut-png`'s notices
+/// are the same shape — because each is something a caller has to *know*, not something that
+/// should fail a conversion whose pixels are fine. What the encoder could write but its own reader
+/// could not read back is still an error, raised at the encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MetadataNotice {
+    /// The C2PA manifest store ([`TiffMetadata::c2pa`]), left behind. A store is signed over the
+    /// exact bytes of the file it was made for (C2PA 2.4 §18.5), so carried into a re-encode it
+    /// is invalid by construction and a validator reports a *tampered* file rather than an
+    /// unsigned one. Re-sign the output and set the store with
+    /// [`TiffEncoder::with_c2pa`](crate::TiffEncoder::with_c2pa).
+    C2paManifestStore,
+}
+
+impl MetadataNotice {
+    /// One line naming the payload and why it was left behind, fit to show a user.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::C2paManifestStore => {
+                "C2PA manifest store: signed over the source bytes, so a copy would be invalid \
+                 (C2PA 2.4 §18.5) — re-sign the output"
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for MetadataNotice {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.reason())
     }
 }
 
@@ -786,50 +831,18 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
     })
 }
 
-/// The byte ranges an external signer excludes from a `c2pa.hash.data` hard binding over `file`
-/// (C2PA 2.4 §18.5.5): the manifest store's own bytes, and the `count` field of its IFD entry.
-///
-/// Returns `Ok(None)` when `file` carries no manifest store — including when a tag-52545 entry
-/// sits somewhere other than the last IFD of the main chain, which §A.3.6 does not allow. The
-/// two ranges are always disjoint, and both are offsets from the first byte of `file`.
-///
-/// This is the read side of [`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved):
-/// it reports where a store *is*, whether this crate wrote the file or not, so a caller that
-/// encoded through a path without a report (a palette or multi-page image) recovers the ranges
-/// from the bytes.
-///
-/// # Errors
-///
-/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
-/// container is unreadable (bad header, looping or runaway IFD chain, no IFD) or the store's declared extent
-/// lies outside `file` or overlaps the entry's own count field.
-pub fn c2pa_exclusions(file: &[u8]) -> Result<Option<C2paExclusions>> {
-    gamut_ifd::c2pa_exclusions(file)
-}
-
-/// A non-validating report of the C2PA manifest store `file` carries, for a host to print: the
-/// store [`c2pa_exclusions`] locates, and every tag-52545 entry of the main IFD chain that yields
-/// none — misplaced in an earlier directory, mistyped, duplicated, too short, or pointing outside
-/// the file or over its own count field — with the reason, rather than reporting it as absence.
-///
-/// [`C2paSummary::report_lines`](gamut_ifd::C2paSummary::report_lines) renders it, with the
-/// non-validation disclaimer inline; the store's bytes are never part of it. See
-/// [`gamut_ifd::c2pa_summary`], which this delegates to, for the whole contract.
-///
-/// # Errors
-///
-/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
-/// container is unreadable (bad header, looping or runaway IFD chain, no IFD). An unreadable store is not an
-/// error here; it is listed.
-pub fn c2pa_summary(file: &[u8]) -> Result<C2paSummary> {
-    gamut_ifd::c2pa_summary(file)
-}
-
 #[cfg(test)]
 mod tests {
-    use gamut_ifd::{ByteOrder, TiffFile, Variant, write};
+    use gamut_ifd::{ByteOrder, TiffFile, Variant, c2pa_exclusions, c2pa_summary, write};
 
     use super::*;
+
+    /// `meta` holding `store` as the manifest store a reader found — the field has no builder,
+    /// because an encoder never writes it.
+    fn with_store(mut meta: TiffMetadata, store: Vec<u8>) -> TiffMetadata {
+        meta.c2pa = Some(store);
+        meta
+    }
 
     /// A directory holding one recognisable field.
     fn exif_ifd() -> Ifd {
@@ -969,7 +982,7 @@ mod tests {
             TiffMetadata::new().with_xmp(vec![1]),
             TiffMetadata::new().with_iptc(vec![1]),
             TiffMetadata::new().with_icc(vec![1]),
-            TiffMetadata::new().with_c2pa(vec![1]),
+            with_store(TiffMetadata::new(), vec![1]),
         ];
         for (i, meta) in singles.iter().enumerate() {
             assert!(!meta.is_empty(), "carrier {i} alone must be non-empty");
@@ -984,15 +997,13 @@ mod tests {
             .with_gps(gps_ifd())
             .with_xmp(b"<x:xmpmeta/>".to_vec())
             .with_iptc(vec![0x1c, 0x02, 0x05])
-            .with_icc(vec![7; 4])
-            .with_c2pa(b"\0\0\0\x14jumbc2pa".to_vec());
+            .with_icc(vec![7; 4]);
         assert_eq!(meta.exif, Some(exif_ifd()));
         assert_eq!(meta.ifd0, Some(page_fields()));
         assert_eq!(meta.gps, Some(gps_ifd()));
         assert_eq!(meta.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
         assert_eq!(meta.iptc.as_deref(), Some(&[0x1c, 0x02, 0x05][..]));
         assert_eq!(meta.icc.as_deref(), Some(&[7, 7, 7, 7][..]));
-        assert_eq!(meta.c2pa.as_deref(), Some(&b"\0\0\0\x14jumbc2pa"[..]));
     }
 
     #[test]
@@ -1028,7 +1039,7 @@ mod tests {
         // The store is the encoder's to place at the end of the file (§A.3.6), so `apply` must
         // leave the directory without it even when one is configured.
         let mut ifd = Ifd::new();
-        TiffMetadata::new().with_c2pa(vec![0; 16]).apply(&mut ifd);
+        with_store(TiffMetadata::new(), vec![0; 16]).apply(&mut ifd);
         assert!(ifd.get(tags::C2PA_MANIFEST_STORE).is_none());
         assert!(ifd.fields().is_empty());
     }
@@ -1536,7 +1547,11 @@ mod tests {
             ifd0.set(tags::C2PA_MANIFEST_STORE, value.clone());
             let bytes = file_with(ifd0);
             assert_eq!(read_metadata(&bytes).expect("read").c2pa, None, "{value:?}");
-            assert_eq!(c2pa_exclusions(&bytes).expect("locate"), None, "{value:?}");
+            assert_eq!(
+                c2pa_exclusions(&bytes[..]).expect("locate"),
+                None,
+                "{value:?}"
+            );
         }
     }
 
@@ -1549,7 +1564,7 @@ mod tests {
         ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(store.clone()));
         let bytes = file_with(ifd0);
         assert_eq!(read_metadata(&bytes).expect("read").c2pa, Some(store));
-        assert!(c2pa_exclusions(&bytes).expect("locate").is_some());
+        assert!(c2pa_exclusions(&bytes[..]).expect("locate").is_some());
     }
 
     #[test]
@@ -1559,17 +1574,17 @@ mod tests {
         let mut ifd0 = Ifd::new();
         ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(vec![0x10; 12]));
         let bytes = file_with(ifd0);
-        let summary = c2pa_summary(&bytes).expect("summarize");
+        let summary = c2pa_summary(&bytes[..]).expect("summarize");
         let store = summary.store.expect("a store");
         assert_eq!(
             Some(store.exclusions),
-            c2pa_exclusions(&bytes).expect("locate")
+            c2pa_exclusions(&bytes[..]).expect("locate")
         );
         assert!(summary.unread.is_empty());
 
         let mut ifd0 = Ifd::new();
         ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Byte(vec![0x10; 12]));
-        let summary = c2pa_summary(&file_with(ifd0)).expect("summarize");
+        let summary = c2pa_summary(&file_with(ifd0)[..]).expect("summarize");
         assert_eq!(summary.store, None);
         assert_eq!(summary.unread.len(), 1);
         assert_eq!(
@@ -1983,12 +1998,12 @@ pub(crate) mod typed {
 
         #[test]
         fn blocks_hand_over_the_byte_carriers_only() {
-            let meta = TiffMetadata::new()
+            let mut meta = TiffMetadata::new()
                 .with_exif(directory().0)
                 .with_xmp(b"<x:xmpmeta/>".to_vec())
                 .with_iptc(vec![0x1c, 0x02, 0x05])
-                .with_icc(vec![7; 4])
-                .with_c2pa(b"jumb".to_vec());
+                .with_icc(vec![7; 4]);
+            meta.c2pa = Some(b"jumb".to_vec());
             assert_eq!(
                 meta.blocks().unwrap(),
                 vec![
@@ -2127,9 +2142,8 @@ pub(crate) mod typed {
         #[test]
         fn metadata_assigns_the_exif_model_in_the_recorded_byte_order() {
             let (ifd, _) = directory();
-            let mut meta = TiffMetadata::new()
-                .with_exif(ifd.clone())
-                .with_c2pa(b"jumb".to_vec());
+            let mut meta = TiffMetadata::new().with_exif(ifd.clone());
+            meta.c2pa = Some(b"jumb".to_vec());
             meta.exif_byte_order = Some(ByteOrder::BigEndian);
             let unified = meta.metadata().unwrap();
             assert_eq!(

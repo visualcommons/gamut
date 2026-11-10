@@ -161,7 +161,7 @@ would pass classic TIFF's 4 GiB limit depends on the size of the file it lands a
 stays `gamut_ifd::append_c2pa_store`'s, refused once the file exists. What stays outside this
 crate's reach is the allocator's: a reservation the machine has no memory for aborts, as any
 oversized allocation in Rust does. `encode_with_report` reports the ranges, and `c2pa_exclusions`
-recovers them from any TIFF's bytes — including files written through `encode_palette8` or
+recovers them from any TIFF's bytes — including files written through `encode_indexed8` or
 `encode_pages_rgb8`, which the object-safe `EncodeImage` seam cannot report through. The store's
 bytes are never byte-swapped: the header's `ByteOrder` does not govern them (§A.3.6). Tag 52545
 joins `is_known_tag`, so the v1 zero-tolerance byte accounting claims the store as its entry's typed

@@ -98,9 +98,9 @@ fn valid_metadata_tiff() -> Vec<u8> {
                 .with_exif(exif)
                 .with_xmp(b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>".to_vec())
                 .with_iptc(vec![0x1c, 0x02, 0x05, 0x00, 0x04, b't', b'e', b's', b't'])
-                .with_icc(vec![0, 0, 0, 12, b'a', b'c', b's', b'p', 1, 2, 3, 4])
-                .with_c2pa(b"\0\0\0\x16jumb\x01\x02\x03\x04\x05\x06".to_vec()),
+                .with_icc(vec![0, 0, 0, 12, b'a', b'c', b's', b'p', 1, 2, 3, 4]),
         )
+        .with_c2pa(b"\0\0\0\x16jumb\x01\x02\x03\x04\x05\x06")
         .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims).unwrap())
         .expect("encode")
 }

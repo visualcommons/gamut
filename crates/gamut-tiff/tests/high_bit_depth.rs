@@ -8,8 +8,12 @@ use gamut_core::{
 };
 use gamut_tiff::{
     ByteOrder, Compression, Ifd, PhotometricInterpretation, Predictor, SampleFormat, TiffDecoder,
-    TiffEncoder, Value, Variant, read, tags, write_image,
+    TiffEncoder, Value, Variant, tags,
 };
+
+mod common;
+use common::write_image;
+use gamut_ifd::read;
 use libtiff_oracle::Compression as OC;
 
 /// Sizes include 1x1, a size smaller than one tile, and 17x13 — deliberately not a multiple of 16,

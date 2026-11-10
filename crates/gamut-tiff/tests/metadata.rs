@@ -9,9 +9,12 @@ use gamut_core::{
     Rgba16,
 };
 use gamut_tiff::{
-    Anomaly, Ifd, Palette8, Severity, TiffDecoder, TiffEncoder, TiffMetadata, Value, deconstruct,
-    read, tags,
+    Anomaly, Ifd, Palette, Severity, TiffDecoder, TiffEncoder, TiffMetadata, Value, deconstruct,
+    tags,
 };
+
+mod common;
+use gamut_ifd::read;
 
 /// Distinct payloads per carrier, so a block written under the wrong tag is visible.
 const XMP: &[u8] = b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>";
@@ -309,7 +312,7 @@ fn every_public_encode_surface_refuses_an_exif_tree_its_own_decoder_could_not_re
     let enc = TiffEncoder::new().with_tiff_metadata(TiffMetadata::new().with_exif(deeper));
 
     let dims = Dimensions::new(2, 2).unwrap();
-    let palette = Palette8::from_rgb_triples(&[0u8; 768]).expect("palette");
+    let palette = Palette::new(&[[0u8; 3]; 256]).expect("palette");
     let rgb8 = ImageRef::<Rgb8>::new(&[0u8; 12], dims).expect("rgb8");
     let mut out = Vec::new();
     let refusals = [
@@ -374,8 +377,8 @@ fn every_public_encode_surface_refuses_an_exif_tree_its_own_decoder_could_not_re
             .map(|_| ()),
         ),
         (
-            "encode_palette8",
-            enc.encode_palette8(
+            "encode_indexed8",
+            enc.encode_indexed8(
                 ImageRef::<Indexed8>::new(&[0u8; 4], dims).expect("indexed8"),
                 &palette,
                 &mut out,
@@ -429,7 +432,7 @@ fn file_with_extra_ifd0_field(tag: u16, value: Value) -> Vec<u8> {
     let mut ifd = page_ifd();
     ifd.set(tags::XMP, Value::Byte(XMP.to_vec()));
     ifd.set(tag, value);
-    gamut_tiff::write_image(
+    common::write_image(
         gamut_tiff::ByteOrder::LittleEndian,
         gamut_tiff::Variant::Classic,
         &ifd,
@@ -444,7 +447,7 @@ fn multipage(pages: &[Ifd]) -> Vec<u8> {
         .iter()
         .map(|ifd| (ifd.clone(), page_strips()))
         .collect();
-    gamut_tiff::write_multipage(
+    common::write_pages(
         gamut_tiff::ByteOrder::LittleEndian,
         gamut_tiff::Variant::Classic,
         &pages,

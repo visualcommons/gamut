@@ -2,7 +2,8 @@
 //! compatibility, and bidirectional libtiff parity.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
-use gamut_tiff::{Compression, Predictor, TiffDecoder, TiffEncoder, read, tags};
+use gamut_ifd::read;
+use gamut_tiff::{Compression, Predictor, TiffDecoder, TiffEncoder, tags};
 
 fn pattern(width: u32, height: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((width * height * 3) as usize);
