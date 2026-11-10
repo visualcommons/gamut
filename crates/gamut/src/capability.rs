@@ -175,9 +175,8 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
         // gamut-tiff STATUS.md "Additions since the freeze (#446)": `TiffDecoder::metadata` locates
         // the Exif (its 0th-IFD fields in IFD 0, `ExifIFD` and `GPSInfo`), XMP (700), IPTC-IIM
         // (33723), ICC (34675) and C2PA (52545) payloads, and `TiffEncoder::with_tiff_metadata`
-        // writes the first four (the facade path refuses an Exif model holding a thumbnail, or a
-        // 0th-IFD field outside `gamut_tiff::IFD0_EXIF_TAGS`, which a `TiffMetadata` has no
-        // carrier for — #876).
+        // writes the first four (an Exif model's thumbnail, and a 0th-IFD field outside
+        // `gamut_tiff::IFD0_EXIF_TAGS`, are left behind with a `MetadataNotice` — #876, #1082).
         // gamut-dng STATUS.md P16: EXIF sub-IFD + XMP (700) / IPTC-IIM (33723) / ICC (34675),
         // embedded and decoded (`DngMetadata`, `DngMetadata::blocks`).
         (

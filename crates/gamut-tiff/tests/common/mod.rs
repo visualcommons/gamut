@@ -62,6 +62,40 @@ pub fn write_pages(
     })
 }
 
+/// An EXIF model holding `ifd0` as its 0th IFD, `exif` as its Exif sub-IFD (any
+/// `InteroperabilityIFD` group left inside it, which the encoder writes as it stands) and `gps` as
+/// its GPS sub-IFD — the three directories of a TIFF's IFD 0 the suites below were written
+/// against.
+pub fn exif_model(
+    ifd0: Option<gamut_ifd::Ifd>,
+    exif: Option<gamut_ifd::Ifd>,
+    gps: Option<gamut_ifd::Ifd>,
+) -> gamut_tiff::Exif {
+    let mut model = gamut_tiff::Exif::new(gamut_ifd::ByteOrder::LittleEndian);
+    if let Some(fields) = ifd0 {
+        *model.image_mut() = fields;
+    }
+    if let Some(exif) = exif {
+        model.set_exif_ifd(exif);
+    }
+    if let Some(gps) = gps {
+        model.set_gps_ifd(gps);
+    }
+    model
+}
+
+/// The `ExifIFD` directory a read [`gamut_tiff::TiffMetadata`] holds, as it lies in the file: the
+/// model's Exif sub-IFD with its Interoperability sub-IFD put back as an `InteroperabilityIFD`
+/// group.
+pub fn exif_dir(meta: &gamut_tiff::TiffMetadata) -> Option<gamut_ifd::Ifd> {
+    let model = meta.exif.as_ref()?;
+    let mut dir = model.exif_ifd().cloned()?;
+    if let Some(interop) = model.interop_ifd() {
+        dir.set_sub_ifd(gamut_ifd::tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
+    }
+    Some(dir)
+}
+
 /// [`write_pages`] for one page.
 pub fn write_image(
     order: gamut_ifd::ByteOrder,

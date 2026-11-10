@@ -16,6 +16,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8, Rgb16};
 use gamut_tiff::{Compression, Ifd, Predictor, TiffDecoder, TiffEncoder, TiffMetadata, Value};
 
+mod common;
+
 /// The largest single allocation this binary grants: four times the decoder's 64 MiB
 /// `MAX_IMAGE_BYTES`, so no decode that limit admits (nor its widening to RGB output) is refused,
 /// and far below the gibibyte-scale requests a declared count or geometry produces.
@@ -95,7 +97,7 @@ fn valid_metadata_tiff() -> Vec<u8> {
     TiffEncoder::new()
         .with_tiff_metadata(
             TiffMetadata::new()
-                .with_exif(exif)
+                .with_exif(common::exif_model(None, Some(exif), None))
                 .with_xmp(b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>".to_vec())
                 .with_iptc(vec![0x1c, 0x02, 0x05, 0x00, 0x04, b't', b'e', b's', b't'])
                 .with_icc(vec![0, 0, 0, 12, b'a', b'c', b's', b'p', 1, 2, 3, 4]),

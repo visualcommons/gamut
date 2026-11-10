@@ -9,8 +9,8 @@ use gamut_core::{
     Rgba16,
 };
 use gamut_tiff::{
-    Anomaly, Ifd, Palette, Severity, TiffDecoder, TiffEncoder, TiffMetadata, Value, deconstruct,
-    tags,
+    Anomaly, Ifd, MetadataNotice, Palette, Severity, TiffDecoder, TiffEncoder, TiffMetadata, Value,
+    deconstruct, tags,
 };
 
 mod common;
@@ -48,9 +48,7 @@ fn metadata() -> TiffMetadata {
         .with_xmp(XMP.to_vec())
         .with_iptc(IPTC.to_vec())
         .with_icc(ICC.to_vec())
-        .with_exif(exif())
-        .with_ifd0(ifd0())
-        .with_gps(gps())
+        .with_exif(common::exif_model(Some(ifd0()), Some(exif()), Some(gps())))
 }
 
 fn rgb(w: u32, h: u32) -> Vec<u8> {
@@ -141,25 +139,43 @@ fn the_decoder_returns_every_block_verbatim() {
     assert_eq!(read_back.xmp.as_deref(), Some(XMP));
     assert_eq!(read_back.iptc.as_deref(), Some(IPTC));
     assert_eq!(read_back.icc.as_deref(), Some(ICC));
-    assert_eq!(read_back.exif, Some(exif()));
-    assert_eq!(read_back.ifd0, Some(ifd0()));
-    assert_eq!(read_back.gps, Some(gps()));
+    assert_eq!(common::exif_dir(&read_back), Some(exif()));
+    assert_eq!(
+        read_back.exif.as_ref().map(|e| e.image().clone()),
+        Some(ifd0())
+    );
+    assert_eq!(
+        read_back.exif.as_ref().and_then(|e| e.gps_ifd().cloned()),
+        Some(gps())
+    );
 }
 
 #[test]
-fn ifd0_fields_the_encoder_writes_itself_are_refused_before_any_pixel_work() {
-    // `ImageWidth` among the 0th-IFD fields would overwrite the page's own: refused, and the
-    // output buffer is left untouched.
+fn ifd0_fields_the_encoder_writes_itself_are_left_behind_with_a_notice() {
+    // `ImageWidth` among the 0th-IFD fields would overwrite the page's own: it is left behind and
+    // named, the carried fields are still written, and the page keeps its own width.
     let mut layout = ifd0();
     layout.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
     let pixels = rgb(8, 4);
-    let mut out = Vec::new();
-    let err = TiffEncoder::new()
-        .with_tiff_metadata(TiffMetadata::new().with_ifd0(layout))
-        .encode_image(image(&pixels, 8, 4), &mut out)
-        .expect_err("ImageWidth is the encoder's");
-    assert!(err.to_string().contains("IFD0_EXIF_TAGS"), "{err}");
-    assert!(out.is_empty(), "a refused encode writes nothing");
+    let encoder = TiffEncoder::new().with_tiff_metadata(
+        TiffMetadata::new().with_exif(common::exif_model(Some(layout), None, None)),
+    );
+    assert_eq!(
+        encoder.metadata_notices(),
+        vec![MetadataNotice::ExifImageField {
+            tag: tags::IMAGE_WIDTH
+        }]
+    );
+    let bytes = encoder
+        .encode_to_vec(image(&pixels, 8, 4))
+        .expect("left behind, not refused");
+    let page = &read(&bytes).expect("read").ifds[0];
+    assert_eq!(page.get_u32(tags::IMAGE_WIDTH), Some(8));
+    let read_back = TiffDecoder::new().metadata(&bytes).expect("metadata");
+    assert_eq!(
+        read_back.exif.as_ref().map(|e| e.image().clone()),
+        Some(ifd0())
+    );
 }
 
 #[test]
@@ -178,14 +194,18 @@ fn a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file() {
 
     let pixels = rgb(8, 4);
     let first = TiffEncoder::new()
-        .with_tiff_metadata(TiffMetadata::new().with_exif(exif))
+        .with_tiff_metadata(TiffMetadata::new().with_exif(common::exif_model(
+            None,
+            Some(exif),
+            None,
+        )))
         .encode_to_vec(image(&pixels, 8, 4))
         .expect("encode");
 
     // Decode the metadata back and feed it straight into a new encode — the round trip a caller
     // makes when rewriting a file.
     let decoded = TiffDecoder::new().metadata(&first).expect("metadata");
-    let exif_back = decoded.exif.clone().expect("an Exif sub-IFD");
+    let exif_back = common::exif_dir(&decoded).expect("an Exif sub-IFD");
     assert_eq!(
         exif_back
             .sub_ifds()
@@ -248,16 +268,18 @@ fn every_standard_pointer_inside_the_exif_directory_survives_a_round_trip() {
 
         let pixels = rgb(8, 4);
         let first = TiffEncoder::new()
-            .with_tiff_metadata(TiffMetadata::new().with_exif(exif))
+            .with_tiff_metadata(TiffMetadata::new().with_exif(common::exif_model(
+                None,
+                Some(exif),
+                None,
+            )))
             .encode_to_vec(image(&pixels, 8, 4))
             .unwrap_or_else(|e| panic!("tag {tag}: encode: {e}"));
         let decoded = TiffDecoder::new()
             .metadata(&first)
             .unwrap_or_else(|e| panic!("tag {tag}: metadata: {e}"));
         assert_eq!(
-            decoded
-                .exif
-                .as_ref()
+            common::exif_dir(&decoded)
                 .unwrap_or_else(|| panic!("tag {tag}: an Exif directory"))
                 .get(tag),
             None,
@@ -309,7 +331,9 @@ fn every_public_encode_surface_refuses_an_exif_tree_its_own_decoder_could_not_re
     inner.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop]);
     let mut deeper = exif();
     deeper.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![inner]);
-    let enc = TiffEncoder::new().with_tiff_metadata(TiffMetadata::new().with_exif(deeper));
+    let enc = TiffEncoder::new().with_tiff_metadata(
+        TiffMetadata::new().with_exif(common::exif_model(None, Some(deeper), None)),
+    );
 
     let dims = Dimensions::new(2, 2).unwrap();
     let palette = Palette::new(&[[0u8; 3]; 256]).expect("palette");
@@ -566,7 +590,7 @@ fn two_pages_naming_one_exif_directory_do_not_trip_the_loop_guard() {
     let meta = TiffDecoder::new()
         .metadata(&bytes)
         .expect("a shared directory on a discarded page must not fail the read");
-    assert_eq!(meta.exif, Some(exif()));
+    assert_eq!(common::exif_dir(&meta), Some(exif()));
 }
 
 #[test]

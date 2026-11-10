@@ -40,14 +40,16 @@
 //! directions against libtiff; the deferred colour modes and compression schemes (YCbCr,
 //! CIE L\*a\*b\*, JPEG-in-TIFF, …) land additively — see `STATUS.md` for the scope ledger.
 //!
-//! Embedded metadata — Exif (the 0th-IFD fields of [`IFD0_EXIF_TAGS`] in IFD 0 itself, plus the
-//! `ExifIFD` and `GPSInfo` sub-IFDs) plus XMP / IPTC-IIM / ICC / C2PA payloads — is
-//! [`TiffMetadata`], written by [`TiffEncoder::with_tiff_metadata`] and read by
+//! Embedded metadata — the [`Exif`] model (its 0th-IFD fields of [`IFD0_EXIF_TAGS`] in IFD 0
+//! itself, plus the `ExifIFD` and `GPSInfo` sub-IFDs) plus XMP / IPTC-IIM / ICC payloads and the
+//! C2PA store a file carries — is [`TiffMetadata`], written by [`TiffEncoder::with_tiff_metadata`] and read by
 //! [`TiffDecoder::metadata`]. With the optional **`metadata`** Cargo feature it is also wired to
 //! the `gamut-metadata` facade's typed models: [`TiffMetadata`] implements the facade's
-//! `TypedMetadata` trait, and `TiffEncoder::with_metadata` / `with_encoded_metadata` embed a
-//! unified `Metadata` (the whole EXIF model but its thumbnail, which has no carrier here and is
-//! refused, as is a 0th-IFD field IFD 0 holds as the encoder's own).
+//! `TypedMetadata` trait, and [`TiffEncoder`] is the facade's `MetadataSink`, whose
+//! `with_metadata` / `with_encoded_metadata` embed a unified `Metadata` through the raw setters
+//! ([`TiffEncoder::with_exif`] and its siblings). What of the EXIF model a TIFF cannot hold — its
+//! thumbnail, a 0th-IFD field IFD 0 holds as the encoder's own — is left behind and named by
+//! [`TiffEncoder::metadata_notices`] rather than refused.
 //!
 //! TIFF codestreams are permanently backend-less: unlike the other format crates, this crate
 //! adds **no** pluggable codestream backend (the IoC seam of #241), because TIFF's compression
@@ -93,6 +95,8 @@ mod ifd;
 mod info;
 mod metadata;
 mod palette;
+#[cfg(feature = "metadata")]
+mod typed;
 mod writer;
 
 pub use decoder::TiffDecoder;
@@ -102,6 +106,9 @@ pub use encoder::{TiffEncodeReport, TiffEncoder};
 // `TiffDecoder::with_convert_policy`, `TiffEncoder::encode_indexed8`), so a caller needs no direct
 // gamut-core dependency.
 pub use gamut_core::{DecodeLimits, Palette, convert::ConvertPolicy};
+// `TiffMetadata::exif` is gamut-exif's model, as `gamut-dng`'s is; re-exported with the tag
+// vocabulary its accessors take so a caller needs no direct gamut-exif dependency.
+pub use gamut_exif::{Exif, ExifTag};
 // The tag-value codes are gamut-ifd's, shared with gamut-dng; they are reachable from
 // `TiffEncoder` and `TiffInfo`, so they are re-exported for the same reason as the IFD types below.
 // Which codes a TIFF page may carry is this crate's own (`ifd`, `compression`).
@@ -132,6 +139,6 @@ pub use gamut_ifd::{
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `TiffMetadata::metadata` / `TiffEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataSink, TypedMetadata};
 pub use info::TiffInfo;
 pub use metadata::{IFD0_EXIF_TAGS, MetadataNotice, TiffMetadata};

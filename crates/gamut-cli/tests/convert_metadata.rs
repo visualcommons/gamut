@@ -15,7 +15,6 @@ use std::process::Command;
 use gamut::core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgba8};
 use gamut::exif::{ByteOrder, Exif, ExifTag, ExifWriter, Value};
 use gamut::icc::{BuiltinProfile, IccProfile};
-use gamut::ifd::tags::INTEROPERABILITY_IFD;
 use gamut::jpeg::JpegEncoder;
 use gamut::jxl::{Container, Distance, JxlDecoder, JxlEncoder, Orientation};
 use gamut::png::{PngEncoder, PngMetadata, SrgbIntent};
@@ -399,7 +398,8 @@ fn a_tiff_output_carries_xmp_icc_and_the_exif_sub_ifd() {
     let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
     assert_eq!(meta.xmp.as_deref(), Some(XMP));
     assert_eq!(meta.icc, Some(rgb_icc()));
-    let directory = meta.exif.expect("an ExifIFD");
+    let model = meta.exif.expect("an Exif model");
+    let directory = model.exif_ifd().expect("an ExifIFD");
     assert_eq!(
         directory.get(ExifTag::ExposureTime.tag_id()),
         Some(&Value::Rational(vec![(1, 250)]))
@@ -433,7 +433,8 @@ fn a_tiff_output_carries_the_exif_0th_ifd_into_its_own_ifd_0() {
         "stderr reported a carried field as left behind: {stderr}"
     );
     let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
-    let page = meta.ifd0.expect("the 0th-IFD fields");
+    let model = meta.exif.as_ref().expect("the 0th-IFD fields");
+    let page = model.image();
     assert_eq!(
         page.get(ExifTag::Make.tag_id()),
         Some(&Value::Ascii("gamut".into()))
@@ -445,7 +446,7 @@ fn a_tiff_output_carries_the_exif_0th_ifd_into_its_own_ifd_0() {
     assert_eq!(page.get(ExifTag::YCbCrPositioning.tag_id()), None);
     // The fixture's Exif holds nothing below its 0th IFD, so no `ExifIFD` is written, and the
     // other carriers still are.
-    assert!(meta.exif.is_none());
+    assert!(model.exif_ifd().is_none());
     assert_eq!(meta.xmp.as_deref(), Some(XMP));
 }
 
@@ -481,23 +482,25 @@ fn a_tiff_output_carries_the_gps_and_interop_ifds_and_reports_the_thumbnail() {
     );
     let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
     assert_eq!(
-        meta.gps
+        meta.exif
+            .as_ref()
+            .and_then(|model| model.gps_ifd())
             .expect("the GPS sub-IFD")
             .get(ExifTag::GpsLatitudeRef.tag_id()),
         Some(&Value::Ascii("N".into()))
     );
     assert_eq!(meta.xmp.as_deref(), Some(XMP));
     assert_eq!(meta.icc, Some(rgb_icc()));
-    let directory = meta.exif.expect("an ExifIFD");
+    let model = meta.exif.expect("an Exif model");
+    let directory = model.exif_ifd().expect("an ExifIFD");
     assert_eq!(
         directory.get(ExifTag::ExposureTime.tag_id()),
         Some(&Value::Rational(vec![(1, 250)]))
     );
-    let interop = directory
-        .sub_ifds()
-        .iter()
-        .find(|group| group.tag == INTEROPERABILITY_IFD)
-        .and_then(|group| group.ifds.first())
+    // The reader resolves the `InteroperabilityIFD` group inside `ExifIFD` into the model's own
+    // Interoperability sub-IFD.
+    let interop = model
+        .interop_ifd()
         .expect("the Interoperability sub-IFD is kept");
     assert_eq!(
         interop.get(ExifTag::InteroperabilityIndex.tag_id()),

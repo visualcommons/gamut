@@ -284,6 +284,28 @@ The API was frozen after a full-surface review; the additions and breaks:
   still flagged. **Behaviour change:** `TiffEncoder` now refuses, with `ErrorKind::Unsupported`,
   a `with_predictor` value other than `None` or `HorizontalDifferencing`, which the shared type
   can now express and which would otherwise be silently encoded unpredicted.
+- **The workspace shapes (#1082). Breaking.** `TiffMetadata::exif` is gamut-exif's `Exif` model
+  (a new normal `gamut-exif` edge, re-exported with `ExifTag`), replacing the raw `exif`/`ifd0`/
+  `gps` directories and `exif_byte_order`: the model carries all three and its byte order, as
+  `gamut-dng`'s `DngMetadata` does. **Behaviour change:** what of the model a TIFF cannot hold — a
+  thumbnail, a 0th-IFD field outside `IFD0_EXIF_TAGS`, a 0th-IFD sub-IFD group — is left behind
+  with a `MetadataNotice` (`TiffEncoder::metadata_notices`) where the encode used to refuse it, as
+  `gamut-png` reports what it cannot carry; the sub-IFD shapes the reader could not hand back are
+  still refused. The C2PA store is set with `TiffEncoder::with_c2pa(&[u8])`; `TiffMetadata::c2pa`
+  is read-side only, and handed back to an encoder it is left behind with
+  `MetadataNotice::C2paManifestStore`. `TiffEncoder` gains the raw `with_exif`/`with_xmp`/
+  `with_icc_profile`/`with_iptc_iim` setters, and under `metadata` is the facade's
+  `MetadataSink` in place of its own `with_metadata`/`with_encoded_metadata` (whose refusals now
+  carry the facade's messages); the facade wiring lives in `typed.rs`.
+  `with_big_tiff(bool)` → `with_variant(Variant)`; `encode_palette8(&Palette8)` →
+  `encode_indexed8(&gamut_core::Palette)` (1–256 entries padded with black; an index past the
+  palette is `InvalidInput`, a transparent entry `Unsupported`); `TiffDecoder::convert_policy` →
+  `with_convert_policy`; `TiffDecoder::with_limits(DecodeLimits)` makes the 64 MiB stored-byte cap
+  configurable, with the same default, and adds the shared per-side caps (unbounded by default).
+  Removed: `TiffDecoder::{deconstruct, deconstruct_page}` (the free `deconstruct` stays), the
+  `read`/`write`/`TiffFile` re-exports (gamut-ifd's to expose), the public `write_image`/
+  `write_image_tiled`/`write_multipage` and `Palette8`; `c2pa_exclusions`/`c2pa_summary` are
+  gamut-ifd's, re-exported under the names `gamut-dng` uses, so they take any `ReadAt` source.
 - **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
   on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
   diagnostics whose wording is not contractual.

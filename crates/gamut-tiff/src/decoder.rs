@@ -225,8 +225,8 @@ impl TiffDecoder {
     /// §4.6.3), and the same bound
     /// [`TiffEncoder::with_tiff_metadata`](crate::TiffEncoder::with_tiff_metadata) writes within. It is also
     /// returned for an IFD-0 `ExifIFD` or `GPSInfo` entry naming **two or more** directories:
-    /// EXIF 2.32 §4.6.3 A fixes each count at 1, [`TiffMetadata::exif`] and
-    /// [`TiffMetadata::gps`] hold one each, and keeping only the first would drop the rest
+    /// EXIF 2.32 §4.6.3 A fixes each count at 1, [`TiffMetadata::exif`]'s model holds one
+    /// of each, and keeping only the first would drop the rest
     /// silently. [`deconstruct`](crate::deconstruct) still walks such a file.
     ///
     /// Which pointers are followed depends on the **level**, so which ones can fail this call does

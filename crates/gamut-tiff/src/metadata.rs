@@ -13,18 +13,16 @@
 //! hand over), and keeping them opaque here is what lets a caller choose its own conflict policy
 //! instead of inheriting one from the container.
 //!
-//! EXIF is the exception, and only because TIFF makes it one: an `ExifIFD` (34665) *is* an IFD,
-//! which this crate has already parsed by the time a caller sees it. Handing it back as
-//! [`gamut_ifd::Ifd`] rather than as bytes saves every caller from re-parsing a directory the
-//! decoder already walked. Its fields are neither validated nor completed — what the caller
-//! supplies is what the file gets, and what the file holds is what the caller gets — subject to
-//! the three normalisations a directory model implies, named on [`TiffMetadata::exif`], and to
-//! the four shapes the encode **refuses** outright rather than write a file it could not read
-//! back ([`TiffMetadata::check`]). The `GPSInfo` sub-IFD is carried the same way
-//! ([`TiffMetadata::gps`]). The Exif *0th IFD* has no directory of its own in a TIFF — its tags
-//! are TIFF 6.0 tags of the page's own IFD 0 — so [`TiffMetadata::ifd0`] carries those fields
-//! directly, limited to the descriptive tags of [`IFD0_EXIF_TAGS`]: the rest of IFD 0 is the
-//! encoder's.
+//! EXIF is the exception, and only because TIFF makes it one: a TIFF has no EXIF *block*. Its
+//! `ExifIFD` (34665) and `GPSInfo` (34853) are IFDs, which this crate has already parsed by the
+//! time a caller sees them, and the Exif *0th IFD* is the page's own IFD 0, limited to the
+//! descriptive tags of [`IFD0_EXIF_TAGS`]: the rest of IFD 0 is the encoder's. So
+//! [`TiffMetadata::exif`] carries them as the shared [`Exif`] model — the type `gamut-dng` and the
+//! facade hold — rather than as bytes a caller would re-parse. Its fields are neither validated
+//! nor completed, subject to the three normalisations a directory model implies (named on
+//! [`TiffMetadata::exif`]); what of the model a TIFF cannot hold is left behind with a
+//! [`MetadataNotice`]; and the four sub-IFD shapes this crate's reader could not hand back are
+//! **refused** by the encode ([`TiffMetadata::check`]).
 //!
 //! # Where the blocks live, and what that costs a page-at-a-time reader
 //!
@@ -50,6 +48,7 @@
 //! [`c2pa_exclusions`](crate::c2pa_exclusions).
 
 use gamut_core::{Error, Result};
+use gamut_exif::Exif;
 use gamut_ifd::{
     ByteOrder, Ifd, SubtreeScope, Value, read, read_header, read_ifd_at, resolve_subtree,
 };
@@ -75,17 +74,33 @@ use crate::tags;
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct TiffMetadata {
-    /// The Exif private sub-IFD (`ExifIFD`, 34665), as the shared directory model.
+    /// The page's EXIF, as the shared [`Exif`] model — the type `gamut-dng`'s `DngMetadata` and
+    /// the facade's `Metadata` hold.
+    ///
+    /// A TIFF has no EXIF *block*: the model's directories are directories of the file itself.
+    /// Its **0th IFD** is the page's own IFD 0 — EXIF 2.32 §4.6.4 Table 4 lists those tags as
+    /// TIFF 6.0 attributes — limited to the descriptive tags of [`IFD0_EXIF_TAGS`]; its **Exif
+    /// sub-IFD** is the `ExifIFD` (34665) directory, which holds its **Interoperability sub-IFD**
+    /// as an `InteroperabilityIFD` (40965) group; and its **GPS sub-IFD** is the `GPSInfo` (34853)
+    /// directory. On read the model is in the file's byte order; on write its byte order does not
+    /// travel — the file's is [`TiffEncoder::with_byte_order`](crate::TiffEncoder::with_byte_order)'s.
+    ///
+    /// **What a TIFF cannot hold is left behind, and said so.** A thumbnail (the 1st IFD) would be
+    /// a page of its own, and every other Table 4 tag (`ImageWidth`, `Compression`,
+    /// `XResolution`, `StripOffsets`, `YCbCrPositioning`, `TransferFunction`, …) — and any sub-IFD
+    /// group in the 0th IFD — is one the encoder writes from the pixels it lays out, or one whose
+    /// meaning depends on that layout. The encoder writes neither and reports each with a
+    /// [`MetadataNotice`] ([`TiffEncoder::metadata_notices`](crate::TiffEncoder::metadata_notices))
+    /// rather than letting it overwrite or contradict the page's own entry. On read, IFD 0's
+    /// fields under the carried tags come back as the 0th IFD and nothing else does.
     ///
     /// **Entries are carried unchanged; ordering is normalised.** This crate adds no mandatory
-    /// Exif field — not even `ExifVersion` — and drops none of the directory's entries, because a
-    /// TIFF's `ExifIFD` is the caller's directory and completing it would silently change what a
-    /// round trip returns. What
-    /// it does not promise is byte-identity, because [`gamut_ifd::Ifd`] is a directory model
+    /// Exif field — not even `ExifVersion` — and drops none of a sub-IFD's entries. Values are
+    /// not validated: an `Orientation` of 6 is written as 6, and the stored pixels are not rotated
+    /// by either side. What it does not promise is byte-identity, because a directory is a model
     /// rather than a byte range, and three normalisations are inherent to it:
     ///
-    /// 1. fields are kept **sorted by ascending tag**, as TIFF 6.0 §2 requires on disk, so a
-    ///    source directory written out of order comes back in order;
+    /// 1. fields are kept **sorted by ascending tag**, as TIFF 6.0 §2 requires on disk;
     /// 2. a **duplicated tag collapses** to its last occurrence;
     /// 3. a child directory's **next-IFD pointer is ignored** — a sub-IFD is a directory, not a
     ///    chain.
@@ -94,68 +109,25 @@ pub struct TiffMetadata {
     /// silently repaired, which is worth knowing before using a re-encode to prove a file
     /// unmodified.
     ///
-    /// **One directory, and an array of them is refused.** The field holds a single directory,
-    /// and an `ExifIFD` entry names one (EXIF 2.32 §4.6.3 A fixes its `count` at 1). A source
-    /// file whose `ExifIFD` entry instead carries an **array** of two or more offsets is refused
-    /// by [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) with an
-    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than narrowed to its first
-    /// directory, which would drop the rest without a report — use
-    /// [`deconstruct`](crate::deconstruct) to see the whole array.
+    /// **One directory each, and an array is refused.** An IFD-0 `ExifIFD` or `GPSInfo` entry
+    /// naming two or more directories (EXIF 2.32 §4.6.3 A fixes each count at 1) is refused by
+    /// [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) with an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than narrowed
+    /// to its first directory — use [`deconstruct`](crate::deconstruct) to see the whole array.
     ///
-    /// The one shape the model can express and the file cannot is a tag holding **both** a field
-    /// and a sub-IFD group: two entries under one tag, which TIFF 6.0 §2 does not allow. That is
-    /// refused by the encode rather than normalised, because normalising it would mean choosing —
-    /// silently — which of the two the caller meant; see `TiffMetadata::check`.
-    ///
-    /// **Every standard pointer tag inside this directory is resolved.** All four members of
-    /// [`gamut_ifd::tags::STANDARD_POINTER_TAGS`] — `SubIFDs` (330), `ExifIFD` (34665), `GPSInfo`
-    /// (34853) and `InteroperabilityIFD` (40965) — come back as parsed
+    /// **Every standard pointer tag inside the Exif and GPS directories is resolved.** All four
+    /// members of [`gamut_ifd::tags::STANDARD_POINTER_TAGS`] come back as parsed
     /// [`sub_ifds`](gamut_ifd::Ifd::sub_ifds) groups rather than as raw offsets, so the writer
-    /// gives each a fresh offset when the directory is embedded again. `InteroperabilityIFD` is
-    /// the one EXIF 2.3 §4.6.3 puts here and the one a camera writes; the other three are
-    /// resolved because a directory this crate *hands back* must not contain an offset into the
-    /// file it was read from, whichever tag carries it.
+    /// gives each a fresh offset when the directory is embedded again; at IFD 0 only `ExifIFD` and
+    /// `GPSInfo` are followed. A *private* tag whose value happens to be a `LONG` file offset is
+    /// indistinguishable from an ordinary integer field, so it is carried through unchanged and
+    /// re-encoded verbatim, still holding an offset into the file it was read from; neither this
+    /// crate nor [`deconstruct`](crate::deconstruct) can grade that.
     ///
-    /// This is the Exif subtree's rule and not IFD 0's: at IFD 0 only `ExifIFD` and `GPSInfo` are
-    /// followed, so a `SubIFDs` pointer sitting on the page — whose target feeds no field here —
-    /// cannot fail the call. Inside this directory the same pointer is followed, and an
-    /// unreadable target is an error, because this directory is the one that comes back.
-    ///
-    /// **Only the standard pointer tags are recognised as pointers.** A *private* tag whose value
-    /// happens to be a `LONG` file offset — some vendors point at their own sub-directories this
-    /// way — is indistinguishable from an ordinary integer field here, so it is carried through
-    /// unchanged and re-encoded verbatim, still holding an offset into the file it was read from.
-    /// Neither this crate nor [`deconstruct`](crate::deconstruct) can grade that, because neither
-    /// knows the tag is a pointer. A caller rewriting a file with vendor metadata must not treat a
-    /// round trip through this field as proof the result is pointer-safe.
-    pub exif: Option<Ifd>,
-    /// The Exif **0th-IFD** fields a TIFF holds in the page's own IFD 0 — `Make`, `Model`,
-    /// `Orientation`, `DateTime`, `Copyright`, … — as a directory of plain fields.
-    ///
-    /// A TIFF has no Exif 0th IFD of its own: EXIF 2.32 §4.6.4 Table 4 lists those tags as TIFF
-    /// 6.0 attributes, and in a TIFF they *are* IFD 0's. Only the tags in [`IFD0_EXIF_TAGS`] are
-    /// carried — Table 4's tags that describe the image rather than the way its samples are laid
-    /// out. Every other tag of Table 4 (`ImageWidth`, `Compression`, `XResolution`,
-    /// `StripOffsets`, `YCbCrPositioning`, `TransferFunction`, …) is one the encoder writes from the
-    /// pixels it lays out, or one whose meaning depends on that layout, so a field under any tag
-    /// outside the list — or a sub-IFD group — is **refused** by the encode with an
-    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error rather than allowed to overwrite
-    /// or contradict the page's own entry. On read, IFD 0's fields under those tags come back here and nothing else does; `None`
-    /// when the page carries none of them.
-    ///
-    /// Values are carried unchanged and not validated: an `Orientation` of 6 is written as 6, and
-    /// the stored pixels are not rotated by either side.
-    pub ifd0: Option<Ifd>,
-    /// The GPS private sub-IFD (`GPSInfo`, 34853, EXIF 2.32 §4.6.3 A), pointed to from IFD 0.
-    ///
-    /// Carried as [`exif`](Self::exif) is, under the same three normalisations and the same four
-    /// refusals at the encode (see
-    /// [`TiffEncoder::with_tiff_metadata`](crate::TiffEncoder::with_tiff_metadata)); an IFD-0 `GPSInfo` entry naming two or more directories
-    /// is refused on read, as an `ExifIFD` array is. Its pointer is followed on read, so an
-    /// **unreadable** `GPSInfo` target fails [`TiffDecoder::metadata`](crate::TiffDecoder::metadata)
-    /// — the same trade `ExifIFD` makes, for the same reason: reporting `gps: None` for a directory
-    /// the file declares would be silent loss.
-    pub gps: Option<Ifd>,
+    /// The shapes of a caller-built Exif or GPS sub-IFD this crate's reader could not hand back
+    /// are refused by the encode, each with its own message — see
+    /// [`TiffEncoder::with_tiff_metadata`](crate::TiffEncoder::with_tiff_metadata).
+    pub exif: Option<Exif>,
     /// An XMP packet (UTF-8 RDF/XML), stored in the `XMP` tag (700) as `BYTE`, verbatim.
     pub xmp: Option<Vec<u8>>,
     /// A legacy IPTC-IIM dataset stream, stored in the `IPTC/NAA` tag (33723) as `BYTE`,
@@ -180,17 +152,6 @@ pub struct TiffMetadata {
     /// rather than write it. A store computed for an encoder's own output goes through
     /// [`TiffEncoder::with_c2pa`](crate::TiffEncoder::with_c2pa).
     pub c2pa: Option<Vec<u8>>,
-    /// The byte order of the file the Exif carriers — [`exif`](Self::exif), [`ifd0`](Self::ifd0)
-    /// and [`gps`](Self::gps) — were read from: `Some` exactly when
-    /// [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) returned any of the three, and
-    /// `None` on a value built by hand.
-    ///
-    /// **Read-side provenance only.** An `ExifIFD` has no byte order of its own — it is written in
-    /// the file's, which [`TiffEncoder::with_byte_order`](crate::TiffEncoder::with_byte_order)
-    /// chooses — so the encoder ignores this field. It exists so the typed EXIF model the
-    /// `metadata` feature builds from the three states the order the directories were actually
-    /// stored in.
-    pub exif_byte_order: Option<ByteOrder>,
 }
 
 impl TiffMetadata {
@@ -200,25 +161,11 @@ impl TiffMetadata {
         Self::default()
     }
 
-    /// Returns a copy carrying `exif` as the file's `ExifIFD` sub-IFD.
+    /// Returns a copy carrying `exif` as the file's EXIF — see [`exif`](Self::exif) for which of
+    /// the model's directories a TIFF holds, and where.
     #[must_use]
-    pub fn with_exif(mut self, exif: Ifd) -> Self {
+    pub fn with_exif(mut self, exif: Exif) -> Self {
         self.exif = Some(exif);
-        self
-    }
-
-    /// Returns a copy carrying `fields` as the Exif 0th-IFD fields of the file's IFD 0 — see
-    /// [`ifd0`](Self::ifd0) for which tags it may hold.
-    #[must_use]
-    pub fn with_ifd0(mut self, fields: Ifd) -> Self {
-        self.ifd0 = Some(fields);
-        self
-    }
-
-    /// Returns a copy carrying `gps` as the file's `GPSInfo` sub-IFD.
-    #[must_use]
-    pub fn with_gps(mut self, gps: Ifd) -> Self {
-        self.gps = Some(gps);
         self
     }
 
@@ -243,37 +190,28 @@ impl TiffMetadata {
         self
     }
 
-    /// Whether there is nothing to embed: no payload set, and no Exif directory — sub-IFD, 0th-IFD
-    /// fields or GPS sub-IFD — with content in it.
+    /// Whether there is nothing to embed: no payload set, and no EXIF directory a TIFF holds —
+    /// carried 0th-IFD fields, Exif sub-IFD or GPS sub-IFD — with content in it.
     ///
-    /// An `exif` or `gps` directory with no entries counts as empty — writing it would add a
-    /// pointer to a directory with nothing in it — and so does an `ifd0` with none. A sub-IFD group
-    /// *is* content: a directory whose only entry is an `InteroperabilityIFD` pointer still writes
-    /// one on-disk entry.
+    /// An Exif or GPS sub-IFD with no entries counts as empty — writing it would add a pointer to
+    /// a directory with nothing in it — and so does a 0th IFD with no carried field. A sub-IFD
+    /// group *is* content: an Exif sub-IFD whose only content is an Interoperability sub-IFD
+    /// still writes one on-disk entry. What a TIFF leaves behind (a thumbnail, an uncarried 0th-IFD
+    /// field) is not content here. A read-side manifest store is: the set is not empty while it
+    /// holds one, though no encoder writes it.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.exif_ifd().is_none()
-            && self.ifd0_fields().is_none()
-            && self.gps_ifd().is_none()
+        self.carriers() == ExifCarriers::default()
             && self.xmp.is_none()
             && self.iptc.is_none()
             && self.icc.is_none()
             && self.c2pa.is_none()
     }
 
-    /// The Exif sub-IFD to write, or `None` when there is no Exif content worth a directory.
-    fn exif_ifd(&self) -> Option<&Ifd> {
-        with_content(self.exif.as_ref())
-    }
-
-    /// The 0th-IFD fields to write into IFD 0, or `None` when there are none.
-    fn ifd0_fields(&self) -> Option<&Ifd> {
-        with_content(self.ifd0.as_ref())
-    }
-
-    /// The GPS sub-IFD to write, or `None` when there is no GPS content worth a directory.
-    fn gps_ifd(&self) -> Option<&Ifd> {
-        with_content(self.gps.as_ref())
+    /// The directories a TIFF writes for [`exif`](Self::exif), each `None` when it has nothing
+    /// worth a directory.
+    pub(crate) fn carriers(&self) -> ExifCarriers {
+        self.exif.as_ref().map(exif_carriers).unwrap_or_default()
     }
 
     /// Refuses a set this crate would write into a file its own [`read_metadata`] then rejects,
@@ -304,9 +242,9 @@ impl TiffMetadata {
     /// The GPS sub-IFD is a caller's directory too, read back by the same walk at the same level,
     /// so the same four bounds apply to it unchanged.
     ///
-    /// The 0th-IFD fields are checked by a rule of their own ([`ifd0_refusal`]), because they are
-    /// written into the page's own directory rather than below it: only the tags in
-    /// [`IFD0_EXIF_TAGS`] are accepted, and no group.
+    /// The 0th-IFD fields are not checked here: they are written into the page's own directory
+    /// rather than below it, and what of them a TIFF cannot hold is left behind with a notice
+    /// ([`exif_carriers`], [`notices`](Self::notices)) rather than refused.
     ///
     /// The blocks [`apply`](Self::apply) writes into IFD 0 sit under `XMP`, `IPTC_NAA` and
     /// `ICC_PROFILE`, none of which any level treats as a pointer, and the rest of IFD 0 is the
@@ -318,12 +256,10 @@ impl TiffMetadata {
     /// or GPS sub-IFD
     /// carries a pointer-typed field under a pointer tag, hangs a group off a tag the reader does
     /// not resolve, carries a field and a group under one tag, or nests deeper than the reader
-    /// walks back; or if the 0th-IFD fields hold a tag outside [`IFD0_EXIF_TAGS`] or a group.
+    /// walks back.
     pub(crate) fn check(&self) -> Result<()> {
-        if let Some(refusal) = self.ifd0_fields().and_then(ifd0_refusal) {
-            return Err(Error::invalid_input(env!("CARGO_PKG_NAME"), refusal));
-        }
-        for directory in [self.exif_ifd(), self.gps_ifd()].into_iter().flatten() {
+        let carriers = self.carriers();
+        for directory in [&carriers.exif, &carriers.gps].into_iter().flatten() {
             check_exif_subtree(directory, MAX_POINTER_DEPTH - 1)?;
         }
         Ok(())
@@ -333,7 +269,7 @@ impl TiffMetadata {
     /// into `ifd0`.
     ///
     /// The 0th-IFD fields are set after the encoder's own and cannot replace one, because
-    /// [`check`](Self::check) admits only [`IFD0_EXIF_TAGS`], none of which the encoder writes.
+    /// [`exif_carriers`] keeps only [`IFD0_EXIF_TAGS`], none of which the encoder writes.
     ///
     /// The C2PA store is **never** written from here: one read from another file is signed over
     /// that file's bytes ([`notices`](Self::notices) reports it left behind), and one computed for
@@ -349,16 +285,17 @@ impl TiffMetadata {
         if let Some(icc) = &self.icc {
             ifd0.set(tags::ICC_PROFILE, Value::Undefined(icc.clone()));
         }
-        if let Some(fields) = self.ifd0_fields() {
+        let carriers = self.carriers();
+        if let Some(fields) = carriers.ifd0 {
             for field in fields.fields() {
                 ifd0.set(field.tag, field.value.clone());
             }
         }
-        if let Some(exif) = self.exif_ifd() {
-            ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif.clone()]);
+        if let Some(exif) = carriers.exif {
+            ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
         }
-        if let Some(gps) = self.gps_ifd() {
-            ifd0.set_sub_ifd(tags::GPS_INFO, vec![gps.clone()]);
+        if let Some(gps) = carriers.gps {
+            ifd0.set_sub_ifd(tags::GPS_INFO, vec![gps]);
         }
     }
 
@@ -368,6 +305,9 @@ impl TiffMetadata {
         let mut notices = Vec::new();
         if self.c2pa.is_some() {
             notices.push(MetadataNotice::C2paManifestStore);
+        }
+        if let Some(exif) = &self.exif {
+            notices.extend(exif_notices(exif));
         }
         notices
     }
@@ -392,10 +332,27 @@ pub enum MetadataNotice {
     /// unsigned one. Re-sign the output and set the store with
     /// [`TiffEncoder::with_c2pa`](crate::TiffEncoder::with_c2pa).
     C2paManifestStore,
+    /// The EXIF thumbnail (the model's 1st IFD), left behind: in a TIFF it would be a page of its
+    /// own, which a metadata carrier does not add.
+    ExifThumbnail,
+    /// An EXIF 0th-IFD field under `tag`, left behind because a TIFF's IFD 0 holds that tag as the
+    /// encoder's own: it is not in [`IFD0_EXIF_TAGS`], so it describes the way the samples are
+    /// laid out (`XResolution`, `YCbCrPositioning`, …), which the encoder writes from the pixels.
+    ExifImageField {
+        /// The field's tag.
+        tag: u16,
+    },
+    /// A sub-IFD group under `tag` in the EXIF 0th IFD, left behind: IFD 0's own pointers are the
+    /// encoder's, and the model's Exif and GPS sub-IFDs are carried as directories of their own.
+    ExifImageGroup {
+        /// The group's tag.
+        tag: u16,
+    },
 }
 
 impl MetadataNotice {
-    /// One line naming the payload and why it was left behind, fit to show a user.
+    /// One line naming the payload and why it was left behind, fit to show a user. The
+    /// [`Display`](core::fmt::Display) form adds the tag a field or group notice carries.
     #[must_use]
     pub fn reason(self) -> &'static str {
         match self {
@@ -403,14 +360,119 @@ impl MetadataNotice {
                 "C2PA manifest store: signed over the source bytes, so a copy would be invalid \
                  (C2PA 2.4 §18.5) — re-sign the output"
             }
+            Self::ExifThumbnail => "EXIF thumbnail: a TIFF would hold it as a page of its own",
+            Self::ExifImageField { .. } => {
+                "EXIF 0th-IFD field: a TIFF's IFD 0 holds this tag as the encoder's own"
+            }
+            Self::ExifImageGroup { .. } => {
+                "EXIF 0th-IFD sub-IFD group: a TIFF's IFD 0 pointers are the encoder's own"
+            }
         }
     }
 }
 
 impl core::fmt::Display for MetadataNotice {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.reason())
+        match self {
+            Self::ExifImageField { tag } | Self::ExifImageGroup { tag } => {
+                write!(f, "{} (tag {tag})", self.reason())
+            }
+            _ => f.write_str(self.reason()),
+        }
     }
+}
+
+/// The directories a TIFF writes for one EXIF model, each `None` when the model holds nothing
+/// worth a directory for it.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ExifCarriers {
+    /// The model's 0th-IFD fields under [`IFD0_EXIF_TAGS`], written into the page's IFD 0.
+    pub(crate) ifd0: Option<Ifd>,
+    /// The model's Exif sub-IFD with its Interoperability sub-IFD attached as an
+    /// `InteroperabilityIFD` group, written as the `ExifIFD` directory.
+    pub(crate) exif: Option<Ifd>,
+    /// The model's GPS sub-IFD, written as the `GPSInfo` directory.
+    pub(crate) gps: Option<Ifd>,
+}
+
+/// The directories a TIFF writes for `exif` — the inverse of [`exif_model`] over everything a TIFF
+/// holds. What it does not hold is dropped here and named by [`exif_notices`].
+pub(crate) fn exif_carriers(exif: &Exif) -> ExifCarriers {
+    let mut fields = Ifd::new();
+    for field in exif.image().fields() {
+        if IFD0_EXIF_TAGS.contains(&field.tag) {
+            fields.set(field.tag, field.value.clone());
+        }
+    }
+    let directory = match (exif.exif_ifd(), exif.interop_ifd()) {
+        (None, None) => None,
+        (directory, interop) => {
+            let mut directory = directory.cloned().unwrap_or_default();
+            if let Some(interop) = interop {
+                directory.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
+            }
+            Some(directory)
+        }
+    };
+    ExifCarriers {
+        ifd0: with_content(Some(&fields)).cloned(),
+        exif: with_content(directory.as_ref()).cloned(),
+        gps: with_content(exif.gps_ifd()).cloned(),
+    }
+}
+
+/// What of `exif` a TIFF leaves behind, in a fixed order: the thumbnail, then each 0th-IFD field
+/// outside [`IFD0_EXIF_TAGS`] in ascending tag order, then each 0th-IFD sub-IFD group.
+fn exif_notices(exif: &Exif) -> Vec<MetadataNotice> {
+    let image = exif.image();
+    exif.thumbnail()
+        .map(|_| MetadataNotice::ExifThumbnail)
+        .into_iter()
+        .chain(
+            image
+                .fields()
+                .iter()
+                .filter(|field| !IFD0_EXIF_TAGS.contains(&field.tag))
+                .map(|field| MetadataNotice::ExifImageField { tag: field.tag }),
+        )
+        .chain(
+            image
+                .sub_ifds()
+                .iter()
+                .map(|group| MetadataNotice::ExifImageGroup { tag: group.tag }),
+        )
+        .collect()
+}
+
+/// The EXIF model of a TIFF's Exif directories, in `order`, or `None` when it holds none: the
+/// 0th-IFD fields as the model's 0th IFD, the GPS directory as its GPS sub-IFD, and the `ExifIFD`
+/// directory as its Exif sub-IFD — a single `InteroperabilityIFD` group lifted out of that into
+/// the model's own Interoperability sub-IFD.
+fn exif_model(carriers: ExifCarriers, order: ByteOrder) -> Option<Exif> {
+    if carriers == ExifCarriers::default() {
+        return None;
+    }
+    let mut exif = Exif::new(order);
+    if let Some(fields) = carriers.ifd0 {
+        *exif.image_mut() = fields;
+    }
+    if let Some(gps) = carriers.gps {
+        exif.set_gps_ifd(gps);
+    }
+    if let Some(ifd) = carriers.exif {
+        let mut directory = Ifd::new();
+        for field in ifd.fields() {
+            directory.set(field.tag, field.value.clone());
+        }
+        for group in ifd.sub_ifds() {
+            match (group.tag, group.ifds.as_slice()) {
+                (tags::INTEROPERABILITY_IFD, [interop]) => exif.set_interop_ifd(interop.clone()),
+                _ => directory.set_sub_ifd(group.tag, group.ifds.clone()),
+            }
+        }
+        exif.set_exif_ifd(directory);
+    }
+    Some(exif)
 }
 
 /// `directory`, unless it has nothing to write.
@@ -425,7 +487,7 @@ fn with_content(directory: Option<&Ifd>) -> Option<&Ifd> {
     directory.filter(|ifd| !ifd.fields().is_empty() || !ifd.sub_ifds().is_empty())
 }
 
-/// The Exif 0th-IFD tags [`TiffMetadata::ifd0`] carries into a TIFF's IFD 0, ascending.
+/// The Exif 0th-IFD tags [`TiffMetadata::exif`] carries into a TIFF's IFD 0, ascending.
 ///
 /// EXIF 2.32 §4.6.4 Table 4 lists the TIFF 6.0 tags an Exif 0th IFD uses. These are the ten of
 /// them that describe the image rather than the layout of its samples: `ImageDescription` (270),
@@ -453,40 +515,12 @@ pub const IFD0_EXIF_TAGS: &[u16] = &[
     tags::COPYRIGHT,
 ];
 
-/// The refusal earned by a 0th-IFD field under a tag outside [`IFD0_EXIF_TAGS`].
-pub(crate) const IFD0_FIELD_REFUSAL: &str = "TIFF: the Exif 0th-IFD fields may only use the tags \
-     IFD0_EXIF_TAGS lists (ImageDescription, Make, Model, Orientation, Software, DateTime, Artist, \
-     WhitePoint, PrimaryChromaticities, Copyright); the rest of IFD 0 is the encoder's";
-
-/// The refusal earned by a sub-IFD group among the 0th-IFD fields: IFD 0's own pointers are the
-/// encoder's (`ExifIFD` and `GPSInfo` are [`TiffMetadata::exif`] and [`TiffMetadata::gps`]).
-pub(crate) const IFD0_GROUP_REFUSAL: &str = "TIFF: the Exif 0th-IFD fields may not hold a sub-IFD \
-     group; the Exif and GPS sub-IFDs are TiffMetadata's own exif and gps carriers";
-
-/// Why the 0th-IFD fields `fields` cannot be written into IFD 0, or `None` when they can: a group
-/// ([`IFD0_GROUP_REFUSAL`]), or a field under a tag outside [`IFD0_EXIF_TAGS`]
-/// ([`IFD0_FIELD_REFUSAL`]).
-///
-/// The message rather than an [`Error`], because the two callers raise it as different kinds: an
-/// encode handed a [`TiffMetadata`] directly calls it invalid input, while the `metadata`
-/// feature's facade path calls an Exif model holding such a field unsupported by this container.
-pub(crate) fn ifd0_refusal(fields: &Ifd) -> Option<&'static str> {
-    if !fields.sub_ifds().is_empty() {
-        return Some(IFD0_GROUP_REFUSAL);
-    }
-    fields
-        .fields()
-        .iter()
-        .any(|field| !IFD0_EXIF_TAGS.contains(&field.tag))
-        .then_some(IFD0_FIELD_REFUSAL)
-}
-
 /// The pointer tags [`read_metadata`] resolves **at IFD 0**, scoped to what [`TiffMetadata`]
 /// actually returns.
 ///
 /// Two tags, and they are a deliberate lower bound rather than a subset of convenience. `ExifIFD`
 /// and `GPSInfo` are followed because those directories **are** fields of [`TiffMetadata`]
-/// ([`exif`](TiffMetadata::exif) and [`gps`](TiffMetadata::gps)): they are handed to the caller
+/// ([`exif`](TiffMetadata::exif)'s Exif and GPS sub-IFDs): they are handed to the caller
 /// and may be written back, so a pointer under either that stayed a raw offset would be
 /// re-encoded into a file laid out differently.
 ///
@@ -500,7 +534,7 @@ pub(crate) fn ifd0_refusal(fields: &Ifd) -> Option<&'static str> {
 /// thumbnail directory tripped the reader's cross-chain loop guard. A pointer whose target this
 /// reader throws away must not be able to fail the whole call.
 ///
-/// `GPSInfo` was on that side of the rule until [`TiffMetadata::gps`] gave its target a field
+/// `GPSInfo` was on that side of the rule until `TiffMetadata` gave its target a field
 /// (#876), and moving it is the same rule applied, with the same cost `ExifIFD` already pays: a
 /// file whose IFD-0 `GPSInfo` names an unreadable directory, which used to read with the pointer
 /// ignored, now fails [`read_metadata`] — what this stops accepting is exactly that dangling GPS
@@ -629,7 +663,7 @@ const EXIF_ARRAY_REFUSAL: &str = "TIFF: the ExifIFD entry names more than one di
 
 /// [`EXIF_ARRAY_REFUSAL`]'s twin for an IFD-0 `GPSInfo` entry naming two or more directories:
 /// EXIF 2.32 §4.6.3 A fixes the GPS Info IFD Pointer's count at 1 as well, and
-/// [`TiffMetadata::gps`] holds one directory.
+/// the model's GPS sub-IFD is one directory.
 const GPS_ARRAY_REFUSAL: &str = "TIFF: the GPSInfo entry names more than one directory, and \
      EXIF 2.32 §4.6.3 allows one (count 1); returning only the first would drop the rest";
 
@@ -800,7 +834,11 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
             fields.set(field.tag, field.value.clone());
         }
     }
-    let ifd0_fields = with_content(Some(&fields)).cloned();
+    let carriers = ExifCarriers {
+        ifd0: with_content(Some(&fields)).cloned(),
+        exif,
+        gps,
+    };
     let xmp = bytes_value(ifd0.get(tags::XMP));
     let iptc = iptc_value(ifd0.get(tags::IPTC_NAA), order);
     let icc = bytes_value(ifd0.get(tags::ICC_PROFILE));
@@ -817,13 +855,8 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
         Some(Value::Undefined(store)) if located => Some(store.clone()),
         _ => None,
     };
-    let exif_byte_order =
-        (exif.is_some() || ifd0_fields.is_some() || gps.is_some()).then_some(order);
     Ok(TiffMetadata {
-        exif_byte_order,
-        exif,
-        ifd0: ifd0_fields,
-        gps,
+        exif: exif_model(carriers, order),
         xmp,
         iptc,
         icc,
@@ -836,6 +869,44 @@ mod tests {
     use gamut_ifd::{ByteOrder, TiffFile, Variant, c2pa_exclusions, c2pa_summary, write};
 
     use super::*;
+
+    /// The crate's three Exif directories as the tests below were written against them, over the
+    /// one model [`TiffMetadata::exif`] now holds: each setter places a directory in the model as
+    /// given, and each getter is that directory as [`exif_carriers`] writes it. They route through the shipped conversions, so a test reading through them
+    /// still pins what reaches the file.
+    impl TiffMetadata {
+        fn model(&mut self) -> &mut Exif {
+            self.exif
+                .get_or_insert_with(|| Exif::new(ByteOrder::LittleEndian))
+        }
+
+        fn with_exif_dir(mut self, ifd: Ifd) -> Self {
+            self.model().set_exif_ifd(ifd);
+            self
+        }
+
+        fn with_ifd0(mut self, fields: Ifd) -> Self {
+            *self.model().image_mut() = fields;
+            self
+        }
+
+        fn with_gps(mut self, gps: Ifd) -> Self {
+            self.model().set_gps_ifd(gps);
+            self
+        }
+
+        fn exif_dir(&self) -> Option<Ifd> {
+            self.carriers().exif
+        }
+
+        fn ifd0_dir(&self) -> Option<Ifd> {
+            self.carriers().ifd0
+        }
+
+        fn gps_dir(&self) -> Option<Ifd> {
+            self.carriers().gps
+        }
+    }
 
     /// `meta` holding `store` as the manifest store a reader found — the field has no builder,
     /// because an encoder never writes it.
@@ -964,7 +1035,7 @@ mod tests {
     #[test]
     fn an_exif_directory_with_no_fields_is_empty() {
         // An empty directory must not become an `ExifIFD` pointer to nothing.
-        let meta = TiffMetadata::new().with_exif(Ifd::new());
+        let meta = TiffMetadata::new().with_exif_dir(Ifd::new());
         assert!(meta.is_empty());
         let mut ifd = Ifd::new();
         meta.apply(&mut ifd);
@@ -976,7 +1047,7 @@ mod tests {
         // One assertion per carrier, so a builder that assigned the wrong field, or an
         // `is_empty` that stopped consulting one, fails here rather than in a whole-file test.
         let singles = [
-            TiffMetadata::new().with_exif(exif_ifd()),
+            TiffMetadata::new().with_exif_dir(exif_ifd()),
             TiffMetadata::new().with_ifd0(page_fields()),
             TiffMetadata::new().with_gps(gps_ifd()),
             TiffMetadata::new().with_xmp(vec![1]),
@@ -992,15 +1063,15 @@ mod tests {
     #[test]
     fn the_builders_set_the_field_they_name() {
         let meta = TiffMetadata::new()
-            .with_exif(exif_ifd())
+            .with_exif_dir(exif_ifd())
             .with_ifd0(page_fields())
             .with_gps(gps_ifd())
             .with_xmp(b"<x:xmpmeta/>".to_vec())
             .with_iptc(vec![0x1c, 0x02, 0x05])
             .with_icc(vec![7; 4]);
-        assert_eq!(meta.exif, Some(exif_ifd()));
-        assert_eq!(meta.ifd0, Some(page_fields()));
-        assert_eq!(meta.gps, Some(gps_ifd()));
+        assert_eq!(meta.exif_dir(), Some(exif_ifd()));
+        assert_eq!(meta.ifd0_dir(), Some(page_fields()));
+        assert_eq!(meta.gps_dir(), Some(gps_ifd()));
         assert_eq!(meta.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
         assert_eq!(meta.iptc.as_deref(), Some(&[0x1c, 0x02, 0x05][..]));
         assert_eq!(meta.icc.as_deref(), Some(&[7, 7, 7, 7][..]));
@@ -1014,7 +1085,7 @@ mod tests {
             .with_xmp(b"<x:xmpmeta/>".to_vec())
             .with_iptc(vec![0x1c, 0x02, 0x05])
             .with_icc(vec![7; 4])
-            .with_exif(exif_ifd());
+            .with_exif_dir(exif_ifd());
         let mut ifd = Ifd::new();
         meta.apply(&mut ifd);
         assert_eq!(
@@ -1061,7 +1132,10 @@ mod tests {
             read(&bytes).expect("read").ifds[0].get(tags::EXIF_IFD),
             Some(Value::Long8(_))
         ));
-        assert_eq!(read_metadata(&bytes).expect("read").exif, Some(exif_ifd()));
+        assert_eq!(
+            read_metadata(&bytes).expect("read").exif_dir(),
+            Some(exif_ifd())
+        );
     }
 
     #[test]
@@ -1096,7 +1170,7 @@ mod tests {
         let mut only_a_group = Ifd::new();
         only_a_group.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
 
-        let meta = TiffMetadata::new().with_exif(only_a_group);
+        let meta = TiffMetadata::new().with_exif_dir(only_a_group);
         assert!(!meta.is_empty(), "a group is content");
         let mut ifd0 = Ifd::new();
         meta.apply(&mut ifd0);
@@ -1130,7 +1204,7 @@ mod tests {
         let mut vendor = exif_ifd();
         vendor.set_sub_ifd(50000, vec![child]); // a private tag, not a standard pointer
         let err = TiffMetadata::new()
-            .with_exif(vendor)
+            .with_exif_dir(vendor)
             .check()
             .expect_err("a group the reader hands back as an offset must not be written");
         assert!(err.to_string().contains("standard pointer tag"), "{err}");
@@ -1158,7 +1232,7 @@ mod tests {
 
         let back = read_metadata(&file_with(ifd0))
             .expect("the reader takes the file the writer refuses")
-            .exif
+            .exif_dir()
             .expect("an Exif directory");
         assert!(
             back.get_u32(VENDOR).is_some_and(|offset| offset > 0),
@@ -1191,7 +1265,7 @@ mod tests {
             for value in &pointer_typed {
                 let mut exif = exif_ifd();
                 exif.set(*tag, value.clone());
-                let Err(err) = TiffMetadata::new().with_exif(exif).check() else {
+                let Err(err) = TiffMetadata::new().with_exif_dir(exif).check() else {
                     panic!("tag {tag}, {value:?}: a field the reader follows as an offset");
                 };
                 assert!(
@@ -1258,7 +1332,7 @@ mod tests {
                         } else {
                             exif = carrier;
                         }
-                        let meta = TiffMetadata::new().with_exif(exif.clone());
+                        let meta = TiffMetadata::new().with_exif_dir(exif.clone());
                         if meta.check().is_err() {
                             continue;
                         }
@@ -1268,7 +1342,7 @@ mod tests {
                         let bytes = file_with_variant(ifd0, variant);
                         let back = read_metadata(&bytes)
                             .unwrap_or_else(|e| panic!("{where_}: accepted but unreadable: {e}"))
-                            .exif
+                            .exif_dir()
                             .unwrap_or_else(|| panic!("{where_}: accepted but no Exif directory"));
                         let carrier = if nested {
                             back.sub_ifds()
@@ -1313,7 +1387,7 @@ mod tests {
             exif.set(tag, Value::Short(vec![7]));
             exif.set_sub_ifd(u16::MAX, vec![child]);
             exif.sub_ifds_mut()[0].tag = tag;
-            let Err(err) = TiffMetadata::new().with_exif(exif).check() else {
+            let Err(err) = TiffMetadata::new().with_exif_dir(exif).check() else {
                 panic!("tag {tag}: two entries under one tag is not a directory");
             };
             assert!(
@@ -1333,7 +1407,7 @@ mod tests {
         for tag in EXIF_SUBTREE_POINTER_TAGS {
             let mut exif = exif_ifd();
             exif.set(*tag, Value::Short(vec![8]));
-            let meta = TiffMetadata::new().with_exif(exif);
+            let meta = TiffMetadata::new().with_exif_dir(exif);
             meta.check()
                 .unwrap_or_else(|e| panic!("tag {tag}: a SHORT is not a pointer: {e}"));
 
@@ -1341,7 +1415,7 @@ mod tests {
             meta.apply(&mut ifd0);
             let back = read_metadata(&file_with(ifd0))
                 .expect("read")
-                .exif
+                .exif_dir()
                 .unwrap_or_else(|| panic!("tag {tag}: an Exif directory"));
             assert_eq!(
                 back.get(*tag),
@@ -1390,7 +1464,7 @@ mod tests {
 
             let back = read_metadata(&file_with(ifd0))
                 .expect("read")
-                .exif
+                .exif_dir()
                 .unwrap_or_else(|| panic!("tag {tag}: an Exif directory"));
             assert_eq!(back.get(*tag), None, "tag {tag}: left as a raw offset");
             assert_eq!(
@@ -1482,14 +1556,14 @@ mod tests {
         let mut pair = exif_ifd();
         pair.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop]);
         TiffMetadata::new()
-            .with_exif(pair.clone())
+            .with_exif_dir(pair.clone())
             .check()
             .expect("the Exif -> Interop pair is what a decoded camera EXIF is");
 
         let mut deeper = exif_ifd();
         deeper.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![pair]);
         let err = TiffMetadata::new()
-            .with_exif(deeper)
+            .with_exif_dir(deeper)
             .check()
             .expect_err("a directory below the pair is one this crate could not read back");
         assert!(err.to_string().contains("nests deeper"), "{err}");
@@ -1521,14 +1595,14 @@ mod tests {
             .with_xmp(b"<x:xmpmeta/>".to_vec())
             .with_iptc(vec![0x1c, 0x02, 0x05])
             .with_icc(vec![7; 4])
-            .with_exif(exif_ifd())
+            .with_exif_dir(exif_ifd())
             .apply(&mut ifd0);
         ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(vec![0x10; 12]));
         let read = read_metadata(&file_with(ifd0)).expect("read");
         assert_eq!(read.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
         assert_eq!(read.iptc.as_deref(), Some(&[0x1c, 0x02, 0x05][..]));
         assert_eq!(read.icc.as_deref(), Some(&[7, 7, 7, 7][..]));
-        assert_eq!(read.exif, Some(exif_ifd()));
+        assert_eq!(read.exif_dir(), Some(exif_ifd()));
         assert_eq!(read.c2pa.as_deref(), Some(&[0x10; 12][..]));
     }
 
@@ -1628,7 +1702,7 @@ mod tests {
             meta.apply(&mut page);
             assert_eq!(page.get(tag), Some(&Value::Ascii("v".into())), "tag {tag}");
             let back = read_metadata(&file_with(page)).expect("read");
-            assert_eq!(back.ifd0, Some(fields), "tag {tag}");
+            assert_eq!(back.ifd0_dir(), Some(fields), "tag {tag}");
         }
     }
 
@@ -1645,7 +1719,7 @@ mod tests {
         ] {
             let back = read_metadata(&file_with(page)).expect("read");
             assert_eq!(
-                back.exif_byte_order,
+                back.exif.as_ref().map(Exif::byte_order),
                 Some(ByteOrder::LittleEndian),
                 "{name}"
             );
@@ -1653,7 +1727,11 @@ mod tests {
         let mut xmp_only = Ifd::new();
         xmp_only.set(tags::XMP, Value::Byte(b"x".to_vec()));
         let back = read_metadata(&file_with(xmp_only)).expect("read");
-        assert_eq!(back.exif_byte_order, None, "no Exif carrier, no byte order");
+        assert_eq!(
+            back.exif.as_ref().map(Exif::byte_order),
+            None,
+            "no Exif carrier, no byte order"
+        );
     }
 
     #[test]
@@ -1661,8 +1739,8 @@ mod tests {
         let mut page = Ifd::new();
         page.set_sub_ifd(tags::GPS_INFO, vec![gps_ifd()]);
         let back = read_metadata(&file_with(page)).expect("read");
-        assert_eq!(back.gps, Some(gps_ifd()));
-        assert_eq!(back.exif, None);
+        assert_eq!(back.gps_dir(), Some(gps_ifd()));
+        assert_eq!(back.exif_dir(), None);
     }
 
     #[test]
@@ -1700,30 +1778,102 @@ mod tests {
     }
 
     #[test]
-    fn the_writer_refuses_ifd0_fields_the_page_holds_as_the_encoders_own() {
-        // A carried field beside an uncarried one: the refusal is for *any* field outside the
-        // list, not only the first.
+    fn ifd0_fields_the_page_holds_as_the_encoders_own_are_left_behind_with_a_notice() {
+        // A carried field beside an uncarried one: the uncarried one is left behind and named, the
+        // carried ones are still written, and nothing is refused.
         let mut layout = page_fields();
         layout.set(tags::IMAGE_WIDTH, Value::Short(vec![9]));
-        let err = TiffMetadata::new()
-            .with_ifd0(layout)
-            .check()
-            .expect_err("ImageWidth is the encoder's");
-        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
-        assert_eq!(err.static_message(), Some(IFD0_FIELD_REFUSAL));
+        let meta = TiffMetadata::new().with_ifd0(layout);
+        meta.check().expect("left behind, not refused");
+        assert_eq!(
+            meta.notices(),
+            vec![MetadataNotice::ExifImageField {
+                tag: tags::IMAGE_WIDTH
+            }]
+        );
+        let mut page = Ifd::new();
+        meta.apply(&mut page);
+        assert_eq!(page.fields(), page_fields().fields());
 
         let mut group = Ifd::new();
         group.set_sub_ifd(tags::SUB_IFDS, vec![exif_ifd()]);
-        let err = TiffMetadata::new()
-            .with_ifd0(group)
-            .check()
-            .expect_err("IFD 0's pointers are the encoder's");
-        assert_eq!(err.static_message(), Some(IFD0_GROUP_REFUSAL));
+        let meta = TiffMetadata::new().with_ifd0(group);
+        assert_eq!(
+            meta.notices(),
+            vec![MetadataNotice::ExifImageGroup {
+                tag: tags::SUB_IFDS
+            }]
+        );
+        let mut page = Ifd::new();
+        meta.apply(&mut page);
+        assert!(
+            page.sub_ifds().is_empty(),
+            "IFD 0's pointers are the encoder's"
+        );
 
-        TiffMetadata::new()
-            .with_ifd0(page_fields())
-            .check()
-            .expect("carried tags only");
+        assert!(
+            TiffMetadata::new()
+                .with_ifd0(page_fields())
+                .notices()
+                .is_empty()
+        );
+    }
+
+    /// A thumbnail is left behind before any field notice, and the notices come in a fixed order:
+    /// the store, the thumbnail, the fields by ascending tag, then the groups.
+    #[test]
+    fn the_notices_name_each_thing_left_behind_in_a_fixed_order() {
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set_thumbnail(vec![0xff, 0xd8, 0xff, 0xd9]);
+        let image = exif.image_mut();
+        image.set(tags::X_RESOLUTION, Value::Rational(vec![(300, 1)]));
+        image.set(tags::IMAGE_WIDTH, Value::Short(vec![9]));
+        image.set(tags::MAKE, Value::Ascii("gamut".into()));
+        image.set_sub_ifd(tags::SUB_IFDS, vec![Ifd::new()]);
+        let meta = with_store(TiffMetadata::new().with_exif(exif), vec![0; 16]);
+        assert_eq!(
+            meta.notices(),
+            vec![
+                MetadataNotice::C2paManifestStore,
+                MetadataNotice::ExifThumbnail,
+                MetadataNotice::ExifImageField {
+                    tag: tags::IMAGE_WIDTH
+                },
+                MetadataNotice::ExifImageField {
+                    tag: tags::X_RESOLUTION
+                },
+                MetadataNotice::ExifImageGroup {
+                    tag: tags::SUB_IFDS
+                },
+            ]
+        );
+        // The thumbnail adds no content, so a model holding only it writes nothing.
+        let mut thumbnail = Exif::new(ByteOrder::LittleEndian);
+        thumbnail.set_thumbnail(vec![0xff, 0xd8, 0xff, 0xd9]);
+        assert!(TiffMetadata::new().with_exif(thumbnail).is_empty());
+    }
+
+    #[test]
+    fn each_notice_reads_as_its_reason_and_names_its_tag() {
+        assert_eq!(
+            MetadataNotice::ExifThumbnail.to_string(),
+            MetadataNotice::ExifThumbnail.reason()
+        );
+        let field = MetadataNotice::ExifImageField { tag: 282 };
+        assert_eq!(field.to_string(), format!("{} (tag 282)", field.reason()));
+        let group = MetadataNotice::ExifImageGroup { tag: 330 };
+        assert_eq!(group.to_string(), format!("{} (tag 330)", group.reason()));
+        let reasons = [
+            MetadataNotice::C2paManifestStore.reason(),
+            MetadataNotice::ExifThumbnail.reason(),
+            field.reason(),
+            group.reason(),
+        ];
+        for (i, a) in reasons.iter().enumerate() {
+            for b in &reasons[i + 1..] {
+                assert_ne!(a, b, "two notices share one reason");
+            }
+        }
     }
 
     #[test]
@@ -1796,370 +1946,104 @@ mod tests {
             None
         );
     }
-}
 
-/// The `metadata` feature: the facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over
-/// [`TiffMetadata`], and the two conversions between a TIFF's `ExifIFD` directory and the
-/// facade's [`Exif`](gamut_metadata::exif::Exif) model that it and
-/// [`TiffEncoder::with_encoded_metadata`](crate::TiffEncoder::with_encoded_metadata) share.
-///
-/// # What of the EXIF model a TIFF holds
-///
-/// Everything but the thumbnail. The model's **0th-IFD fields** are [`TiffMetadata::ifd0`] —
-/// a TIFF's IFD 0 *is* the image's own directory, so they are written straight into it, limited
-/// to [`IFD0_EXIF_TAGS`](super::IFD0_EXIF_TAGS); its **GPS sub-IFD** is [`TiffMetadata::gps`];
-/// and its **Exif sub-IFD and Interoperability sub-IFD** are [`TiffMetadata::exif`] — the reader
-/// resolves `InteroperabilityIFD` as a group inside `ExifIFD`, which the model holds as its own
-/// directory. The **thumbnail** (the 1st IFD) has no carrier: in a TIFF it would be a page of its
-/// own. Writing a model that holds one, or a 0th-IFD field outside the carried tags, is a typed
-/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error rather than a silent drop.
-#[cfg(feature = "metadata")]
-pub(crate) mod typed {
-    use gamut_core::{Error, Result};
-    use gamut_ifd::{ByteOrder, Ifd};
-    use gamut_metadata::exif::Exif;
-    use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
-
-    use super::{TiffMetadata, ifd0_refusal};
-    use crate::tags;
-
-    /// The refusal for an EXIF model holding a thumbnail, which this container has no slot for.
-    pub(crate) const EXIF_THUMBNAIL_REFUSAL: &str = "TIFF: an EXIF thumbnail (the 1st IFD) has no \
-         TiffMetadata carrier; in a TIFF it would be a page of its own";
-
-    /// The facade model of a TIFF's Exif carriers, in `order`, or `None` when it holds none: the
-    /// 0th-IFD fields as the model's 0th IFD, the GPS sub-IFD as its GPS sub-IFD, and the
-    /// `ExifIFD` directory as its Exif sub-IFD — a single `InteroperabilityIFD` group lifted out
-    /// of that into the model's own Interoperability sub-IFD.
-    fn exif_model(meta: &TiffMetadata, order: ByteOrder) -> Option<Exif> {
-        if meta.exif.is_none() && meta.ifd0.is_none() && meta.gps.is_none() {
-            return None;
-        }
-        let mut exif = Exif::new(order);
-        if let Some(fields) = &meta.ifd0 {
-            *exif.image_mut() = fields.clone();
-        }
-        if let Some(gps) = &meta.gps {
-            exif.set_gps_ifd(gps.clone());
-        }
-        if let Some(ifd) = &meta.exif {
-            let mut directory = Ifd::new();
-            for field in ifd.fields() {
-                directory.set(field.tag, field.value.clone());
-            }
-            for group in ifd.sub_ifds() {
-                match (group.tag, group.ifds.as_slice()) {
-                    (tags::INTEROPERABILITY_IFD, [interop]) => {
-                        exif.set_interop_ifd(interop.clone());
-                    }
-                    _ => directory.set_sub_ifd(group.tag, group.ifds.clone()),
-                }
-            }
-            exif.set_exif_ifd(directory);
-        }
-        Some(exif)
+    /// An `ExifIFD` as the reader returns one: an `ExposureTime` field and an
+    /// `InteroperabilityIFD` group.
+    fn exif_with_interop() -> (Ifd, Ifd) {
+        let mut interop = Ifd::new();
+        interop.set(1, Value::Ascii("R98".into()));
+        let mut ifd = Ifd::new();
+        ifd.set(33434, Value::Rational(vec![(1, 60)]));
+        ifd.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
+        (ifd, interop)
     }
 
-    /// The Exif carriers a TIFF writes for one EXIF model, each `None` when the model holds
-    /// nothing for it.
-    #[derive(Debug, PartialEq)]
-    pub(crate) struct ExifCarriers {
-        /// The model's 0th-IFD fields, for [`TiffMetadata::ifd0`].
-        pub(crate) ifd0: Option<Ifd>,
-        /// The model's Exif sub-IFD with its Interoperability sub-IFD attached as an
-        /// `InteroperabilityIFD` group, for [`TiffMetadata::exif`].
-        pub(crate) exif: Option<Ifd>,
-        /// The model's GPS sub-IFD, for [`TiffMetadata::gps`].
-        pub(crate) gps: Option<Ifd>,
-    }
-
-    /// The carriers a TIFF writes for `exif` — the inverse of `exif_model`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the
-    /// model holds a thumbnail, a 0th-IFD field under a
-    /// tag outside [`IFD0_EXIF_TAGS`](super::IFD0_EXIF_TAGS), or a 0th-IFD sub-IFD group — what a
-    /// `TiffMetadata` has no carrier for (see the module docs).
-    pub(crate) fn exif_carriers(exif: &Exif) -> Result<ExifCarriers> {
-        if exif.thumbnail().is_some() {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                EXIF_THUMBNAIL_REFUSAL,
-            ));
-        }
-        let image = exif.image();
-        if let Some(refusal) = ifd0_refusal(image) {
-            return Err(Error::unsupported(env!("CARGO_PKG_NAME"), refusal));
-        }
-        let directory = match (exif.exif_ifd(), exif.interop_ifd()) {
-            (None, None) => None,
-            (directory, interop) => {
-                let mut directory = directory.cloned().unwrap_or_default();
-                if let Some(interop) = interop {
-                    directory.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
-                }
-                Some(directory)
-            }
+    /// The model [`exif_model`] builds from `ifd` as the only (`ExifIFD`) carrier.
+    fn exif_only_model(ifd: &Ifd, order: ByteOrder) -> Exif {
+        let carriers = ExifCarriers {
+            exif: Some(ifd.clone()),
+            ..ExifCarriers::default()
         };
-        Ok(ExifCarriers {
-            ifd0: (!image.fields().is_empty()).then(|| image.clone()),
-            exif: directory,
-            gps: exif.gps_ifd().cloned(),
+        exif_model(carriers, order).unwrap()
+    }
+
+    #[test]
+    fn the_exif_model_lifts_the_interoperability_group_out_of_the_directory() {
+        let (ifd, interop) = exif_with_interop();
+        let exif = exif_only_model(&ifd, ByteOrder::BigEndian);
+        assert_eq!(exif.byte_order(), ByteOrder::BigEndian);
+        assert_eq!(exif.interop_ifd(), Some(&interop));
+        let exif_ifd = exif.exif_ifd().unwrap();
+        assert_eq!(exif_ifd.get(33434), Some(&Value::Rational(vec![(1, 60)])));
+        assert!(exif_ifd.sub_ifds().is_empty());
+        assert!(exif.image().fields().is_empty());
+    }
+
+    #[test]
+    fn a_group_that_is_not_one_interoperability_directory_stays_in_the_directory() {
+        // Two Interoperability directories have no single slot in the model, and a `GPSInfo`
+        // group under `ExifIFD` is not the model's GPS sub-IFD: both stay where they were.
+        let mut ifd = Ifd::new();
+        ifd.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![Ifd::new(), Ifd::new()]);
+        ifd.set_sub_ifd(tags::GPS_INFO, vec![Ifd::new()]);
+        let exif = exif_only_model(&ifd, ByteOrder::LittleEndian);
+        assert_eq!(exif.interop_ifd(), None);
+        assert_eq!(exif.gps_ifd(), None);
+        assert_eq!(exif.exif_ifd().unwrap().sub_ifds(), ifd.sub_ifds());
+    }
+
+    #[test]
+    fn the_exif_model_takes_each_carrier_into_its_own_directory() {
+        let model = |carriers| exif_model(carriers, ByteOrder::LittleEndian);
+        let page_only = model(ExifCarriers {
+            ifd0: Some(page_fields()),
+            ..ExifCarriers::default()
         })
+        .unwrap();
+        assert_eq!(page_only.image(), &page_fields());
+        assert_eq!(page_only.exif_ifd(), None);
+        assert_eq!(page_only.gps_ifd(), None);
+
+        let gps_only = model(ExifCarriers {
+            gps: Some(gps_ifd()),
+            ..ExifCarriers::default()
+        })
+        .unwrap();
+        assert_eq!(gps_only.gps_ifd(), Some(&gps_ifd()));
+        assert!(gps_only.image().fields().is_empty());
+        assert_eq!(gps_only.exif_ifd(), None);
+
+        assert_eq!(model(ExifCarriers::default()), None);
     }
 
-    /// The facade's [`TypedMetadata`] over the seven carriers. Like `gamut-dng`'s, the EXIF
-    /// carriers are parsed directories rather than bytes, so [`blocks`](TypedMetadata::blocks)
-    /// hands over only the four byte carriers and [`metadata`](TypedMetadata::metadata) assigns
-    /// the EXIF model straight onto [`Metadata::exif`].
-    ///
-    /// ```
-    /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
-    /// use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
-    /// use gamut_tiff::{Metadata, TiffEncoder, TypedMetadata};
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut exif = Exif::new(ByteOrder::LittleEndian);
-    /// exif.set_tag(ExifTag::Make, Value::Ascii("gamut".into()));
-    /// exif.set_tag(ExifTag::Orientation, Value::Short(vec![6]));
-    /// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
-    /// let typed = Metadata::from_carriers(Some(exif), None, None);
-    ///
-    /// let pixels = vec![0u8; 64];
-    /// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
-    /// let tiff = TiffEncoder::new()
-    ///     .with_metadata(&typed)?
-    ///     .encode_to_vec(image)?;
-    ///
-    /// let read = gamut_tiff::TiffDecoder::new().metadata(&tiff)?;
-    /// assert_eq!(read.metadata()?, typed);
-    /// # Ok(())
-    /// # }
-    /// ```
-    impl TypedMetadata for TiffMetadata {
-        /// The byte-carried blocks — XMP, IPTC-IIM, ICC and the C2PA store — as
-        /// [`MetadataBlock`]s, each present only when the file carried it.
-        /// [`exif`](TiffMetadata::exif) is deliberately absent; see the impl's docs.
-        ///
-        /// # Errors
-        ///
-        /// Never: every carrier is already held as bytes. The signature is the trait's, shared
-        /// with containers that resolve payloads lazily.
-        fn blocks(&self) -> gamut_metadata::Result<Vec<MetadataBlock<'_>>> {
-            let mut blocks = Vec::new();
-            blocks.extend(self.xmp.as_deref().map(MetadataBlock::Xmp));
-            blocks.extend(self.iptc.as_deref().map(MetadataBlock::IptcIim));
-            blocks.extend(self.icc.as_deref().map(MetadataBlock::Icc));
-            blocks.extend(self.c2pa.as_deref().map(MetadataBlock::C2pa));
-            Ok(blocks)
-        }
-
-        /// The unified model: [`Metadata::parse_blocks`] over [`blocks`](TypedMetadata::blocks)
-        /// (the IPTC-IIM block reconciled into the XMP graph under the default
-        /// [`ConflictPolicy`](gamut_metadata::iptc::ConflictPolicy)), with the Exif carriers —
-        /// [`ifd0`](TiffMetadata::ifd0), [`exif`](TiffMetadata::exif) and
-        /// [`gps`](TiffMetadata::gps) — assigned onto [`Metadata::exif`] as one model whose 0th
-        /// IFD, Exif sub-IFD and GPS sub-IFD they are, in
-        /// [`exif_byte_order`](TiffMetadata::exif_byte_order) — or little-endian,
-        /// [`TiffEncoder`](crate::TiffEncoder)'s default, on a value built by hand.
-        ///
-        /// # Errors
-        ///
-        /// The [`MetadataError`](gamut_metadata::MetadataError) naming the byte carrier whose
-        /// parse failed.
-        fn metadata(&self) -> gamut_metadata::Result<Metadata> {
-            let mut unified = Metadata::parse_blocks(&self.blocks()?)?;
-            unified.exif = exif_model(
-                self,
-                self.exif_byte_order.unwrap_or(ByteOrder::LittleEndian),
-            );
-            Ok(unified)
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use gamut_ifd::Value;
-        use gamut_metadata::exif::{ExifTag, Value as ExifValue};
-
-        use super::*;
-
-        /// An `ExifIFD` as the reader returns one: an `ExposureTime` field and an
-        /// `InteroperabilityIFD` group.
-        fn directory() -> (Ifd, Ifd) {
-            let mut interop = Ifd::new();
-            interop.set(1, Value::Ascii("R98".into()));
-            let mut ifd = Ifd::new();
-            ifd.set(33434, Value::Rational(vec![(1, 60)]));
-            ifd.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
-            (ifd, interop)
-        }
-
-        #[test]
-        fn blocks_hand_over_the_byte_carriers_only() {
-            let mut meta = TiffMetadata::new()
-                .with_exif(directory().0)
-                .with_xmp(b"<x:xmpmeta/>".to_vec())
-                .with_iptc(vec![0x1c, 0x02, 0x05])
-                .with_icc(vec![7; 4]);
-            meta.c2pa = Some(b"jumb".to_vec());
-            assert_eq!(
-                meta.blocks().unwrap(),
-                vec![
-                    MetadataBlock::Xmp(b"<x:xmpmeta/>"),
-                    MetadataBlock::IptcIim(&[0x1c, 0x02, 0x05]),
-                    MetadataBlock::Icc(&[7; 4]),
-                    MetadataBlock::C2pa(b"jumb"),
-                ]
-            );
-        }
-
-        /// The model of a `TiffMetadata` carrying only `ifd` as its `ExifIFD`.
-        fn exif_only_model(ifd: &Ifd, order: ByteOrder) -> Exif {
-            exif_model(&TiffMetadata::new().with_exif(ifd.clone()), order).unwrap()
-        }
-
-        /// Exif 0th-IFD fields and a GPS directory, as a camera's EXIF carries them.
-        fn page_and_gps() -> (Ifd, Ifd) {
-            let mut page = Ifd::new();
-            page.set(tags::MAKE, Value::Ascii("gamut".into()));
-            page.set(tags::ORIENTATION, Value::Short(vec![6]));
-            let mut gps = Ifd::new();
-            gps.set(1, Value::Ascii("N".into()));
-            (page, gps)
-        }
-
-        #[test]
-        fn the_exif_model_lifts_the_interoperability_group_out_of_the_directory() {
-            let (ifd, interop) = directory();
-            let exif = exif_only_model(&ifd, ByteOrder::BigEndian);
-            assert_eq!(exif.byte_order(), ByteOrder::BigEndian);
-            assert_eq!(exif.interop_ifd(), Some(&interop));
-            let exif_ifd = exif.exif_ifd().unwrap();
-            assert_eq!(exif_ifd.get(33434), Some(&Value::Rational(vec![(1, 60)])));
-            assert!(exif_ifd.sub_ifds().is_empty());
-            assert!(exif.image().fields().is_empty());
-        }
-
-        #[test]
-        fn a_group_that_is_not_one_interoperability_directory_stays_in_the_directory() {
-            // Two Interoperability directories have no single slot in the model, and a `GPSInfo`
-            // group under `ExifIFD` is not the model's GPS sub-IFD: both stay where they were.
-            let mut ifd = Ifd::new();
-            ifd.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![Ifd::new(), Ifd::new()]);
-            ifd.set_sub_ifd(tags::GPS_INFO, vec![Ifd::new()]);
-            let exif = exif_only_model(&ifd, ByteOrder::LittleEndian);
-            assert_eq!(exif.interop_ifd(), None);
-            assert_eq!(exif.gps_ifd(), None);
-            assert_eq!(exif.exif_ifd().unwrap().sub_ifds(), ifd.sub_ifds());
-        }
-
-        #[test]
-        fn the_exif_model_takes_each_carrier_into_its_own_directory() {
-            let (page, gps) = page_and_gps();
-            let page_only = exif_model(
-                &TiffMetadata::new().with_ifd0(page.clone()),
-                ByteOrder::LittleEndian,
-            )
-            .unwrap();
-            assert_eq!(page_only.image(), &page);
-            assert_eq!(page_only.exif_ifd(), None);
-            assert_eq!(page_only.gps_ifd(), None);
-
-            let gps_only = exif_model(
-                &TiffMetadata::new().with_gps(gps.clone()),
-                ByteOrder::LittleEndian,
-            )
-            .unwrap();
-            assert_eq!(gps_only.gps_ifd(), Some(&gps));
-            assert!(gps_only.image().fields().is_empty());
-            assert_eq!(gps_only.exif_ifd(), None);
-
-            assert_eq!(
-                exif_model(&TiffMetadata::new(), ByteOrder::LittleEndian),
-                None
-            );
-        }
-
-        #[test]
-        fn exif_carriers_is_the_inverse_of_the_model() {
-            let (ifd, _) = directory();
-            let (page, gps) = page_and_gps();
-            let meta = TiffMetadata::new()
-                .with_exif(ifd.clone())
-                .with_ifd0(page.clone())
-                .with_gps(gps.clone());
-            let exif = exif_model(&meta, ByteOrder::LittleEndian).unwrap();
-            assert_eq!(
-                exif_carriers(&exif).unwrap(),
-                ExifCarriers {
-                    ifd0: Some(page),
-                    exif: Some(ifd),
-                    gps: Some(gps),
-                }
-            );
-
-            // An Interoperability sub-IFD alone still makes a directory to carry it.
-            let mut interop_only = Exif::new(ByteOrder::LittleEndian);
-            interop_only.set_interop_ifd(directory().1);
-            let written = exif_carriers(&interop_only).unwrap().exif.unwrap();
-            assert!(written.fields().is_empty());
-            assert_eq!(written.sub_ifds().len(), 1);
-
-            assert_eq!(
-                exif_carriers(&Exif::new(ByteOrder::LittleEndian)).unwrap(),
-                ExifCarriers {
-                    ifd0: None,
-                    exif: None,
-                    gps: None,
-                }
-            );
-        }
-
-        #[test]
-        fn each_part_of_the_model_without_a_carrier_is_refused() {
-            let mut thumbnail = Exif::new(ByteOrder::LittleEndian);
-            thumbnail.set_thumbnail(vec![0xff, 0xd8, 0xff, 0xd9]);
-            let mut resolution = Exif::new(ByteOrder::LittleEndian);
-            resolution.set_tag(ExifTag::Make, ExifValue::Ascii("gamut".into()));
-            resolution
-                .image_mut()
-                .set(crate::tags::X_RESOLUTION, Value::Rational(vec![(300, 1)]));
-            let mut group_in_ifd0 = Exif::new(ByteOrder::LittleEndian);
-            group_in_ifd0.image_mut().set_sub_ifd(330, vec![Ifd::new()]);
-            for (exif, refusal) in [
-                (thumbnail, EXIF_THUMBNAIL_REFUSAL),
-                (resolution, super::super::IFD0_FIELD_REFUSAL),
-                (group_in_ifd0, super::super::IFD0_GROUP_REFUSAL),
-            ] {
-                let err = exif_carriers(&exif).unwrap_err();
-                assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
-                assert_eq!(err.static_message(), Some(refusal));
+    #[test]
+    fn exif_carriers_is_the_inverse_of_the_model() {
+        let (ifd, _) = exif_with_interop();
+        let carriers = ExifCarriers {
+            ifd0: Some(page_fields()),
+            exif: Some(ifd.clone()),
+            gps: Some(gps_ifd()),
+        };
+        let exif = exif_model(carriers, ByteOrder::LittleEndian).unwrap();
+        assert_eq!(
+            exif_carriers(&exif),
+            ExifCarriers {
+                ifd0: Some(page_fields()),
+                exif: Some(ifd),
+                gps: Some(gps_ifd()),
             }
-        }
+        );
 
-        #[test]
-        fn metadata_assigns_the_exif_model_in_the_recorded_byte_order() {
-            let (ifd, _) = directory();
-            let mut meta = TiffMetadata::new().with_exif(ifd.clone());
-            meta.c2pa = Some(b"jumb".to_vec());
-            meta.exif_byte_order = Some(ByteOrder::BigEndian);
-            let unified = meta.metadata().unwrap();
-            assert_eq!(
-                unified.exif,
-                Some(exif_only_model(&ifd, ByteOrder::BigEndian))
-            );
-            // The byte carriers still go through `from_blocks` beside the assigned model.
-            assert_eq!(unified.c2pa.as_deref(), Some(&b"jumb"[..]));
+        // An Interoperability sub-IFD alone still makes a directory to carry it.
+        let mut interop_only = Exif::new(ByteOrder::LittleEndian);
+        interop_only.set_interop_ifd(exif_with_interop().1);
+        let written = exif_carriers(&interop_only).exif.unwrap();
+        assert!(written.fields().is_empty());
+        assert_eq!(written.sub_ifds().len(), 1);
 
-            // Built by hand: the encoder's default order.
-            meta.exif_byte_order = None;
-            assert_eq!(
-                meta.metadata().unwrap().exif.unwrap().byte_order(),
-                ByteOrder::LittleEndian
-            );
-            assert_eq!(TiffMetadata::new().metadata().unwrap(), Metadata::default());
-        }
+        assert_eq!(
+            exif_carriers(&Exif::new(ByteOrder::LittleEndian)),
+            ExifCarriers::default()
+        );
     }
 }

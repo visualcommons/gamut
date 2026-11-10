@@ -25,7 +25,7 @@ fn metadata() -> TiffMetadata {
         .with_xmp(b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>".to_vec())
         .with_iptc(vec![0x1c, 0x02, 0x05, 0x00, 0x04, b't', b'e', b's', b't'])
         .with_icc(vec![0, 0, 0, 12, b'a', b'c', b's', b'p', 1, 2, 3, 4])
-        .with_exif(exif)
+        .with_exif(common::exif_model(None, Some(exif), None))
 }
 
 #[test]
