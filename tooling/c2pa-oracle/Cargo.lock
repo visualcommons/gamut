@@ -1134,6 +1134,7 @@ dependencies = [
  "gamut-bitstream",
  "gamut-core",
  "gamut-deflate",
+ "gamut-exif",
  "gamut-ifd",
 ]
 
