@@ -32,7 +32,7 @@
 //! header. [`TiffDecoder::info`] reports a page's declared depth, sample format and layout from
 //! tags alone, so a caller can pick a pixel type before paying for a decode — including for pages
 //! this crate declines to decode. Sample depths are 1, 8 and 16 bits; the typed impls widen 8-bit
-//! samples to 16-bit exactly (`×257`) and, once [`TiffDecoder::convert_policy`] permits the loss,
+//! samples to 16-bit exactly (`×257`) and, once [`TiffDecoder::with_convert_policy`] permits the loss,
 //! narrow 16-bit to 8-bit by the shared engine's rescaling, while signed,
 //! IEEE-float and 32-bit samples are refused by name rather than reinterpreted (§19 float support
 //! and its Predictor 3 remain deferred). The strict [`deconstruct`] walk additionally accounts
@@ -98,6 +98,9 @@ mod writer;
 pub use decoder::TiffDecoder;
 pub use deconstruct::deconstruct;
 pub use encoder::{TiffEncodeReport, TiffEncoder};
+// The core types this crate's own signatures take (`TiffDecoder::with_limits`,
+// `TiffDecoder::with_convert_policy`), so a caller needs no direct gamut-core dependency.
+pub use gamut_core::{DecodeLimits, convert::ConvertPolicy};
 // The tag-value codes are gamut-ifd's, shared with gamut-dng; they are reachable from
 // `TiffEncoder` and `TiffInfo`, so they are re-exported for the same reason as the IFD types below.
 // Which codes a TIFF page may carry is this crate's own (`ifd`, `compression`).

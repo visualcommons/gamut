@@ -14,14 +14,13 @@
 
 use std::collections::BTreeMap;
 
-use gamut_core::{ImageBuf, Result, Rgb8};
+use gamut_core::Result;
 use gamut_ifd::{
     Anomaly, AuditFinding, DeconstructReport, Ifd, Severity, SkipReason, StandardAuditSpec,
     UnknownFieldType, UnknownTag, Value, audit as ifd_audit,
 };
 
 use crate::compression::tiff_compression;
-use crate::decoder::TiffDecoder;
 use crate::ifd::{tiff_photometric, tiff_predictor};
 use crate::tags;
 
@@ -231,37 +230,6 @@ impl Findings {
             self.anomalies
                 .push(Anomaly::duplicate_tag(ifd, tag, lost + 1));
         }
-    }
-}
-
-impl TiffDecoder {
-    /// Strictly deconstructs `data`, returning a [`DeconstructReport`] that classifies every
-    /// byte and flags anything unrecognised — without decoding pixels.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`gamut_core::Error`] only when the container itself is unreadable (see
-    /// [`deconstruct`]).
-    pub fn deconstruct(&self, data: &[u8]) -> Result<DeconstructReport> {
-        deconstruct(data)
-    }
-
-    /// Decodes page `page` to [`Rgb8`] *and* returns a whole-file [`DeconstructReport`].
-    ///
-    /// The report covers the entire file (every page), independent of which page is decoded.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`gamut_core::Error`] if the container is unreadable or the requested page cannot be
-    /// decoded (e.g. an unsupported pixel mode) — a strict superset of [`TiffDecoder::decode_page`].
-    pub fn deconstruct_page(
-        &self,
-        data: &[u8],
-        page: usize,
-    ) -> Result<(ImageBuf<Rgb8>, DeconstructReport)> {
-        let report = deconstruct(data)?;
-        let image = self.decode_page(data, page)?;
-        Ok((image, report))
     }
 }
 

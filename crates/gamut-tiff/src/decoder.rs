@@ -3,13 +3,14 @@
 //! Decoding proper produces the image in the layout the file natively carries; presenting it as a
 //! caller's chosen [`gamut_core::Pixel`] is then a pure conversion, delegated wholesale to
 //! [`gamut_core::convert`] so TIFF applies exactly the same widening and narrowing rules as every
-//! other gamut decoder. [`TiffDecoder::convert_policy`] selects which lossy conversions are
-//! permitted; the default permits none.
+//! other gamut decoder. [`TiffDecoder::with_convert_policy`] selects which lossy conversions are
+//! permitted; the default permits none. [`TiffDecoder::with_limits`] bounds what a page may make
+//! it allocate.
 
 use gamut_core::convert::{ConvertPolicy, DepthPolicy, RawImage, convert_from_raw};
 use gamut_core::{
-    Cmyk8, DecodeImage, Dimensions, Error, Gray8, Gray16, ImageBuf, Pixel, PixelFormat, Result,
-    Rgb8, Rgb16, Rgba8, Rgba16, Sample,
+    Cmyk8, DecodeImage, DecodeLimits, Dimensions, Error, Gray8, Gray16, ImageBuf, Pixel,
+    PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16, Sample,
 };
 use gamut_ifd::{ByteOrder, Ifd, ZeroRowsPerStrip, extent_slices, read, rows_per_strip};
 
@@ -34,7 +35,7 @@ use crate::tags;
 /// grayscale replicates across RGB channels, RGB gains an opaque alpha, and 8-bit samples widen to
 /// 16-bit by `×257` (exact). A request that would *lose* information — dropping alpha, narrowing
 /// 16-bit samples to 8, reducing colour to luma — is refused by default; call
-/// [`TiffDecoder::convert_policy`] to opt into it.
+/// [`TiffDecoder::with_convert_policy`] to opt into it.
 ///
 /// Use [`TiffDecoder::info`] to see a page's declared depth before deciding, rather than relying
 /// on the conversions above.
@@ -52,24 +53,21 @@ use crate::tags;
 #[derive(Debug, Clone, Default)]
 pub struct TiffDecoder {
     policy: ConvertPolicy,
+    limits: DecodeLimits,
 }
 
-/// Upper bound on a decoded image's stored bytes, guarding against malformed huge dimensions and
-/// decompression bombs (64 MiB — e.g. a 4096×4096 8-bit RGBA image, or a 2896×2896 16-bit RGB one).
-///
-/// The cap is on *stored* bytes, so a 16-bit image gets half the pixel budget of an 8-bit one at
-/// the same channel count — which is the intent: the guard bounds the buffer actually allocated.
-const MAX_IMAGE_BYTES: usize = 64 << 20;
-
-/// Rejects a byte count past [`MAX_IMAGE_BYTES`].
+/// Rejects a byte count past `max_bytes` — [`DecodeLimits::max_image_bytes`], 64 MiB by default
+/// (e.g. a 4096×4096 8-bit RGBA image, or a 2896×2896 16-bit RGB one).
 ///
 /// An *allocation* guard, not a validity one: the caller is about to reserve this many bytes for a
 /// buffer whose size the file's tags — not its data — declare, so a malformed or hostile header
 /// must not be able to name an arbitrary allocation. A file rejected here would fail later anyway;
 /// the guard only stops the reservation from happening first, which is why each call site passes
-/// its own message.
-fn within_size_limit(bytes: usize, message: &'static str) -> Result<()> {
-    if bytes > MAX_IMAGE_BYTES {
+/// its own message. The cap is on *stored* bytes, so a 16-bit image gets half the pixel budget of
+/// an 8-bit one at the same channel count — which is the intent: the guard bounds the buffer
+/// actually allocated.
+fn within_size_limit(bytes: usize, max_bytes: usize, message: &'static str) -> Result<()> {
+    if bytes > max_bytes {
         return Err(Error::unsupported(env!("CARGO_PKG_NAME"), message));
     }
     Ok(())
@@ -246,7 +244,7 @@ impl TiffDecoder {
     /// `ExifIFD` offset cannot stop it; this method does follow one, and the alternative to
     /// failing is reporting `exif: None` for a directory the file plainly declares — silent loss
     /// a caller cannot tell apart from "there is no EXIF here". A caller that wants a partial
-    /// answer can walk the re-exported [`read`](crate::read) / [`gamut_ifd::IfdReader::read_tree`] spine
+    /// answer can walk the [`gamut_ifd::read`] / [`gamut_ifd::IfdReader::read_tree`] spine
     /// itself and decide per pointer. (`gamut-dng` degrades instead of failing, because there the
     /// metadata is incidental to a raw *image* decode that must still succeed.)
     ///
@@ -281,14 +279,28 @@ impl TiffDecoder {
     ///
     /// # fn main() -> gamut_core::Result<()> {
     /// # let bytes: &[u8] = &[];
-    /// let decoder = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    /// let decoder = TiffDecoder::new().with_convert_policy(ConvertPolicy::permissive());
     /// let rgb: ImageBuf<Rgb8> = decoder.decode_image(bytes)?;
     /// # Ok(())
     /// # }
     /// ```
     #[must_use]
-    pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
+    pub fn with_convert_policy(mut self, policy: ConvertPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Sets the image limits: the per-side dimension caps and the stored-sample byte budget
+    /// ([`DecodeLimits::max_image_bytes`], default 64 MiB). A page past any of them is refused
+    /// with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before
+    /// anything is allocated for its pixels, and so is a tile whose own stored bytes exceed the
+    /// byte budget.
+    ///
+    /// The budget counts the samples as the file *stores* them — 1-bit rows packed, palette
+    /// indices unexpanded — because that is the buffer the tags make this decoder reserve.
+    #[must_use]
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -318,7 +330,7 @@ impl TiffDecoder {
     /// conversion to `P` that would lose information this decoder's [`ConvertPolicy`] does not
     /// permit.
     pub fn decode_page_as<P: Pixel>(&self, data: &[u8], page: usize) -> Result<ImageBuf<P>> {
-        let img = decode_page_samples(data, page)?;
+        let img = decode_page_samples(data, page, self.limits)?;
         match img.samples {
             Samples::U8(ref samples) => {
                 convert_from_raw(RawImage::new(samples, img.format, img.dims)?, self.policy)
@@ -406,7 +418,7 @@ impl DecodeImage<Rgba16> for TiffDecoder {
     }
 }
 
-fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
+fn decode_page_samples(data: &[u8], page: usize, limits: DecodeLimits) -> Result<DecodedImage> {
     let file = read(data)?;
     let ifd = file.ifds.get(page).ok_or_else(|| {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: page index out of range")
@@ -416,6 +428,12 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     // never disagree about a default; what follows here is purely which of those declarations this
     // decoder is willing to act on.
     let info = info::page_info(ifd, file.order)?;
+    if info.width > limits.max_width() || info.height > limits.max_height() {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: image dimensions exceed the decode limits",
+        ));
+    }
     let (width, height) = (info.width as usize, info.height as usize);
     let compression = info.compression;
     if !matches!(
@@ -557,7 +575,11 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     let stored_total = stored_row_bytes
         .checked_mul(height)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?;
-    within_size_limit(stored_total, "TIFF: image exceeds the size limit")?;
+    within_size_limit(
+        stored_total,
+        limits.max_image_bytes(),
+        "TIFF: image exceeds the size limit",
+    )?;
 
     // Reassemble the stored (packed) row bytes from tiles or strips.
     let layout = Layout {
@@ -568,6 +590,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         stored_row_bytes,
         compression,
         order: info.byte_order,
+        max_image_bytes: limits.max_image_bytes(),
     };
     let tiled = info.tiled;
     let mut packed = if tiled {
@@ -666,6 +689,8 @@ struct Layout {
     compression: Compression,
     /// The file's byte order — how 16-bit samples and the 16-bit predictor read and write them.
     order: ByteOrder,
+    /// [`DecodeLimits::max_image_bytes`]: the most one tile may make the tile reader reserve.
+    max_image_bytes: usize,
 }
 
 /// Decompresses one strip/tile of byte-level data (`None`/PackBits/LZW/Deflate) to `want` bytes.
@@ -768,7 +793,11 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
     let tile_size = th
         .checked_mul(tile_row_bytes)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile too large"))?;
-    within_size_limit(tile_size, "TIFF: tile exceeds the size limit")?;
+    within_size_limit(
+        tile_size,
+        l.max_image_bytes,
+        "TIFF: tile exceeds the size limit",
+    )?;
     let raws = extent_slices(&offsets, &counts, data, env!("CARGO_PKG_NAME"))?;
     let mut packed = vec![0u8; l.stored_row_bytes * l.height];
     for ty in 0..down {
@@ -841,7 +870,79 @@ mod tests {
             stored_row_bytes: 2,
             compression: Compression::None,
             order: ByteOrder::LittleEndian,
+            max_image_bytes: DecodeLimits::DEFAULT_MAX_IMAGE_BYTES,
         }
+    }
+
+    /// Encodes a `width × height` 8-bit grayscale page, tiled when `tile` is given.
+    fn gray_tiff(width: u32, height: u32, tile: Option<u32>) -> Vec<u8> {
+        let pixels = vec![9u8; (width * height) as usize];
+        let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(width, height).unwrap());
+        let encoder = match tile {
+            Some(side) => TiffEncoder::new().with_tiling(side, side),
+            None => TiffEncoder::new(),
+        };
+        encoder.encode_to_vec(image.unwrap()).unwrap()
+    }
+
+    /// Asserts `got` is an `Unsupported` error carrying exactly `message`.
+    fn assert_unsupported<T: std::fmt::Debug>(got: Result<T>, message: &str) {
+        let err = got.expect_err("expected an error");
+        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported, "{err:?}");
+        assert_eq!(err.static_message(), Some(message), "{err:?}");
+    }
+
+    /// `with_limits` bounds the page by each side and by its stored bytes, each limit inclusive:
+    /// a 17×13 page decodes at exactly its own size and is refused one under it on any axis.
+    #[test]
+    fn with_limits_bounds_each_side_and_the_stored_bytes_inclusively() {
+        let tiff = gray_tiff(17, 13, None);
+        let decode = |limits: DecodeLimits| {
+            TiffDecoder::new()
+                .with_limits(limits)
+                .decode_image(&tiff)
+                .map(|image: ImageBuf<Gray8>| image.dimensions())
+        };
+        let exact = DecodeLimits::new()
+            .with_max_width(17)
+            .with_max_height(13)
+            .with_max_image_bytes(17 * 13);
+        assert_eq!(decode(exact).unwrap(), Dimensions::new(17, 13).unwrap());
+        let dims = "TIFF: image dimensions exceed the decode limits";
+        assert_unsupported(decode(exact.with_max_width(16)), dims);
+        assert_unsupported(decode(exact.with_max_height(12)), dims);
+        assert_unsupported(
+            decode(exact.with_max_image_bytes(17 * 13 - 1)),
+            "TIFF: image exceeds the size limit",
+        );
+    }
+
+    /// The tile reader reserves one tile at a time against the same byte budget, inclusively: a
+    /// 16×1 page in one 16×16 tile stores 16 image bytes but makes the reader reserve 256.
+    #[test]
+    fn with_limits_bounds_each_tile_by_the_byte_budget() {
+        let tiff = gray_tiff(16, 1, Some(16));
+        let decode = |bytes: usize| {
+            TiffDecoder::new()
+                .with_limits(DecodeLimits::new().with_max_image_bytes(bytes))
+                .decode_image(&tiff)
+                .map(|image: ImageBuf<Gray8>| image.dimensions())
+        };
+        // The page stores 16 bytes and its one tile 256, so a budget between the two passes the
+        // image check and is the tile's to refuse.
+        assert_unsupported(decode(255), "TIFF: tile exceeds the size limit");
+        assert_eq!(decode(256).unwrap(), Dimensions::new(16, 1).unwrap());
+    }
+
+    /// The default limits are `DecodeLimits::default()` — the 64 MiB the decoder hard-coded before
+    /// they were configurable.
+    #[test]
+    fn the_default_limits_are_the_shared_defaults() {
+        assert_eq!(TiffDecoder::new().limits, DecodeLimits::default());
+        assert_eq!(
+            TiffDecoder::new().limits.max_image_bytes(),
+            DecodeLimits::DEFAULT_MAX_IMAGE_BYTES
+        );
     }
 
     /// An IFD holding one strip at `offset` of `count` bytes, with `RowsPerStrip` set when given.

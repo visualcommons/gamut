@@ -91,7 +91,7 @@ use libfuzzer_sys::fuzz_target;
 const MAX_PAGES: usize = 4;
 
 fuzz_target!(|data: &[u8]| {
-    let decoder = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    let decoder = TiffDecoder::new().with_convert_policy(ConvertPolicy::permissive());
 
     // A file whose chain does not parse is simply refused. The other entry points are not driven
     // for it: `page_count` is `read(data)?.ifds.len()`, and `info`/`decode_page` both begin with
