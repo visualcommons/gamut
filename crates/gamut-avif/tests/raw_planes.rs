@@ -6,15 +6,18 @@
 //! reconstruction `gamut-av1` computed for them (a conformant decoder is obliged to reproduce it)
 //! — and that `colr nclx` states the caller's declaration rather than the encoder's own knobs.
 //! libavif (dav1d backend) answers for the colour item and the container; dav1d directly, through
-//! this crate's own `Av1StillDecoder` seam, answers for the alpha auxiliary, which libavif's
+//! this crate's own `Av1CodestreamDecoder` seam, answers for the alpha auxiliary, which libavif's
 //! planar output does not carry.
 //!
 //! Building this needs the `third_party/libavif` + `third_party/dav1d` submodules and a C
 //! toolchain, like the crate's other oracle tests.
 
+mod common;
+
+use common::Decode;
 use gamut_av1::Av1Color;
 use gamut_avif::{
-    AlphaMode, Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, DecodedFrame, RawPlanes,
+    AlphaMode, Av1CodestreamDecoder, Av1Config, AvifContainer, AvifEncoder, DecodedFrame, RawPlanes,
 };
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients, Planar8, Planar16,
@@ -93,10 +96,11 @@ fn owned(planes: &Planar16) -> [Vec<u16>; 3] {
     planes.planes().map(<[u16]>::to_vec)
 }
 
-/// [`Av1StillDecoder`] over the real dav1d decoder, as `conformance.rs` bridges it.
+/// [`Av1CodestreamDecoder`] over the real dav1d decoder, as `conformance.rs` bridges it.
+#[derive(Default)]
 struct Dav1dDecoder;
 
-impl Av1StillDecoder for Dav1dDecoder {
+impl Av1CodestreamDecoder for Dav1dDecoder {
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;
@@ -107,11 +111,11 @@ impl Av1StillDecoder for Dav1dDecoder {
             )
         })?;
         let [y, u, v] = pic.planes;
-        DecodedFrame::new(
+        common::decoded_frame(
             pic.width,
             pic.height,
             pic.bit_depth,
-            config.chroma_format(),
+            config.chroma_subsampling(),
             y,
             u,
             v,
@@ -127,7 +131,7 @@ fn decoded_alpha(avif: &[u8]) -> Vec<u16> {
         .alpha_auxiliary_of(image.primary_item().id())
         .expect("an alpha auxiliary");
     let frame = container
-        .decode_item_planar(alpha.id(), &mut Dav1dDecoder)
+        .planar(alpha.id(), &mut Dav1dDecoder)
         .expect("dav1d decodes the alpha auxiliary");
     frame.y().to_vec()
 }
@@ -202,7 +206,7 @@ fn lossy_subsampled_planes_decode_to_gamut_av1s_own_reconstruction() {
         &p8,
         &gamut_av1::Av1EncodeConfig::new(quality_to_quant(QUALITY))
             .with_color(colour(MatrixCoefficients::Bt601))
-            .with_effort(encoder.effort()),
+            .with_effort(encoder.config().effort),
     )
     .unwrap()
     .recon;
@@ -225,7 +229,7 @@ fn lossy_subsampled_planes_decode_to_gamut_av1s_own_reconstruction() {
         &p16,
         &gamut_av1::Av1EncodeConfig::new(quality_to_quant(QUALITY))
             .with_color(colour(MatrixCoefficients::Bt2020Ncl))
-            .with_effort(encoder.effort()),
+            .with_effort(encoder.config().effort),
     )
     .unwrap()
     .recon;

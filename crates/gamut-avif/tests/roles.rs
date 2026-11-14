@@ -5,7 +5,7 @@
 mod common;
 
 use common::{auxc, av01_item, av1c, clean_file, iref, ispe, item};
-use gamut_avif::{AvifContainer, AvifItem, ItemKind};
+use gamut_avif::{AvifContainer, HeifItem, ItemKind};
 use gamut_isobmff::{
     EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, OverlayOffset, Property, PropertyKind,
 };
@@ -14,8 +14,8 @@ const ALPHA_URN: &str = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
 const DEPTH_URN: &str = "urn:mpeg:mpegB:cicp:systems:auxiliary:depth";
 
 /// The ids of a lens result, for order-exact assertions.
-fn ids(items: Vec<AvifItem<'_>>) -> Vec<u32> {
-    items.iter().map(AvifItem::id).collect()
+fn ids(items: Vec<HeifItem<'_>>) -> Vec<u32> {
+    items.iter().map(HeifItem::id).collect()
 }
 
 /// An `av01` auxiliary (hidden) with the given aux-type URN and an `auxl` reference to `master`.
@@ -100,7 +100,7 @@ fn relationship_lenses_resolve_exact_items() {
     );
     // The Exif metadata item is not a coded image (pins `ItemKind::is_coded_image`).
     assert!(matches!(exif.kind(), ItemKind::Exif));
-    assert!(!exif.kind().is_coded_image());
+    assert!(!matches!(exif.kind(), ItemKind::CodedImage { .. }));
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn overlay_lens_parses_payload_with_dimg_count() {
 fn brand_predicate_distinguishes_av1_and_non_av1() {
     // `avif` major brand → AV1 still.
     let data = rich_file();
-    assert!(AvifContainer::parse(&data).unwrap().image().is_av1_still());
+    assert!(AvifContainer::parse(&data).unwrap().is_av1_still());
 
     // A generic `mif1` file whose primary carries `hvc1`/`hvcC` (a HEIC-shaped file) is not an
     // AV1 still, even though `read` accepts the container.
@@ -244,13 +244,13 @@ fn brand_predicate_distinguishes_av1_and_non_av1() {
     )]);
     let mut model = IsoBmffImage::new(*b"mif1", vec![*b"mif1"], 1, vec![hevc_item]);
     let data = model.to_bytes().unwrap();
-    assert!(!AvifContainer::parse(&data).unwrap().image().is_av1_still());
+    assert!(!AvifContainer::parse(&data).unwrap().is_av1_still());
 
     // The same generic `mif1` container, but the primary is an `av01` item carrying `av1C` → AV1
     // still by the mif1 + av1C fallback.
     model.items = vec![av01_item(1, vec![1, 2, 3, 4])];
     let data = model.to_bytes().unwrap();
-    assert!(AvifContainer::parse(&data).unwrap().image().is_av1_still());
+    assert!(AvifContainer::parse(&data).unwrap().is_av1_still());
 
     // The intra-only brand `avio` also marks an AV1 still.
     model.major_brand = *b"avio";
@@ -258,5 +258,5 @@ fn brand_predicate_distinguishes_av1_and_non_av1() {
     let data = model.to_bytes().unwrap();
     let c = AvifContainer::parse(&data).unwrap();
     assert_eq!(c.image().major_brand(), *b"avio");
-    assert!(c.image().is_av1_still());
+    assert!(c.is_av1_still());
 }

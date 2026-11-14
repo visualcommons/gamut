@@ -3132,7 +3132,8 @@ mod tests {
 }
 
 /// The `metadata` feature: the encoder half of the typed [`gamut_metadata`] wiring (the reader
-/// half is the `TypedMetadata` impl on [`AvifImage`](crate::AvifImage)). `AvifEncoder` is a
+/// half is the facade's `TypedMetadata` over the [`RawMetadata`](gamut_core::RawMetadata)
+/// [`AvifDecoder::metadata`](crate::AvifDecoder::metadata) returns). `AvifEncoder` is a
 /// [`MetadataSink`] over its raw setters, so `with_metadata` / `with_encoded_metadata` and their
 /// precedence are the facade's.
 #[cfg(feature = "metadata")]
@@ -3214,9 +3215,9 @@ mod typed {
             // `colr` `prof` property.
             let typed = typed();
             let file = encode(&AvifEncoder::lossless().with_metadata(&typed).unwrap());
-            let container = AvifContainer::parse(&file).unwrap();
-            assert_eq!(container.image().blocks().unwrap().len(), 3);
-            assert_eq!(container.image().metadata().unwrap(), typed);
+            let raw = crate::AvifDecoder::new().metadata(&file).unwrap();
+            assert_eq!(raw.blocks().unwrap().len(), 3);
+            assert_eq!(raw.metadata().unwrap(), typed);
         }
 
         #[test]

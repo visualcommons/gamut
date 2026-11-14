@@ -13,9 +13,9 @@
 //! `colour_type` `prof` — ISO/IEC 23008-12; Exif and XMP items and their `cdsc` reference — AVIF
 //! v1.2.0 §9.1.2 and ISO/IEC 23008-12.
 
-use gamut_avif::{AvifContainer, AvifEncoder, ContentLightLevel, MasteringDisplay, Rotation};
+use gamut_avif::{AvifContainer, AvifEncoder, ContentLightLevel, MasteringDisplay};
 use gamut_color::{ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Orientation, Rgb8};
 use gamut_isobmff::PropertyKind;
 
 const W: u32 = 34;
@@ -199,7 +199,7 @@ fn libavif_accepts_the_mastering_display_property() {
 #[test]
 fn the_crate_reads_back_the_hdr_properties_as_descriptive() {
     // A rotation as well, so the order of descriptive before transformative properties is visible.
-    let avif = encode(hdr_encoder().with_rotation(Rotation::Ccw90));
+    let avif = encode(hdr_encoder().with_orientation(Orientation::Rotate90Ccw));
     let container = AvifContainer::parse(&avif).expect("gamut-avif parses its own output");
     let primary = container.image().primary_item();
 
@@ -281,7 +281,7 @@ fn the_crate_reads_back_what_it_wrote() {
     let described: Vec<u32> = image
         .metadata_of(primary.id())
         .iter()
-        .map(gamut_avif::AvifItem::id)
+        .map(gamut_avif::HeifItem::id)
         .collect();
     assert_eq!(described.len(), 2, "Exif and XMP both describe the primary");
 

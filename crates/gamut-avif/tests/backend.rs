@@ -5,7 +5,9 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::Av1Color;
-use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder, Effort};
+use gamut_avif::{
+    AbiAv1CodestreamEncoder, Av1CodestreamEncoder, Av1EncodeRequest, AvifEncoder, Effort,
+};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr,
@@ -64,7 +66,7 @@ fn builtin_obus(base_q_idx: u8, colour: Av1Color, chroma: ChromaSubsampling) -> 
         &planes,
         &gamut_av1::Av1EncodeConfig::new(base_q_idx)
             .with_color(colour)
-            .with_effort(AvifEncoder::new().effort()),
+            .with_effort(AvifEncoder::new().config().effort),
     )
     .unwrap()
     .obus
@@ -159,7 +161,7 @@ fn monochrome_jobs_never_reach_the_backend_registry() {
     // silently.
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Scripted::new("b", true, Outcome::Passthrough, &log));
+    encoder = encoder.with_backend(Scripted::new("b", true, Outcome::Passthrough, &log));
 
     // `Gray8` is monochrome end to end: the registry is not consulted at all.
     let gray: Vec<u8> = (0..(W * H)).map(|i| (i * 37) as u8).collect();
@@ -196,7 +198,7 @@ struct Wide {
     effort_seen: Arc<Mutex<Option<Effort>>>,
 }
 
-impl Av1StillEncoder for Wide {
+impl Av1CodestreamEncoder for Wide {
     fn supports(&mut self, _req: &Av1EncodeRequest) -> bool {
         true
     }
@@ -221,28 +223,28 @@ impl Av1StillEncoder for Wide {
     }
 }
 
-/// A backend that accepts every job but never overrode `encode_still16`: the **default** must
-/// decline, so a high-bit-depth job falls through to the built-in tail instead of being handed
-/// samples the backend's 8-bit contract never covered.
+/// A backend that accepts every job but never overrode `encode_still16`: `supports` is the only
+/// fall-through (Q2), so the **default** refuses the accepted high-bit-depth job as a terminal
+/// error — never the 8-bit entry point, and never the built-in tail.
 #[test]
-fn a_backend_without_encode_still16_declines_high_bit_depth() {
+fn a_backend_without_encode_still16_refuses_an_accepted_high_bit_depth_job() {
     let log = log();
     let mut encoder = AvifEncoder::new();
     // `Outcome::Fail` would be a terminal error if the 8-bit entry point were reached, so this also
     // pins that it is not.
-    encoder.push_backend(Scripted::new(
+    encoder = encoder.with_backend(Scripted::new(
         "b",
         true,
         Outcome::Fail("the 8-bit entry point must not be used"),
         &log,
     ));
-    let with_backend = encode16(&encoder).expect("falls through to the built-in tail");
-    assert_eq!(events(&log), ["b:supports"]);
+    let err = encode16(&encoder).expect_err("the accepted job is the backend's");
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(
-        with_backend,
-        encode16(&AvifEncoder::new()).unwrap(),
-        "the fall-through output is the backend-free output"
+        err.static_message(),
+        Some("AVIF: the AV1 encode backend accepted a high-bit-depth job it does not implement")
     );
+    assert_eq!(events(&log), ["b:supports"]);
 }
 
 #[test]
@@ -250,7 +252,7 @@ fn a_backend_that_opts_in_owns_the_high_bit_depth_job() {
     let log = log();
     let depth_seen = Arc::new(Mutex::new(None));
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Wide {
+    encoder = encoder.with_backend(Wide {
         log: Arc::clone(&log),
         depth_seen: Arc::clone(&depth_seen),
         effort_seen: Arc::new(Mutex::new(None)),
@@ -273,7 +275,7 @@ fn a_high_bit_depth_backend_sees_the_chosen_preset() {
         let mut encoder = AvifEncoder::new()
             .with_bit_depth(depth)
             .with_effort(Effort::Fastest);
-        encoder.push_backend(Wide {
+        encoder = encoder.with_backend(Wide {
             log: log(),
             depth_seen: Arc::new(Mutex::new(None)),
             effort_seen: Arc::clone(&effort_seen),
@@ -292,7 +294,7 @@ fn a_backend_stream_at_the_wrong_depth_is_rejected() {
     // The container stamps `av1C` and `pixi` from the request's depth, so a stream coded at another
     // one would be published under a description it does not match.
     struct TenBit;
-    impl Av1StillEncoder for TenBit {
+    impl Av1CodestreamEncoder for TenBit {
         fn supports(&mut self, _req: &Av1EncodeRequest) -> bool {
             true
         }
@@ -316,7 +318,7 @@ fn a_backend_stream_at_the_wrong_depth_is_rejected() {
         }
     }
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(TenBit);
+    encoder = encoder.with_backend(TenBit);
     let err = encode16(&encoder).expect_err("a depth mismatch is rejected");
     assert_owned_error(
         &err,
@@ -376,7 +378,7 @@ impl Scripted {
     }
 }
 
-impl Av1StillEncoder for Scripted {
+impl Av1CodestreamEncoder for Scripted {
     fn supports(&mut self, req: &Av1EncodeRequest) -> bool {
         // The request must describe the job exactly: display dimensions and the *derived*
         // quantizer, never the 0..=100 quality scale.
@@ -426,9 +428,9 @@ fn events(log: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
 fn first_supporting_backend_wins_in_push_order() {
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
-    encoder
-        .push_backend(Scripted::new("a", true, Outcome::Passthrough, &log))
-        .push_backend(Scripted::new("b", true, Outcome::Passthrough, &log));
+    encoder = encoder
+        .with_backend(Scripted::new("a", true, Outcome::Passthrough, &log))
+        .with_backend(Scripted::new("b", true, Outcome::Passthrough, &log));
     let out = encode(&encoder).expect("first backend encodes");
     assert_eq!(
         events(&log),
@@ -445,9 +447,9 @@ fn first_supporting_backend_wins_in_push_order() {
 fn declining_backends_are_skipped() {
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
-    encoder
-        .push_backend(Scripted::new("no", false, Outcome::Passthrough, &log))
-        .push_backend(Scripted::new("yes", true, Outcome::Passthrough, &log));
+    encoder = encoder
+        .with_backend(Scripted::new("no", false, Outcome::Passthrough, &log))
+        .with_backend(Scripted::new("yes", true, Outcome::Passthrough, &log));
     encode(&encoder).expect("second backend encodes");
     assert_eq!(
         events(&log),
@@ -465,9 +467,9 @@ fn declining_backends_are_skipped() {
 fn all_declining_falls_through_to_the_builtin_tail() {
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder
-        .push_backend(Scripted::new("a", false, Outcome::Passthrough, &log))
-        .push_backend(Scripted::new("b", false, Outcome::Passthrough, &log));
+    encoder = encoder
+        .with_backend(Scripted::new("a", false, Outcome::Passthrough, &log))
+        .with_backend(Scripted::new("b", false, Outcome::Passthrough, &log));
     let out = encode(&encoder).expect("built-in tail encodes");
     assert_eq!(
         events(&log),
@@ -483,14 +485,14 @@ fn all_declining_falls_through_to_the_builtin_tail() {
 fn accepted_then_failed_propagates_and_skips_the_tail() {
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder
-        .push_backend(Scripted::new(
+    encoder = encoder
+        .with_backend(Scripted::new(
             "boom",
             true,
             Outcome::Fail("backend exploded"),
             &log,
         ))
-        .push_backend(Scripted::new("later", true, Outcome::Passthrough, &log));
+        .with_backend(Scripted::new("later", true, Outcome::Passthrough, &log));
     let err = encode(&encoder).expect_err("the accepted backend's error propagates");
     assert!(
         err.kind() == ErrorKind::Unsupported && err.static_message() == Some("backend exploded"),
@@ -509,7 +511,7 @@ fn accepted_then_failed_propagates_and_skips_the_tail() {
 fn clone_shares_backends() {
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
-    encoder.push_backend(Scripted::new("shared", true, Outcome::Passthrough, &log));
+    encoder = encoder.with_backend(Scripted::new("shared", true, Outcome::Passthrough, &log));
     let clone = encoder.clone();
 
     encode(&clone).expect("the clone sees the pushed backend");
@@ -519,8 +521,8 @@ fn clone_shares_backends() {
         "the clone drove the shared backend"
     );
 
-    // A push after cloning affects only the original's registry.
-    encoder.push_backend(Scripted::new("late", true, Outcome::Passthrough, &log));
+    // A backend added after cloning reaches only the encoder it was added to.
+    let _later = encoder.with_backend(Scripted::new("late", true, Outcome::Passthrough, &log));
     log.lock().unwrap().clear();
     encode(&clone).expect("clone still encodes");
     assert_eq!(
@@ -536,7 +538,7 @@ fn clone_shares_backends() {
 fn a_panicking_backend_poisons_the_registry() {
     /// Panics from `supports` on its first call.
     struct Panicky;
-    impl Av1StillEncoder for Panicky {
+    impl Av1CodestreamEncoder for Panicky {
         fn supports(&mut self, _req: &Av1EncodeRequest) -> bool {
             panic!("backend panicked");
         }
@@ -545,7 +547,7 @@ fn a_panicking_backend_poisons_the_registry() {
         }
     }
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Panicky);
+    encoder = encoder.with_backend(Panicky);
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encode(&encoder)));
@@ -569,7 +571,7 @@ fn debug_reports_the_backend_count() {
         format!("{encoder:?}").contains("backends: 0"),
         "{encoder:?}"
     );
-    encoder.push_backend(Scripted::new("a", false, Outcome::Passthrough, &log));
+    encoder = encoder.with_backend(Scripted::new("a", false, Outcome::Passthrough, &log));
     let rendered = format!("{encoder:?}");
     assert!(rendered.contains("backends: 1"), "{rendered}");
     assert!(rendered.contains("AvifEncoder"), "{rendered}");
@@ -592,7 +594,7 @@ fn backend_stream_dimensions_must_match() {
         .obus;
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Scripted::new("wrong", true, Outcome::Bytes(wrong), &log));
+    encoder = encoder.with_backend(Scripted::new("wrong", true, Outcome::Bytes(wrong), &log));
     let err = encode(&encoder).expect_err("dimension mismatch rejected");
     assert_owned_error(
         &err,
@@ -607,7 +609,7 @@ fn backend_stream_without_sequence_header_is_rejected() {
     let log = log();
     let mut encoder = AvifEncoder::new();
     // A lone temporal-delimiter OBU: well-formed OBU framing, no sequence header.
-    encoder.push_backend(Scripted::new(
+    encoder = encoder.with_backend(Scripted::new(
         "hdrless",
         true,
         Outcome::Bytes(vec![0x12, 0x00]),
@@ -661,7 +663,7 @@ fn backend_stream_must_be_a_reduced_still_picture() {
     obus.extend_from_slice(&payload);
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Scripted::new("full", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("full", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("non-reduced sequence header rejected");
     assert_owned_error(
         &err,
@@ -681,7 +683,7 @@ fn backend_stream_must_use_a_describable_profile() {
     obus.extend_from_slice(&payload);
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Scripted::new("p3", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("p3", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("a reserved profile is rejected");
     assert_owned_error(
         &err,
@@ -711,7 +713,7 @@ fn backend_stream_must_be_three_plane() {
     .obus;
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Scripted::new("mono", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("mono", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("a monochrome stream is rejected for a colour item");
     assert_owned_error(
         &err,
@@ -845,7 +847,7 @@ fn a_profile_zero_stream_is_four_two_zero() {
     // be used — it signals the identity matrix, which §6.4.2 permits only at 4:4:4, so it takes
     // the sRGB shortcut and never reaches the profile-derived layout at all.
     let mut encoder = AvifEncoder::lossy(50).with_chroma(ChromaSubsampling::Cs444);
-    encoder.push_backend(Scripted::new("p0-420", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("p0-420", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("a three-plane profile-0 stream is 4:2:0, not 4:4:4");
     assert_owned_error(
         &err,
@@ -865,7 +867,7 @@ fn a_profile_two_stream_below_twelve_bits_is_four_two_two() {
     let obus = seq_header_obu(2, false, false, 1, None);
     let log = log();
     let mut encoder = AvifEncoder::lossy(50).with_chroma(ChromaSubsampling::Cs444);
-    encoder.push_backend(Scripted::new("p2-8bit", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("p2-8bit", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("profile 2 below 12 bits is 4:2:2");
     assert_owned_error(
         &err,
@@ -887,7 +889,7 @@ fn a_twelve_bit_profile_two_stream_codes_its_subsampling() {
     let obus = seq_header_obu(2, true, true, 1, Some((1, 1)));
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Scripted::new("p2-12bit", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("p2-12bit", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("the 8-bit request rejects a 12-bit stream");
     assert_owned_error(
         &err,
@@ -904,7 +906,7 @@ fn a_twelve_bit_profile_two_stream_may_be_four_four_four() {
     let obus = seq_header_obu(2, true, true, 1, Some((0, 0)));
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Scripted::new("p2-444", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("p2-444", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("the 8-bit request rejects a 12-bit stream");
     assert_owned_error(
         &err,
@@ -922,7 +924,7 @@ fn backend_stream_must_signal_the_requested_chroma() {
     let stream = builtin_obus(127, colour, ChromaSubsampling::Cs444);
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
-    encoder.push_backend(Scripted::new(
+    encoder = encoder.with_backend(Scripted::new(
         "wrong-chroma",
         true,
         Outcome::Bytes(stream),
@@ -971,7 +973,7 @@ fn backend_stream_shortcut_must_not_contradict_its_profile() {
     obus.extend_from_slice(&payload);
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
-    encoder.push_backend(Scripted::new(
+    encoder = encoder.with_backend(Scripted::new(
         "shortcut-p0",
         true,
         Outcome::Bytes(obus),
@@ -1021,7 +1023,7 @@ fn backend_stream_must_signal_the_requested_colour() {
     let identity_stream = builtin_obus(127, Av1Color::default(), ChromaSubsampling::Cs444);
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
-    encoder.push_backend(Scripted::new(
+    encoder = encoder.with_backend(Scripted::new(
         "wrong-colour",
         true,
         Outcome::Bytes(identity_stream),
@@ -1057,7 +1059,7 @@ fn backend_stream_must_signal_the_requested_colour() {
             127
         };
         let mut with_backend = encoder.clone();
-        with_backend.push_backend(Scripted::new(
+        with_backend = with_backend.with_backend(Scripted::new(
             "right-colour",
             true,
             Outcome::Bytes(builtin_obus(base_q_idx, colour, chroma_for(colour))),
@@ -1101,7 +1103,7 @@ fn backend_stream_must_describe_its_colour() {
     obus.extend_from_slice(&payload);
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
-    encoder.push_backend(Scripted::new("no-cicp", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("no-cicp", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("undescribed colour rejected");
     assert_owned_error(
         &err,
@@ -1119,7 +1121,7 @@ fn truncated_sequence_header_is_reported() {
     obus.extend_from_slice(&payload);
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Scripted::new("short", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("short", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("truncated header rejected");
     assert_owned_error(
         &err,
@@ -1255,7 +1257,7 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
         vec![head.to_vec(), tail.to_vec()],
     ))));
     let mut encoder = AvifEncoder::lossy(50); // quality 50 ⇒ base_q_idx 127
-    encoder.push_backend(AbiAv1StillEncoder::new(stub.clone()));
+    encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
     let out = encode(&encoder).expect("adapter encodes");
     assert_eq!(
         out,
@@ -1315,7 +1317,7 @@ fn abi_adapter_appends_a_non_thorough_effort_to_the_extra_blob() {
             vec![obus.clone()],
         ))));
         let mut encoder = encoder;
-        encoder.push_backend(AbiAv1StillEncoder::new(stub.clone()));
+        encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
         encode(&encoder).expect("adapter encodes");
         stub.0.lock().unwrap().seen_extra.clone()
     };
@@ -1346,7 +1348,7 @@ fn abi_adapter_unsupported_declines() {
         vec![],
     ))));
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(AbiAv1StillEncoder::new(stub.clone()));
+    encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
     let out = encode(&encoder).expect("falls through to the built-in tail");
     assert_eq!(out, encode(&AvifEncoder::new()).unwrap());
     assert!(
@@ -1355,10 +1357,11 @@ fn abi_adapter_unsupported_declines() {
     );
 }
 
-/// A **late** `UNSUPPORTED` — accepted at `supports`, declined at `encode` — also falls through:
-/// to the next backend first, and to the built-in tail when there is none.
+/// A **late** `UNSUPPORTED` — accepted at `supports`, declined at `encode` — is terminal (Q2:
+/// `supports` is the only fall-through): the error carries the status, and neither the next
+/// backend nor the built-in tail runs.
 #[test]
-fn abi_adapter_late_unsupported_falls_through() {
+fn abi_adapter_late_unsupported_is_terminal() {
     let late = SharedStub(Arc::new(Mutex::new(AbiStub::new(
         Status::OK,
         Status::UNSUPPORTED,
@@ -1366,26 +1369,34 @@ fn abi_adapter_late_unsupported_falls_through() {
     ))));
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
-    encoder
-        .push_backend(AbiAv1StillEncoder::new(late.clone()))
-        .push_backend(Scripted::new("next", true, Outcome::Passthrough, &log));
-    let out = encode(&encoder).expect("the next backend takes over");
-    assert_eq!(out, encode(&AvifEncoder::lossy(50)).unwrap());
+    encoder = encoder
+        .with_backend(AbiAv1CodestreamEncoder::new(late.clone()))
+        .with_backend(Scripted::new("next", true, Outcome::Passthrough, &log));
+    let err = encode(&encoder).expect_err("the accepting backend owns the job");
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 encode backend failed",
+    );
+    assert_eq!(
+        err.detail(),
+        Some(format!("codec-abi status {}", Status::UNSUPPORTED.0).as_str())
+    );
     assert!(
         late.0.lock().unwrap().seen_image.is_some(),
         "encode was attempted"
     );
-    assert_eq!(
-        events(&log),
-        vec!["next:supports".to_string(), "next:encode".to_string()]
-    );
+    assert!(events(&log).is_empty(), "no later backend, no tail");
 
-    // With no later backend, the late decline reaches the built-in tail.
-    let mut solo = AvifEncoder::new();
-    solo.push_backend(AbiAv1StillEncoder::new(SharedStub(Arc::new(Mutex::new(
-        AbiStub::new(Status::OK, Status::UNSUPPORTED, vec![]),
-    )))));
-    assert_eq!(encode(&solo).unwrap(), encode(&AvifEncoder::new()).unwrap());
+    // With no later backend the late decline does not reach the built-in tail either.
+    let solo = AvifEncoder::new().with_backend(AbiAv1CodestreamEncoder::new(SharedStub(Arc::new(
+        Mutex::new(AbiStub::new(Status::OK, Status::UNSUPPORTED, vec![])),
+    ))));
+    assert_owned_error(
+        &encode(&solo).expect_err("terminal"),
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 encode backend failed",
+    );
 }
 
 /// Any other non-OK status is terminal and propagates as a typed error — the tail is not used.
@@ -1393,11 +1404,11 @@ fn abi_adapter_late_unsupported_falls_through() {
 fn abi_adapter_other_status_propagates() {
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder
-        .push_backend(AbiAv1StillEncoder::new(SharedStub(Arc::new(Mutex::new(
-            AbiStub::new(Status::OK, Status(-42), vec![]),
-        )))))
-        .push_backend(Scripted::new("never", true, Outcome::Passthrough, &log));
+    encoder = encoder
+        .with_backend(AbiAv1CodestreamEncoder::new(SharedStub(Arc::new(
+            Mutex::new(AbiStub::new(Status::OK, Status(-42), vec![])),
+        ))))
+        .with_backend(Scripted::new("never", true, Outcome::Passthrough, &log));
     let err = encode(&encoder).expect_err("a terminal backend status propagates");
     assert_owned_error(
         &err,
@@ -1416,8 +1427,8 @@ fn abi_adapter_exposes_the_wrapped_encoder() {
         Status::OK,
         vec![],
     ))));
-    let adapter = AbiAv1StillEncoder::new(stub.clone());
-    assert!(format!("{adapter:?}").contains("AbiAv1StillEncoder"));
+    let adapter = AbiAv1CodestreamEncoder::new(stub.clone());
+    assert!(format!("{adapter:?}").contains("AbiAv1CodestreamEncoder"));
     let inner = adapter.into_inner();
     assert!(
         Arc::ptr_eq(&inner.0, &stub.0),
@@ -1459,7 +1470,7 @@ fn backend_stream_may_use_the_professional_profile() {
 
     let log = log();
     let mut encoder = AvifEncoder::lossy(50); // asks for 4:2:0
-    encoder.push_backend(Scripted::new("p2", true, Outcome::Bytes(obus), &log));
+    encoder = encoder.with_backend(Scripted::new("p2", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("4:2:2 stream for a 4:2:0 request is rejected");
     assert_owned_error(
         &err,
@@ -1492,7 +1503,7 @@ fn abi_adapter_lowers_a_high_bit_depth_job() {
         &planes,
         &gamut_av1::Av1EncodeConfig::new(127)
             .with_color(colour)
-            .with_effort(AvifEncoder::lossy(50).effort()),
+            .with_effort(AvifEncoder::lossy(50).config().effort),
     )
     .expect("the built-in encoder handles the request")
     .obus;
@@ -1506,7 +1517,7 @@ fn abi_adapter_lowers_a_high_bit_depth_job() {
     let mut encoder = AvifEncoder::lossy(50) // quality 50 ⇒ base_q_idx 127
         .with_bit_depth(BitDepth::Twelve)
         .with_chroma(ChromaSubsampling::Cs420);
-    encoder.push_backend(AbiAv1StillEncoder::new(stub.clone()));
+    encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
     let out = encode16(&encoder).expect("the adapter owns the 12-bit job");
     assert_eq!(
         out,
@@ -1569,7 +1580,7 @@ fn abi_adapter_lowers_the_requested_depth_not_a_fixed_one() {
             vec![obus],
         ))));
         let mut encoder = AvifEncoder::new().with_bit_depth(bits);
-        encoder.push_backend(AbiAv1StillEncoder::new(stub.clone()));
+        encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
         encode16(&encoder).unwrap_or_else(|e| panic!("{bits:?}: {e}"));
         let seen = stub.0.lock().unwrap();
         let image = seen.seen_image.expect("the adapter lowered an image");

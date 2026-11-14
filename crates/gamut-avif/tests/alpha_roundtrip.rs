@@ -12,7 +12,7 @@
 //! and the checked-out submodules (`git submodule update --init --recursive` plus `mise run
 //! fetch-av1-oracles`).
 
-use gamut_avif::{AlphaMode, AvifContainer, AvifEncoder, AvifItem, ChromaFormat};
+use gamut_avif::{AlphaMode, AvifContainer, AvifEncoder, ChromaSubsampling, HeifItem, OpaqueAlpha};
 use gamut_color::{ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgb16, Rgba8, Rgba16};
 
@@ -89,11 +89,11 @@ fn targets<'a>(item: &'a gamut_isobmff::Item, ref_type: &[u8; 4]) -> Option<&'a 
 }
 
 /// The `av1C` chroma format an item declares.
-fn chroma(item: &AvifItem<'_>) -> ChromaFormat {
-    item.av1_config()
-        .expect("an av01 item has an av1C")
-        .expect("the record parses")
-        .chroma_format()
+fn chroma(container: &AvifContainer<'_>, item: &HeifItem<'_>) -> ChromaSubsampling {
+    container
+        .av1_config(item.id())
+        .expect("an av01 item has a parseable av1C")
+        .chroma_subsampling()
 }
 
 // ---- structure --------------------------------------------------------------------------------
@@ -110,7 +110,7 @@ fn alpha_is_a_conformant_auxiliary_image_item() {
     let colour = img.primary_item();
     assert_eq!(colour.id(), 1);
     assert_eq!(colour.bits_per_channel(), Some(&[8u8, 8, 8][..]));
-    assert_eq!(chroma(&colour), ChromaFormat::Yuv444);
+    assert_eq!(chroma(&container, &colour), ChromaSubsampling::Cs444);
 
     // The alpha auxiliary is reached the way a reader reaches it: an `auxl` reference to the
     // colour item, typed by the alpha URN.
@@ -127,7 +127,7 @@ fn alpha_is_a_conformant_auxiliary_image_item() {
 
     // AVIF v1.2.0 §4.1: an AV1 auxiliary image item shall be monochrome, and its `pixi` describes
     // the one channel it actually codes.
-    assert_eq!(chroma(&alpha), ChromaFormat::Monochrome);
+    assert_eq!(chroma(&container, &alpha), ChromaSubsampling::Cs400);
     assert_eq!(alpha.bits_per_channel(), Some(&[8u8][..]));
     // §4.1: `colr` should be omitted — the samples are opacity, not colour.
     assert!(alpha.colour().is_none(), "no colr on an alpha item");
@@ -156,8 +156,11 @@ fn alpha_is_a_conformant_auxiliary_image_item() {
 fn premultiplication_is_declared_only_when_asked() {
     // `prem` runs the other way to `auxl` — colour image → alpha auxiliary — so getting the
     // direction wrong is invisible to a presence check on the wrong item.
-    for premultiplied in [false, true] {
-        let avif = encode_rgba(&AvifEncoder::new().with_premultiplied_alpha(premultiplied));
+    for (mode, premultiplied) in [
+        (AlphaMode::Unassociated, false),
+        (AlphaMode::Premultiplied, true),
+    ] {
+        let avif = encode_rgba(&AvifEncoder::new().with_alpha_mode(mode));
         let img = AvifContainer::parse(&avif).expect("parses");
         let img = img.image();
         assert_eq!(img.is_premultiplied(1), premultiplied);
@@ -173,7 +176,7 @@ fn premultiplication_is_declared_only_when_asked() {
     // Without an alpha channel there is nothing to premultiply, and the knob reaches no box.
     let rgb = vec![0u8; (W * H * 3) as usize];
     let avif = AvifEncoder::new()
-        .with_premultiplied_alpha(true)
+        .with_alpha_mode(AlphaMode::Premultiplied)
         .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims()).unwrap())
         .expect("encode");
     assert!(
@@ -283,7 +286,7 @@ fn a_16_bit_alpha_below_full_scale_keeps_the_alpha_auxiliary() {
 fn keep_opaque_alpha_keeps_the_alpha_auxiliary_of_an_opaque_rgba8() {
     let px = opaque_rgba();
     let avif = AvifEncoder::new()
-        .with_keep_opaque_alpha(true)
+        .with_opaque_alpha(OpaqueAlpha::Keep)
         .encode_to_vec(ImageRef::<Rgba8>::new(&px, dims()).unwrap())
         .expect("encode");
     assert!(has_alpha_auxiliary(&avif));
@@ -296,7 +299,7 @@ fn grayscale_is_one_monochrome_item() {
     let img = container.image();
     assert_eq!(img.items().count(), 1, "no replicated chroma, no auxiliary");
     let primary = img.primary_item();
-    assert_eq!(chroma(&primary), ChromaFormat::Monochrome);
+    assert_eq!(chroma(&container, &primary), ChromaSubsampling::Cs400);
     // One channel declared, because one is coded — three would claim colour the item does not hold.
     assert_eq!(primary.bits_per_channel(), Some(&[8u8][..]));
     assert!(img.alpha_auxiliary_of(primary.id()).is_none());
@@ -468,7 +471,7 @@ fn lossy_alpha_is_the_av1_reconstruction_of_the_alpha_plane() {
         &alpha_planes,
         &gamut_av1::Av1EncodeConfig::new(quality_to_quant(QUALITY))
             .with_color(gamut_av1::Av1Color::monochrome())
-            .with_effort(AvifEncoder::lossy(QUALITY).effort()),
+            .with_effort(AvifEncoder::lossy(QUALITY).config().effort),
     )
     .expect("the alpha plane encodes")
     .recon;
@@ -510,7 +513,7 @@ fn alpha_stream_at(base_q_idx: u8) -> Vec<u8> {
         &planes,
         &gamut_av1::Av1EncodeConfig::new(base_q_idx)
             .with_color(gamut_av1::Av1Color::monochrome())
-            .with_effort(AvifEncoder::new().effort()),
+            .with_effort(AvifEncoder::new().config().effort),
     )
     .expect("the alpha plane encodes")
     .obus
@@ -594,7 +597,7 @@ fn a_finer_alpha_quality_decodes_closer_to_the_source_through_libavif() {
         &alpha_planes,
         &gamut_av1::Av1EncodeConfig::new(quality_to_quant(ALPHA_Q))
             .with_color(gamut_av1::Av1Color::monochrome())
-            .with_effort(AvifEncoder::lossy(COLOUR_Q).effort()),
+            .with_effort(AvifEncoder::lossy(COLOUR_Q).config().effort),
     )
     .expect("the alpha plane encodes")
     .recon;
@@ -690,7 +693,7 @@ fn clean_alpha_shrinks_a_lossy_transparent_edge_and_libavif_decodes_it() {
             .expect("encode")
     };
     let dirty = encode(AvifEncoder::lossy(60));
-    let clean = encode(AvifEncoder::lossy(60).with_clean_alpha(true));
+    let clean = encode(AvifEncoder::lossy(60).with_alpha_mode(AlphaMode::CleanOnEncode));
 
     // Reported, not just asserted: the size the hidden noise was costing.
     eprintln!(

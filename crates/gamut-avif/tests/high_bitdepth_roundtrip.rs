@@ -11,9 +11,10 @@
 //! Building this needs the `third_party/libavif` + `third_party/dav1d` submodules and a C
 //! toolchain, like the crate's other oracle tests.
 
-use gamut_avif::{
-    Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, ChromaFormat, DecodedFrame,
-};
+mod common;
+
+use common::Decode;
+use gamut_avif::{Av1CodestreamDecoder, Av1Config, AvifContainer, AvifEncoder, DecodedFrame};
 use gamut_color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
 use gamut_core::{
     Dimensions, EncodeImage, Error, Gray8, ImageRef, Result, Rgb8, Rgb16, Rgba8, Rgba16,
@@ -26,12 +27,13 @@ fn dims() -> Dimensions {
     Dimensions::new(W, H).unwrap()
 }
 
-/// [`Av1StillDecoder`] over the real dav1d decoder, as `conformance.rs` bridges it: the typed
+/// [`Av1CodestreamDecoder`] over the real dav1d decoder, as `conformance.rs` bridges it: the typed
 /// `av1C` plus the raw item payload are assembled into one self-contained temporal unit and handed
 /// to a Section-5 decoder — the same door a platform decoder enters by.
+#[derive(Default)]
 struct Dav1dDecoder;
 
-impl Av1StillDecoder for Dav1dDecoder {
+impl Av1CodestreamDecoder for Dav1dDecoder {
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;
@@ -42,11 +44,11 @@ impl Av1StillDecoder for Dav1dDecoder {
             )
         })?;
         let [y, u, v] = pic.planes;
-        DecodedFrame::new(
+        common::decoded_frame(
             pic.width,
             pic.height,
             pic.bit_depth,
-            config.chroma_format(),
+            config.chroma_subsampling(),
             y,
             u,
             v,
@@ -131,12 +133,11 @@ fn the_depth_is_stated_the_same_way_everywhere() {
         let img = container.image();
         let primary = img.primary_item();
 
-        let config = primary
-            .av1_config()
-            .expect("an av01 item has an av1C")
-            .expect("the record parses");
+        let config = container
+            .av1_config(primary.id())
+            .expect("an av01 item has a parseable av1C");
         assert_eq!(config.bit_depth(), bits.bits(), "{bits:?}: av1C");
-        assert_eq!(config.chroma_format(), ChromaFormat::Yuv444);
+        assert_eq!(config.chroma_subsampling(), ChromaSubsampling::Cs444);
         // §6.4.1: 12-bit of any plane count needs the Professional profile; 10-bit 4:4:4 stays High.
         assert_eq!(config.seq_profile, profile, "{bits:?}: seq_profile");
 
@@ -150,7 +151,7 @@ fn the_depth_is_stated_the_same_way_everywhere() {
         // And the codestream itself: decoding through the `av1C` the container carries reproduces
         // the same depth, which is what makes the record a description rather than a claim.
         let frame = img
-            .decode_item_planar(primary.id(), &mut Dav1dDecoder)
+            .planar(primary.id(), &mut Dav1dDecoder)
             .expect("dav1d decodes the primary");
         assert_eq!(frame.bit_depth(), bits.bits(), "{bits:?}: codestream");
         assert_eq!(frame.y(), expected_plane(0, bits), "{bits:?}: luma");
@@ -200,14 +201,14 @@ fn rgba16_carries_its_alpha_at_the_master_depth() {
         let alpha = img
             .alpha_auxiliary_of(img.primary_item().id())
             .expect("the colour item has an alpha auxiliary");
-        let config = alpha.av1_config().unwrap().unwrap();
+        let config = container.av1_config(alpha.id()).unwrap();
         assert_eq!(config.bit_depth(), bits.bits(), "{bits:?}: aux av1C");
-        assert_eq!(config.chroma_format(), ChromaFormat::Monochrome);
+        assert_eq!(config.chroma_subsampling(), ChromaSubsampling::Cs400);
         assert_eq!(alpha.bits_per_channel(), Some(&[bits.bits()][..]));
         assert!(alpha.colour().is_none(), "no colr on an alpha item");
 
         let frame = img
-            .decode_item_planar(alpha.id(), &mut Dav1dDecoder)
+            .planar(alpha.id(), &mut Dav1dDecoder)
             .expect("dav1d decodes the auxiliary");
         let shift = 16 - u32::from(bits.bits());
         let want: Vec<u16> = (0..H)
@@ -282,9 +283,9 @@ fn lossy_rgb16_decodes_at_the_coded_depth() {
 fn sixteen_bit_input_honours_the_requested_chroma() {
     for bits in [BitDepth::Ten, BitDepth::Twelve] {
         for (chroma, want) in [
-            (ChromaSubsampling::Cs444, ChromaFormat::Yuv444),
-            (ChromaSubsampling::Cs422, ChromaFormat::Yuv422),
-            (ChromaSubsampling::Cs420, ChromaFormat::Yuv420),
+            (ChromaSubsampling::Cs444, ChromaSubsampling::Cs444),
+            (ChromaSubsampling::Cs422, ChromaSubsampling::Cs422),
+            (ChromaSubsampling::Cs420, ChromaSubsampling::Cs420),
         ] {
             let px = source_rgb16();
             let avif = AvifEncoder::lossy(70)
@@ -297,13 +298,10 @@ fn sixteen_bit_input_honours_the_requested_chroma() {
             // What the container says.
             let container = AvifContainer::parse(&avif).expect("parse");
             let cfg = container
-                .image()
-                .primary_item()
-                .av1_config()
-                .expect("an av01 item has an av1C")
-                .expect("the record parses");
+                .av1_config(container.image().primary_item().id())
+                .expect("an av01 item has a parseable av1C");
             assert_eq!(
-                cfg.chroma_format(),
+                cfg.chroma_subsampling(),
                 want,
                 "{bits:?}/{chroma:?}: av1C layout"
             );
@@ -341,12 +339,9 @@ fn the_identity_matrix_stays_four_four_four_at_high_bit_depth() {
         .expect("encode");
     let container = AvifContainer::parse(&avif).expect("parse");
     let cfg = container
-        .image()
-        .primary_item()
-        .av1_config()
-        .expect("an av01 item has an av1C")
-        .expect("the record parses");
-    assert_eq!(cfg.chroma_format(), ChromaFormat::Yuv444);
+        .av1_config(container.image().primary_item().id())
+        .expect("an av01 item has a parseable av1C");
+    assert_eq!(cfg.chroma_subsampling(), ChromaSubsampling::Cs444);
 }
 
 // ---- 8-bit input coded at 10/12 bits (#659) ---------------------------------------------------
@@ -438,7 +433,7 @@ fn rgba8_widens_its_alpha_to_the_colour_depth() {
             "{bits:?}: colour pixi"
         );
         let colour = img
-            .decode_item_planar(primary.id(), &mut Dav1dDecoder)
+            .planar(primary.id(), &mut Dav1dDecoder)
             .expect("dav1d decodes the primary");
         assert_eq!(
             colour.y(),
@@ -451,7 +446,7 @@ fn rgba8_widens_its_alpha_to_the_colour_depth() {
             .expect("the colour item has an alpha auxiliary");
         assert_eq!(alpha.bits_per_channel(), Some(&[bits.bits()][..]));
         let frame = img
-            .decode_item_planar(alpha.id(), &mut Dav1dDecoder)
+            .planar(alpha.id(), &mut Dav1dDecoder)
             .expect("dav1d decodes the auxiliary");
         assert_eq!(frame.bit_depth(), bits.bits(), "{bits:?}: alpha codestream");
         let want: Vec<u16> = (0..H)
