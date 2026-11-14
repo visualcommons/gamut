@@ -142,7 +142,7 @@ drops a value a caller set says so:
   `LocationCreated` caps.
 - **Exotic ISO 2022 character sets**: dataset 1:90 designations other than the spec default
   (decoded as Latin-1, the exiv2/ExifTool de-facto reading of ISO 646 IRV) and UTF-8 (`ESC % G`)
-  are reported as `Error::Unsupported`, never mis-decoded.
+  are reported as `IptcError::Unsupported`, never mis-decoded.
 - **Scalar-shaped repeatable IIM datasets** (2:04 Object Attribute Reference, 2:85 By-line Title):
   repeatable on the wire but mapped to single XMP properties — reconciliation takes the first
   value; the wire side still round-trips every repeat.

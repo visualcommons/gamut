@@ -66,7 +66,9 @@ AVIF encode, and HEIC decode) is live, with the committed C header and its CI dr
 first slices of the **consumer boundary** — C entry points that run encodes and decodes — have
 shipped: AVIF encode (`gamut_avif_encoder_encode_*` for the five layouts, plus the encoder's config
 setters) and AVIF container parse (`gamut_avif_image_*`, issue #666). The rest of the consumer boundary is the per-crate conversion work
-tracked in issue #242; AVIF decode joins the surface when its Rust registry exists (issue #259).
+tracked in issue #242. AVIF decode has its Rust registry (`AvifDecoder::with_backend`) but no
+`gamut-codec-abi` adapter for its `Av1CodestreamDecoder` backends yet, so a C vtable has nothing
+to be wrapped in; it joins the surface with that adapter.
 See [DESIGN.md](DESIGN.md) for the full contract.
 
 ## License

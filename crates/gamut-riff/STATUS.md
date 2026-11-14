@@ -162,7 +162,7 @@ whose declared owner is this crate. Every row there is ✅ or ⊘ as of v1.
 |------|-------|--------|
 | Generic RIFF form types | `RiffReader::with_form(data, FourCc)` and a `RiffWriter::with_form`, for a non-WebP RIFF format. No consumer today; purely additive. | ☐ |
 | `LIST` / nested chunks | Not used by WebP's flat layout. The `ANMF` payload is the only nesting the spec defines, and animation is out of scope. | ☐ |
-| A cheap `is_webp` sniff | `gamut-cli` hand-rolls the 12-byte signature check (`crates/gamut-cli/src/input.rs`) because no helper is exported. Additive whenever a second caller wants it. | ☐ |
+| A cheap `is_webp` sniff | `gamut-cli` hand-rolls the 12-byte signature check (`crates/gamut-cli/src/sniff.rs`) because no helper is exported. Additive whenever a second caller wants it. | ☐ |
 | Fuzz harness | Issue #264 tracks fuzz coverage for the workspace's parser entry points; `RiffReader` belongs on that list. `tests/robustness.rs` covers exhaustive truncation and bit-flips deterministically in the meantime. | ☐ |
 | Property-based round-trip tests | Issue #240 tracks adopting proptest workspace-wide; the writer→reader round-trip and the pad-byte invariant are natural candidates. | ☐ |
 
