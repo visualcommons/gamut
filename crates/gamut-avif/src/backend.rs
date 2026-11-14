@@ -1,23 +1,26 @@
-//! The AV1 **still-encode** backend seam: the typed [`Av1StillEncoder`] trait a caller plugs an
-//! alternate AV1 encoder into, the [`Av1EncodeRequest`] describing one encode job, and the
-//! [`AbiAv1StillEncoder`] adapter that bridges a [`gamut_codec_abi::Encoder`] (and, through
-//! [`gamut_codec_abi::bridge::ForeignEncoder`], a C/`-sys` backend) onto it.
+//! The AV1 codestream backend seams: the typed [`Av1CodestreamEncoder`] trait a caller plugs an
+//! alternate AV1 encoder into, the [`Av1EncodeRequest`] describing one encode job, the
+//! [`AbiAv1CodestreamEncoder`] adapter that bridges a [`gamut_codec_abi::Encoder`] (and, through
+//! [`gamut_codec_abi::bridge::ForeignEncoder`], a C/`-sys` backend) onto it, and the decode-side
+//! [`Av1CodestreamDecoder`] the [`AvifDecoder`](crate::AvifDecoder) runs coded items through.
 //!
-//! This is the write-direction mirror of the [`Av1StillDecoder`](crate::Av1StillDecoder) seam:
 //! `gamut-avif` owns the container and everything around the coded picture, while the AV1
-//! codestream itself may come from a platform or reference encoder (libaom, SVT-AV1, a hardware
-//! encoder, …). The shape and the fallback contract are the workspace-wide ones defined by
-//! [`gamut_codec_abi`] (issue #241/#272):
+//! codestream itself may come from a platform or reference codec (libaom, SVT-AV1, dav1d, a
+//! hardware codec, …). Both directions keep their backends in a [`gamut_codec_abi::Registry`],
+//! whose fallback contract is the workspace-wide one:
 //!
-//! - Backends are tried in **push order** ([`AvifEncoder::push_backend`](crate::AvifEncoder::push_backend)).
-//! - [`Av1StillEncoder::supports`] returning `false` — or, across the C seam,
+//! - Backends are tried in **the order they were added**
+//!   ([`AvifEncoder::with_backend`](crate::AvifEncoder::with_backend),
+//!   [`AvifDecoder::with_backend`](crate::AvifDecoder::with_backend)).
+//! - `supports` returning `false` — or, across the C seam, `supports` reporting
 //!   [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) — is the **only** fall-through
 //!   signal.
-//! - `gamut-av1`'s [`encode_still`](gamut_av1::encode_still) is the
-//!   **implicit tail**,
-//!   used when every pushed backend declines. `gamut-av1` itself is unaware of this seam.
-//! - A backend that *accepts* a job and then fails propagates its error; the tail is **not** retried,
-//!   because silently substituting a different encoder would make the output non-deterministic.
+//! - On the encode side `gamut-av1`'s [`encode_still`](gamut_av1::encode_still) is the
+//!   **implicit tail**, used when every backend declines. The decode side has no tail yet:
+//!   `gamut-av1` reconstructs no samples, so a coded item no backend accepts is refused.
+//! - A backend that *accepts* a job and then fails returns its error unchanged; nothing after it
+//!   is tried, because silently substituting a different codec would make the output
+//!   non-deterministic.
 //!
 //! # The `av1C` record for a backend-supplied stream
 //!
@@ -29,19 +32,21 @@
 //! the `colr` box can never disagree with the payload), and the stream is then checked against the
 //! AVIF still-image item constraints
 //! ([`Av1Config::validate_still_payload`](crate::Av1Config::validate_still_payload)). The rest of
-//! the pixel parameters (8-bit, 4:4:4) are the v1 surface's fixed contract, stated on
-//! [`Av1StillEncoder::encode_still`] and enforced by the `seq_profile` check.
+//! the pixel parameters are the request's, stated on [`Av1CodestreamEncoder::encode_still`] and
+//! enforced by the `seq_profile` check.
 
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Color, Av1StillConfig, Effort, EncodedStill, SequenceHeader};
-use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status, codec_id, pixel_format};
+use gamut_codec_abi::{
+    EncodeConfig, Encoder, ImageDesc, Registry, RegistryError, Status, codec_id, pixel_format,
+};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients, Planar8, Planar16,
     TransferCharacteristics,
 };
 use gamut_core::{Dimensions, Error, Result};
+use gamut_heif::DecodedFrame;
 
 use crate::av1c::{Av1Config, first_sequence_header};
 
@@ -51,7 +56,7 @@ use crate::av1c::{Av1Config, first_sequence_header};
 /// gamut-specific table.
 pub const AV1_CODEC_ID: u32 = codec_id(*b"av01");
 
-/// One AV1 still-encode job, as handed to an [`Av1StillEncoder`].
+/// One AV1 still-encode job, as handed to an [`Av1CodestreamEncoder`].
 ///
 /// Constructed by `gamut-avif` (never by a caller) and read through its getters, so the crate can
 /// grow the request without a breaking change. It carries the **already-derived**
@@ -112,7 +117,7 @@ impl Av1EncodeRequest {
     ///
     /// Like [`effort`](Self::effort) this is a **hint**: a backend may run on fewer threads or ignore
     /// it. The built-in encoder's output does not depend on it; whether a backend's does is the
-    /// backend's own contract. It does not cross the C seam — [`AbiAv1StillEncoder`]'s `extra`
+    /// backend's own contract. It does not cross the C seam — [`AbiAv1CodestreamEncoder`]'s `extra`
     /// blob is unchanged — since a C backend schedules its own threads.
     #[must_use]
     pub fn threads(&self) -> NonZeroUsize {
@@ -168,7 +173,7 @@ impl Av1EncodeRequest {
     /// The colour encoding the job is in: the CICP triple plus the signal range.
     ///
     /// This is **both** an input and an obligation. It says what the `planes` handed to
-    /// [`Av1StillEncoder::encode_still`] contain — GBR for
+    /// [`Av1CodestreamEncoder::encode_still`] contain — GBR for
     /// [`MatrixCoefficients::Identity`], `Y/Cb/Cr`
     /// otherwise — and the returned stream's `color_config()` must declare exactly it, because the
     /// container mirrors these values into `colr` and they must agree with the payload
@@ -178,7 +183,7 @@ impl Av1EncodeRequest {
         self.colour
     }
 
-    /// The chroma sampling of the planes passed to [`Av1StillEncoder::encode_still`].
+    /// The chroma sampling of the planes passed to [`Av1CodestreamEncoder::encode_still`].
     ///
     /// Like [`colour`](Self::colour) this is both an input and an obligation: the planes are in
     /// this layout, and the returned stream's `seq_profile` must declare it, because `av1C` mirrors
@@ -195,63 +200,60 @@ impl Av1EncodeRequest {
     /// and the `high_bitdepth`/`twelve_bit` pair must declare this depth, because `av1C` mirrors
     /// them.
     ///
-    /// [`BitDepth::Eight`] is the only depth [`Av1StillEncoder::encode_still`] is ever handed;
+    /// [`BitDepth::Eight`] is the only depth [`Av1CodestreamEncoder::encode_still`] is ever handed;
     /// [`BitDepth::Ten`] and [`BitDepth::Twelve`] arrive through
-    /// [`encode_still16`](Av1StillEncoder::encode_still16), whose default implementation declines.
+    /// [`encode_still16`](Av1CodestreamEncoder::encode_still16), so a backend that codes only 8 bits
+    /// declines the others from [`supports`](Av1CodestreamEncoder::supports).
     #[must_use]
     pub fn bit_depth(&self) -> BitDepth {
         self.bit_depth
     }
 }
 
-/// A pluggable AV1 **still-image encoder** backend.
+/// A pluggable AV1 **codestream encoder** backend.
 ///
 /// Implement this to route [`AvifEncoder`](crate::AvifEncoder)'s codestream through an alternate
-/// AV1 encoder (a platform/hardware encoder, libaom, SVT-AV1, …) and register it with
-/// [`AvifEncoder::push_backend`](crate::AvifEncoder::push_backend). A C or `-sys` backend reaches
-/// this trait through [`AbiAv1StillEncoder`] rather than implementing it directly.
+/// AV1 encoder (a platform/hardware encoder, libaom, SVT-AV1, …) and add it with
+/// [`AvifEncoder::with_backend`](crate::AvifEncoder::with_backend). A C or `-sys` backend reaches
+/// this trait through [`AbiAv1CodestreamEncoder`] rather than implementing it directly.
 ///
-/// `Send` is a supertrait because the registry stores backends behind an
-/// [`Arc`]`<`[`Mutex`]`<…>>` so [`AvifEncoder`](crate::AvifEncoder) stays [`Clone`] and encodes
-/// through `&self`.
-pub trait Av1StillEncoder: Send {
-    /// Reports whether this backend can satisfy `req`. Returning `false` is the **only** signal
-    /// that lets the encoder fall through to the next backend (and finally to the built-in
-    /// `gamut-av1` tail); a backend that returns `true` owns the job outright.
+/// `Send` is not a supertrait: the encoder requires it where a backend is added, so the trait
+/// itself stays usable by single-threaded hosts.
+pub trait Av1CodestreamEncoder {
+    /// Reports whether this backend can satisfy `req` — its dimensions, colour, chroma **and
+    /// [`bit_depth`](Av1EncodeRequest::bit_depth)**. Returning `false` is the **only** signal that
+    /// lets the encoder fall through to the next backend (and finally to the built-in `gamut-av1`
+    /// tail); a backend that returns `true` owns the job outright, so one that codes only 8 bits
+    /// must decline a 10- or 12-bit request here.
     fn supports(&mut self, req: &Av1EncodeRequest) -> bool;
 
-    /// Encodes `planes` and returns the **AV1 OBU byte stream** for the `av01` item payload — the
-    /// low-overhead OBU syntax of AV1 §5.3, with no temporal delimiter, exactly as
+    /// Encodes 8-bit `planes` and returns the **AV1 OBU byte stream** for the `av01` item payload
+    /// — the low-overhead OBU syntax of AV1 §5.3, with no temporal delimiter, exactly as
     /// [`gamut_av1::EncodedStill::obus`] carries it.
     ///
-    /// `planes` are `gamut-color` planes, each `width * height` 8-bit samples, in the layout
-    /// [`Av1EncodeRequest::colour`] describes: identity GBR (`Y = G`, `U = B`, `V = R`) or
-    /// `Y/Cb/Cr` through that matrix. The v1 surface fixes the rest of the coding parameters: the
-    /// returned stream must be a **still picture** with `seq_profile = 1` (High), 8-bit, 4:4:4,
-    /// whose sequence header carries `reduced_still_picture_header = 1`, the request's dimensions,
-    /// and a `color_config()` matching the request's colour. The crate re-derives the
-    /// `av1C`/`colr` boxes from that sequence header and rejects a stream that does not meet the
-    /// contract.
+    /// `planes` are `gamut-color` planes in the layout [`Av1EncodeRequest::colour`] and
+    /// [`Av1EncodeRequest::chroma`] describe: identity GBR (`Y = G`, `U = B`, `V = R`) or
+    /// `Y/Cb/Cr` through that matrix. The returned stream must be a **still picture** whose
+    /// sequence header carries `reduced_still_picture_header = 1`, the request's dimensions, a
+    /// `seq_profile` matching its chroma and depth, and a `color_config()` matching its colour.
+    /// The crate re-derives the `av1C`/`colr` boxes from that sequence header and rejects a
+    /// stream that does not meet the contract.
     ///
     /// # Errors
     ///
     /// Any error a backend returns after accepting the job **propagates** to the caller of
-    /// [`encode_image`](gamut_core::EncodeImage::encode_image); the built-in encoder is not used
-    /// as a silent fallback. Decline the job from [`supports`](Self::supports) instead.
+    /// [`encode_image`](gamut_core::EncodeImage::encode_image) unchanged; the built-in encoder is
+    /// not used as a silent fallback. Decline the job from [`supports`](Self::supports) instead.
     fn encode_still(&mut self, req: &Av1EncodeRequest, planes: &Planar8) -> Result<Vec<u8>>;
 
     /// Encodes **10- or 12-bit** planes, returning the AV1 OBU byte stream exactly as
     /// [`encode_still`](Self::encode_still) does for 8-bit.
     ///
-    /// The default implementation **declines**, and the host falls through to the next backend and
-    /// finally to the built-in `gamut-av1` tail — so a backend written against the 8-bit v1
-    /// contract keeps compiling *and* keeps its meaning: it is never handed samples it did not
-    /// agree to encode. Override it to opt into high bit depth.
-    ///
-    /// Declining here is the one late fall-through the seam allows, and it exists because
-    /// [`supports`](Self::supports) is a single answer for a job whose depth a pre-existing
-    /// implementation does not inspect. Every *other* failure after accepting a job still
-    /// propagates.
+    /// The default implementation refuses with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, which — like every
+    /// error from an accepted job — is returned to the caller, not treated as a decline. A
+    /// backend that does not override this must therefore decline high-bit-depth requests from
+    /// [`supports`](Self::supports); override it to code them.
     ///
     /// The returned stream's `seq_profile` must match the depth §6.4.1 requires — 1 (or 0
     /// monochrome) at 10 bits, 2 at 12 — and its `color_config()` must declare
@@ -263,55 +265,87 @@ pub trait Av1StillEncoder: Send {
     /// As [`encode_still`](Self::encode_still).
     fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
         let _ = (req, planes);
-        Err(LateDecline::error())
+        Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            HIGH_BIT_DEPTH_UNIMPLEMENTED,
+        ))
     }
 }
 
-/// The registry entry type: a shared, interior-mutable backend.
-///
-/// [`Arc`] so cloning an [`AvifEncoder`](crate::AvifEncoder) **shares** backends rather than
-/// duplicating (a backend is typically a stateful, non-`Clone` encoder handle), and [`Mutex`] so
-/// `&self` encoding can call the `&mut self` trait methods.
-pub(crate) type BackendSlot = Arc<Mutex<dyn Av1StillEncoder + Send>>;
+/// The message of the default [`Av1CodestreamEncoder::encode_still16`]'s refusal.
+pub(crate) const HIGH_BIT_DEPTH_UNIMPLEMENTED: &str =
+    "AVIF: the AV1 encode backend accepted a high-bit-depth job it does not implement";
+
+/// The encoder's backend list.
+pub(crate) type EncoderRegistry = Registry<dyn Av1CodestreamEncoder + Send>;
+
+/// The decoder's backend list.
+pub(crate) type DecoderRegistry = Registry<dyn Av1CodestreamDecoder + Send>;
 
 /// The planes one registry run offers a backend, at whichever width the job actually has.
 pub(crate) enum BackendPlanes<'a> {
-    /// 8-bit planes, offered through [`Av1StillEncoder::encode_still`].
+    /// 8-bit planes, offered through [`Av1CodestreamEncoder::encode_still`].
     Eight(&'a Planar8),
-    /// 10/12-bit planes, offered through [`Av1StillEncoder::encode_still16`].
+    /// 10/12-bit planes, offered through [`Av1CodestreamEncoder::encode_still16`].
     High(&'a Planar16),
 }
 
-/// Runs the registry for one request: tries `backends` in push order, returning the first
-/// acceptance's OBUs, or `None` when every backend declines (the caller then uses the built-in
-/// `gamut-av1` tail).
+/// Runs the registry for one request: tries `backends` in insertion order, returning the first
+/// acceptance's OBUs (or its error, unchanged), or `None` when every backend declines (the caller
+/// then uses the built-in `gamut-av1` tail).
 pub(crate) fn run_backends(
-    backends: &[BackendSlot],
+    backends: &EncoderRegistry,
     req: &Av1EncodeRequest,
     planes: BackendPlanes<'_>,
 ) -> Result<Option<Vec<u8>>> {
-    for slot in backends {
-        let mut backend = slot.lock().map_err(|_| {
-            Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 encode backend is poisoned",
-            )
-        })?;
-        if backend.supports(req) {
-            // Accepted: this backend owns the job, so its error propagates — falling back to a
-            // different encoder here would silently change the output bytes. The sole exception is
-            // the ABI adapter's late-`UNSUPPORTED` sentinel, which *is* a decline.
-            let encoded = match planes {
-                BackendPlanes::Eight(p) => backend.encode_still(req, p),
-                BackendPlanes::High(p) => backend.encode_still16(req, p),
-            };
-            return match encoded {
-                Err(e) if LateDecline::is(&e) => continue,
-                other => other.map(Some),
-            };
-        }
+    let run = backends.run(
+        |backend| backend.supports(req),
+        |backend| match planes {
+            BackendPlanes::Eight(p) => backend.encode_still(req, p),
+            BackendPlanes::High(p) => backend.encode_still16(req, p),
+        },
+    );
+    match run {
+        Ok(obus) => Ok(Some(obus)),
+        Err(RegistryError::Unsupported) => Ok(None),
+        Err(RegistryError::Backend(error)) => Err(error),
+        Err(RegistryError::Poisoned) => Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: AV1 encode backend is poisoned",
+        )),
     }
-    Ok(None)
+}
+
+/// A pluggable AV1 **codestream decoder** backend: decodes one coded `av01` item to planar
+/// samples.
+///
+/// gamut-avif decodes the container — and everything around the coded picture — itself; the AV1
+/// codestream is handed to a backend the caller adds with
+/// [`AvifDecoder::with_backend`](crate::AvifDecoder::with_backend) (dav1d, a platform hardware
+/// decoder, …). The shape is the workspace's codestream-hook one: object-safe, borrowed bytes in,
+/// owned plain data out. `Send` is not a supertrait; the decoder requires it where a backend is
+/// added.
+///
+/// `config` is the item's parsed `av1C` and `payload` the item's OBU stream — sequence header
+/// plus frame OBUs, already validated against the AVIF still-image constraints
+/// ([`Av1Config::validate_still_payload`]). A backend that wants one self-contained stream
+/// bridges the two with [`Av1Config::full_stream`].
+pub trait Av1CodestreamDecoder {
+    /// Reports whether this backend will decode an item coded under `config`. Returning `false`
+    /// is the **only** fall-through to the next backend; the default accepts every item.
+    fn supports(&mut self, config: &Av1Config) -> bool {
+        let _ = config;
+        true
+    }
+
+    /// Decodes the coded item to its planar frame — native bit depth and chroma, before any
+    /// colour conversion, `clap`, `irot` or `imir`.
+    ///
+    /// # Errors
+    ///
+    /// The backend's own error, returned to the caller unchanged: a backend that accepted the job
+    /// owns it.
+    fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame>;
 }
 
 /// Rebuilds the [`EncodedStill`] — OBUs plus the sequence-header values the container stamps into
@@ -515,7 +549,7 @@ impl SeqHeaderParams {
 
 /// Bridges a [`gamut_codec_abi::Encoder`] — the workspace-wide codestream seam, and hence any C /
 /// `-sys` backend reached through [`gamut_codec_abi::bridge::ForeignEncoder`] — onto
-/// [`Av1StillEncoder`].
+/// [`Av1CodestreamEncoder`].
 ///
 /// The adapter lowers an [`Av1EncodeRequest`] into an [`EncodeConfig`] tagged with
 /// [`AV1_CODEC_ID`], presents the [`Planar8`] input as a three-plane [`ImageDesc`], and collects
@@ -547,10 +581,10 @@ impl SeqHeaderParams {
 ///
 /// # Bit depth
 ///
-/// Both directions are lowered: an 8-bit job through [`Av1StillEncoder::encode_still`] and a 10- or
-/// 12-bit one through [`encode_still16`](Av1StillEncoder::encode_still16), so a wrapped hardware or
-/// `-sys` encoder owns the job at every depth rather than silently losing the high-bit-depth ones to
-/// the software tail.
+/// Both directions are lowered: an 8-bit job through [`Av1CodestreamEncoder::encode_still`] and a
+/// 10- or 12-bit one through [`encode_still16`](Av1CodestreamEncoder::encode_still16), so a
+/// wrapped hardware or `-sys` encoder owns the job at every depth rather than silently losing the
+/// high-bit-depth ones to the software tail.
 ///
 /// [`ImageDesc`] describes the two identically except in three places, and a backend reading the
 /// descriptor must honour all three:
@@ -564,21 +598,32 @@ impl SeqHeaderParams {
 ///
 /// # Status handling
 ///
-/// [`Status::UNSUPPORTED`] is the fall-through code in both places it can appear: from `supports`
-/// (as `false`) and — for a backend that changes its mind — from `encode`, where it is treated as
-/// a late decline and the encoder moves on to the next backend. Any other non-OK status is a
-/// terminal failure and propagates as an
-/// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error.
-pub struct AbiAv1StillEncoder<E: Encoder + Send> {
+/// `supports` reporting [`Status::UNSUPPORTED`] is the one fall-through. Once a backend has
+/// accepted a job, every non-OK status from `encode` — [`Status::UNSUPPORTED`] included — is a
+/// terminal failure returned as an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
+/// error carrying the status, and no later backend is tried.
+pub struct AbiAv1CodestreamEncoder<E: Encoder> {
     /// The wrapped ABI encoder.
     inner: E,
 }
 
-impl<E: Encoder + Send> AbiAv1StillEncoder<E> {
-    /// Wraps a [`gamut_codec_abi::Encoder`] as an [`Av1StillEncoder`].
+impl<E: Encoder> AbiAv1CodestreamEncoder<E> {
+    /// Wraps a [`gamut_codec_abi::Encoder`] as an [`Av1CodestreamEncoder`].
     #[must_use]
     pub fn new(inner: E) -> Self {
         Self { inner }
+    }
+
+    /// Borrows the wrapped encoder.
+    #[must_use]
+    pub fn get_ref(&self) -> &E {
+        &self.inner
+    }
+
+    /// Mutably borrows the wrapped encoder.
+    #[must_use]
+    pub fn get_mut(&mut self) -> &mut E {
+        &mut self.inner
     }
 
     /// Consumes the adapter, returning the wrapped encoder.
@@ -597,7 +642,7 @@ impl<E: Encoder + Send> AbiAv1StillEncoder<E> {
     }
 }
 
-/// The codec-specific `extra` blob [`AbiAv1StillEncoder`] lowers `req` to: the `base_q_idx`,
+/// The codec-specific `extra` blob [`AbiAv1CodestreamEncoder`] lowers `req` to: the `base_q_idx`,
 /// then — only when the job runs at a preset other than [`Effort::Thorough`] — the preset's
 /// [`wire_speed`] value. A full-search job therefore lowers to exactly the one-byte blob the
 /// adapter wrote before presets existed. The test is against `Thorough`, not against
@@ -630,13 +675,27 @@ fn wire_speed(effort: Effort) -> Option<u8> {
     }
 }
 
-impl<E: Encoder + Send> std::fmt::Debug for AbiAv1StillEncoder<E> {
+impl<E: Encoder> std::fmt::Debug for AbiAv1CodestreamEncoder<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AbiAv1StillEncoder").finish_non_exhaustive()
+        f.debug_struct("AbiAv1CodestreamEncoder")
+            .finish_non_exhaustive()
     }
 }
 
-impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
+/// Maps the wrapped encoder's terminal status onto the result: OK carries `obus`, anything else —
+/// a late [`Status::UNSUPPORTED`] included — is the backend's failure.
+fn encode_status(status: Status, obus: Vec<u8>) -> Result<Vec<u8>> {
+    if status.is_ok() {
+        Ok(obus)
+    } else {
+        Err(
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: AV1 encode backend failed")
+                .with_detail(format!("codec-abi status {}", status.0)),
+        )
+    }
+}
+
+impl<E: Encoder> Av1CodestreamEncoder for AbiAv1CodestreamEncoder<E> {
     fn supports(&mut self, req: &Av1EncodeRequest) -> bool {
         let extra = extra_blob(req);
         self.inner.supports(&Self::config(&extra))
@@ -674,16 +733,7 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
             obus.extend_from_slice(chunk);
             Status::OK
         });
-        if status.is_ok() {
-            Ok(obus)
-        } else if status.is_unsupported() {
-            Err(LateDecline::error().with_detail(format!("codec-abi status {}", status.0)))
-        } else {
-            Err(
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: AV1 encode backend failed")
-                    .with_detail(format!("codec-abi status {}", status.0)),
-            )
-        }
+        encode_status(status, obus)
     }
 
     fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
@@ -722,42 +772,7 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
             obus.extend_from_slice(chunk);
             Status::OK
         });
-        if status.is_ok() {
-            Ok(obus)
-        } else if status.is_unsupported() {
-            Err(LateDecline::error().with_detail(format!("codec-abi status {}", status.0)))
-        } else {
-            Err(
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: AV1 encode backend failed")
-                    .with_detail(format!("codec-abi status {}", status.0)),
-            )
-        }
-    }
-}
-
-/// The sentinel for a **late** decline — a backend that answered `supports` affirmatively and then
-/// declined at `encode` time.
-///
-/// The typed trait has no third outcome between "handled" and "declined", so the late decline is
-/// this exact [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) payload, which [`run_backends`] maps back to a fall-through.
-/// Two things raise it: [`AbiAv1StillEncoder`] translating a late [`Status::UNSUPPORTED`] from a C
-/// backend, and the default [`Av1StillEncoder::encode_still16`], which is how a backend written
-/// against the 8-bit contract declines a high-bit-depth job it never agreed to. A hand-written
-/// backend otherwise signals a decline from [`supports`](Av1StillEncoder::supports).
-pub(crate) struct LateDecline;
-
-impl LateDecline {
-    /// The sentinel error value.
-    pub(crate) const MESSAGE: &'static str = "AVIF: AV1 encode backend declined late (UNSUPPORTED)";
-    /// Builds the sentinel error.
-    pub(crate) fn error() -> Error {
-        Error::unsupported(env!("CARGO_PKG_NAME"), Self::MESSAGE)
-    }
-
-    /// Whether `err` is the late-decline sentinel.
-    pub(crate) fn is(err: &Error) -> bool {
-        err.kind() == gamut_core::ErrorKind::Unsupported
-            && err.static_message() == Some(Self::MESSAGE)
+        encode_status(status, obus)
     }
 }
 

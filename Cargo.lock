@@ -716,7 +716,7 @@ dependencies = [
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
- "gamut-dsp",
+ "gamut-heif",
  "gamut-isobmff",
  "gamut-metadata",
  "libavif-oracle",

@@ -2,7 +2,8 @@
 //! `full_stream` bridge, and the `validate_still_payload` still-image constraint matrix
 //! (AV1-ISOBMFF v1.3.0 §2.3/§2.4; AVIF v1.2.0 §2.1; AV1 §4.10.5/§5.3).
 
-use gamut_avif::{Av1Config, ChromaFormat, Obu, ObuHeader, ObuType, iter_obus};
+use gamut_avif::Av1Config;
+use gamut_color::ChromaSubsampling;
 use gamut_core::{Error, ErrorKind};
 
 /// Appends the minimal `leb128()` encoding of `value`.
@@ -54,139 +55,6 @@ fn assert_invalid<T: core::fmt::Debug>(result: Result<T, Error>, message: &str) 
     }
 }
 
-// ---- OBU split -------------------------------------------------------------------------------
-
-#[test]
-fn obu_split_is_byte_exact() {
-    let td = obu(2, &[]);
-    let seq = seq_obu(true);
-    let frame = frame_obu(0x10);
-    let stream = concat(&[td.clone(), seq.clone(), frame.clone()]);
-    let obus: Vec<Obu<'_>> = iter_obus(&stream).collect::<Result<_, _>>().unwrap();
-    assert_eq!(obus.len(), 3);
-    assert_eq!(obus[0].header.obu_type, ObuType::TemporalDelimiter);
-    assert_eq!(obus[0].raw, &td[..]);
-    assert!(obus[0].payload.is_empty());
-    assert_eq!(obus[1].header.obu_type, ObuType::SequenceHeader);
-    assert_eq!(obus[1].raw, &seq[..]);
-    assert_eq!(obus[1].payload, &seq[2..]);
-    assert_eq!(obus[2].header.obu_type, ObuType::Frame);
-    assert_eq!(obus[2].raw, &frame[..]);
-    assert_eq!(obus[2].payload, &frame[2..]);
-    // The split consumes the stream exactly; an empty payload yields zero OBUs without error.
-    assert_eq!(iter_obus(&[]).count(), 0);
-}
-
-#[test]
-fn obu_type_round_trips_all_raw_values() {
-    for raw in 0..=15u8 {
-        assert_eq!(ObuType::from_raw(raw).raw(), raw);
-    }
-    assert!(ObuType::Frame.is_frame_bearing());
-    assert!(ObuType::FrameHeader.is_frame_bearing());
-    assert!(ObuType::TileGroup.is_frame_bearing());
-    assert!(!ObuType::SequenceHeader.is_frame_bearing());
-    assert!(!ObuType::Metadata.is_frame_bearing());
-}
-
-#[test]
-fn obu_header_reads_the_extension_fields() {
-    // obu_type 6, extension flag, size field; extension byte: temporal_id 5, spatial_id 2.
-    let bytes = [(6 << 3) | 0x04 | 0x02, (5 << 5) | (2 << 3), 0x00];
-    let header = ObuHeader::parse(&bytes).unwrap();
-    assert_eq!(header.obu_type, ObuType::Frame);
-    assert!(header.has_size_field);
-    assert_eq!(header.temporal_id, 5);
-    assert_eq!(header.spatial_id, 2);
-    // Without the extension flag both ids read 0.
-    let plain = ObuHeader::parse(&[(6 << 3) | 0x02, 0x00]).unwrap();
-    assert_eq!((plain.temporal_id, plain.spatial_id), (0, 0));
-    // The whole OBU (header + extension + size + payload) splits, too.
-    let obus: Vec<Obu<'_>> = iter_obus(&bytes).collect::<Result<_, _>>().unwrap();
-    assert_eq!(obus.len(), 1);
-    assert!(obus[0].payload.is_empty());
-}
-
-#[test]
-fn obu_header_rejects_the_forbidden_bit_and_truncation() {
-    assert_invalid(ObuHeader::parse(&[0x80]), "AVIF: OBU forbidden bit set");
-    assert_invalid(ObuHeader::parse(&[]), "AVIF: truncated OBU header");
-    // Extension flag set but no extension byte.
-    assert_invalid(
-        ObuHeader::parse(&[(6 << 3) | 0x04]),
-        "AVIF: truncated OBU extension header",
-    );
-}
-
-#[test]
-fn sizeless_last_obu_fills_the_remainder() {
-    // A frame OBU without a size field consumes the rest of the payload.
-    let mut stream = seq_obu(true);
-    stream.push(6 << 3); // header: type 6, no extension, no size field
-    stream.extend_from_slice(&[0x10, 0xBB, 0xCC]);
-    let obus: Vec<Obu<'_>> = iter_obus(&stream).collect::<Result<_, _>>().unwrap();
-    assert_eq!(obus.len(), 2);
-    assert!(!obus[1].header.has_size_field);
-    assert_eq!(obus[1].payload, &[0x10, 0xBB, 0xCC]);
-}
-
-#[test]
-fn leb128_accepts_padding_and_enforces_the_conformance_bounds() {
-    // A padded (non-minimal) two-byte encoding of 3: reference encoders emit these.
-    let stream = [(5 << 3) | 0x02, 0x83, 0x00, 0xAA, 0xBB, 0xCC];
-    let obus: Vec<Obu<'_>> = iter_obus(&stream).collect::<Result<_, _>>().unwrap();
-    assert_eq!(obus[0].payload, &[0xAA, 0xBB, 0xCC]);
-    // Nine continuation bytes: longer than the 8-byte bound.
-    let long = [
-        (5 << 3) | 0x02,
-        0x80,
-        0x80,
-        0x80,
-        0x80,
-        0x80,
-        0x80,
-        0x80,
-        0x80,
-    ];
-    assert_invalid(
-        iter_obus(&long).next().unwrap(),
-        "AVIF: OBU size field longer than 8 bytes",
-    );
-    // 1 << 32 does not fit the 32-bit obu_size bound.
-    let huge = [(5 << 3) | 0x02, 0x80, 0x80, 0x80, 0x80, 0x10];
-    assert_invalid(
-        iter_obus(&huge).next().unwrap(),
-        "AVIF: OBU size exceeds 32 bits",
-    );
-    // u32::MAX itself is legal. With no corresponding payload it must reach the payload bounds
-    // check, rather than being rejected by the size-field bound.
-    let max = [(5 << 3) | 0x02, 0xff, 0xff, 0xff, 0xff, 0x0f];
-    assert_invalid(
-        iter_obus(&max).next().unwrap(),
-        "AVIF: truncated OBU payload",
-    );
-    // A truncated size field (continuation bit on the final byte).
-    let mut cut = obu(2, &[0]);
-    cut.extend_from_slice(&[(5 << 3) | 0x02, 0x80]);
-    let error = assert_invalid(
-        iter_obus(&cut).nth(1).unwrap(),
-        "AVIF: truncated OBU size field",
-    );
-    assert_eq!(error.byte_offset(), Some(4));
-}
-
-#[test]
-fn obu_split_rejects_a_truncated_body() {
-    let mut stream = obu(2, &[0]);
-    // Size field claims 4 bytes; only 2 follow.
-    stream.extend_from_slice(&[(5 << 3) | 0x02, 0x04, 0xAA, 0xBB]);
-    let error = assert_invalid(
-        iter_obus(&stream).nth(1).unwrap(),
-        "AVIF: truncated OBU payload",
-    );
-    assert_eq!(error.byte_offset(), Some(5));
-}
-
 // ---- av1C parse ------------------------------------------------------------------------------
 
 #[test]
@@ -206,7 +74,7 @@ fn av1c_golden_parse_is_field_exact() {
     assert_eq!(c.initial_presentation_delay_minus_one, Some(7));
     assert!(c.config_obus.is_empty());
     assert_eq!(c.bit_depth(), 10);
-    assert_eq!(c.chroma_format(), ChromaFormat::Yuv444);
+    assert_eq!(c.chroma_subsampling(), ChromaSubsampling::Cs444);
 }
 
 #[test]
@@ -227,15 +95,27 @@ fn av1c_bit_depth_covers_every_profile_arm() {
     assert_eq!(parse(2 << 5, 0x68).bit_depth(), 12); // profile 2, high_bitdepth + twelve_bit, 4:2:2
     assert_eq!(parse(2 << 5, 0x28).bit_depth(), 8); // twelve_bit without high_bitdepth is inert
     // Chroma mapping: mono / 4:2:0 / 4:2:2 / 4:4:4.
-    assert_eq!(parse(0, 0x1C).chroma_format(), ChromaFormat::Monochrome);
-    assert_eq!(parse(0, 0x0C).chroma_format(), ChromaFormat::Yuv420);
-    assert_eq!(parse(2 << 5, 0x08).chroma_format(), ChromaFormat::Yuv422);
-    assert_eq!(parse(1 << 5, 0x00).chroma_format(), ChromaFormat::Yuv444);
+    assert_eq!(
+        parse(0, 0x1C).chroma_subsampling(),
+        ChromaSubsampling::Cs400
+    );
+    assert_eq!(
+        parse(0, 0x0C).chroma_subsampling(),
+        ChromaSubsampling::Cs420
+    );
+    assert_eq!(
+        parse(2 << 5, 0x08).chroma_subsampling(),
+        ChromaSubsampling::Cs422
+    );
+    assert_eq!(
+        parse(1 << 5, 0x00).chroma_subsampling(),
+        ChromaSubsampling::Cs444
+    );
     // Ceiling-division chroma plane dimensions on odd luma sizes.
-    assert_eq!(ChromaFormat::Yuv420.chroma_dimensions(5, 3), (3, 2));
-    assert_eq!(ChromaFormat::Yuv422.chroma_dimensions(5, 3), (3, 3));
-    assert_eq!(ChromaFormat::Yuv444.chroma_dimensions(5, 3), (5, 3));
-    assert_eq!(ChromaFormat::Monochrome.chroma_dimensions(5, 3), (0, 0));
+    assert_eq!(ChromaSubsampling::Cs420.chroma_dimensions(5, 3), (3, 2));
+    assert_eq!(ChromaSubsampling::Cs422.chroma_dimensions(5, 3), (3, 3));
+    assert_eq!(ChromaSubsampling::Cs444.chroma_dimensions(5, 3), (5, 3));
+    assert_eq!(ChromaSubsampling::Cs400.chroma_dimensions(5, 3), (0, 0));
 }
 
 #[test]
@@ -491,19 +371,19 @@ fn encoder_output_carries_a_parseable_av1c_and_a_valid_still_payload() {
     // The identity 8-bit 4:4:4 path: High profile, no high_bitdepth, no subsampling.
     assert_eq!(config.seq_profile, 1);
     assert_eq!(config.bit_depth(), 8);
-    assert_eq!(config.chroma_format(), ChromaFormat::Yuv444);
+    assert_eq!(config.chroma_subsampling(), ChromaSubsampling::Cs444);
     assert!(config.config_obus.is_empty());
     // The emitted temporal unit satisfies the still-image constraints this crate enforces.
     config.validate_still_payload(&item.payload).unwrap();
     // And its OBUs split cleanly with exactly one sequence header.
-    let types: Vec<ObuType> = iter_obus(&item.payload)
-        .map(|o| o.map(|o| o.header.obu_type))
+    let types: Vec<u8> = gamut_av1::ObuIter::new(&item.payload)
+        .map(|o| o.map(|o| o.obu_type))
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(
         types
             .iter()
-            .filter(|t| **t == ObuType::SequenceHeader)
+            .filter(|t| **t == gamut_av1::Obu::SEQUENCE_HEADER)
             .count(),
         1
     );

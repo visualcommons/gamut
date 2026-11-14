@@ -12,7 +12,7 @@
 //! monochrome **auxiliary image item** (AVIF v1.2.0 §4.1), not a fourth plane — unless every
 //! alpha sample is fully opaque, in which case the input is coded as the RGB image it is
 //! indistinguishable from, with no auxiliary at all
-//! ([`AvifEncoder::with_keep_opaque_alpha`] keeps it).
+//! ([`AvifEncoder::with_opaque_alpha`] keeps it).
 //!
 //! A caller already holding YCbCr planes skips the colour conversion entirely:
 //! [`AvifEncoder::encode_raw_planes`] codes a [`RawPlanes`] view — borrowed
@@ -20,61 +20,51 @@
 //! optional alpha plane, and the CICP matrix and range they were produced under — as given, and
 //! writes `colr nclx` from that declaration.
 //!
-//! # The decode surface (issue #250)
+//! # The decode surface
 //!
-//! The read side mirrors the surface [`gamut-heic`](https://docs.rs/gamut-heic) established for
-//! HEIF: the crate decodes the **container** — and everything around the coded picture — in pure
-//! Rust, while the AV1 codestream itself is decoded by a pluggable [`Av1StillDecoder`] the caller
-//! supplies (a platform hardware decoder, dav1d, …). Two layers:
+//! gamut-avif is the AV1 binding over [`gamut_heif`], the HEIF/MIAF layer it shares with
+//! `gamut-heic`: the container and everything around the coded picture are decoded there, in pure
+//! Rust, while the AV1 codestream itself is decoded by the [`Av1CodestreamDecoder`] backends the
+//! caller adds (a platform hardware decoder, dav1d, …). Three pieces:
 //!
+//! - [`AvifDecoder`] — the [`DecodeImage`](gamut_core::DecodeImage) entry point for the primary
+//!   image, to [`Rgba8`](gamut_core::Rgba8) or [`Rgba16`](gamut_core::Rgba16) (colour conversion,
+//!   alpha, `iovl` compositing, `clap`/`irot`/`imir`), or to its planar samples with
+//!   [`AvifDecoder::decode_planar`]; [`AvifDecoder::metadata`] reads the Exif/XMP/ICC payloads.
 //! - [`AvifContainer`] — the **total, byte-accounting** representation: every input byte maps to
 //!   exactly one [`Segment`] (box / appended motion-photo stream / trailer), and unconsumed
-//!   `meta` boxes surface as [`UnknownBox`]es — it is structurally impossible to ignore bits.
-//! - [`AvifImage`] / [`AvifItem`] — the **role-typed semantic view** over
-//!   [`gamut_isobmff::IsoBmffImage`]: the validated primary item, alpha/depth auxiliaries,
-//!   thumbnails, Exif/XMP payloads, grid/overlay derivations, and typed properties including the
-//!   [`Av1Config`] `av1C` record ([`AvifItem::av1_config`]), the parsed AV1
-//!   [`SequenceHeader`] ([`AvifImage::av1_sequence_header`], with its [`ColorConfig`] field
-//!   type), and the OBU layer
-//!   ([`iter_obus`]/[`ObuType`]).
+//!   `meta` boxes surface as [`UnknownBox`]es — it is structurally impossible to ignore bits. Its
+//!   [`image`](AvifContainer::image) is the role-typed [`HeifImage`]; the AV1-specific lenses are
+//!   [`AvifContainer::av1_config`], [`AvifContainer::av1_sequence_header`] and
+//!   [`AvifContainer::is_av1_still`].
+//! - [`Av1`] — the binding itself, which decodes **any** item of a [`HeifImage`] through
+//!   `gamut-heif`'s surfaces.
 //!
-//! Around the seam, [`AvifImage::decode_item_planar`] resolves item derivation (`grid`/`iden`)
-//! and returns the decoder's raw planar [`DecodedFrame`] — the surface for callers with their own
-//! colour pipeline — while [`AvifImage::decode_item_rgba8`] /
-//! [`AvifImage::decode_primary_rgba8`] add colour conversion, alpha merge, `iovl` compositing,
-//! and the `clap`/`irot`/`imir` transforms for a presentation-ready
-//! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). [`AvifImage::decode_item_rgba16`] /
-//! [`AvifImage::decode_primary_rgba16`] are the same pipeline for high-bit-depth content: they take
-//! any coded depth from 8 to 16 bits and normalize the samples to the full 16-bit range. The whole
-//! pipeline is validated differentially
-//! against **libavif + dav1d** (`tests/conformance.rs`).
-//!
-//! Every surface decodes under [`DecodeLimits`] — libavif's default dimension and pixel caps,
-//! checked against each `grid`/`iovl` canvas, `ispe` and decoded frame **before** the buffer it
-//! sizes is allocated, with every full-image buffer reserved fallibly — and under per-call caps on
-//! AV1 decodes and derived-item evaluations, so a derivation that references one item many times
-//! cannot multiply into unbounded work. A hostile file is thus refused with a typed error rather
-//! than exhausting memory or time. Each [`AvifImage`] decode entry point
-//! has a `*_with_limits` twin taking caller-chosen limits (the [`AvifContainer`] conveniences
-//! decode under the defaults; reach the twins through [`AvifContainer::image`]).
+//! The whole pipeline is validated differentially against **libavif + dav1d**
+//! (`tests/conformance.rs`). Every surface decodes under [`DecodeLimits`] — libavif's default
+//! dimension and pixel caps, checked before the buffer they size is allocated, and per-call caps
+//! on AV1 decodes and derived-item evaluations — so a hostile file is refused with a typed error
+//! rather than exhausting memory or time.
 //!
 //! # Examples
 //!
-//! Parse an AVIF file and decode it through a caller-supplied [`Av1StillDecoder`]. The stub here
-//! returns a solid-gray monochrome frame; a real decoder wraps a platform AV1 decoder (dav1d,
+//! Decode an AVIF file through a caller-supplied [`Av1CodestreamDecoder`]. The stub here returns a
+//! solid-gray monochrome frame; a real decoder wraps a platform AV1 decoder (dav1d,
 //! VideoToolbox, VAAPI, MediaCodec, …), typically bridging the config + payload into one stream
 //! with [`Av1Config::full_stream`].
 //!
 //! ```
-//! use gamut_avif::{Av1Config, Av1StillDecoder, AvifContainer, ChromaFormat, DecodedFrame};
-//! use gamut_core::Result;
+//! use gamut_avif::{Av1CodestreamDecoder, Av1Config, AvifContainer, AvifDecoder, DecodedFrame};
+//! use gamut_color::ChromaSubsampling;
+//! use gamut_core::{DecodeImage, Dimensions, ImageBuf, Result, Rgba8};
 //! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind};
 //!
 //! // A stub AV1 decoder: ignores the codestream and returns a 2x2 solid-gray monochrome frame.
 //! struct GrayStub;
-//! impl Av1StillDecoder for GrayStub {
+//! impl Av1CodestreamDecoder for GrayStub {
 //!     fn decode_still(&mut self, _config: &Av1Config, _payload: &[u8]) -> Result<DecodedFrame> {
-//!         DecodedFrame::new(2, 2, 8, ChromaFormat::Monochrome, vec![128; 4], vec![], vec![])
+//!         let size = Dimensions::new(2, 2)?;
+//!         DecodedFrame::new(size, 8, ChromaSubsampling::Cs400, vec![128; 4], vec![], vec![])
 //!     }
 //! }
 //!
@@ -102,17 +92,17 @@
 //! let bytes = img.to_bytes().unwrap();
 //!
 //! let container = AvifContainer::parse(&bytes).unwrap();
-//! assert!(container.image().is_av1_still());
+//! assert!(container.is_av1_still());
 //! assert_eq!(container.image().primary_item().id(), 1);
 //!
 //! // The item has no `colr`, so the RGBA surface takes its colour from this sequence header.
-//! let header = container.image().av1_sequence_header(1).unwrap();
+//! let header = container.av1_sequence_header(1).unwrap();
 //! assert_eq!((header.max_frame_width, header.max_frame_height), (2, 2));
 //! assert_eq!(header.color.bit_depth, gamut_color::BitDepth::Eight);
 //! assert!(!header.color.cicp.full_range);
 //!
 //! // Decode the primary image to RGBA through the stub decoder.
-//! let rgba = container.decode_primary_rgba8(&mut GrayStub).unwrap();
+//! let rgba: ImageBuf<Rgba8> = AvifDecoder::new().with_backend(GrayStub).decode_image(&bytes).unwrap();
 //! assert_eq!((rgba.width(), rgba.height()), (2, 2));
 //! assert_eq!(rgba.as_samples()[3], 255); // opaque (no alpha auxiliary)
 //! ```
@@ -120,11 +110,13 @@
 //! # The encode-backend seam (issue #274)
 //!
 //! Symmetrically, the AV1 codestream on the **write** side is pluggable: [`AvifEncoder`] encodes
-//! with [`gamut_av1`] by default, and [`AvifEncoder::push_backend`] registers
-//! [`Av1StillEncoder`] backends that are tried ahead of it in push order (`gamut-av1` is the
-//! implicit tail). [`AbiAv1StillEncoder`] bridges the shared [`gamut_codec_abi`] seam — and hence
-//! any C/`-sys` encoder — onto that trait. An encoder with no pushed backend is byte-for-byte the
-//! encoder this crate has always been. See [`backend`] for the full fallback contract.
+//! with [`gamut_av1`] by default, and [`AvifEncoder::with_backend`] adds
+//! [`Av1CodestreamEncoder`] backends that are tried ahead of it in the order they were added
+//! (`gamut-av1` is the implicit tail). [`AbiAv1CodestreamEncoder`] bridges the shared
+//! [`gamut_codec_abi`] seam — and hence any C/`-sys` encoder — onto that trait. An encoder with no
+//! backend is byte-for-byte the encoder this crate has always been. Both directions share the
+//! workspace's registry contract: `supports` returning `false` is the only fall-through, and a
+//! backend that accepts a job and then fails returns its error unchanged.
 //!
 //! Encoding:
 //!
@@ -148,13 +140,14 @@
 //! complete. The encoder therefore **reserves**: [`AvifEncoder::with_c2pa_reserved`] writes the
 //! C2PA `ContentProvenanceBox` — a top-level `uuid` box with user type [`C2PA_UUID`], after
 //! `ftyp` (C2PA 2.4 §A.5.1, §A.5.3) — around a slot of zero bytes, and
-//! [`AvifEncoder::encode_with_report`] returns the bytes `encode_to_vec` would plus the slot's
-//! range ([`AvifEncodeReport::c2pa`]), which an external signer patches in place; nothing after
-//! the slot moves. [`AvifEncoder::with_c2pa`] writes a store already computed over this exact
+//! [`AvifEncoder::encode_with_report`] appends the bytes `encode_image` would and reports the
+//! slot's range ([`AvifEncodeReport::c2pa`]), which an external signer patches in place; nothing
+//! after the slot moves. [`AvifEncoder::with_c2pa`] writes a store already computed over this exact
 //! output. On read, [`AvifContainer::c2pa_slot`] / [`AvifContainer::c2pa_slots`] report each
 //! located [`C2paSlot`] — slot bytes, file range and [`C2paBoxPurpose`], with
 //! [`C2paSlot::store`] trimming the slot to the store's own JUMBF length. The framing is
-//! `gamut-isobmff`'s, the same lens `gamut-heic` reads through. The store is
+//! `gamut-isobmff`'s, the same lens `gamut-heic` reads through, and
+//! [`AvifContainer::c2pa_summary`] is `gamut-heif`'s shared [`C2paSummary`]. The store is
 //! opaque throughout: nothing here validates it, and the range is for patching and byte
 //! accounting, not a hash exclusion range (BMFF assets bind by box path, §18.6).
 //!
@@ -171,17 +164,18 @@
 //! ([`AvifEncoder::with_bit_depth`]); **alpha** as a monochrome auxiliary item with its own
 //! quality and premultiplication mode ([`AvifEncoder::with_alpha_quality`] /
 //! [`AvifEncoder::with_alpha_mode`]); an encode-**effort** preset trading mode-decision search for
-//! time ([`AvifEncoder::with_effort`], `gamut-av1`'s [`Effort`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
-//! [`AvifEncoder::with_mirror`]); the **colour and metadata surface** — CICP primaries and transfer
+//! time ([`AvifEncoder::with_effort`], `gamut-av1`'s [`Effort`]); `irot`/`imir` display
+//! orientation ([`AvifEncoder::with_orientation`]); the **colour and metadata surface** — CICP primaries and transfer
 //! ([`AvifEncoder::with_primaries`] / [`AvifEncoder::with_transfer`]), HDR `clli` / `mdcv`
 //! metadata ([`AvifEncoder::with_content_light_level`] /
 //! [`AvifEncoder::with_mastering_display`]), an embedded ICC profile
 //! ([`AvifEncoder::with_icc_profile`]), Exif / XMP items
 //! ([`AvifEncoder::with_exif`] / [`AvifEncoder::with_xmp`]), and a reserved or written C2PA
 //! manifest store (above) — with the optional **`metadata`** Cargo feature, the same items are
-//! also wired to the `gamut-metadata` facade's typed models (`AvifImage` implements its
-//! `TypedMetadata` trait, and `AvifEncoder` implements its `MetadataSink`, whose
-//! `with_metadata` / `with_encoded_metadata` embed a unified `Metadata`); and the **container decode surface** above (full read of items,
+//! also wired to the `gamut-metadata` facade's typed models (`AvifEncoder` implements its
+//! `MetadataSink`, whose `with_metadata` / `with_encoded_metadata` embed a unified `Metadata`,
+//! and the [`RawMetadata`] [`AvifDecoder::metadata`] returns parses into one through its
+//! `TypedMetadata`); and the **container decode surface** above (full read of items,
 //! properties, derivations, and metadata; planar, 8-bit and high-bit-depth RGBA presentation around
 //! a caller decoder). Output is validated end-to-end against `libavif` (its dav1d-backed reference
 //! container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the AV1
@@ -190,12 +184,12 @@
 //! **Deferred, planned** (tracked row-by-row against the specs in `STATUS.md`, whose disposition
 //! ledger is the authority): the HDR surface beyond CICP tagging and `clli`/`mdcv` (the
 //! `cclv`/`amve`/`reve`/`ndwt` properties and film grain), `grid` / `tmap` (gain-map) / `sato` derivations and the remaining
-//! container transforms on the encode side, layered/progressive still images, rate control, a **built-in AV1 codestream decoder** behind [`Av1StillDecoder`], and the decoder
-//! backend registry / `gamut-codec-abi` adapter around the seam. On the decoder: `gamut-av1`
-//! ships the pure-Rust one (its default `decode` feature), but today it parses only the header
-//! and tile-framing layer and reconstructs no samples, so gamut-avif does not yet register it as
-//! the implicit tail behind [`Av1StillDecoder`] — until it does, the caller supplies that decoder
-//! (which will then become optional). All of these land semver-minor — the current major's
+//! container transforms on the encode side, layered/progressive still images, rate control, a
+//! **built-in AV1 codestream decoder** behind [`Av1CodestreamDecoder`], and a `gamut-codec-abi`
+//! adapter for the decode seam. On the decoder: `gamut-av1` ships the pure-Rust one (its default
+//! `decode` feature), but today it parses only the header and tile-framing layer and reconstructs
+//! no samples, so gamut-avif does not yet register it as the implicit tail of
+//! [`AvifDecoder`]'s registry — until it does, the caller adds a backend. All of these land semver-minor — the current major's
 //! surface is designed so no deferred feature reshapes it.
 //!
 //! **Permanently out of scope** (workspace charter — gamut is image-first): image sequences and
@@ -210,45 +204,52 @@
 struct ReadmeDoctests;
 
 mod av1c;
-pub mod backend;
+mod backend;
 mod c2pa;
 mod clean_alpha;
 mod config;
 mod container;
-mod decode;
+mod decoder;
 mod encoder;
-mod image;
 /// Executable laws for this crate's sample transforms, shared by its property tests and the
 /// out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod invariants;
 mod obu;
-mod transform;
 
-pub use av1c::{Av1Config, ChromaFormat};
-pub use backend::{AV1_CODEC_ID, AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder};
-pub use c2pa::{
-    C2PA_NOT_VALIDATED, C2paBoxPosition, C2paMerkleBox, C2paStoreSummary, C2paSummary,
-    C2paUnreadBox,
+pub use av1c::Av1Config;
+pub use backend::{
+    AV1_CODEC_ID, AbiAv1CodestreamEncoder, Av1CodestreamDecoder, Av1CodestreamEncoder,
+    Av1EncodeRequest,
 };
-pub use config::{AvifConfig, AvifMode};
-pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
-pub use decode::{Av1StillDecoder, DecodeLimits, DecodeOptions, DecodedFrame};
-pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder, RawPlanes};
+pub use config::{AlphaMode, AvifConfig, AvifMode, OpaqueAlpha};
+pub use container::AvifContainer;
+pub use decoder::{Av1, AvifDecoder};
+pub use encoder::{AvifEncodeReport, AvifEncoder, RawPlanes};
+// The foreign types this crate's signatures name, so a caller needs no direct dependency to spell
+// them.
 pub use gamut_av1::{ColorConfig, Effort, SequenceHeader};
-pub use gamut_color::ChromaUpsampling;
-pub use gamut_core::Dimensions;
-// The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-heic` (#505).
-pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paSlot, C2paUnreadReason};
-// The facade types named in the `metadata`-feature signatures, and the two traits whose methods
-// they are, so a caller can spell `AvifImage::metadata` / `AvifEncoder::with_metadata` without a
-// direct dependency.
-#[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataSink, TypedMetadata};
-pub use image::{
-    AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay,
-    PixelAspectRatio, TransformativeProperty,
+pub use gamut_color::{
+    BitDepth, ChromaSubsampling, ChromaUpsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
+    Planar8, Planar16, TransferCharacteristics,
 };
-pub use obu::{Obu, ObuHeader, ObuIter, ObuType, iter_obus};
-pub use transform::{Mirror, Rotation};
+pub use gamut_core::{Dimensions, Orientation, RawMetadata};
+// The shared HEIF layer: the item model `AvifContainer::image` returns, the decode-surface types,
+// and the C2PA summary `AvifContainer::c2pa_summary` returns.
+pub use gamut_heif::{
+    C2PA_NOT_VALIDATED, C2paBoxPosition, C2paMerkleBox, C2paPresence, C2paStoreSummary,
+    C2paSummary, C2paUnreadBox, DecodeLimits, DecodeOptions, DecodedFrame, HeifImage, HeifItem,
+    ItemKind,
+};
+// The C2PA `ContentProvenanceBox` framing, the HDR property values and the segment walk are
+// `gamut-isobmff`'s.
+pub use gamut_isobmff::{
+    C2PA_UUID, C2paBoxPurpose, C2paSlot, C2paUnreadReason, ContentLightLevel, MasteringDisplay,
+    Segment, SegmentKind, UnknownBox, UnknownBoxLocation,
+};
+// The facade types named in the `metadata`-feature signatures, and the two traits a caller needs
+// in scope: `MetadataSink` for `AvifEncoder::with_metadata`, and `TypedMetadata` to parse the
+// `RawMetadata` `AvifDecoder::metadata` returns.
+#[cfg(feature = "metadata")]
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataSink, TypedMetadata};

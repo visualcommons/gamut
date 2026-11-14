@@ -28,10 +28,12 @@ metadata = ["dep:gamut-metadata"]
 gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-av1.workspace = true
-gamut-codec-abi.workspace = true
-# libavif's bilinear chroma upsampling kernel (`upsample::libavif`) for the RGB presentation path.
-gamut-dsp.workspace = true
+# The shared backend `Registry` (behind its `std` feature) both seams run through.
+gamut-codec-abi = { workspace = true, features = ["std"] }
 gamut-isobmff.workspace = true
+# The shared HEIF/MIAF layer: the item model, the derivation walk, the decode limits, the RGBA
+# presentation and the C2PA summary, which this crate binds AV1 into (issue #1085).
+gamut-heif.workspace = true
 # Typed metadata (issue #510): the unified `Metadata` model over the `Exif` / XMP items and `colr`
 # ICC profile this crate locates and writes. Optional and off by default, and a *normal*
 # dependency (never dev-only), so release ordering follows it (`mise run check-release-deps`).

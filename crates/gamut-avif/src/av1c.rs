@@ -14,53 +14,6 @@ use gamut_core::{Error, Result};
 
 use crate::obu::{ObuType, iter_obus, write_leb128};
 
-/// The chroma sampling format, derived from the `av1C` `monochrome` and
-/// `chroma_subsampling_x`/`_y` fields (AV1 §6.4.2: mono / (1,1) = 4:2:0 / (1,0) = 4:2:2 /
-/// (0,0) = 4:4:4).
-///
-/// `#[repr(u8)]` with explicit, stable discriminants so the value is FFI-stable across the boundary
-/// a platform decoder crosses (mirroring `gamut-heic`'s C-compatibility posture): a `-sys` shim can
-/// pass the raw discriminant without a translation table.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ChromaFormat {
-    /// Monochrome: a single luma plane, no chroma.
-    Monochrome = 0,
-    /// 4:2:0: chroma sub-sampled by two horizontally and vertically.
-    Yuv420 = 1,
-    /// 4:2:2: chroma sub-sampled by two horizontally.
-    Yuv422 = 2,
-    /// 4:4:4: full-resolution chroma.
-    Yuv444 = 3,
-}
-
-impl ChromaFormat {
-    /// The equivalent [`ChromaSubsampling`], gamut's shared plane-geometry vocabulary.
-    ///
-    /// A total mapping: this type's discriminants are the codec's `chroma_format_idc`, while
-    /// `ChromaSubsampling`'s are gamut's own, so the two never share a numbering and convert
-    /// explicitly.
-    #[must_use]
-    pub fn subsampling(self) -> ChromaSubsampling {
-        match self {
-            ChromaFormat::Monochrome => ChromaSubsampling::Cs400,
-            ChromaFormat::Yuv420 => ChromaSubsampling::Cs420,
-            ChromaFormat::Yuv422 => ChromaSubsampling::Cs422,
-            ChromaFormat::Yuv444 => ChromaSubsampling::Cs444,
-        }
-    }
-
-    /// The dimensions of each chroma (Cb/Cr) plane for a luma plane of `width` × `height`, using
-    /// **ceiling** division on the subsampled axes so an odd luma dimension keeps the half-covering
-    /// edge sample: 4:2:0 ⇒ `(ceil(width/2), ceil(height/2))`, 4:2:2 ⇒ `(ceil(width/2), height)`,
-    /// 4:4:4 ⇒ `(width, height)`. [`Monochrome`](Self::Monochrome) has no chroma, so it returns
-    /// `(0, 0)`.
-    #[must_use]
-    pub fn chroma_dimensions(self, width: u32, height: u32) -> (u32, u32) {
-        self.subsampling().chroma_dimensions(width, height)
-    }
-}
-
 /// A parsed `av1C` AV1CodecConfigurationRecord (AV1-ISOBMFF v1.3.0 §2.3.3).
 ///
 /// The fixed four header bytes are exposed as typed values (bit-width fields as the smallest
@@ -224,19 +177,20 @@ impl Av1Config {
         }
     }
 
-    /// The chroma sampling format from `monochrome` and the subsampling pair (AV1 §6.4.2).
-    /// Infallible: the one inexpressible pair, `(0, 1)`, is rejected at [`parse`](Self::parse)
-    /// time.
+    /// The chroma sampling from `monochrome` and the subsampling pair (AV1 §6.4.2: mono /
+    /// (1,1) = 4:2:0 / (1,0) = 4:2:2 / (0,0) = 4:4:4), in gamut's shared plane-geometry
+    /// vocabulary. Infallible: the one inexpressible pair, `(0, 1)`, is rejected at
+    /// [`parse`](Self::parse) time.
     #[must_use]
-    pub fn chroma_format(&self) -> ChromaFormat {
+    pub fn chroma_subsampling(&self) -> ChromaSubsampling {
         if self.monochrome {
-            return ChromaFormat::Monochrome;
+            return ChromaSubsampling::Cs400;
         }
         match (self.chroma_subsampling_x, self.chroma_subsampling_y) {
-            (1, 1) => ChromaFormat::Yuv420,
-            (1, 0) => ChromaFormat::Yuv422,
+            (1, 1) => ChromaSubsampling::Cs420,
+            (1, 0) => ChromaSubsampling::Cs422,
             // (0, 1) is rejected at parse, so the only remaining pair is (0, 0).
-            _ => ChromaFormat::Yuv444,
+            _ => ChromaSubsampling::Cs444,
         }
     }
 
@@ -253,7 +207,7 @@ impl Av1Config {
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if neither
-    /// the payload nor `configOBUs` carries a sequence header OBU, propagates the OBU-split errors of [`crate::iter_obus`] for either source, and
+    /// the payload nor `configOBUs` carries a sequence header OBU, propagates the OBU-split errors for either source, and
     /// propagates [`SequenceHeader::parse`]'s errors for a malformed header.
     pub fn sequence_header(&self, payload: &[u8]) -> Result<SequenceHeader> {
         let obu = match first_sequence_header(payload)? {
@@ -282,8 +236,7 @@ impl Av1Config {
     ///
     /// # Errors
     ///
-    /// Propagates the payload-split errors of [`crate::iter_obus`] (truncated header, size field,
-    /// or body). On error, bytes already appended to `out` are left in place.
+    /// Propagates the payload-split errors (truncated header, size field, or body). On error, bytes already appended to `out` are left in place.
     pub fn full_stream(&self, payload: &[u8], out: &mut Vec<u8>) -> Result<()> {
         // OBU_TEMPORAL_DELIMITER with a size field and an empty payload: header 0x12, size 0.
         out.extend_from_slice(&[0x12, 0x00]);
@@ -312,7 +265,7 @@ impl Av1Config {
     /// §2.4 it incorporates — so the item is independently decodable:
     ///
     /// - the payload splits exactly into low-overhead OBUs (every OBU carries a size field except,
-    ///   optionally, the last — [`crate::iter_obus`]'s contract);
+    ///   optionally, the last);
     /// - no `OBU_TILE_LIST` is present (SHALL NOT, §2.4);
     /// - exactly one sequence header OBU is present (§2.1), before the first frame-bearing OBU
     ///   (§2.4 — other OBU types such as metadata may precede it);
@@ -331,7 +284,7 @@ impl Av1Config {
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if any
     /// constraint above fails, and propagates the
-    /// payload-split ([`crate::iter_obus`]) errors.
+    /// payload-split errors.
     pub fn validate_still_payload(&self, payload: &[u8]) -> Result<()> {
         let mut sequence_headers = 0usize;
         let mut reduced_still_picture = false;
@@ -438,23 +391,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chroma_format_maps_onto_the_shared_subsampling_vocabulary() {
-        // Total mapping, asserted per variant so a mutant that collapses two arms dies. The two
-        // enums deliberately do not share a numbering: these discriminants are the codec's
-        // `chroma_format_idc`, `ChromaSubsampling`'s are gamut's own.
+    fn chroma_subsampling_reads_the_monochrome_flag_and_the_pair() {
+        // Each layout asserted on its own, so a mutant that collapses two arms dies.
+        let record = |monochrome, x, y| Av1Config {
+            monochrome,
+            chroma_subsampling_x: x,
+            chroma_subsampling_y: y,
+            ..Av1Config::parse(&[0x81, 0, 0, 0]).unwrap()
+        };
         assert_eq!(
-            ChromaFormat::Monochrome.subsampling(),
+            record(true, 1, 1).chroma_subsampling(),
             ChromaSubsampling::Cs400
         );
-        assert_eq!(ChromaFormat::Yuv420.subsampling(), ChromaSubsampling::Cs420);
-        assert_eq!(ChromaFormat::Yuv422.subsampling(), ChromaSubsampling::Cs422);
-        assert_eq!(ChromaFormat::Yuv444.subsampling(), ChromaSubsampling::Cs444);
-        // The delegation preserves the documented ceiling-division behaviour on odd dimensions,
-        // which is the property downstream plane sizing depends on.
-        assert_eq!(ChromaFormat::Yuv420.chroma_dimensions(17, 13), (9, 7));
-        assert_eq!(ChromaFormat::Yuv422.chroma_dimensions(17, 13), (9, 13));
-        assert_eq!(ChromaFormat::Yuv444.chroma_dimensions(17, 13), (17, 13));
-        assert_eq!(ChromaFormat::Monochrome.chroma_dimensions(17, 13), (0, 0));
+        assert_eq!(
+            record(false, 1, 1).chroma_subsampling(),
+            ChromaSubsampling::Cs420
+        );
+        assert_eq!(
+            record(false, 1, 0).chroma_subsampling(),
+            ChromaSubsampling::Cs422
+        );
+        assert_eq!(
+            record(false, 0, 0).chroma_subsampling(),
+            ChromaSubsampling::Cs444
+        );
     }
     use crate::encoder::av1c_record;
 
@@ -488,6 +448,6 @@ mod tests {
         assert_eq!(parsed.initial_presentation_delay_minus_one, None);
         assert!(parsed.config_obus.is_empty());
         assert_eq!(parsed.bit_depth(), 12);
-        assert_eq!(parsed.chroma_format(), ChromaFormat::Yuv422);
+        assert_eq!(parsed.chroma_subsampling(), ChromaSubsampling::Cs422);
     }
 }

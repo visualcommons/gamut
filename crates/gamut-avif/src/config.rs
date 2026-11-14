@@ -1,10 +1,100 @@
-//! Encoder configuration: lossless vs. lossy selection, the quality knob, and the output colour
-//! encoding.
+//! Encoder configuration: lossless vs. lossy selection, the quality knob, the output colour
+//! encoding, alpha handling, orientation, HDR descriptors, effort and threads — every plain-data
+//! knob of an [`AvifEncoder`](crate::AvifEncoder).
 
+use core::num::NonZeroUsize;
+
+use gamut_av1::Effort;
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
     TransferCharacteristics,
 };
+use gamut_core::Orientation;
+use gamut_isobmff::{ContentLightLevel, MasteringDisplay};
+
+/// How the colour of an RGBA input relates to its alpha, and so what an RGBA encode codes and
+/// declares. Select it with [`AvifEncoder::with_alpha_mode`](crate::AvifEncoder::with_alpha_mode).
+///
+/// A file whose colour item carries a `prem` item reference to its alpha auxiliary declares the
+/// colour **premultiplied** — associated with alpha (ISO/IEC 23008-12 §6); without
+/// one the colour is unassociated. A reader un-premultiplies the first before compositing, so
+/// declaring the wrong one darkens or halos the displayed edges.
+///
+/// | Mode | Input colour | Coded colour | `prem` written |
+/// | --- | --- | --- | --- |
+/// | [`Unassociated`](Self::Unassociated) | unassociated | as given | no |
+/// | [`Premultiplied`](Self::Premultiplied) | already premultiplied | as given | yes |
+/// | [`PremultiplyOnEncode`](Self::PremultiplyOnEncode) | unassociated | premultiplied by the encoder | yes |
+/// | [`CleanOnEncode`](Self::CleanOnEncode) | unassociated | hidden colour cleaned by the encoder (lossy only) | no |
+///
+/// Every mode is ignored by an input without an alpha channel: with no alpha auxiliary there is
+/// no alpha to associate with and nothing for `prem` to target.
+///
+/// `#[non_exhaustive]`, `#[repr(u8)]` with permanent, append-only discriminants: plain
+/// configuration data that must stay mechanically portable to C (see the workspace charter).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum AlphaMode {
+    /// The colour is **unassociated** (straight) and is coded as given, with no `prem` — the
+    /// default, and the interpretation [`Rgba8`](gamut_core::Rgba8)'s
+    /// [`ColorModel::Rgba`](gamut_core::ColorModel::Rgba) already documents.
+    #[default]
+    Unassociated = 0,
+    /// The caller's colour is **already premultiplied** by its alpha. It is coded as given and the
+    /// file declares it with `prem`: a declaration, not a conversion — the encoder multiplies
+    /// nothing and divides nothing. Getting the declaration wrong darkens or halos the edges of
+    /// the displayed image.
+    Premultiplied = 1,
+    /// The caller's colour is **unassociated**; the encoder premultiplies it — with
+    /// [`gamut_core::convert::premultiply_alpha`], `round(colour * alpha / max)` at the input's
+    /// own sample scale — before coding, and declares the result with `prem`.
+    ///
+    /// Opaque pixels code exactly as given and alpha is never touched. Every other pixel keeps
+    /// only `alpha + 1` colour levels, so a reader that un-premultiplies recovers the source only
+    /// to within rounding — `⌊(a + max) / 2a⌋` code values at alpha `a`, and no colour at all
+    /// under a fully transparent pixel. That makes this mode **lossy in the colour channels even
+    /// under [`AvifMode::Lossless`]**, which then codes the *premultiplied* colour bit-exactly.
+    PremultiplyOnEncode = 2,
+    /// The caller's colour is **unassociated**, and before a **lossy** encode the encoder
+    /// replaces the colour hidden under transparent and semi-transparent pixels with a smooth
+    /// bleed of the visible edge, so the coder spends no bits on colour nobody sees and the
+    /// visible edge does not ring against it. No `prem` is written.
+    ///
+    /// What a reader displays does not change: alpha and opaque pixels are untouched, a fully
+    /// transparent pixel's colour is invisible, and a semi-transparent pixel's colour moves only
+    /// within the range that premultiplies to the same value. Only the decoded *unassociated*
+    /// colour under transparency differs from the source, which is why it is opt-in.
+    ///
+    /// [`AvifMode::Lossless`] stays bit-exact and codes this mode exactly as
+    /// [`Unassociated`](Self::Unassociated), and so does
+    /// [`AvifEncoder::encode_raw_planes`](crate::AvifEncoder::encode_raw_planes), which rewrites
+    /// no colour.
+    CleanOnEncode = 3,
+}
+
+impl AlphaMode {
+    /// Whether the file declares its colour premultiplied with a `prem` item reference.
+    pub(crate) fn declares_premultiplied(self) -> bool {
+        matches!(self, Self::Premultiplied | Self::PremultiplyOnEncode)
+    }
+}
+
+/// Whether an RGBA input whose every alpha sample is fully opaque keeps its alpha auxiliary item.
+/// Select it with [`AvifEncoder::with_opaque_alpha`](crate::AvifEncoder::with_opaque_alpha).
+///
+/// `#[repr(u8)]` with permanent, append-only discriminants, like [`AlphaMode`].
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum OpaqueAlpha {
+    /// Code a fully opaque RGBA input as the RGB image it is indistinguishable from: no alpha
+    /// auxiliary, byte-identical to the RGB encode of its colour — the default.
+    #[default]
+    Drop = 0,
+    /// Keep the alpha auxiliary item even when every alpha sample is fully opaque.
+    Keep = 1,
+}
 
 /// Which AVIF bitstream the encoder produces.
 ///
@@ -31,15 +121,27 @@ pub enum AvifMode {
 /// Configuration for an [`AvifEncoder`](crate::AvifEncoder).
 ///
 /// `quality` ranges `0..=100` (higher = larger output, closer to the source) and applies to
-/// [`AvifMode::Lossy`]; it is ignored for [`AvifMode::Lossless`]. Build one with the
-/// [`AvifEncoder`](crate::AvifEncoder) constructors rather than by hand — they keep `mode`,
-/// `quality` and `matrix` consistent.
+/// [`AvifMode::Lossy`]; it is ignored for [`AvifMode::Lossless`].
+///
+/// Every plain-data knob of the encoder is a field here — the byte payloads (ICC, Exif, XMP,
+/// C2PA) and the codestream backends are not — so a configuration read back with
+/// [`AvifEncoder::config`](crate::AvifEncoder::config) feeds straight back in through
+/// [`AvifEncoder::from_config`](crate::AvifEncoder::from_config):
+///
+/// ```
+/// use gamut_avif::{AvifConfig, AvifEncoder, AvifMode};
+///
+/// let mut config = AvifEncoder::lossy(60).config();
+/// config.quality = 40;
+/// let encoder = AvifEncoder::from_config(config);
+/// assert_eq!(encoder.config().mode, AvifMode::Lossy);
+/// assert_eq!(encoder.config().quality, 40);
+/// assert_eq!(AvifEncoder::from_config(AvifConfig::default()).config(), AvifEncoder::new().config());
+/// ```
 ///
 /// `#[non_exhaustive]`: the configuration is an open set — fields for deferred encoder knobs
-/// (see `STATUS.md`) are added as they ship. Encode effort and thread count are not fields here:
-/// they live on the encoder, as [`AvifEncoder::with_effort`](crate::AvifEncoder::with_effort) and
-/// [`AvifEncoder::with_threads`](crate::AvifEncoder::with_threads). Read it as the snapshot
-/// returned by [`AvifEncoder::config`](crate::AvifEncoder::config).
+/// (see `STATUS.md`) are added as they ship — so start from [`AvifConfig::default`] or from
+/// [`AvifEncoder::config`](crate::AvifEncoder::config) rather than a struct literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AvifConfig {
@@ -110,20 +212,26 @@ pub struct AvifConfig {
     /// 8-bit inputs only. See
     /// [`AvifEncoder::with_bit_depth`](crate::AvifEncoder::with_bit_depth) for both conversions.
     pub bit_depth: Option<BitDepth>,
-    /// Whether to replace the colour hidden under transparent and semi-transparent pixels with a
-    /// smooth bleed of the visible edge before coding, so a lossy encode spends no bits on colour
-    /// nobody sees and does not ring at alpha edges.
-    ///
-    /// The premultiplied composite is unchanged by construction: alpha and opaque pixels are
-    /// untouched, and a semi-transparent pixel's colour moves only within the range that
-    /// premultiplies to the same value. `false` (the default) codes the colour as given. Applies
-    /// only to [`AvifMode::Lossy`] encodes of inputs with **unassociated** alpha
-    /// ([`Rgba8`](gamut_core::Rgba8), [`Rgba16`](gamut_core::Rgba16)): [`AvifMode::Lossless`]
-    /// **ignores** it and stays bit-exact, and so does an encoder whose
-    /// [`AlphaMode`](crate::AlphaMode) is not [`Unassociated`](crate::AlphaMode::Unassociated),
-    /// whose colour already *is* — or is made into — the composite. Set it with
-    /// [`AvifEncoder::with_clean_alpha`](crate::AvifEncoder::with_clean_alpha).
-    pub clean_alpha: bool,
+    /// How an RGBA input's colour relates to its alpha — see [`AlphaMode`]. Meaningless without an
+    /// alpha channel, so it reaches the file only for an RGBA encode.
+    pub alpha_mode: AlphaMode,
+    /// Whether a fully opaque RGBA input keeps its alpha auxiliary — see [`OpaqueAlpha`].
+    pub opaque_alpha: OpaqueAlpha,
+    /// The display orientation a reader applies, written as `irot`/`imir` item properties. The
+    /// stored pixels are unchanged. [`Orientation::Identity`] (the default) writes neither.
+    pub orientation: Orientation,
+    /// HDR content light level, written as a non-essential `clli` property of the primary colour
+    /// item, or `None` for none.
+    pub content_light_level: Option<ContentLightLevel>,
+    /// HDR mastering display colour volume, written as a non-essential `mdcv` property of the
+    /// primary colour item, or `None` for none.
+    pub mastering_display: Option<MasteringDisplay>,
+    /// The `gamut-av1` mode-decision search preset every AV1 still of the file is coded at —
+    /// colour and alpha alike. Defaults to [`Effort::default`].
+    pub effort: Effort,
+    /// The most threads an encode may use; `None` is the machine's available parallelism.
+    /// Defaults to `Some(1)`. The output does not depend on it.
+    pub threads: Option<NonZeroUsize>,
 }
 
 impl Default for AvifConfig {
@@ -138,7 +246,13 @@ impl Default for AvifConfig {
             primaries: ColorPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
             bit_depth: None,
-            clean_alpha: false,
+            alpha_mode: AlphaMode::Unassociated,
+            opaque_alpha: OpaqueAlpha::Drop,
+            orientation: Orientation::Identity,
+            content_light_level: None,
+            mastering_display: None,
+            effort: Effort::default(),
+            threads: Some(NonZeroUsize::MIN),
         }
     }
 }
@@ -162,8 +276,17 @@ mod tests {
         // default encoder's 8-bit bytes predate the knob reaching 8-bit inputs.
         assert_eq!(c.bit_depth, None);
         // Opt-in: hidden colour is coded as given unless the caller asks for it to be cleaned.
-        assert!(!c.clean_alpha);
+        assert_eq!(c.alpha_mode, AlphaMode::Unassociated);
+        assert_eq!(c.opaque_alpha, OpaqueAlpha::Drop);
+        assert_eq!(c.orientation, Orientation::Identity);
+        assert_eq!(c.content_light_level, None);
+        assert_eq!(c.mastering_display, None);
+        assert_eq!(c.effort, Effort::default());
+        // One thread unless asked: an encoder without the knob spawns nothing.
+        assert_eq!(c.threads, Some(NonZeroUsize::MIN));
         assert_eq!(AvifMode::default(), AvifMode::Lossless);
+        assert_eq!(AlphaMode::default(), AlphaMode::Unassociated);
+        assert_eq!(OpaqueAlpha::default(), OpaqueAlpha::Drop);
     }
 
     #[test]
@@ -172,5 +295,20 @@ mod tests {
         // append-only: a reordering would silently change what an existing C caller selects.
         assert_eq!(AvifMode::Lossless as u8, 0);
         assert_eq!(AvifMode::Lossy as u8, 1);
+        assert_eq!(AlphaMode::Unassociated as u8, 0);
+        assert_eq!(AlphaMode::Premultiplied as u8, 1);
+        assert_eq!(AlphaMode::PremultiplyOnEncode as u8, 2);
+        assert_eq!(AlphaMode::CleanOnEncode as u8, 3);
+        assert_eq!(OpaqueAlpha::Drop as u8, 0);
+        assert_eq!(OpaqueAlpha::Keep as u8, 1);
+    }
+
+    #[test]
+    fn only_the_premultiplied_modes_declare_prem() {
+        assert!(!AlphaMode::Unassociated.declares_premultiplied());
+        assert!(AlphaMode::Premultiplied.declares_premultiplied());
+        assert!(AlphaMode::PremultiplyOnEncode.declares_premultiplied());
+        // Cleaning rewrites hidden colour but keeps it unassociated.
+        assert!(!AlphaMode::CleanOnEncode.declares_premultiplied());
     }
 }

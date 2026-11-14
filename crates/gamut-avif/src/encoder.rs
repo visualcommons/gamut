@@ -12,27 +12,37 @@ use gamut_color::{
 };
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy, convert, premultiply_alpha};
 use gamut_core::{
-    Cicp, Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, Pixel, Result, Rgb8, Rgb16,
-    Rgba8, Rgba16, Sample,
+    Cicp, Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, Orientation, Pixel, Result,
+    Rgb8, Rgb16, Rgba8, Rgba16, Sample,
 };
 use gamut_isobmff::{
-    C2PA_UUID, C2paBoxPurpose, ColourInformation, IsoBmffImage, Item, ItemReference, Property,
-    PropertyKind, TopLevelBox, content_provenance_payload, content_provenance_reserved,
+    C2PA_UUID, C2paBoxPurpose, ColourInformation, ContentLightLevel, IsoBmffImage, Item,
+    ItemReference, MasteringDisplay, Property, PropertyKind, TopLevelBox,
+    content_provenance_payload, content_provenance_reserved,
 };
 
+/// The `aux_type` URN that marks an auxiliary image as an **alpha** plane (AVIF v1.2.0 §4 — the
+/// MIAF/CICP URN; AVIF defines no format-specific alias the way HEVC does).
+const ALPHA_AUX_URN: &str = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
+
 use crate::av1c::Av1Config;
-use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
+use crate::backend::{Av1CodestreamEncoder, Av1EncodeRequest, BackendPlanes, EncoderRegistry};
 use crate::clean_alpha::clean_rgba;
-use crate::config::{AvifConfig, AvifMode};
+use crate::config::{AlphaMode, AvifConfig, AvifMode, OpaqueAlpha};
 use crate::container::AvifContainer;
-use crate::image::{ALPHA_AUX_URN, ContentLightLevel, MasteringDisplay};
-use crate::transform::{Mirror, Rotation};
 
 /// What the encoder writes into the store slot of the C2PA `uuid` box it emits.
 #[derive(Clone, PartialEq, Eq)]
 enum SlotSource {
-    /// A slot of this many zero bytes, for an external signer to fill after encoding.
-    Reserved(usize),
+    /// A slot of `len` zero bytes, for an external signer to fill after encoding. `payload` is the
+    /// whole framed `ContentProvenanceBox` payload, built — and so checked — when the reservation
+    /// was set.
+    Reserved {
+        /// The slot length the caller asked for.
+        len: usize,
+        /// The §A.5.1.2 framing around `len` zero bytes.
+        payload: Vec<u8>,
+    },
     /// A manifest store the caller has already computed over this exact output.
     Store(Vec<u8>),
 }
@@ -42,7 +52,7 @@ enum SlotSource {
 impl std::fmt::Debug for SlotSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Reserved(len) => write!(f, "Reserved({len})"),
+            Self::Reserved { len, .. } => write!(f, "Reserved({len})"),
             Self::Store(store) => write!(f, "Store({})", store.len()),
         }
     }
@@ -58,7 +68,10 @@ impl std::fmt::Debug for SlotSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AvifEncodeReport {
-    /// The byte range of the C2PA manifest-store slot within the file — the `len` bytes of
+    /// The number of bytes appended to the output — the whole AVIF file.
+    pub len: usize,
+    /// The byte range, counted from the first byte of this AVIF (not of the output buffer it was
+    /// appended to), of the C2PA manifest-store slot within the file — the `len` bytes of
     /// [`with_c2pa_reserved`](AvifEncoder::with_c2pa_reserved), or the store handed to
     /// [`with_c2pa`](AvifEncoder::with_c2pa) — or `None` when neither was configured.
     ///
@@ -78,50 +91,6 @@ pub struct AvifEncodeReport {
     /// What is left of the file, `file.len() - color_bytes - alpha_bytes`, is the container and
     /// whatever metadata (ICC, Exif, XMP, C2PA) it carries.
     pub alpha_bytes: usize,
-}
-
-/// How the colour of an RGBA input relates to its alpha, and so what an RGBA encode codes and
-/// declares. Select it with [`AvifEncoder::with_alpha_mode`].
-///
-/// A file whose colour item carries a `prem` item reference to its alpha auxiliary declares the
-/// colour **premultiplied** — associated with alpha (ISO/IEC 23008-12 §6); without
-/// one the colour is unassociated. A reader un-premultiplies the first before compositing, so
-/// declaring the wrong one darkens or halos the displayed edges.
-///
-/// | Mode | Input colour | Coded colour | `prem` written |
-/// | --- | --- | --- | --- |
-/// | [`Unassociated`](Self::Unassociated) | unassociated | as given | no |
-/// | [`Premultiplied`](Self::Premultiplied) | already premultiplied | as given | yes |
-/// | [`PremultiplyOnEncode`](Self::PremultiplyOnEncode) | unassociated | premultiplied by the encoder | yes |
-///
-/// Every mode is ignored by an input without an alpha channel: with no alpha auxiliary there is
-/// no alpha to associate with and nothing for `prem` to target.
-///
-/// `#[non_exhaustive]`, `#[repr(u8)]` with permanent, append-only discriminants: plain
-/// configuration data that must stay mechanically portable to C (see the workspace charter).
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum AlphaMode {
-    /// The colour is **unassociated** (straight) and is coded as given, with no `prem` — the
-    /// default, and the interpretation [`Rgba8`]'s
-    /// [`ColorModel::Rgba`](gamut_core::ColorModel::Rgba) already documents.
-    #[default]
-    Unassociated = 0,
-    /// The caller's colour is **already premultiplied** by its alpha. It is coded as given and the
-    /// file declares it with `prem`: a declaration, not a conversion — the encoder multiplies
-    /// nothing and divides nothing.
-    Premultiplied = 1,
-    /// The caller's colour is **unassociated**; the encoder premultiplies it — with
-    /// [`gamut_core::convert::premultiply_alpha`], `round(colour * alpha / max)` at the input's
-    /// own sample scale — before coding, and declares the result with `prem`.
-    ///
-    /// Opaque pixels code exactly as given and alpha is never touched. Every other pixel keeps
-    /// only `alpha + 1` colour levels, so a reader that un-premultiplies recovers the source only
-    /// to within rounding — `⌊(a + max) / 2a⌋` code values at alpha `a`, and no colour at all
-    /// under a fully transparent pixel. That makes this mode **lossy in the colour channels even
-    /// under [`AvifMode::Lossless`]**, which then codes the *premultiplied* colour bit-exactly.
-    PremultiplyOnEncode = 2,
 }
 
 /// Caller-supplied planes for [`AvifEncoder::encode_raw_planes`]: samples already in the coded
@@ -202,7 +171,7 @@ impl<'a> RawPlanes<'a> {
     /// As [`RawPlanes::eight`], plus an
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when `colour` is
     /// [`BitDepth::Eight`] (8-bit planes take [`RawPlanes::eight`], so a backend's
-    /// [`encode_still16`](crate::Av1StillEncoder::encode_still16) is only ever handed 10 or 12
+    /// [`encode_still16`](crate::Av1CodestreamEncoder::encode_still16) is only ever handed 10 or 12
     /// bits) or when `alpha`'s depth is not `colour`'s. A [`BitDepth::Sixteen`] buffer is
     /// accepted here and refused by the encode, as an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error: AV1 codes 8, 10 or 12 bits
@@ -302,23 +271,12 @@ fn check_alpha(
     Ok(())
 }
 
-/// The encoder's display-orientation transforms, applied by a reader at display time (the stored
-/// pixels are unchanged). Maps to the `irot`/`imir` item properties.
-#[derive(Debug, Clone, Copy, Default)]
-struct ImageTransform {
-    /// `irot` rotation in 90° steps (`0..=3`), anti-clockwise. `0` writes no `irot`.
-    rotation_ccw: u8,
-    /// `imir` mirror axis: `Some(0)` vertical (left↔right), `Some(1)` horizontal (top↔bottom).
-    mirror_axis: Option<u8>,
-}
-
 /// Encodes images to AVIF still images.
 ///
 /// 8-bit input, mapped to AV1 planes. Construct with [`AvifEncoder::new`] (lossless),
 /// [`AvifEncoder::lossless`], or [`AvifEncoder::lossy`], then encode via the
 /// [`EncodeImage`](gamut_core::EncodeImage) trait, taking a typed [`ImageRef`].
-/// [`AvifEncoder::with_rotation`] / [`AvifEncoder::with_mirror`] add `irot`/`imir`
-/// display-orientation transforms.
+/// [`AvifEncoder::with_orientation`] adds the `irot`/`imir` display-orientation transforms.
 ///
 /// # Inputs
 ///
@@ -339,30 +297,24 @@ struct ImageTransform {
 ///
 /// An RGBA input whose alpha is fully opaque everywhere carries no information an RGB input
 /// would not, so by default it is coded as one: no alpha auxiliary, byte-identical to the RGB
-/// encode of its colour. [`AvifEncoder::with_keep_opaque_alpha`] keeps the auxiliary instead.
+/// encode of its colour. [`AvifEncoder::with_opaque_alpha`] keeps the auxiliary instead.
 ///
 /// Alpha is coded as its own AV1 still: AVIF v1.2.0 §4.1 makes `mono_chrome = 1` and full range a
 /// *shall* for an AV1 auxiliary image item, and the auxiliary is linked to the colour item by an
 /// `auxl` reference and typed by an essential `auxC` property.
 /// [`AvifEncoder::with_alpha_mode`] selects whether the colour is unassociated, already
-/// premultiplied by alpha, or premultiplied by the encoder (see [`AlphaMode`]).
+/// premultiplied by alpha, premultiplied by the encoder, or cleaned under transparency (see
+/// [`AlphaMode`]).
 ///
-/// The AV1 codestream comes from `gamut-av1` by default; [`AvifEncoder::push_backend`] registers
-/// alternate [`Av1StillEncoder`] backends ahead of it (see [`crate::backend`] for the fallback
-/// contract).
+/// The AV1 codestream comes from `gamut-av1` by default; [`AvifEncoder::with_backend`] registers
+/// alternate [`Av1CodestreamEncoder`] backends ahead of it (see [`Av1CodestreamEncoder`] for the
+/// fallback contract).
 #[derive(Clone)]
 pub struct AvifEncoder {
-    /// Lossless/lossy mode and the lossy quality factor.
+    /// Every plain-data knob: mode, quality, colour, alpha, orientation, HDR, effort, threads.
     config: AvifConfig,
-    /// Optional `irot`/`imir` display-orientation transforms.
-    transform: ImageTransform,
     /// An embedded ICC profile, carried verbatim into a `colr` box of type `prof`.
     icc: Option<Vec<u8>>,
-    /// HDR content light level, written as a `clli` property of the primary colour item.
-    content_light_level: Option<ContentLightLevel>,
-    /// HDR mastering display colour volume, written as an `mdcv` property of the primary colour
-    /// item.
-    mastering_display: Option<MasteringDisplay>,
     /// An Exif payload — a bare TIFF stream — carried verbatim into an `Exif` metadata item.
     exif: Option<Vec<u8>>,
     /// An XMP packet, carried verbatim into a `mime` metadata item.
@@ -370,23 +322,9 @@ pub struct AvifEncoder {
     /// The C2PA manifest-store slot — reserved zeros or a caller-computed store — written into a
     /// top-level `uuid` `ContentProvenanceBox` after `ftyp`.
     c2pa: Option<SlotSource>,
-    /// How an RGBA input's colour relates to its alpha: whether it is premultiplied before coding
-    /// and whether a `prem` item reference declares it. Meaningless without an alpha channel, so
-    /// it reaches the file only for an RGBA encode.
-    alpha_mode: AlphaMode,
-    /// Whether an RGBA input whose every alpha sample is fully opaque still gets its alpha
-    /// auxiliary item. `false` (the default) codes such an input as the RGB input it is
-    /// indistinguishable from — see [`AvifEncoder::with_keep_opaque_alpha`].
-    keep_opaque_alpha: bool,
-    /// The `gamut-av1` mode-decision search preset every AV1 still of the file is coded at —
-    /// colour and alpha alike. See [`AvifEncoder::with_effort`].
-    effort: Effort,
-    /// The most threads an encode may use; `None` is the machine's available parallelism. See
-    /// [`AvifEncoder::with_threads`].
-    threads: Option<NonZeroUsize>,
-    /// Pluggable AV1 still-encode backends, tried in push order before the `gamut-av1` tail.
-    /// Shared (not copied) by [`Clone`] — see [`AvifEncoder::push_backend`].
-    backends: Vec<BackendSlot>,
+    /// Pluggable AV1 codestream encoders, tried in push order before the `gamut-av1` tail.
+    /// Shared (not copied) by [`Clone`] — see [`AvifEncoder::with_backend`].
+    backends: EncoderRegistry,
 }
 
 /// Hand-written because a backend registry is not [`Debug`]: the backends are opaque
@@ -396,19 +334,12 @@ impl std::fmt::Debug for AvifEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AvifEncoder")
             .field("config", &self.config)
-            .field("transform", &self.transform)
             // Payload *lengths*, not bytes: a profile is kilobytes of binary and would swamp the
             // output, while its presence and size are what a caller debugging a build wants.
             .field("icc", &self.icc.as_ref().map(Vec::len))
-            .field("content_light_level", &self.content_light_level)
-            .field("mastering_display", &self.mastering_display)
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("c2pa", &self.c2pa)
-            .field("alpha_mode", &self.alpha_mode)
-            .field("keep_opaque_alpha", &self.keep_opaque_alpha)
-            .field("effort", &self.effort)
-            .field("threads", &self.threads)
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -434,26 +365,11 @@ impl AvifEncoder {
     /// explicit at the call site.
     #[must_use]
     pub fn lossless() -> Self {
-        Self {
-            // `AvifConfig::default()` outright, with no `mode:` override: lossless *is* the
-            // default mode, so writing it again changed nothing and the field could be deleted
-            // with the suite green (#110). `lossless_is_the_default_mode` below pins the coupling
-            // this relies on, so a change to the default fails there rather than silently making
-            // `lossless()` lossy.
-            config: AvifConfig::default(),
-            transform: ImageTransform::default(),
-            icc: None,
-            content_light_level: None,
-            mastering_display: None,
-            exif: None,
-            xmp: None,
-            c2pa: None,
-            alpha_mode: AlphaMode::Unassociated,
-            keep_opaque_alpha: false,
-            effort: Effort::default(),
-            threads: Some(NonZeroUsize::MIN),
-            backends: Vec::new(),
-        }
+        // `AvifConfig::default()` outright, with no `mode:` override: lossless *is* the default
+        // mode, so writing it again changed nothing and the field could be deleted with the suite
+        // green (#110). `lossless_is_the_default_mode` below pins the coupling this relies on, so
+        // a change to the default fails there rather than silently making `lossless()` lossy.
+        Self::from_config(AvifConfig::default())
     }
 
     /// Creates an encoder that produces a **lossy** still image at the given `quality` (`0..=100`,
@@ -465,26 +381,28 @@ impl AvifEncoder {
     /// [`AvifEncoder::with_chroma`]; note the identity matrix forces 4:4:4 (§6.4.2).
     #[must_use]
     pub fn lossy(quality: u8) -> Self {
+        Self::from_config(AvifConfig {
+            mode: AvifMode::Lossy,
+            quality,
+            matrix: MatrixCoefficients::Bt709,
+            chroma: ChromaSubsampling::Cs420,
+            ..AvifConfig::default()
+        })
+    }
+
+    /// Creates an encoder from a complete [`AvifConfig`] — typically one read back with
+    /// [`config`](Self::config) and adjusted. Every knob comes from `config` as given, with no
+    /// byte payload and no backend; [`lossless`](Self::lossless) and [`lossy`](Self::lossy) are
+    /// this over their preset configurations.
+    #[must_use]
+    pub fn from_config(config: AvifConfig) -> Self {
         Self {
-            config: AvifConfig {
-                mode: AvifMode::Lossy,
-                quality,
-                matrix: MatrixCoefficients::Bt709,
-                chroma: ChromaSubsampling::Cs420,
-                ..AvifConfig::default()
-            },
-            transform: ImageTransform::default(),
+            config,
             icc: None,
-            content_light_level: None,
-            mastering_display: None,
             exif: None,
             xmp: None,
             c2pa: None,
-            alpha_mode: AlphaMode::Unassociated,
-            keep_opaque_alpha: false,
-            effort: Effort::default(),
-            threads: Some(NonZeroUsize::MIN),
-            backends: Vec::new(),
+            backends: EncoderRegistry::new(),
         }
     }
 
@@ -655,63 +573,25 @@ impl AvifEncoder {
     /// Selects how an RGBA input's colour relates to its alpha — unassociated, already
     /// premultiplied, or to be premultiplied by the encoder — and so whether the file declares
     /// premultiplied colour with a `prem` item reference from the colour item to its alpha
-    /// auxiliary (ISO/IEC 23008-12 §6). See [`AlphaMode`] for each mode's contract; the default is
-    /// [`AlphaMode::Unassociated`].
+    /// auxiliary (ISO/IEC 23008-12 §6), and whether the encoder cleans the colour hidden under
+    /// transparency before a lossy encode. See [`AlphaMode`] for each mode's contract; the default
+    /// is [`AlphaMode::Unassociated`].
     ///
-    /// [`AlphaMode::PremultiplyOnEncode`] is the one that converts samples, and it is lossy in the
-    /// colour channels even on the lossless path. Ignored by every input without an alpha channel.
+    /// [`AlphaMode::PremultiplyOnEncode`] is the one that converts samples on every path, and it is
+    /// lossy in the colour channels even on the lossless path; [`AlphaMode::CleanOnEncode`]
+    /// rewrites only hidden colour, and only on the lossy path. Ignored by every input without an
+    /// alpha channel.
     #[must_use]
     pub fn with_alpha_mode(mut self, mode: AlphaMode) -> Self {
-        self.alpha_mode = mode;
+        self.config.alpha_mode = mode;
         self
     }
 
-    /// Declares whether the colour values of an RGBA input are **already premultiplied** by their
-    /// alpha — shorthand for [`with_alpha_mode`](Self::with_alpha_mode) with
-    /// [`AlphaMode::Premultiplied`] (`true`) or [`AlphaMode::Unassociated`] (`false`).
+    /// Selects whether an RGBA input whose every alpha sample is fully opaque keeps its **alpha
+    /// auxiliary item** ([`OpaqueAlpha::Keep`]) or is coded as the RGB image it is
+    /// indistinguishable from ([`OpaqueAlpha::Drop`], the default).
     ///
-    /// This is a **declaration, not a conversion**: the encoder multiplies nothing and divides
-    /// nothing, it only records the caller's assertion as a `prem` item reference. A caller
-    /// holding unassociated colour that wants the file stored premultiplied asks for
-    /// [`AlphaMode::PremultiplyOnEncode`] instead. Getting the declaration wrong darkens or halos
-    /// the edges of the displayed image, so the default is `false`.
-    ///
-    /// Ignored by every input without an alpha channel: with no alpha auxiliary there is nothing
-    /// for the reference to target.
-    #[must_use]
-    pub fn with_premultiplied_alpha(self, premultiplied: bool) -> Self {
-        self.with_alpha_mode(if premultiplied {
-            AlphaMode::Premultiplied
-        } else {
-            AlphaMode::Unassociated
-        })
-    }
-
-    /// Cleans the colour hidden under transparent pixels before a **lossy** encode: each
-    /// non-opaque pixel's colour is replaced by a blurred bleed of the visible edge around it, so
-    /// the coder spends no bits on colour nobody sees and the visible edge does not ring against
-    /// it.
-    ///
-    /// What a reader displays does not change: alpha and opaque pixels are untouched, a fully
-    /// transparent pixel's colour is invisible, and a semi-transparent pixel's colour moves only
-    /// within the range that premultiplies to the same value. Only the decoded *unassociated*
-    /// colour under transparency differs from the source, which is why it is opt-in (see
-    /// [`AvifConfig::clean_alpha`]).
-    ///
-    /// **Ignored by [`AvifMode::Lossless`]**, which stays bit-exact; by every
-    /// [`AlphaMode`] but [`AlphaMode::Unassociated`] — premultiplied colour is the composite
-    /// itself, and premultiplying already zeroes the colour under a fully transparent pixel; and by
-    /// every input without an alpha channel.
-    #[must_use]
-    pub fn with_clean_alpha(mut self, clean: bool) -> Self {
-        self.config.clean_alpha = clean;
-        self
-    }
-
-    /// Keeps the **alpha auxiliary item** of an RGBA input whose every alpha sample is fully
-    /// opaque, instead of coding it as the RGB image it is indistinguishable from.
-    ///
-    /// By default (`false`) an [`Rgba8`] or [`Rgba16`] input whose alpha is the sample type's
+    /// By default an [`Rgba8`] or [`Rgba16`] input whose alpha is the sample type's
     /// maximum everywhere — 255, or 65535 — is encoded exactly as the same pixels without their
     /// alpha channel would be through [`EncodeImage<Rgb8>`] or [`EncodeImage<Rgb16>`]: one colour
     /// item, no alpha auxiliary, no `auxl` or `prem` reference, and so byte for byte the file that
@@ -726,12 +606,12 @@ impl AvifEncoder {
     /// non-opaque sample anywhere keeps it, and so does every [`AlphaMode`] — premultiplying an
     /// opaque pixel changes nothing, so there is nothing for `prem` to declare.
     ///
-    /// Set `true` when a consumer needs the alpha item present regardless — one that branches on
-    /// it, or a pipeline comparing file structure across inputs. The check reads every alpha
-    /// sample once; dropping the channel copies the colour samples once.
+    /// Select [`OpaqueAlpha::Keep`] when a consumer needs the alpha item present regardless — one
+    /// that branches on it, or a pipeline comparing file structure across inputs. The check reads
+    /// every alpha sample once; dropping the channel copies the colour samples once.
     #[must_use]
-    pub fn with_keep_opaque_alpha(mut self, keep: bool) -> Self {
-        self.keep_opaque_alpha = keep;
+    pub fn with_opaque_alpha(mut self, opaque_alpha: OpaqueAlpha) -> Self {
+        self.config.opaque_alpha = opaque_alpha;
         self
     }
 
@@ -751,21 +631,14 @@ impl AvifEncoder {
     /// `av1C`, `colr`, `pixi` and the rest mirror the sequence header, which is the same at every
     /// effort — only the coded tile data differs.
     ///
-    /// A [pushed backend](Self::push_backend) receives the preset as
-    /// [`Av1EncodeRequest::effort`] — through [`AbiAv1StillEncoder`](crate::AbiAv1StillEncoder),
-    /// as the second byte of the `extra` blob (see there) — and is free to map it onto its own
-    /// effort scale or to ignore it.
+    /// A [backend](Self::with_backend) receives the preset as [`Av1EncodeRequest::effort`] —
+    /// through [`AbiAv1CodestreamEncoder`](crate::AbiAv1CodestreamEncoder), as the second byte of
+    /// the `extra` blob (see there) — and is free to map it onto its own effort scale or to ignore
+    /// it.
     #[must_use]
     pub fn with_effort(mut self, effort: Effort) -> Self {
-        self.effort = effort;
+        self.config.effort = effort;
         self
-    }
-
-    /// The [`Effort`] preset this encoder codes at — [`Effort::default`] ([`Effort::Balanced`]) unless
-    /// [`with_effort`](Self::with_effort) chose another.
-    #[must_use]
-    pub fn effort(&self) -> Effort {
-        self.effort
     }
 
     /// Caps the threads an encode may use: `Some(n)` uses at most `n`, and `None` uses
@@ -790,26 +663,19 @@ impl AvifEncoder {
     /// runs on the calling thread; `gamut-av1` codes a still's tiles one after another on any
     /// `wasm32` target.
     ///
-    /// A [pushed backend](Self::push_backend) runs on the calling thread and receives the colour
-    /// item's share as [`Av1EncodeRequest::threads`], a hint it may ignore.
+    /// A [backend](Self::with_backend) runs on the calling thread and receives the colour item's
+    /// share as [`Av1EncodeRequest::threads`], a hint it may ignore.
     #[must_use]
     pub fn with_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
-        self.threads = threads;
+        self.config.threads = threads;
         self
-    }
-
-    /// The thread cap this encoder runs under — `Some(1)` unless
-    /// [`with_threads`](Self::with_threads) chose another; `None` is the machine's available
-    /// parallelism.
-    #[must_use]
-    pub fn threads(&self) -> Option<NonZeroUsize> {
-        self.threads
     }
 
     /// The thread budget one encode runs under: the configured cap, or the machine's available
     /// parallelism for `None`.
     fn thread_budget(&self) -> NonZeroUsize {
-        self.threads
+        self.config
+            .threads
             .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
     }
 
@@ -823,7 +689,7 @@ impl AvifEncoder {
     ) -> Av1EncodeConfig {
         Av1EncodeConfig::new(base_q_idx)
             .with_color(colour)
-            .with_effort(self.effort)
+            .with_effort(self.config.effort)
             .with_threads(threads)
     }
 
@@ -831,7 +697,7 @@ impl AvifEncoder {
     /// scoped thread when the budget has room for one — each handed its share of the budget
     /// ([`split_threads`]). Returns the colour still, then the alpha one.
     ///
-    /// The colour still is the one a [pushed backend](Self::push_backend) may produce, so keeping
+    /// The colour still is the one a [backend](Self::with_backend) may produce, so keeping
     /// it on the calling thread keeps every backend call there. The order the two finish in is
     /// unobservable: each still is a pure function of its own inputs.
     fn colour_and_alpha<C, A>(&self, colour: C, alpha: A) -> Result<(EncodedStill, EncodedStill)>
@@ -863,9 +729,8 @@ impl AvifEncoder {
     }
 
     /// The colour samples an RGBA `image` codes as instead, when its alpha is to be dropped: every
-    /// alpha sample is the sample type's maximum and
-    /// [`with_keep_opaque_alpha`](Self::with_keep_opaque_alpha) is unset. `None` codes `image`
-    /// with its alpha auxiliary.
+    /// alpha sample is the sample type's maximum and [`OpaqueAlpha::Drop`] is selected. `None`
+    /// codes `image` with its alpha auxiliary.
     fn opaque_colour<P: Pixel, Q: Pixel>(
         &self,
         image: ImageRef<'_, P>,
@@ -874,7 +739,7 @@ impl AvifEncoder {
             .as_samples()
             .chunks_exact(P::CHANNELS)
             .all(|pixel| pixel[P::CHANNELS - 1] == P::Sample::MAX_VALUE);
-        if self.keep_opaque_alpha || !opaque {
+        if self.config.opaque_alpha == OpaqueAlpha::Keep || !opaque {
             return Ok(None);
         }
         convert(
@@ -884,30 +749,21 @@ impl AvifEncoder {
         .map(Some)
     }
 
-    /// Whether an RGBA encode cleans the colour under its transparent pixels: asked for, lossy,
-    /// and unassociated (see [`AvifEncoder::with_clean_alpha`]).
+    /// Whether an RGBA encode cleans the colour under its transparent pixels:
+    /// [`AlphaMode::CleanOnEncode`], on the lossy path.
     fn cleans_alpha(&self) -> bool {
-        self.config.clean_alpha
-            && self.config.mode == AvifMode::Lossy
-            && self.alpha_mode == AlphaMode::Unassociated
-    }
-
-    /// Whether the file declares its colour premultiplied with a `prem` item reference: every
-    /// [`AlphaMode`] but [`AlphaMode::Unassociated`].
-    fn declares_premultiplied(&self) -> bool {
-        self.alpha_mode != AlphaMode::Unassociated
+        self.config.alpha_mode == AlphaMode::CleanOnEncode && self.config.mode == AvifMode::Lossy
     }
 
     /// The RGBA samples an encode codes in place of `image`, or `None` to code `image` as given:
     /// the premultiplied image under [`AlphaMode::PremultiplyOnEncode`], the cleaned one when
-    /// [`cleans_alpha`](Self::cleans_alpha) applies. The two never both apply, since cleaning
-    /// requires unassociated colour.
+    /// [`cleans_alpha`](Self::cleans_alpha) applies.
     fn coded_rgba<P>(&self, image: ImageRef<'_, P>) -> Result<Option<ImageBuf<P>>>
     where
         P: Pixel,
         P::Sample: crate::clean_alpha::Sample,
     {
-        if self.alpha_mode == AlphaMode::PremultiplyOnEncode {
+        if self.config.alpha_mode == AlphaMode::PremultiplyOnEncode {
             let mut premultiplied = ImageBuf::new(image.as_samples().to_vec(), image.dimensions())?;
             premultiply_alpha(&mut premultiplied);
             Ok(Some(premultiplied))
@@ -1056,7 +912,7 @@ impl AvifEncoder {
     /// ([`with_transfer`](Self::with_transfer)). Calling this twice keeps the **last** value.
     #[must_use]
     pub fn with_content_light_level(mut self, level: ContentLightLevel) -> Self {
-        self.content_light_level = Some(level);
+        self.config.content_light_level = Some(level);
         self
     }
 
@@ -1071,7 +927,7 @@ impl AvifEncoder {
     /// this twice keeps the **last** value.
     #[must_use]
     pub fn with_mastering_display(mut self, display: MasteringDisplay) -> Self {
-        self.mastering_display = Some(display);
+        self.config.mastering_display = Some(display);
         self
     }
 
@@ -1129,30 +985,27 @@ impl AvifEncoder {
     /// as `len` zero bytes. Calling this, or [`with_c2pa`](Self::with_c2pa), twice keeps the
     /// **last** call — as every other payload builder on this encoder does.
     ///
-    /// # `len` is checked, at encode time
+    /// # Errors
     ///
-    /// This builder cannot fail — it returns `Self` — so an unusable `len` is refused by the
-    /// *encode* that follows, on every entry point including [`EncodeImage::encode_to_vec`]. This
-    /// crate refuses two lengths, both as
-    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) errors: one **below 8
-    /// bytes**, the size
-    /// of a JUMBF box header, which could not hold even an empty manifest store's outermost box;
-    /// and one so large that the framed box exceeds what a buffer can hold. Neither is merely
-    /// documented as a precondition, because in the release profile a downstream consumer builds
-    /// with, the second wrapped silently and produced a well-formed AVIF whose C2PA box no locator
-    /// — this crate's included — could find, while just below the wrap it panicked instead.
+    /// `len` is checked here, when the reservation is set, and the framed slot is built once,
+    /// so no encode can accept a reservation that cannot be written. Three lengths are refused:
     ///
-    /// On **64-bit** targets a **third** refusal sits between them: a top-level box carries a
-    /// 32-bit size field, so a `ContentProvenanceBox` at or beyond 4 GiB cannot be written. This
-    /// crate applies the bound [`IsoBmffImage::to_bytes`] enforces on every top-level box, *before*
-    /// the slot is allocated, and refuses with an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error — the kind the container writer
-    /// would give. It is the encoder's effective ceiling: on this framing the largest `len` that
-    /// clears it is `4_294_967_250`, and `4_294_967_251` is refused. It is `Unsupported` rather
-    /// than `InvalidInput` because such a box is well-formed ISOBMFF (a 64-bit `largesize`) that
-    /// the writer does not emit, so the limit is a capability, not bad input. On **32-bit** targets (`wasm32`) a buffer
-    /// holds under 2 GiB, so this crate's own `InvalidInput` is the effective ceiling and the
-    /// 4 GiB refusal is never reached.
+    /// - one **below 8 bytes**, the size of a JUMBF box header
+    ///   ([`gamut_core::c2pa::MIN_STORE_LEN`]), which could not hold even an empty manifest
+    ///   store's outermost box — an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
+    ///   error;
+    /// - one so large that the framed box exceeds what a buffer can hold — an
+    ///   [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error. Unchecked, the
+    ///   release profile wrapped silently and produced a well-formed AVIF whose C2PA box no
+    ///   locator — this crate's included — could find, while just below the wrap it panicked;
+    /// - on **64-bit** targets, one that puts the `ContentProvenanceBox` at or beyond 4 GiB, which
+    ///   the box's 32-bit size field cannot carry — the bound [`IsoBmffImage::to_bytes`] enforces
+    ///   on every top-level box — an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
+    ///   error, decided before the slot is allocated. On this framing the largest `len` that
+    ///   clears it is `4_294_967_250`, and `4_294_967_251` is refused. It is `Unsupported` rather
+    ///   than `InvalidInput` because such a box is well-formed ISOBMFF (a 64-bit `largesize`) that
+    ///   the writer does not emit. On **32-bit** targets (`wasm32`) a buffer holds under 2 GiB, so
+    ///   the `InvalidInput` refusal is the effective ceiling.
     ///
     /// Every `len` below the effective ceiling is written as asked. What remains beyond this
     /// crate's reach is the allocator's: a reservation the machine has no memory for aborts, as
@@ -1172,10 +1025,10 @@ impl AvifEncoder {
     /// re-encoding such a file through this builder would label it wrongly; producing an
     /// `original`/`update` pair is a manifest-update operation on an existing file, which this
     /// crate does not offer (issue #444's scope is reserve, write and locate).
-    #[must_use]
-    pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
-        self.c2pa = Some(SlotSource::Reserved(len));
-        self
+    pub fn with_c2pa_reserved(mut self, len: usize) -> Result<Self> {
+        let payload = content_provenance_reserved(C2paBoxPurpose::Manifest, len)?;
+        self.c2pa = Some(SlotSource::Reserved { len, payload });
+        Ok(self)
     }
 
     /// Writes `store` — a C2PA manifest store the caller has **already computed over this exact
@@ -1221,39 +1074,41 @@ impl AvifEncoder {
         self
     }
 
-    /// Encodes `image` as [`EncodeImage::encode_to_vec`] would, and additionally reports how the
-    /// file splits between the colour codestream, the alpha codestream and the container
+    /// Encodes `image`, appending it to `out` as [`EncodeImage::encode_image`] does, and reports
+    /// how many bytes the AVIF took ([`AvifEncodeReport::len`]), how the file splits between the
+    /// colour codestream, the alpha codestream and the container
     /// ([`AvifEncodeReport::color_bytes`], [`AvifEncodeReport::alpha_bytes`]), and where the
     /// container placed what a caller has to come back to — today the C2PA manifest-store slot
-    /// ([`AvifEncodeReport::c2pa`]).
+    /// ([`AvifEncodeReport::c2pa`]), whose offsets count from the first byte of this AVIF, not of
+    /// `out`.
     ///
-    /// The bytes are exactly the bytes `encode_to_vec` produces: this is the same encode with a
+    /// The bytes are exactly the bytes `encode_image` appends: this is the same encode with a
     /// report alongside, not a different code path, so the object-safe `EncodeImage` entry point
     /// stays what it is. Every figure is found by parsing the finished file with
     /// [`AvifContainer::parse`] — the sizes from the colour and alpha items' `iloc` extents, the
     /// range from [`AvifContainer::c2pa_slot`] — so what the encoder reports is, by construction,
     /// what a reader of the file finds. That parse is the price of the report over a plain
-    /// `encode_to_vec`: one container walk of the output, small beside the AV1 encode.
+    /// `encode_image`: one container walk of the output, small beside the AV1 encode.
     ///
     /// # Errors
     ///
-    /// As [`EncodeImage::encode_image`] — which includes an
-    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for a
-    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) length that cannot be framed — and
-    /// additionally an error if the file just written does not parse with
-    /// [`AvifContainer::parse`], or an
-    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a C2PA slot was configured but
-    /// cannot be located in it. Either would mean the writer and the reader disagree about the
-    /// container, and is never expected.
+    /// As [`EncodeImage::encode_image`], and additionally an error if the file just written does
+    /// not parse with [`AvifContainer::parse`], or an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a C2PA slot was
+    /// configured but cannot be located in it. Either would mean the writer and the reader
+    /// disagree about the container, and is never expected. `out` keeps whatever was appended
+    /// before the error.
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
-    ) -> Result<(Vec<u8>, AvifEncodeReport)>
+        out: &mut Vec<u8>,
+    ) -> Result<AvifEncodeReport>
     where
         Self: EncodeImage<P>,
     {
-        let bytes = self.encode_to_vec(image)?;
-        let container = AvifContainer::parse(&bytes)?;
+        let start = out.len();
+        let len = self.encode_image(image, out)?;
+        let container = AvifContainer::parse(&out[start..])?;
         let c2pa = match self.c2pa {
             None => None,
             Some(_) => {
@@ -1274,14 +1129,12 @@ impl AvifEncoder {
         let alpha_bytes = image
             .alpha_auxiliary_of(primary.id())
             .map_or(0, |alpha| alpha.as_isobmff_item().payload.len());
-        Ok((
-            bytes,
-            AvifEncodeReport {
-                c2pa,
-                color_bytes,
-                alpha_bytes,
-            },
-        ))
+        Ok(AvifEncodeReport {
+            len,
+            c2pa,
+            color_bytes,
+            alpha_bytes,
+        })
     }
 
     /// Encodes caller-supplied planes **as given** — no colour conversion, no resampling, no
@@ -1303,9 +1156,9 @@ impl AvifEncoder {
     /// 4:4:4, so lossless subsampled planes are refused.
     ///
     /// An alpha plane is always coded as the monochrome alpha auxiliary, opaque or not
-    /// ([`with_keep_opaque_alpha`](Self::with_keep_opaque_alpha) does not apply: the caller chose
-    /// to hand it over). [`AlphaMode::Premultiplied`] declares it with `prem`;
-    /// [`with_clean_alpha`](Self::with_clean_alpha) does not apply, since it rewrites colour.
+    /// ([`with_opaque_alpha`](Self::with_opaque_alpha) does not apply: the caller chose to hand it
+    /// over). [`AlphaMode::Premultiplied`] declares it with `prem`; [`AlphaMode::CleanOnEncode`]
+    /// codes as [`AlphaMode::Unassociated`], since cleaning rewrites colour.
     ///
     /// # Errors
     ///
@@ -1317,7 +1170,7 @@ impl AvifEncoder {
     ///   §5.5.2 can only signal as full range;
     /// - any error the AV1 encode, a pushed backend or the container writer returns.
     pub fn encode_raw_planes(&self, planes: RawPlanes<'_>, out: &mut Vec<u8>) -> Result<usize> {
-        if planes.has_alpha() && self.alpha_mode == AlphaMode::PremultiplyOnEncode {
+        if planes.has_alpha() && self.config.alpha_mode == AlphaMode::PremultiplyOnEncode {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "AVIF: raw planes are coded as given, so AlphaMode::PremultiplyOnEncode cannot \
@@ -1373,49 +1226,49 @@ impl AvifEncoder {
         Ok(out)
     }
 
-    /// Records an `irot` display [`Rotation`] applied by a reader (the stored pixels are unchanged,
-    /// so this captures e.g. a camera's EXIF orientation without re-encoding rotated samples).
-    /// [`Rotation::None`] writes no `irot`. Returns the updated encoder for chaining.
-    #[must_use]
-    pub fn with_rotation(mut self, rotation: Rotation) -> Self {
-        self.transform.rotation_ccw = rotation.quarter_turns();
-        self
-    }
-
-    /// Records an `imir` display [`Mirror`] applied by a reader (the stored pixels are unchanged).
-    /// Returns the updated encoder for chaining.
-    #[must_use]
-    pub fn with_mirror(mut self, mirror: Mirror) -> Self {
-        self.transform.mirror_axis = Some(mirror.axis());
-        self
-    }
-
-    /// Registers an [`Av1StillEncoder`] backend for the AV1 codestream, returning `&mut self` for
-    /// chaining.
+    /// Records the display [`Orientation`] a reader applies, as `irot`/`imir` item properties (the
+    /// stored pixels are unchanged, so this captures e.g. a camera's EXIF orientation without
+    /// re-encoding rotated samples). [`Orientation::Identity`] writes neither property.
     ///
-    /// Backends are tried in **push order**, ahead of the built-in `gamut-av1` encoder, which is
-    /// the implicit tail: for each encode the first backend whose
-    /// [`supports`](Av1StillEncoder::supports) returns `true` produces the codestream, a backend
-    /// that returns `false` is skipped, and if every backend declines the built-in encoder runs. A
-    /// backend that accepts a job and then fails propagates its error — the built-in encoder is
-    /// **not** used as a silent fallback, because substituting a different encoder would change
-    /// the output bytes unpredictably. An encoder with no backends is byte-for-byte the encoder
-    /// this crate shipped before backends existed.
+    /// Each orientation is written in the form libavif writes it: a quarter-turn `irot`, a mirror
+    /// `imir`, or — for [`Orientation::Transpose`] and [`Orientation::AntiTranspose`] — an `irot`
+    /// followed by a top↔bottom `imir`, the MIAF order (§7.3.6.7). A reader that composes them
+    /// (`gamut_heif::HeifItem::orientation`) reads back exactly the orientation set here.
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
+        self.config.orientation = orientation;
+        self
+    }
+
+    /// Adds an [`Av1CodestreamEncoder`] backend for the AV1 codestream.
+    ///
+    /// Backends are tried in **the order they are added**, ahead of the built-in `gamut-av1`
+    /// encoder, which is the implicit tail: for each encode the first backend whose
+    /// [`supports`](Av1CodestreamEncoder::supports) returns `true` produces the codestream, a
+    /// backend that returns `false` is skipped, and if every backend declines the built-in encoder
+    /// runs. `supports` is the **only** fall-through: a backend that accepts a job and then fails
+    /// returns its error unchanged — the built-in encoder is **not** used as a silent fallback,
+    /// because substituting a different encoder would change the output bytes unpredictably. An
+    /// encoder with no backends is byte-for-byte the encoder this crate shipped before backends
+    /// existed.
+    ///
+    /// `Send` is required here, where the backend is inserted, not by the trait: the encoder is
+    /// `Send` and shares its backends across clones.
     ///
     /// # Cloning shares backends
     ///
     /// Backends are held behind [`Arc`]`<`[`Mutex`]`<…>>`, so [`clone`](Clone::clone)ing an
     /// `AvifEncoder` yields an encoder that drives **the same** backend objects, not copies. A
     /// stateful backend therefore observes the encodes of every clone, and clones made *before* a
-    /// `push_backend` call do not gain the new backend (the registry vector itself is per-encoder).
+    /// `with_backend` call do not gain the new backend (the list itself is per-encoder).
     ///
     /// ```
-    /// use gamut_avif::{Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
-    /// use gamut_color::Planar8;
+    /// use gamut_avif::{Av1CodestreamEncoder, Av1EncodeRequest, AvifEncoder};
+    /// use gamut_color::{Planar8, Planar16};
     ///
     /// // A backend that declines everything, so encoding still uses the built-in encoder.
     /// struct Decline;
-    /// impl Av1StillEncoder for Decline {
+    /// impl Av1CodestreamEncoder for Decline {
     ///     fn supports(&mut self, _req: &Av1EncodeRequest) -> bool { false }
     ///     fn encode_still(
     ///         &mut self,
@@ -1426,10 +1279,10 @@ impl AvifEncoder {
     ///     }
     /// }
     ///
-    /// let mut encoder = AvifEncoder::new();
-    /// encoder.push_backend(Decline);
+    /// let encoder = AvifEncoder::new().with_backend(Decline);
     /// ```
-    pub fn push_backend(&mut self, backend: impl Av1StillEncoder + 'static) -> &mut Self {
+    #[must_use]
+    pub fn with_backend(mut self, backend: impl Av1CodestreamEncoder + Send + 'static) -> Self {
         self.backends.push(Arc::new(Mutex::new(backend)));
         self
     }
@@ -1493,23 +1346,21 @@ impl AvifEncoder {
         // sit with the other descriptive properties ahead of the transformative ones. Appended after
         // the `colr`s for the same reason the ICC one is: an encoder without them keeps its
         // `ipco`/`ipma` indices.
-        if let Some(level) = self.content_light_level {
+        if let Some(level) = self.config.content_light_level {
             properties.push(Property::new(false, PropertyKind::ContentLightLevel(level)));
         }
-        if let Some(display) = self.mastering_display {
+        if let Some(display) = self.config.mastering_display {
             properties.push(Property::new(
                 false,
                 PropertyKind::MasteringDisplayColourVolume(display),
             ));
         }
         // Transformative properties are essential (MIAF §7.3.6.7); applied irot-then-imir.
-        if self.transform.rotation_ccw != 0 {
-            properties.push(Property::new(
-                true,
-                PropertyKind::Rotation(self.transform.rotation_ccw),
-            ));
+        let (quarter_turns, mirror_axis) = irot_imir(self.config.orientation);
+        if quarter_turns != 0 {
+            properties.push(Property::new(true, PropertyKind::Rotation(quarter_turns)));
         }
-        if let Some(axis) = self.transform.mirror_axis {
+        if let Some(axis) = mirror_axis {
             properties.push(Property::new(true, PropertyKind::Mirror(axis)));
         }
         let mut items = vec![
@@ -1525,7 +1376,7 @@ impl AvifEncoder {
             items.push(alpha_item(id, alpha, dims));
             // `prem` runs colour image → alpha auxiliary, so the reference lives on the *colour*
             // item — the opposite direction to the `auxl` the auxiliary owns.
-            if self.declares_premultiplied() {
+            if self.config.alpha_mode.declares_premultiplied() {
                 items[0]
                     .references
                     .push(ItemReference::new(*b"prem", vec![id]));
@@ -1558,12 +1409,8 @@ impl AvifEncoder {
         // §A.5.3) — and the slot is zeros or the caller's store behind the §A.5.1 framing.
         if let Some(slot) = &self.c2pa {
             let payload = match slot {
-                // The reserved zeros are written once, into the payload buffer itself. A length
-                // that cannot be framed is refused here rather than truncated: see
-                // `content_provenance_reserved`.
-                SlotSource::Reserved(len) => {
-                    content_provenance_reserved(C2paBoxPurpose::Manifest, *len)?
-                }
+                // Framed — and so checked — when the reservation was set.
+                SlotSource::Reserved { payload, .. } => payload.clone(),
                 SlotSource::Store(store) => {
                     content_provenance_payload(C2paBoxPurpose::Manifest, store)
                 }
@@ -1590,7 +1437,7 @@ impl AvifEncoder {
             colour,
             chroma,
             BitDepth::Eight,
-            self.effort,
+            self.config.effort,
             threads,
         );
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::Eight(planes))?
@@ -1603,8 +1450,7 @@ impl AvifEncoder {
     }
 
     /// The high-bit-depth counterpart of [`colour_still`](Self::colour_still): the same registry,
-    /// entered through [`Av1StillEncoder::encode_still16`], whose default declines so a backend
-    /// written against the 8-bit contract falls through to the built-in tail.
+    /// entered through [`Av1CodestreamEncoder::encode_still16`].
     fn colour_still16(
         &self,
         planes: &Planar16,
@@ -1625,7 +1471,7 @@ impl AvifEncoder {
             colour,
             chroma,
             bit_depth,
-            self.effort,
+            self.config.effort,
             threads,
         );
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::High(planes))? {
@@ -1651,11 +1497,28 @@ impl AvifEncoder {
     }
 }
 
+/// The `irot` quarter turns (anti-clockwise, `0` for none) and the `imir` axis (`0` exchanges top
+/// and bottom, `1` left and right; `None` for none) that write `orientation`, applied in that
+/// order — the forms libavif's EXIF-orientation mapping writes, so a mirrored rotation is always
+/// a top↔bottom `imir` after its `irot`.
+fn irot_imir(orientation: Orientation) -> (u8, Option<u8>) {
+    match orientation {
+        Orientation::Identity => (0, None),
+        Orientation::FlipHorizontal => (0, Some(1)),
+        Orientation::Rotate180 => (2, None),
+        Orientation::FlipVertical => (0, Some(0)),
+        Orientation::Transpose => (1, Some(0)),
+        Orientation::Rotate90Cw => (3, None),
+        Orientation::AntiTranspose => (3, Some(0)),
+        Orientation::Rotate90Ccw => (1, None),
+    }
+}
+
 /// Encodes **monochrome** planes, always through the built-in `gamut-av1` encoder.
 ///
-/// The [`Av1StillEncoder`] seam is deliberately skipped. Its v1 contract fixes 8-bit 4:4:4
-/// `seq_profile = 1` (see [`Av1StillEncoder::encode_still`]), and
-/// [`supports`](Av1StillEncoder::supports) is handed an [`Av1EncodeRequest`] that cannot express
+/// The [`Av1CodestreamEncoder`] seam is deliberately skipped. Its v1 contract fixes 8-bit 4:4:4
+/// `seq_profile = 1` (see [`Av1CodestreamEncoder::encode_still`]), and
+/// [`supports`](Av1CodestreamEncoder::supports) is handed an [`Av1EncodeRequest`] that cannot express
 /// anything else — so a backend registered against that contract has no way to decline a
 /// monochrome job, and would be given single-plane input it never agreed to encode. Widening the
 /// request is the additive change that opens this path to backends (`STATUS.md`).
@@ -2328,70 +2191,60 @@ mod tests {
     }
 
     #[test]
-    fn cleans_alpha_only_when_asked_lossy_and_unassociated() {
+    fn cleans_alpha_only_on_clean_on_encode_and_lossy() {
         assert!(!AvifEncoder::lossy(50).cleans_alpha(), "opt-in");
-        assert!(AvifEncoder::lossy(50).with_clean_alpha(true).cleans_alpha());
+        let clean = AlphaMode::CleanOnEncode;
+        assert!(AvifEncoder::lossy(50).with_alpha_mode(clean).cleans_alpha());
         assert!(
             !AvifEncoder::lossy(50)
-                .with_clean_alpha(true)
-                .with_clean_alpha(false)
+                .with_alpha_mode(clean)
+                .with_alpha_mode(AlphaMode::Unassociated)
                 .cleans_alpha(),
             "the last call wins"
         );
         assert!(
             !AvifEncoder::lossless()
-                .with_clean_alpha(true)
+                .with_alpha_mode(clean)
                 .cleans_alpha(),
             "lossless stays bit-exact"
         );
-        assert!(
-            !AvifEncoder::lossy(50)
-                .with_clean_alpha(true)
-                .with_premultiplied_alpha(true)
-                .cleans_alpha(),
-            "premultiplied colour is the composite itself"
-        );
-        assert!(
-            !AvifEncoder::lossy(50)
-                .with_clean_alpha(true)
-                .with_alpha_mode(AlphaMode::PremultiplyOnEncode)
-                .cleans_alpha(),
-            "premultiplying already zeroes the hidden colour"
-        );
+        for mode in [AlphaMode::Premultiplied, AlphaMode::PremultiplyOnEncode] {
+            assert!(
+                !AvifEncoder::lossy(50).with_alpha_mode(mode).cleans_alpha(),
+                "premultiplied colour is the composite itself: {mode:?}"
+            );
+        }
     }
 
     #[test]
-    fn alpha_mode_discriminants_are_the_frozen_c_abi_values() {
-        // Plain configuration data bound for the C boundary: append-only discriminants.
-        assert_eq!(AlphaMode::Unassociated as u8, 0);
-        assert_eq!(AlphaMode::Premultiplied as u8, 1);
-        assert_eq!(AlphaMode::PremultiplyOnEncode as u8, 2);
-        assert_eq!(AlphaMode::default(), AlphaMode::Unassociated);
+    fn prem_is_declared_by_the_premultiplied_modes_only() {
+        let declares = |encoder: AvifEncoder| encoder.config().alpha_mode.declares_premultiplied();
+        assert!(!declares(AvifEncoder::new()), "the default");
+        assert!(!declares(
+            AvifEncoder::new().with_alpha_mode(AlphaMode::Unassociated)
+        ));
+        assert!(declares(
+            AvifEncoder::new().with_alpha_mode(AlphaMode::Premultiplied)
+        ));
+        assert!(declares(
+            AvifEncoder::new().with_alpha_mode(AlphaMode::PremultiplyOnEncode)
+        ));
+        assert!(!declares(
+            AvifEncoder::new().with_alpha_mode(AlphaMode::CleanOnEncode)
+        ));
     }
 
     #[test]
-    fn prem_is_declared_by_every_alpha_mode_but_unassociated() {
-        let declares = |mode| {
-            AvifEncoder::new()
-                .with_alpha_mode(mode)
-                .declares_premultiplied()
-        };
-        assert!(!AvifEncoder::new().declares_premultiplied(), "the default");
-        assert!(!declares(AlphaMode::Unassociated));
-        assert!(declares(AlphaMode::Premultiplied));
-        assert!(declares(AlphaMode::PremultiplyOnEncode));
-    }
-
-    #[test]
-    fn with_premultiplied_alpha_selects_the_declaring_modes() {
-        let mode = |premultiplied| {
+    fn with_alpha_mode_keeps_the_last_mode() {
+        let mode = |last| {
             AvifEncoder::new()
                 .with_alpha_mode(AlphaMode::PremultiplyOnEncode)
-                .with_premultiplied_alpha(premultiplied)
+                .with_alpha_mode(last)
+                .config()
                 .alpha_mode
         };
-        assert_eq!(mode(true), AlphaMode::Premultiplied);
-        assert_eq!(mode(false), AlphaMode::Unassociated);
+        assert_eq!(mode(AlphaMode::Premultiplied), AlphaMode::Premultiplied);
+        assert_eq!(mode(AlphaMode::Unassociated), AlphaMode::Unassociated);
     }
 
     #[test]
@@ -2405,12 +2258,11 @@ mod tests {
             "the fixture is not opaque"
         );
         let encode = |enc: AvifEncoder, px: &[u8]| {
-            enc.with_clean_alpha(true)
-                .encode_to_vec(ImageRef::<Rgba8>::new(px, banded()).unwrap())
+            enc.encode_to_vec(ImageRef::<Rgba8>::new(px, banded()).unwrap())
                 .unwrap()
         };
         // Coded as a caller handing over the premultiplied image would have it coded — on both
-        // paths, and with cleaning (asked for here) not applied on top.
+        // paths.
         for enc in [AvifEncoder::lossless(), AvifEncoder::lossy(50)] {
             assert_eq!(
                 encode(
@@ -2514,12 +2366,18 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(
-            encode(AvifEncoder::lossy(50).with_clean_alpha(true), &px),
+            encode(
+                AvifEncoder::lossy(50).with_alpha_mode(AlphaMode::CleanOnEncode),
+                &px
+            ),
             encode(AvifEncoder::lossy(50), &cleaned)
         );
         // Not applying is coding the source as given.
         assert_eq!(
-            encode(AvifEncoder::lossless().with_clean_alpha(true), &px),
+            encode(
+                AvifEncoder::lossless().with_alpha_mode(AlphaMode::CleanOnEncode),
+                &px
+            ),
             encode(AvifEncoder::lossless(), &px)
         );
     }
@@ -2537,7 +2395,10 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(
-            encode(AvifEncoder::lossy(50).with_clean_alpha(true), &px),
+            encode(
+                AvifEncoder::lossy(50).with_alpha_mode(AlphaMode::CleanOnEncode),
+                &px
+            ),
             encode(AvifEncoder::lossy(50), &cleaned)
         );
     }
@@ -2857,7 +2718,7 @@ mod tests {
         // The C2PA slot prints its kind and length — a reserved slot is distinguishable from a
         // caller-supplied store of the same size, and neither dumps bytes.
         assert!(bare.contains("c2pa: None"), "{bare}");
-        let reserved = format!("{:?}", AvifEncoder::new().with_c2pa_reserved(4096));
+        let reserved = format!("{:?}", AvifEncoder::new().with_c2pa_reserved(4096).unwrap());
         assert!(
             reserved.contains("c2pa: Some(Reserved(4096))"),
             "{reserved}"
@@ -2881,13 +2742,18 @@ mod tests {
             (0usize, "at least 8 bytes"),
             (usize::MAX, "exceeds the largest"),
         ] {
-            let mut out = Vec::new();
             let err = AvifEncoder::new()
                 .with_c2pa_reserved(len)
-                .encode_image(img, &mut out)
                 .expect_err("an unusable reservation is refused");
             assert!(format!("{err}").contains(reason), "{len}: {err}");
         }
+        // The smallest usable reservation is accepted and encodes.
+        let mut out = Vec::new();
+        AvifEncoder::new()
+            .with_c2pa_reserved(8)
+            .unwrap()
+            .encode_image(img, &mut out)
+            .unwrap();
     }
 
     #[test]
@@ -2898,7 +2764,7 @@ mod tests {
         // one `uuid` box with the §A.5.1 user type, placed `AfterFtyp` (§A.5.3), whose payload is
         // the §A.5.1.2 framing around `len` zero bytes.
         let img = IsoBmffImage::parse(&encode_with(
-            AvifEncoder::new().with_c2pa_reserved(96),
+            AvifEncoder::new().with_c2pa_reserved(96).unwrap(),
             34,
             18,
         ))
@@ -2931,16 +2797,18 @@ mod tests {
     fn the_last_c2pa_call_wins_whichever_kind_it_is() {
         // The two knobs set one slot, so the later call replaces the earlier one in both orders.
         let store = payload(0x77, 8);
-        assert_eq!(
+        assert!(matches!(
             AvifEncoder::new()
                 .with_c2pa(&store)
                 .with_c2pa_reserved(16)
+                .unwrap()
                 .c2pa,
-            Some(SlotSource::Reserved(16))
-        );
+            Some(SlotSource::Reserved { len: 16, .. })
+        ));
         assert_eq!(
             AvifEncoder::new()
                 .with_c2pa_reserved(16)
+                .unwrap()
                 .with_c2pa(&store)
                 .c2pa,
             Some(SlotSource::Store(store))
@@ -2987,35 +2855,48 @@ mod tests {
         out
     }
 
-    #[test]
-    fn with_rotation_emits_irot_and_none_is_omitted() {
-        // A rotation emits an `irot` whose body byte is the angle. `irot` lives in `meta`, which
-        // precedes `mdat`, so the first occurrence is the property box (not stray OBU bytes).
-        let f = encode_with(AvifEncoder::new().with_rotation(Rotation::Ccw90), 4, 4);
-        let p = f
-            .windows(4)
-            .position(|w| w == b"irot")
-            .expect("irot present");
-        assert_eq!(f[p + 4] & 0x03, 1, "Ccw90 ⇒ irot angle = 1");
-        // Rotation::None writes no `irot`.
-        let f0 = encode_with(AvifEncoder::new().with_rotation(Rotation::None), 4, 4);
-        assert!(
-            !f0.windows(4).any(|w| w == b"irot"),
-            "Rotation::None ⇒ no irot"
-        );
+    /// The `irot` angle and `imir` axis bytes `f` carries, in that order (`None` for an absent
+    /// box). Both live in `meta`, which precedes `mdat`, so the first occurrence of each type is
+    /// the property box, not stray OBU bytes.
+    fn irot_imir_of(f: &[u8]) -> (Option<u8>, Option<u8>) {
+        let byte =
+            |ty: &[u8; 4], mask: u8| f.windows(4).position(|w| w == ty).map(|p| f[p + 4] & mask);
+        (byte(b"irot", 0x03), byte(b"imir", 0x01))
     }
 
     #[test]
-    fn with_mirror_emits_imir_axis() {
-        // ISO/IEC 23008-12:2022 §6.5.12: axis 1 exchanges left/right, axis 0 top/bottom.
-        for (mirror, axis) in [(Mirror::LeftRight, 1u8), (Mirror::TopBottom, 0)] {
-            let f = encode_with(AvifEncoder::new().with_mirror(mirror), 4, 4);
-            let p = f
-                .windows(4)
-                .position(|w| w == b"imir")
-                .expect("imir present");
-            assert_eq!(f[p + 4] & 0x01, axis, "{mirror:?} ⇒ imir axis = {axis}");
-            assert!(!f.windows(4).any(|w| w == b"irot"), "mirror only ⇒ no irot");
+    fn with_orientation_writes_libavifs_irot_and_imir() {
+        // libavif's EXIF-orientation mapping; ISO/IEC 23008-12:2022 §6.5.12: axis 1 exchanges
+        // left/right, axis 0 top/bottom. Identity writes neither box.
+        for (orientation, expected) in [
+            (Orientation::Identity, (None, None)),
+            (Orientation::FlipHorizontal, (None, Some(1))),
+            (Orientation::Rotate180, (Some(2), None)),
+            (Orientation::FlipVertical, (None, Some(0))),
+            (Orientation::Transpose, (Some(1), Some(0))),
+            (Orientation::Rotate90Cw, (Some(3), None)),
+            (Orientation::AntiTranspose, (Some(3), Some(0))),
+            (Orientation::Rotate90Ccw, (Some(1), None)),
+        ] {
+            let f = encode_with(AvifEncoder::new().with_orientation(orientation), 4, 4);
+            assert_eq!(irot_imir_of(&f), expected, "{orientation:?}");
+        }
+    }
+
+    #[test]
+    fn every_orientation_reads_back_through_the_heif_lens() {
+        // The reader composes `irot` then `imir` into one orientation; each of the eight the
+        // encoder writes must come back as itself.
+        for exif in 1..=8 {
+            let orientation = Orientation::from_exif_value(exif).unwrap();
+            let f = encode_with(AvifEncoder::new().with_orientation(orientation), 4, 4);
+            let container = AvifContainer::parse(&f).unwrap();
+            assert_eq!(
+                container.image().primary_item().orientation(),
+                orientation,
+                "EXIF {exif}"
+            );
+            assert!(container.image().primary_item().is_miaf_transform_ordered());
         }
     }
 
