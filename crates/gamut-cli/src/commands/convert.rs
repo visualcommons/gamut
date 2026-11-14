@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::{Args, ValueEnum};
-use gamut::avif::{AvifEncodeReport, AvifEncoder, Effort as AvifEffort};
+use gamut::avif::{AlphaMode, AvifEncodeReport, AvifEncoder, Effort as AvifEffort};
 use gamut::capability::{Direction, Format as MetadataFormat, supports};
 use gamut::color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
 use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
@@ -712,14 +712,13 @@ fn encode(
             }
             // The report splits the file into its colour and alpha codestreams and the container
             // around them, for the summary line's size breakdown.
-            let (bytes, report) = match &image {
-                NativeImage::Gray8(img) => encoder.encode_with_report(img.as_ref())?,
-                NativeImage::Rgb8(img) => encoder.encode_with_report(img.as_ref())?,
-                NativeImage::Rgba8(img) => encoder.encode_with_report(img.as_ref())?,
-                NativeImage::Rgb16(img) => encoder.encode_with_report(img.as_ref())?,
-                NativeImage::Rgba16(img) => encoder.encode_with_report(img.as_ref())?,
+            let report = match &image {
+                NativeImage::Gray8(img) => encoder.encode_with_report(img.as_ref(), &mut out)?,
+                NativeImage::Rgb8(img) => encoder.encode_with_report(img.as_ref(), &mut out)?,
+                NativeImage::Rgba8(img) => encoder.encode_with_report(img.as_ref(), &mut out)?,
+                NativeImage::Rgb16(img) => encoder.encode_with_report(img.as_ref(), &mut out)?,
+                NativeImage::Rgba16(img) => encoder.encode_with_report(img.as_ref(), &mut out)?,
             };
-            out = bytes;
             avif = Some(report);
             (image.byte_len(), dims)
         }
@@ -1039,8 +1038,10 @@ fn avif_encoder(args: &ConvertArgs) -> AvifEncoder {
     // `0` is "every core", which the encoder spells `None`, exactly what `NonZeroUsize::new` gives.
     encoder = encoder
         .with_effort(effort)
-        .with_threads(NonZeroUsize::new(args.avif_threads))
-        .with_clean_alpha(args.avif_clean_alpha);
+        .with_threads(NonZeroUsize::new(args.avif_threads));
+    if args.avif_clean_alpha {
+        encoder = encoder.with_alpha_mode(AlphaMode::CleanOnEncode);
+    }
     if let Some(quality) = args.avif_alpha_quality {
         encoder = encoder.with_alpha_quality(quality);
     }
@@ -1353,7 +1354,7 @@ mod tests {
     use std::path::PathBuf;
 
     use clap::Parser;
-    use gamut::avif::AvifMode;
+    use gamut::avif::{AlphaMode, AvifMode};
 
     use super::{
         AvifEffort, AvifEncoder, BitDepth, ChromaSubsampling, ConvertArgs, Dimensions,
@@ -1557,13 +1558,10 @@ mod tests {
         // Each `--avif-*` flag only overrides; without them the encoder is the codec's own.
         let encoder = avif_with(&[]);
         let default = AvifEncoder::lossless();
+        // The configuration is every plain-data knob, effort and threads included.
         assert_eq!(encoder.config(), default.config());
-        assert_eq!(encoder.effort(), default.effort());
-        assert_eq!(encoder.threads(), default.threads());
         let lossy = avif_with(&["--avif-lossy", "--quality", "40"]);
         assert_eq!(lossy.config(), AvifEncoder::lossy(40).config());
-        // Effort only moves lossy output, so that is where the flag's default must agree.
-        assert_eq!(lossy.effort(), AvifEncoder::lossy(40).effort());
     }
 
     #[test]
@@ -1583,15 +1581,18 @@ mod tests {
         // flag counts slowest first and the list runs fastest first, so the list is read reversed.
         for (speed, preset) in AvifEffort::ALL.iter().rev().enumerate() {
             let speed = speed.to_string();
-            assert_eq!(avif_with(&["--avif-speed", &speed]).effort(), *preset);
+            assert_eq!(
+                avif_with(&["--avif-speed", &speed]).config().effort,
+                *preset
+            );
         }
         // The flag's ends are the codec's: 0 is the full search and 3 the fastest preset.
         assert_eq!(
-            avif_with(&["--avif-speed", "0"]).effort(),
+            avif_with(&["--avif-speed", "0"]).config().effort,
             AvifEffort::Thorough
         );
         assert_eq!(
-            avif_with(&["--avif-speed", "3"]).effort(),
+            avif_with(&["--avif-speed", "3"]).config().effort,
             AvifEffort::Fastest
         );
         let past_the_end = AvifEffort::ALL.len().to_string();
@@ -1601,14 +1602,14 @@ mod tests {
     #[test]
     fn avif_threads_caps_the_encoder() {
         assert_eq!(
-            avif_with(&["--avif-threads", "3"]).threads(),
+            avif_with(&["--avif-threads", "3"]).config().threads,
             NonZeroUsize::new(3)
         );
     }
 
     #[test]
     fn avif_threads_zero_is_every_core() {
-        assert_eq!(avif_with(&["--avif-threads", "0"]).threads(), None);
+        assert_eq!(avif_with(&["--avif-threads", "0"]).config().threads, None);
     }
 
     #[test]
@@ -1624,7 +1625,11 @@ mod tests {
 
     #[test]
     fn avif_clean_alpha_reaches_the_encoder() {
-        assert!(avif_with(&["--avif-clean-alpha"]).config().clean_alpha);
+        assert_eq!(
+            avif_with(&["--avif-clean-alpha"]).config().alpha_mode,
+            AlphaMode::CleanOnEncode
+        );
+        assert_eq!(avif_with(&[]).config().alpha_mode, AlphaMode::Unassociated);
     }
 
     #[test]

@@ -62,12 +62,16 @@ fn main() -> Result<()> {
     // --- direction 1 -----------------------------------------------------------------------
     let rgb = source_rgb();
     let filled = reserve_then_fill(AVIF_MIME, |len| {
-        let (bytes, report) = AvifEncoder::new()
+        let mut bytes = Vec::new();
+        let report = AvifEncoder::new()
             .with_c2pa_reserved(len)
-            .encode_with_report(
-                ImageRef::<Rgb8>::new(&rgb, Dimensions::new(W, H).expect("non-zero"))
-                    .expect("buffer matches dimensions"),
-            )
+            .and_then(|encoder| {
+                encoder.encode_with_report(
+                    ImageRef::<Rgb8>::new(&rgb, Dimensions::new(W, H).expect("non-zero"))
+                        .expect("buffer matches dimensions"),
+                    &mut bytes,
+                )
+            })
             .map_err(|e| OracleError::Asset(e.to_string()))?;
         let range = report
             .c2pa

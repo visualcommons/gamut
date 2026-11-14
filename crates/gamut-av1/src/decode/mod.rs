@@ -1,7 +1,7 @@
 //! AV1 still-image decoder (AV1 §5 parsing, §7 decoding process).
 //!
 //! The mirror of this crate's encoder, and the pure-Rust software tail behind
-//! `gamut_avif::Av1StillDecoder`. Where the encoder chooses a subset of AV1's tools, a decoder
+//! `gamut_avif::Av1CodestreamDecoder`. Where the encoder chooses a subset of AV1's tools, a decoder
 //! must accept whatever a conformant encoder produced — so these modules follow the spec's syntax
 //! tables rather than the encoder's choices, and refuse, with a typed
 //! [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, any tool that is

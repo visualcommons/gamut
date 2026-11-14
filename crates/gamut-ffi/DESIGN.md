@@ -143,9 +143,10 @@ gamut_status_t gamut_png_encoder_push_backend(GamutPngEncoder *encoder,
   item's `ispe` dimensions and is built per item at decode time, borrowing the stored backend
   through `gamut-codec-abi`'s `&mut` blanket impls (destroy-on-drop stays with the handle).
   There is no software HEVC tail (issue #18); an empty registry decodes nothing.
-- **AVIF decode is excluded**: the Rust API has no decode registry — a single caller-supplied
-  `Av1StillDecoder` is threaded per call, and the planned in-house decoder (issue #259) will
-  make it optional. The decode direction joins the C surface when that registry exists.
+- **AVIF decode is excluded**: `AvifDecoder::with_backend` keeps `Av1CodestreamDecoder`
+  backends in a registry, but `gamut-avif` has no `gamut-codec-abi` adapter for that trait, so
+  a `(vtable, ctx)` pair has no type to be wrapped in. The decode direction joins the C surface
+  with that adapter; `SEAMS.txt` lists the seam so its gaining one is noticed.
 
 ## AVIF consumer entry points (issue #666)
 
@@ -170,12 +171,14 @@ void gamut_avif_image_free(GamutAvifImage *image);
 
 - **Setters** map the `AvifEncoder::with_*` builders one-to-one
   (`gamut_avif_encoder_set_{matrix,primaries,transfer,color_range,chroma,bit_depth,
-  alpha_quality,premultiplied_alpha,rotation,mirror,icc_profile,exif,xmp,c2pa_reserved,
+  alpha_quality,alpha_mode,opaque_alpha,orientation,icc_profile,exif,xmp,c2pa_reserved,
   c2pa}`). CICP values cross as their
   ITU-T H.273 code points and bit depth as a bit count, mapped by `gamut-color`'s own
   `from_code_point`/`from_flag`/`from_bits` (a direct dependency of this crate for that reason);
-  chroma subsampling and mirror cross as `GAMUT_CHROMA_SUBSAMPLING_*` / `GAMUT_AVIF_MIRROR_*`
-  constants, the chroma ones const-locked to `ChromaSubsampling`'s discriminants. A value the
+  chroma subsampling, alpha mode and opaque-alpha handling cross as `GAMUT_CHROMA_SUBSAMPLING_*`
+  / `GAMUT_AVIF_ALPHA_*` / `GAMUT_AVIF_OPAQUE_ALPHA_*` constants, const-locked to
+  `ChromaSubsampling`'s, `AlphaMode`'s and `OpaqueAlpha`'s discriminants, and orientation as
+  its EXIF value (`gamut_core::Orientation`'s discriminant). A value the
   mapping rejects returns `GAMUT_STATUS_UNSUPPORTED` (a code point or depth gamut does not model)
   or `GAMUT_STATUS_INVALID_INPUT` (not one of the defined flag/constant values) and leaves the
   encoder unchanged; a null handle is `GAMUT_STATUS_NULL_ARGUMENT` before either. Lossy mode and
@@ -183,7 +186,7 @@ void gamut_avif_image_free(GamutAvifImage *image);
 - **C2PA slot** (issue #673): `gamut_avif_encoder_set_c2pa_reserved(encoder, size_t len)` and
   `gamut_avif_encoder_set_c2pa(encoder, const uint8_t *store, size_t len)` map
   `with_c2pa_reserved` / `with_c2pa` under the setter conventions above (an unusable reservation
-  length is refused by the encode, as in Rust). Every encode entry point runs
+  length is refused by the setter, as in Rust, and leaves the encoder unchanged). Every encode entry point runs
   `encode_with_report` — the same bytes as `encode_to_vec` — and the handle keeps the report's
   slot range, read back with
   `gamut_avif_encoder_c2pa_slot(const GamutAvifEncoder *, bool *present, size_t *offset,

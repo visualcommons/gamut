@@ -121,11 +121,8 @@ fn sixteen_bit_png_codes_at_twelve_bits() {
     let avif = convert("rgb16", &png::<Rgb16>(PngEncoder::new(), &rgb16), &[]);
     let container = AvifContainer::parse(&avif).unwrap();
     let config = container
-        .image()
-        .primary_item()
-        .av1_config()
-        .expect("av1C")
-        .unwrap();
+        .av1_config(container.image().primary_item().id())
+        .expect("av1C");
     assert!(config.high_bitdepth && config.twelve_bit);
 }
 
@@ -136,11 +133,8 @@ fn grey_png_codes_monochrome() {
     let avif = convert("grey", &png::<Gray8>(PngEncoder::new(), &grey), &[]);
     let container = AvifContainer::parse(&avif).unwrap();
     let config = container
-        .image()
-        .primary_item()
-        .av1_config()
-        .expect("av1C")
-        .unwrap();
+        .av1_config(container.image().primary_item().id())
+        .expect("av1C");
     assert!(config.monochrome);
 }
 
@@ -243,13 +237,10 @@ fn rgb_png() -> Vec<u8> {
 
 /// The primary item's `av1C` of an AVIF file.
 fn av1_config(avif: &[u8]) -> Av1Config {
-    AvifContainer::parse(avif)
-        .unwrap()
-        .image()
-        .primary_item()
-        .av1_config()
+    let container = AvifContainer::parse(avif).unwrap();
+    container
+        .av1_config(container.image().primary_item().id())
         .expect("av1C")
-        .unwrap()
 }
 
 /// `--avif-matrix` reaches the file: the `colr nclx` box names the chosen matrix (BT.601 is CICP

@@ -12,7 +12,7 @@
 //! differential conformance suite: [`introspect`] parses the container without decoding pixels
 //! (structure, CICP, transforms, metadata payloads), and [`decode_rgba`] returns libavif's own
 //! RGBA8 presentation of the primary image (its colour conversion and alpha merge), the oracle for
-//! `gamut_avif::AvifImage::decode_primary_rgba8`.
+//! `gamut_avif::AvifDecoder`'s `DecodeImage<Rgba8>`.
 //!
 //! All `unsafe` FFI is confined here behind these safe entry points.
 

@@ -4,10 +4,10 @@
 //! The AVIF seam is the AV1 still-picture OBU stream (`AV1_CODEC_ID`, encode direction).
 //! Backends are tried in push order; the built-in `gamut-av1` encoder is the implicit tail.
 //!
-//! There is deliberately no `gamut_avif_decoder_push_backend`: AVIF decode has no registry —
-//! the Rust API threads a single caller-supplied `Av1StillDecoder` per call, and the planned
-//! in-house decoder (issue #259) will make it optional. The decode direction joins the C
-//! surface when that lands (see DESIGN.md). What *is* here on the read side is the container
+//! There is deliberately no `gamut_avif_decoder_push_backend`: `gamut-avif` has no
+//! `gamut-codec-abi` adapter for its `Av1CodestreamDecoder` seam yet, so a C backend has no door
+//! into `AvifDecoder`'s registry, and the planned in-house decoder (issue #259) has not landed.
+//! The decode direction joins the C surface with that adapter (see DESIGN.md). What *is* here on the read side is the container
 //! parse (issue #666): [`GamutAvifImage`] hands a C caller the primary and alpha AV1
 //! codestreams, the `av1C` record, and the metadata payloads, so it can drive any AV1 decoder
 //! itself.
@@ -29,8 +29,12 @@ use core::cell::Cell;
 use core::ffi::c_void;
 use core::ptr;
 
-use gamut::avif::{AvifContainer, AvifEncoder, AvifImage, AvifItem, Mirror, Rotation};
-use gamut::core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16};
+use gamut::avif::{
+    AlphaMode, AvifContainer, AvifEncoder, HeifImage, HeifItem, ItemKind, OpaqueAlpha,
+};
+use gamut::core::{
+    Dimensions, EncodeImage, Gray8, ImageRef, Orientation, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
+};
 use gamut_codec_abi::EncoderVTable;
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
@@ -53,11 +57,25 @@ pub const GAMUT_CHROMA_SUBSAMPLING_420: u8 = 2;
 /// `gamut_avif_encoder_set_chroma` value: 4:0:0, monochrome (no chroma planes).
 pub const GAMUT_CHROMA_SUBSAMPLING_400: u8 = 3;
 
-/// `gamut_avif_encoder_set_mirror` value: top and bottom exchanged (the `imir` axis `0`,
-/// ISO/IEC 23008-12:2022 §6.5.12).
-pub const GAMUT_AVIF_MIRROR_TOP_BOTTOM: u8 = 0;
-/// `gamut_avif_encoder_set_mirror` value: left and right exchanged (the `imir` axis `1`).
-pub const GAMUT_AVIF_MIRROR_LEFT_RIGHT: u8 = 1;
+/// `gamut_avif_encoder_set_alpha_mode` value: the colour is unassociated and coded as given
+/// (`AlphaMode::Unassociated`, the default).
+pub const GAMUT_AVIF_ALPHA_UNASSOCIATED: u8 = 0;
+/// `gamut_avif_encoder_set_alpha_mode` value: the colour is already premultiplied and declared
+/// with `prem` (`AlphaMode::Premultiplied`).
+pub const GAMUT_AVIF_ALPHA_PREMULTIPLIED: u8 = 1;
+/// `gamut_avif_encoder_set_alpha_mode` value: the encoder premultiplies unassociated colour and
+/// declares it with `prem` (`AlphaMode::PremultiplyOnEncode`).
+pub const GAMUT_AVIF_ALPHA_PREMULTIPLY_ON_ENCODE: u8 = 2;
+/// `gamut_avif_encoder_set_alpha_mode` value: the encoder cleans the colour hidden under
+/// transparency before a lossy encode (`AlphaMode::CleanOnEncode`).
+pub const GAMUT_AVIF_ALPHA_CLEAN_ON_ENCODE: u8 = 3;
+
+/// `gamut_avif_encoder_set_opaque_alpha` value: a fully opaque RGBA input drops its alpha
+/// auxiliary (`OpaqueAlpha::Drop`, the default).
+pub const GAMUT_AVIF_OPAQUE_ALPHA_DROP: u8 = 0;
+/// `gamut_avif_encoder_set_opaque_alpha` value: a fully opaque RGBA input keeps its alpha
+/// auxiliary (`OpaqueAlpha::Keep`).
+pub const GAMUT_AVIF_OPAQUE_ALPHA_KEEP: u8 = 1;
 
 // The chroma constants are `ChromaSubsampling`'s own discriminants, so a C value and the Rust
 // variant can never be renumbered apart: a change on either side fails this build.
@@ -66,6 +84,12 @@ const _: () = {
     assert!(ChromaSubsampling::Cs422 as u8 == GAMUT_CHROMA_SUBSAMPLING_422);
     assert!(ChromaSubsampling::Cs420 as u8 == GAMUT_CHROMA_SUBSAMPLING_420);
     assert!(ChromaSubsampling::Cs400 as u8 == GAMUT_CHROMA_SUBSAMPLING_400);
+    assert!(AlphaMode::Unassociated as u8 == GAMUT_AVIF_ALPHA_UNASSOCIATED);
+    assert!(AlphaMode::Premultiplied as u8 == GAMUT_AVIF_ALPHA_PREMULTIPLIED);
+    assert!(AlphaMode::PremultiplyOnEncode as u8 == GAMUT_AVIF_ALPHA_PREMULTIPLY_ON_ENCODE);
+    assert!(AlphaMode::CleanOnEncode as u8 == GAMUT_AVIF_ALPHA_CLEAN_ON_ENCODE);
+    assert!(OpaqueAlpha::Drop as u8 == GAMUT_AVIF_OPAQUE_ALPHA_DROP);
+    assert!(OpaqueAlpha::Keep as u8 == GAMUT_AVIF_OPAQUE_ALPHA_KEEP);
 };
 
 /// Opaque handle over a `gamut::avif::AvifEncoder` and its backend registry.
@@ -87,7 +111,9 @@ seam_handle! {
     new = gamut::avif::AvifEncoder::new(),
     fields = { c2pa: Cell::new(None) },
     seam = encoder,
-    push = |host, backend| { host.push_backend(gamut::avif::AbiAv1StillEncoder::new(backend)); },
+    push = |host, backend| {
+        *host = core::mem::take(host).with_backend(gamut::avif::AbiAv1CodestreamEncoder::new(backend));
+    },
     fns = (gamut_avif_encoder_new, gamut_avif_encoder_free, gamut_avif_encoder_push_backend),
     tests = avif_encoder_tests,
 }
@@ -120,6 +146,34 @@ impl GamutAvifEncoder {
             // observed, because no `with_*` builder can panic.
             this.inner = apply(core::mem::take(&mut this.inner), value);
             GAMUT_OK
+        })
+    }
+
+    /// [`configure`](Self::configure) for a fallible builder: on its refusal the handle keeps
+    /// the encoder it had and the refusal's status is returned.
+    ///
+    /// # Safety
+    ///
+    /// As [`configure`](Self::configure).
+    unsafe fn try_configure<T>(
+        encoder: *mut Self,
+        value: T,
+        apply: impl FnOnce(AvifEncoder, T) -> gamut::core::Result<AvifEncoder>,
+    ) -> GamutStatus {
+        guard::status(|| {
+            // SAFETY: null is rejected here; a non-null handle is live per contract.
+            let Some(this) = (unsafe { encoder.as_mut() }) else {
+                return GAMUT_STATUS_NULL_ARGUMENT;
+            };
+            // A clone shares the backends, so the handle's own encoder is untouched unless the
+            // builder accepts.
+            match apply(this.inner.clone(), value) {
+                Ok(configured) => {
+                    this.inner = configured;
+                    GAMUT_OK
+                }
+                Err(error) => status_of(&error),
+            }
         })
     }
 
@@ -180,10 +234,11 @@ impl GamutAvifEncoder {
                 Ok(image) => image,
                 Err(error) => return status_of(&error),
             };
-            // `encode_with_report` is `encode_to_vec` with the report alongside — the same bytes
+            // `encode_with_report` is `encode_image` with the report alongside — the same bytes
             // — so every encode keeps the slot range `gamut_avif_encoder_c2pa_slot` reads.
-            match this.inner.encode_with_report(image) {
-                Ok((bytes, report)) => {
+            let mut bytes = Vec::new();
+            match this.inner.encode_with_report(image, &mut bytes) {
+                Ok(report) => {
                     // The slot lies inside the in-memory file just returned, so both offsets fit
                     // `usize`.
                     this.c2pa.set(
@@ -428,83 +483,10 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_alpha_quality(
     }
 }
 
-/// Declares that an RGBA input's colour values are already premultiplied by alpha
-/// (`AvifEncoder::with_premultiplied_alpha`) — a declaration, not a conversion; written as a
-/// `prem` reference. Ignored by inputs without alpha.
-///
-/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
-///
-/// # Safety
-///
-/// `encoder` is `NULL` or a live encoder handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gamut_avif_encoder_set_premultiplied_alpha(
-    encoder: *mut GamutAvifEncoder,
-    premultiplied: bool,
-) -> GamutStatus {
-    unsafe {
-        GamutAvifEncoder::configure(encoder, Some(premultiplied), GAMUT_OK, |e, p| {
-            e.with_premultiplied_alpha(p)
-        })
-    }
-}
-
-/// Keeps the alpha auxiliary of an RGBA input whose every alpha sample is fully opaque (255, or
-/// 65535) when `keep` is `true` (`AvifEncoder::with_keep_opaque_alpha`). Without this call, or
-/// with `false`, such an input drops its alpha and encodes as the file
-/// `gamut_avif_encoder_encode_rgb8` / `gamut_avif_encoder_encode_rgb16` writes for its colour.
-/// Set it when a consumer needs the alpha item present regardless of its values. Ignored by
-/// inputs without alpha and by inputs with any non-opaque alpha sample, which always keep it.
-///
-/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
-///
-/// # Safety
-///
-/// `encoder` is `NULL` or a live encoder handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gamut_avif_encoder_set_keep_opaque_alpha(
-    encoder: *mut GamutAvifEncoder,
-    keep: bool,
-) -> GamutStatus {
-    unsafe {
-        GamutAvifEncoder::configure(encoder, Some(keep), GAMUT_OK, |e, k| {
-            e.with_keep_opaque_alpha(k)
-        })
-    }
-}
-
-/// Records an `irot` display rotation of `quarter_turns_ccw` anti-clockwise quarter turns
-/// (`0..=3`; `0` writes no `irot`), applied by a reader — the stored pixels are unchanged
-/// (`AvifEncoder::with_rotation`).
-///
-/// Returns `GAMUT_STATUS_INVALID_INPUT` for a value above `3`, `GAMUT_STATUS_NULL_ARGUMENT` on
-/// a `NULL` encoder.
-///
-/// # Safety
-///
-/// `encoder` is `NULL` or a live encoder handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gamut_avif_encoder_set_rotation(
-    encoder: *mut GamutAvifEncoder,
-    quarter_turns_ccw: u8,
-) -> GamutStatus {
-    let value = match quarter_turns_ccw {
-        0 => Some(Rotation::None),
-        1 => Some(Rotation::Ccw90),
-        2 => Some(Rotation::Ccw180),
-        3 => Some(Rotation::Ccw270),
-        _ => None,
-    };
-    unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, r| {
-            e.with_rotation(r)
-        })
-    }
-}
-
-/// Records an `imir` display mirror, one of the `GAMUT_AVIF_MIRROR_*` constants, applied by a
-/// reader — the stored pixels are unchanged (`AvifEncoder::with_mirror`). As in Rust, a mirror
-/// once set can be replaced but not removed.
+/// Selects how an RGBA input's colour relates to its alpha, one of the `GAMUT_AVIF_ALPHA_*`
+/// constants (`AvifEncoder::with_alpha_mode`): unassociated, already premultiplied (declared with
+/// `prem`), premultiplied by the encoder, or cleaned under transparency before a lossy encode.
+/// Ignored by inputs without alpha.
 ///
 /// Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants,
 /// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
@@ -513,18 +495,73 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_rotation(
 ///
 /// `encoder` is `NULL` or a live encoder handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gamut_avif_encoder_set_mirror(
+pub unsafe extern "C" fn gamut_avif_encoder_set_alpha_mode(
     encoder: *mut GamutAvifEncoder,
-    mirror: u8,
+    mode: u8,
 ) -> GamutStatus {
-    let value = match mirror {
-        GAMUT_AVIF_MIRROR_TOP_BOTTOM => Some(Mirror::TopBottom),
-        GAMUT_AVIF_MIRROR_LEFT_RIGHT => Some(Mirror::LeftRight),
+    let value = match mode {
+        GAMUT_AVIF_ALPHA_UNASSOCIATED => Some(AlphaMode::Unassociated),
+        GAMUT_AVIF_ALPHA_PREMULTIPLIED => Some(AlphaMode::Premultiplied),
+        GAMUT_AVIF_ALPHA_PREMULTIPLY_ON_ENCODE => Some(AlphaMode::PremultiplyOnEncode),
+        GAMUT_AVIF_ALPHA_CLEAN_ON_ENCODE => Some(AlphaMode::CleanOnEncode),
         _ => None,
     };
     unsafe {
         GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, m| {
-            e.with_mirror(m)
+            e.with_alpha_mode(m)
+        })
+    }
+}
+
+/// Selects whether an RGBA input whose every alpha sample is fully opaque (255, or 65535) keeps
+/// its alpha auxiliary, one of the `GAMUT_AVIF_OPAQUE_ALPHA_*` constants
+/// (`AvifEncoder::with_opaque_alpha`). By default such an input drops its alpha and encodes as
+/// the file `gamut_avif_encoder_encode_rgb8` / `gamut_avif_encoder_encode_rgb16` writes for its
+/// colour. Ignored by inputs without alpha and by inputs with any non-opaque alpha sample, which
+/// always keep it.
+///
+/// Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_opaque_alpha(
+    encoder: *mut GamutAvifEncoder,
+    opaque_alpha: u8,
+) -> GamutStatus {
+    let value = match opaque_alpha {
+        GAMUT_AVIF_OPAQUE_ALPHA_DROP => Some(OpaqueAlpha::Drop),
+        GAMUT_AVIF_OPAQUE_ALPHA_KEEP => Some(OpaqueAlpha::Keep),
+        _ => None,
+    };
+    unsafe {
+        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, o| {
+            e.with_opaque_alpha(o)
+        })
+    }
+}
+
+/// Records the display orientation a reader applies, by its EXIF `Orientation` value (`1..=8`;
+/// `1` writes neither `irot` nor `imir`), as `irot`/`imir` item properties — the stored pixels
+/// are unchanged (`AvifEncoder::with_orientation`). A later call replaces it.
+///
+/// Returns `GAMUT_STATUS_INVALID_INPUT` for a value outside `1..=8`,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_orientation(
+    encoder: *mut GamutAvifEncoder,
+    exif_orientation: u8,
+) -> GamutStatus {
+    let value = Orientation::from_exif_value(exif_orientation);
+    unsafe {
+        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, o| {
+            e.with_orientation(o)
         })
     }
 }
@@ -612,9 +649,9 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_xmp(
 /// `gamut_avif_encoder_c2pa_slot` reports where the slot landed; the signer writes a store of at
 /// most `len` bytes there, and nothing else in the file moves.
 ///
-/// This setter cannot reject `len`: as in Rust, an unusable length (below 8 bytes, or one too
-/// large to frame) is refused by the encode that follows (`GAMUT_STATUS_INVALID_INPUT`, or
-/// `GAMUT_STATUS_UNSUPPORTED` for a box at or beyond 4 GiB). This call, or
+/// As in Rust, an unusable length is refused here, leaving the encoder as it was:
+/// `GAMUT_STATUS_INVALID_INPUT` below 8 bytes or for one too large to frame, and
+/// `GAMUT_STATUS_UNSUPPORTED` for a box at or beyond 4 GiB. This call, or
 /// `gamut_avif_encoder_set_c2pa`, replaces any earlier one. Returns
 /// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
 ///
@@ -626,9 +663,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_c2pa_reserved(
     encoder: *mut GamutAvifEncoder,
     len: usize,
 ) -> GamutStatus {
-    unsafe {
-        GamutAvifEncoder::configure(encoder, Some(len), GAMUT_OK, |e, l| e.with_c2pa_reserved(l))
-    }
+    unsafe { GamutAvifEncoder::try_configure(encoder, len, AvifEncoder::with_c2pa_reserved) }
 }
 
 /// Writes `store` — a C2PA manifest store already computed over this exact output — into the
@@ -732,10 +767,10 @@ pub unsafe extern "C" fn gamut_avif_encoder_encode_rgb8(
 }
 
 /// Encodes interleaved 8-bit RGBA samples (unassociated alpha unless
-/// `gamut_avif_encoder_set_premultiplied_alpha` says otherwise) to an AVIF file with an alpha
+/// `gamut_avif_encoder_set_alpha_mode` says otherwise) to an AVIF file with an alpha
 /// auxiliary. An input whose every alpha sample is 255 is fully opaque: its alpha is dropped
 /// and the file is the one `gamut_avif_encoder_encode_rgb8` writes for its colour, with no
-/// alpha auxiliary, unless `gamut_avif_encoder_set_keep_opaque_alpha` keeps it. `samples_len`
+/// alpha auxiliary, unless `gamut_avif_encoder_set_opaque_alpha` keeps it. `samples_len`
 /// counts samples (`width * height * 4`); otherwise as `gamut_avif_encoder_encode_rgb8`.
 ///
 /// # Safety
@@ -827,7 +862,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_encode_rgb16(
 /// Encodes interleaved 16-bit RGBA samples (full 16-bit scale) with an alpha auxiliary. An
 /// input whose every alpha sample is 65535 is fully opaque: its alpha is dropped and the file is
 /// the one `gamut_avif_encoder_encode_rgb16` writes for its colour, with no alpha auxiliary,
-/// unless `gamut_avif_encoder_set_keep_opaque_alpha` keeps it. Opacity is judged on the input
+/// unless `gamut_avif_encoder_set_opaque_alpha` keeps it. Opacity is judged on the input
 /// samples, so an alpha of 65534 keeps the auxiliary even where it truncates to the coded
 /// maximum. `samples_len` counts samples (`width * height * 4`); otherwise as
 /// `gamut_avif_encoder_encode_rgb16`.
@@ -858,15 +893,15 @@ pub unsafe extern "C" fn gamut_avif_encoder_encode_rgba16(
     }
 }
 
-/// Opaque handle over a parsed AVIF file (`gamut::avif::AvifImage`, the role-typed view
+/// Opaque handle over a parsed AVIF file (`gamut::avif::HeifImage`, the role-typed view
 /// `AvifContainer::parse` builds). It owns every payload, so it outlives the input buffer.
 pub struct GamutAvifImage {
-    inner: AvifImage,
+    inner: HeifImage,
 }
 
 /// A byte selector over the parsed image: `Ok(None)` is "absent" (an `OK` status with a
 /// `NULL`/`0` result), `Err` a status to return.
-type Select = for<'a> fn(&'a AvifImage) -> Result<Option<&'a [u8]>, GamutStatus>;
+type Select = for<'a> fn(&'a HeifImage) -> Result<Option<&'a [u8]>, GamutStatus>;
 
 impl GamutAvifImage {
     /// Runs `body` against the live image behind `image`, after clearing and null-checking the
@@ -879,7 +914,7 @@ impl GamutAvifImage {
         image: *const Self,
         outs_present: bool,
         clear: impl FnOnce(),
-        body: impl FnOnce(&AvifImage) -> GamutStatus,
+        body: impl FnOnce(&HeifImage) -> GamutStatus,
     ) -> GamutStatus {
         guard::status(|| {
             if !outs_present {
@@ -933,8 +968,8 @@ impl GamutAvifImage {
 
 /// The AV1 codestream of `item`, if it is a coded AV1 item; a derived item (`grid`, `iden`,
 /// `iovl`) or another codec carries no single codestream, so it is `GAMUT_STATUS_UNSUPPORTED`.
-fn av1_payload(item: AvifItem<'_>) -> Result<&[u8], GamutStatus> {
-    if item.kind().is_av1() {
+fn av1_payload(item: HeifItem<'_>) -> Result<&[u8], GamutStatus> {
+    if item.kind() == (ItemKind::CodedImage { codec: *b"av01" }) {
         Ok(&item.as_isobmff_item().payload)
     } else {
         Err(GAMUT_STATUS_UNSUPPORTED)
@@ -1349,7 +1384,7 @@ mod tests {
                 GAMUT_OK
             );
             assert_eq!(
-                gamut_avif_encoder_set_premultiplied_alpha(encoder, true),
+                gamut_avif_encoder_set_alpha_mode(encoder, GAMUT_AVIF_ALPHA_PREMULTIPLIED),
                 GAMUT_OK
             );
         }
@@ -1362,7 +1397,7 @@ mod tests {
         let alpha = oracle.alpha_auxiliary_of(primary.id()).unwrap();
 
         let image = c_parse(&file);
-        let payload = |item: AvifItem<'_>| Some(item.as_isobmff_item().payload.clone());
+        let payload = |item: HeifItem<'_>| Some(item.as_isobmff_item().payload.clone());
         assert_eq!(
             read(image, gamut_avif_image_primary_codestream),
             Ok(payload(primary))
@@ -1731,14 +1766,18 @@ mod tests {
     }
 
     #[test]
-    fn rotation_setter_maps_quarter_turns() {
+    fn orientation_setter_maps_each_exif_value() {
         assert_setter(
-            gamut_avif_encoder_set_rotation,
+            gamut_avif_encoder_set_orientation,
             &[
-                (0, |e| e.with_rotation(Rotation::None)),
-                (1, |e| e.with_rotation(Rotation::Ccw90)),
-                (2, |e| e.with_rotation(Rotation::Ccw180)),
-                (3, |e| e.with_rotation(Rotation::Ccw270)),
+                (1, |e| e.with_orientation(Orientation::Identity)),
+                (2, |e| e.with_orientation(Orientation::FlipHorizontal)),
+                (3, |e| e.with_orientation(Orientation::Rotate180)),
+                (4, |e| e.with_orientation(Orientation::FlipVertical)),
+                (5, |e| e.with_orientation(Orientation::Transpose)),
+                (6, |e| e.with_orientation(Orientation::Rotate90Cw)),
+                (7, |e| e.with_orientation(Orientation::AntiTranspose)),
+                (8, |e| e.with_orientation(Orientation::Rotate90Ccw)),
             ],
             Layout::Rgba8,
         );
@@ -1783,7 +1822,7 @@ mod tests {
             GAMUT_OK
         );
         assert_eq!(
-            unsafe { gamut_avif_encoder_set_rotation(encoder, 1) },
+            unsafe { gamut_avif_encoder_set_orientation(encoder, 8) },
             GAMUT_OK
         );
         let result = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4);
@@ -1791,22 +1830,6 @@ mod tests {
 
         assert_eq!(result, Err(GAMUT_STATUS_INVALID_INPUT));
         assert_eq!(encodes.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn mirror_setter_maps_each_constant() {
-        assert_setter(
-            gamut_avif_encoder_set_mirror,
-            &[
-                (GAMUT_AVIF_MIRROR_TOP_BOTTOM, |e| {
-                    e.with_mirror(Mirror::TopBottom)
-                }),
-                (GAMUT_AVIF_MIRROR_LEFT_RIGHT, |e| {
-                    e.with_mirror(Mirror::LeftRight)
-                }),
-            ],
-            Layout::Rgba8,
-        );
     }
 
     #[test]
@@ -1824,19 +1847,29 @@ mod tests {
     }
 
     #[test]
-    fn premultiplied_setter_maps_the_flag() {
+    fn alpha_mode_setter_maps_each_constant() {
         assert_setter(
-            gamut_avif_encoder_set_premultiplied_alpha,
+            gamut_avif_encoder_set_alpha_mode,
             &[
-                (false, |e| e.with_premultiplied_alpha(false)),
-                (true, |e| e.with_premultiplied_alpha(true)),
+                (GAMUT_AVIF_ALPHA_UNASSOCIATED, |e| {
+                    e.with_alpha_mode(AlphaMode::Unassociated)
+                }),
+                (GAMUT_AVIF_ALPHA_PREMULTIPLIED, |e| {
+                    e.with_alpha_mode(AlphaMode::Premultiplied)
+                }),
+                (GAMUT_AVIF_ALPHA_PREMULTIPLY_ON_ENCODE, |e| {
+                    e.with_alpha_mode(AlphaMode::PremultiplyOnEncode)
+                }),
+                (GAMUT_AVIF_ALPHA_CLEAN_ON_ENCODE, |e| {
+                    e.with_alpha_mode(AlphaMode::CleanOnEncode)
+                }),
             ],
             Layout::Rgba8,
         );
     }
 
     #[test]
-    fn keep_opaque_alpha_setter_keeps_an_opaque_inputs_alpha_auxiliary() {
+    fn opaque_alpha_setter_keeps_an_opaque_inputs_alpha_auxiliary() {
         // Only a fully opaque input reaches the flag: any other alpha keeps its auxiliary
         // regardless, which is why `assert_setter`'s varying-alpha ramp cannot test it.
         let opaque: Vec<u8> = ramp8(4)
@@ -1845,16 +1878,20 @@ mod tests {
             .iter()
             .flat_map(|&[r, g, b, _]| [r, g, b, 255])
             .collect();
-        let has_alpha = |keep: Option<bool>| {
+        let has_alpha = |keep: Option<u8>| {
             let configure = |encoder| {
                 if let Some(keep) = keep {
                     assert_eq!(
-                        unsafe { gamut_avif_encoder_set_keep_opaque_alpha(encoder, keep) },
+                        unsafe { gamut_avif_encoder_set_opaque_alpha(encoder, keep) },
                         GAMUT_OK
                     );
                 }
             };
-            let rust = AvifEncoder::lossy(50).with_keep_opaque_alpha(keep.unwrap_or(false));
+            let opaque_alpha = match keep {
+                Some(GAMUT_AVIF_OPAQUE_ALPHA_KEEP) => OpaqueAlpha::Keep,
+                _ => OpaqueAlpha::Drop,
+            };
+            let rust = AvifEncoder::lossy(50).with_opaque_alpha(opaque_alpha);
             let file = assert_shim::<Rgba8>(
                 new_lossy_50,
                 configure,
@@ -1868,9 +1905,15 @@ mod tests {
             unsafe { gamut_avif_image_free(image) };
             alpha.is_some()
         };
-        assert!(has_alpha(Some(true)), "the setter keeps the auxiliary");
+        assert!(
+            has_alpha(Some(GAMUT_AVIF_OPAQUE_ALPHA_KEEP)),
+            "the setter keeps the auxiliary"
+        );
         assert!(!has_alpha(None), "by default an opaque alpha is dropped");
-        assert!(!has_alpha(Some(false)), "`false` is the default");
+        assert!(
+            !has_alpha(Some(GAMUT_AVIF_OPAQUE_ALPHA_DROP)),
+            "drop is the default"
+        );
     }
 
     #[test]
@@ -1944,7 +1987,7 @@ mod tests {
                         GAMUT_OK
                     )
                 },
-                |e| e.with_c2pa_reserved(96),
+                |e| e.with_c2pa_reserved(96).unwrap(),
             ),
             (
                 |e| {
@@ -1976,7 +2019,10 @@ mod tests {
             unsafe { gamut_avif_encoder_free(encoder) };
 
             let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(4, 4).unwrap()).unwrap();
-            let (rust, report) = with(AvifEncoder::new()).encode_with_report(image).unwrap();
+            let mut rust = Vec::new();
+            let report = with(AvifEncoder::new())
+                .encode_with_report(image, &mut rust)
+                .unwrap();
             assert_eq!(c, rust);
             assert_eq!(slot, report.c2pa);
             slots.push(slot);
@@ -2005,13 +2051,26 @@ mod tests {
         );
         // Reading the report does not consume it, and a setting alone does not change it.
         assert_eq!(c2pa_slot(encoder), Some(slot.clone()));
+        // A reservation below 8 bytes is refused when it is set, leaving the 64-byte one.
         unsafe {
-            assert_eq!(gamut_avif_encoder_set_c2pa_reserved(encoder, 4), GAMUT_OK);
+            assert_eq!(
+                gamut_avif_encoder_set_c2pa_reserved(encoder, 4),
+                GAMUT_STATUS_INVALID_INPUT
+            );
         }
-        assert_eq!(c2pa_slot(encoder), Some(slot));
-        // A failed encode (a reservation below 8 bytes) clears it, as does a boundary failure.
+        assert_eq!(c2pa_slot(encoder), Some(slot.clone()));
+        let again = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4).unwrap();
+        assert_eq!(again, first, "the refused reservation changed nothing");
+        // A failed encode (samples that do not fill the dimensions) clears it, as does a
+        // boundary failure.
         assert_eq!(
-            c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4),
+            c_encode(
+                encoder,
+                gamut_avif_encoder_encode_rgb8,
+                &ramp8(3)[1..],
+                4,
+                4
+            ),
             Err(GAMUT_STATUS_INVALID_INPUT)
         );
         assert_eq!(c2pa_slot(encoder), None);
@@ -2109,12 +2168,18 @@ mod tests {
                 gamut_avif_encoder_set_chroma(encoder, 4),
                 GAMUT_STATUS_INVALID_INPUT
             );
+            for exif in [0, 9] {
+                assert_eq!(
+                    gamut_avif_encoder_set_orientation(encoder, exif),
+                    GAMUT_STATUS_INVALID_INPUT
+                );
+            }
             assert_eq!(
-                gamut_avif_encoder_set_rotation(encoder, 4),
+                gamut_avif_encoder_set_alpha_mode(encoder, 4),
                 GAMUT_STATUS_INVALID_INPUT
             );
             assert_eq!(
-                gamut_avif_encoder_set_mirror(encoder, 2),
+                gamut_avif_encoder_set_opaque_alpha(encoder, 2),
                 GAMUT_STATUS_INVALID_INPUT
             );
             assert_eq!(
@@ -2165,11 +2230,7 @@ mod tests {
                 GAMUT_STATUS_NULL_ARGUMENT
             );
             assert_eq!(
-                gamut_avif_encoder_set_rotation(null, 0),
-                GAMUT_STATUS_NULL_ARGUMENT
-            );
-            assert_eq!(
-                gamut_avif_encoder_set_mirror(null, 0),
+                gamut_avif_encoder_set_orientation(null, 1),
                 GAMUT_STATUS_NULL_ARGUMENT
             );
             assert_eq!(
@@ -2177,11 +2238,11 @@ mod tests {
                 GAMUT_STATUS_NULL_ARGUMENT
             );
             assert_eq!(
-                gamut_avif_encoder_set_premultiplied_alpha(null, true),
+                gamut_avif_encoder_set_alpha_mode(null, GAMUT_AVIF_ALPHA_PREMULTIPLIED),
                 GAMUT_STATUS_NULL_ARGUMENT
             );
             assert_eq!(
-                gamut_avif_encoder_set_keep_opaque_alpha(null, true),
+                gamut_avif_encoder_set_opaque_alpha(null, GAMUT_AVIF_OPAQUE_ALPHA_KEEP),
                 GAMUT_STATUS_NULL_ARGUMENT
             );
             assert_eq!(

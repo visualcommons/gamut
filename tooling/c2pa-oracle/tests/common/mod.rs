@@ -62,9 +62,15 @@ pub fn plain_avif() -> Vec<u8> {
 /// reserve.
 pub fn reserve_avif(len: usize) -> Result<(Vec<u8>, std::ops::Range<usize>)> {
     let rgb = source_rgb();
-    let (bytes, report) = AvifEncoder::new()
+    let mut bytes = Vec::new();
+    let report = AvifEncoder::new()
         .with_c2pa_reserved(len)
-        .encode_with_report(ImageRef::<Rgb8>::new(&rgb, dims()).expect("buffer matches dimensions"))
+        .and_then(|encoder| {
+            encoder.encode_with_report(
+                ImageRef::<Rgb8>::new(&rgb, dims()).expect("buffer matches dimensions"),
+                &mut bytes,
+            )
+        })
         .map_err(|error| OracleError::Asset(error.to_string()))?;
     let range = report.c2pa.ok_or_else(|| {
         OracleError::Asset("encode_with_report reported no range for the reserved slot".into())
