@@ -111,6 +111,7 @@ fn report_decode(data: &[u8]) {
             .metadata
             .exif
             .as_ref()
+            .and_then(|e| e.exif_ifd())
             .map_or(0, |ifd| ifd.fields().len()),
         decoded.gain_table_map.is_some(),
         decoded.gain_table_map2.is_some(),

@@ -805,6 +805,7 @@ dependencies = [
  "gamut-deflate",
  "gamut-dng",
  "gamut-dng-oracle",
+ "gamut-exif",
  "gamut-ifd",
  "gamut-jpeg",
  "gamut-jxl",

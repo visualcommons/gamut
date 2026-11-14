@@ -138,13 +138,13 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   photometry, uncompressed/Deflate/lossless-JPEG/JPEG XL, colour-calibration profile,
   EXIF/XMP/ICC metadata. ← ifd, bitstream, color, core, deflate (Deflate encode, and
   decode via its `inflate` feature), jpeg (lossless JPEG, `Compression = 7`: gamut-jpeg's SOF3
-  coder), jxl (JPEG XL, `Compression = 52546`), `md-5` (the `NewRawImageDigest` MD5), metadata
-  (optional, `metadata` feature). MSB-first sub-byte packing reuses `gamut-bitstream`; the DNG
-  §6 `AsShotWhiteXY` → camera-neutral conversion reuses `gamut-color`'s chromaticity/3×3/CCT
-  math; `DngMetadata` carries the `ExifIFD` as a `gamut-ifd` directory — the very directory the
-  facade's `Exif` holds as its Exif sub-IFD — and the XMP/IPTC-IIM/ICC payloads verbatim as
-  bytes, wired to the facade's typed models (`TypedMetadata`, `MetadataSink`) only behind that
-  feature.
+  coder), jxl (JPEG XL, `Compression = 52546`), exif (the `DngMetadata::exif` model), `md-5`
+  (the `NewRawImageDigest` MD5), metadata (optional, `metadata` feature). MSB-first sub-byte
+  packing reuses `gamut-bitstream`; the DNG §6 `AsShotWhiteXY` → camera-neutral conversion
+  reuses `gamut-color`'s chromaticity/3×3/CCT math; `DngMetadata` carries the `ExifIFD` as
+  `gamut-exif`'s `Exif` model in every build — the `TiffMetadata::exif` shape — and the
+  XMP/IPTC-IIM/ICC payloads verbatim as bytes, wired to the facade's typed models
+  (`TypedMetadata`, `MetadataSink`) only behind that feature.
 - **gamut-cli** (binary `gamut`) — the sandbox exercising implemented features: decodes
   PNG/JPEG/WebP/JXL input with gamut's own decoders (only PPM uses the third-party `image`
   crate) and encodes only with gamut crates, and exposes `primitives` re-exports as inspection

@@ -16,9 +16,9 @@ raw decoder) that is:
 - **Built on shared primitives.** DNG is a profile of TIFF/EP, so its IFD container is the shared
   [`gamut-ifd`](../gamut-ifd) crate (the same spine [`gamut-tiff`](../gamut-tiff) uses), and its
   embedded metadata is not a DNG-local restatement: a DNG's `ExifIFD` *is* an EXIF sub-IFD, so
-  `DngMetadata::exif` is that `gamut-ifd` directory — the one
-  [`gamut-metadata`](../gamut-metadata)'s `Exif` holds as its Exif sub-IFD, which the optional
-  `metadata` feature hands it over as. This crate adds only the DNG-specific tags, raw
+  `DngMetadata::exif` is [`gamut-exif`](../gamut-exif)'s `Exif` model in every build — the type
+  `gamut-tiff`'s `TiffMetadata::exif` and the [`gamut-metadata`](../gamut-metadata) facade hold,
+  which the optional `metadata` feature hands it over as. This crate adds only the DNG-specific tags, raw
   photometry, colour calibration, and compression.
 - **Permissively licensed**, matching the royalty-free DNG format.
 
@@ -64,7 +64,7 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
   `LinearizationTable`, `MaskedAreas`), active area, default crop, and 8/10/12/14/16-bit packing;
   typed `OpcodeList1/2/3` containers (parse + pass-through write); an embedded RGB preview;
   EXIF/XMP/IPTC/ICC metadata (`DngEncoder::with_dng_metadata`) — the `ExifIFD` carried whole as
-  a `gamut-ifd` directory, the XMP/IPTC-IIM/ICC payloads verbatim, and, with the optional
+  the shared `Exif` model's Exif sub-IFD, the XMP/IPTC-IIM/ICC payloads verbatim, and, with the optional
   `metadata` feature, `gamut-metadata`'s `TypedMetadata` and `MetadataSink` over them; a **C2PA
   manifest store** (C2PA 2.4 §A.3.6, tag 52545) typed on both sides — set with `with_c2pa` and
   written last in the file, or reserved zero-filled with `with_c2pa_reserved`, with `encode`'s

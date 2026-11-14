@@ -618,10 +618,9 @@ fn decode_metadata(
             resolve_exif_pointers(&mut exif_ifd, |offset| {
                 read_ifd_at(data, offset, order, variant)
             });
-            exif_ifd
+            crate::metadata::exif_model(exif_ifd, order)
         });
     let metadata = DngMetadata {
-        exif_byte_order: exif.as_ref().map(|_| order),
         exif,
         xmp: bytes_value(ifd0.get(tags::XMP)),
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),

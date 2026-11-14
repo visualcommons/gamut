@@ -41,7 +41,7 @@ internal encode→decode round-trips guard every lossless path.
 | P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope and published the `lossless_jpeg` module; per-chunk geometry follows the spec's total-sample-count rule, and #584 made the encoder use it: a CFA chunk is declared as `repeat-cols` interleaved components at `width / repeat-cols` so predictor 1 differences like colours (DNG 1.7.1.0 p. 20), falling back to the chunk's own geometry past four components or on a width the repeat does not divide. The T.81 65535 line limit now binds the *frame* width, so an untiled Bayer strip encodes up to 131 070 photosites wide (previously refused past 65 535) and decodes back exactly. #1083 moved the SOF3 coder into `gamut-jpeg` (its `lossless` module, on that crate's shared entropy layer), output byte-identical across the move | ✅ done |
 | P14 | Ch2     | Tiled raw layout (`TileWidth`/`TileLength`/`TileOffsets`/`TileByteCounts`): decode with edge-crop reassembly + `with_tiling` encode (zero-padded edge tiles), all schemes, Adobe pixel-exact | ✅ done |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
-| P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) — embed + decode, Adobe-validated. #353 replaced the crate-local models with the workspace facade's; since #1087 `DngMetadata::exif` is the `ExifIFD` as a `gamut-ifd` `Ifd` (the directory `gamut-exif`'s `Exif` holds as its Exif sub-IFD), and the facade wiring (`TypedMetadata`, `MetadataSink`) is the optional `metadata` feature | ✅ done |
+| P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) — embed + decode, Adobe-validated. #353 replaced the crate-local models with the workspace facade's; since #1087 `DngMetadata::exif` is `gamut-exif`'s `Exif` through a normal, feature-independent edge (the `TiffMetadata::exif` shape), and the facade wiring (`TypedMetadata`, `MetadataSink`) is the optional `metadata` feature | ✅ done |
 | P17 | Ch2     | Digests: the encoder writes `NewRawImageDigest` (51111), bit-matching the SDK's `FindNewRawImageDigest` (256×256 digest tiles, planar LE serialisation, the ≤256-entry-table byte mode); `RawImage::new_raw_image_digest` is public and the decoder surfaces the stored digest | ✅ done |
 | P18 | Ch7     | `OpcodeList1/2/3` container + standard opcode library. Container done via #253: typed `OpcodeList`/`Opcode` parse + pass-through write + `DNGBackwardVersion` raising; the standard opcode *processing* library remains deferred | ◑ partial |
 | P19 | —       | Finalization: JPEG XL, sub-images, gain maps, extra-tag explicitness, version auto-computation, docs + API freeze (v1.0.0) | ✅ done |
@@ -132,14 +132,15 @@ One path per item, ahead of the API freeze. Every change below is breaking:
 - **Flat crate root.** Every module is private except `tags`, the low-level tag-code table, and
   each public item is re-exported once at the root. `Error`/`Result` are no longer re-exported:
   they are `gamut_core`'s. The root carries the same `gamut-ifd` subset `gamut-tiff` does, plus
-  `gamut_jxl::{Distance, Effort}`. It no longer re-exports `Exif`, `ExifTag` or `Rational`.
+  `gamut_jxl::{Distance, Effort}` and, as `gamut-tiff` does, `gamut_exif::{Exif, ExifTag}`. It
+  no longer re-exports `Rational`.
 - **`metadata` is an optional feature, off by default.** It is the same as every other codec's
-  `metadata` feature. Without it, `gamut-metadata` is not built, `DngMetadata::exif` is the
-  `ExifIFD` as a plain `gamut_ifd::Ifd` (plus `exif_byte_order`, the read-side provenance), and
-  the XMP / IPTC-IIM / ICC payloads are bytes. With it, `DngMetadata` implements
-  `TypedMetadata` and `DngEncoder` implements `MetadataSink`. The field type is the same in
-  every build, because a type that changed with a feature would break other crates' code under
-  Cargo feature unification.
+  `metadata` feature. Without it, `gamut-metadata` is not built; `DngMetadata::exif` is still
+  `gamut-exif`'s `Exif` model, now reached through a normal `gamut-exif` dependency instead of
+  the facade (exactly `TiffMetadata::exif`'s edge), and the XMP / IPTC-IIM / ICC payloads are
+  bytes. With it, `DngMetadata` implements `TypedMetadata` and `DngEncoder` implements
+  `MetadataSink`. The field type is the same in every build, because a type that changed with a
+  feature would break other crates' code under Cargo feature unification.
 - **`DngMetadata` is `#[non_exhaustive]`.** Build one with `DngMetadata::new()` and
   `with_exif`/`with_xmp`/`with_iptc`/`with_icc`, which is the `TiffMetadata` shape.
 - **The C2PA store leaves `DngMetadata`.** It is written with `DngEncoder::with_c2pa(&[u8])`
@@ -360,8 +361,8 @@ separate path (below).
   built from `DngMetadata::new()` and its `with_*` builders, so a later carrier is additive.
   `GainValues` stays exhaustive — its four variants are the spec's closed `DataType` set.
 - Re-export closure: everything on the crate root, including `RawPhotometry`, `cfa_color`,
-  `opcode_id`, `new_subfile_type`, `gamut_ifd::{Ifd, Value}` (the `DngMetadata::exif` directory
-  and the `RawTag` payload type) — so a caller builds and reads `DngMetadata` without a direct
+  `opcode_id`, `new_subfile_type`, `gamut_exif::{Exif, ExifTag}` (the `DngMetadata::exif`
+  model), `gamut_ifd::{Ifd, Value}` (its directories and the `RawTag` payload type) — so a caller builds and reads `DngMetadata` without a direct
   `gamut-ifd` or `gamut-metadata` dependency (the facade's `MetadataBlock`, `Metadata`,
   `TypedMetadata`, `MetadataSink` and `EncodedMetadata` are re-exported behind the `metadata`
   feature) — and (since #442)
@@ -738,9 +739,10 @@ use; additions are semver-additive.
   `ImageSequenceInfo`, `ProfileDynamicRange`) — explicitly surfaced as typed `RawTag`s. (The
   C2PA manifest store left this list in #442; since #1087 it is `DngEncoder::with_c2pa` /
   `DecodedDng::c2pa`.)
-- **The GPS sub-IFD (`GPSInfo`, 34853) and an EXIF 0th IFD / thumbnail** — `DngMetadata::exif`
-  is the Exif sub-IFD alone, and the `MetadataSink` path drops a facade `Exif` model's other
-  directories, so only its Exif sub-IFD (with its Interoperability sub-IFD) is written: IFD 0 and the preview sub-IFDs are the DNG container's
+- **The GPS sub-IFD (`GPSInfo`, 34853) and an EXIF 0th IFD / thumbnail** — of the
+  `DngMetadata::exif` model only its Exif sub-IFD (with its Interoperability sub-IFD) is written,
+  whether it was set directly or through the `MetadataSink` path, and the model's other
+  directories are dropped: IFD 0 and the preview sub-IFDs are the DNG container's
   own, built from the raw image and the camera profile, and merging a caller's TIFF tags into
   them could contradict the file's geometry. A GPS pointer in a decoded file therefore still
   surfaces in `ifd0_extra`. Wiring `GPSInfo` through symmetrically is additive.

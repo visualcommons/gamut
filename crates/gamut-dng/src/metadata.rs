@@ -1,9 +1,10 @@
 //! Optional metadata embedded in a DNG: an EXIF sub-IFD plus XMP / IPTC / ICC blocks.
 //!
-//! DNG's `ExifIFD` (34665) *is* an EXIF sub-IFD, so it is carried as the shared [`Ifd`]
-//! directory model — the same shape `gamut-tiff`'s `TiffMetadata` carries its own in, and the
-//! very directory the facade's `Exif` model holds as its Exif sub-IFD. XMP (700), IPTC-IIM
-//! (33723) and ICC (34675) are single opaque payloads in the file, carried verbatim as bytes.
+//! DNG's `ExifIFD` (34665) *is* an EXIF sub-IFD, so EXIF is carried as the shared [`Exif`] model
+//! — the type `gamut-tiff`'s `TiffMetadata::exif` and the facade's `Metadata::exif` hold — in
+//! every build, through a normal `gamut-exif` dependency rather than the `metadata` feature.
+//! XMP (700), IPTC-IIM (33723) and ICC (34675) are single opaque payloads in the file, carried
+//! verbatim as bytes.
 //! With the `metadata` feature, [`DngMetadata`] implements the facade's `TypedMetadata` and
 //! [`DngEncoder`](crate::DngEncoder) its `MetadataSink`; without it, nothing here depends on the
 //! facade.
@@ -15,6 +16,8 @@
 //! ([`DecodedDng::c2pa`](crate::DecodedDng::c2pa)).
 
 use gamut_core::{Error, Result};
+use gamut_exif::Exif;
+use gamut_ifd::tags::INTEROPERABILITY_IFD;
 use gamut_ifd::{ByteOrder, Ifd, Value};
 
 use crate::tags;
@@ -33,11 +36,11 @@ const DEFAULT_EXIF_VERSION: &[u8; 4] = b"0230";
 /// already hold.
 ///
 /// ```
-/// use gamut_dng::{DngMetadata, Ifd, Value};
+/// use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, Value};
 ///
-/// let mut exif = Ifd::new();
-/// exif.set(33437, Value::Rational(vec![(28, 10)])); // FNumber
-/// exif.set(34855, Value::Short(vec![400])); // PhotographicSensitivity
+/// let mut exif = Exif::new(ByteOrder::LittleEndian);
+/// exif.set_tag(ExifTag::FNumber, Value::Rational(vec![(28, 10)]));
+/// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
 ///
 /// let meta = DngMetadata::new()
 ///     .with_exif(exif)
@@ -47,23 +50,22 @@ const DEFAULT_EXIF_VERSION: &[u8; 4] = b"0230";
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct DngMetadata {
-    /// The Exif private sub-IFD (`ExifIFD`, 34665), as the shared directory model — the
-    /// directory the facade's `Exif` model holds as its Exif sub-IFD.
+    /// EXIF capture settings, as the shared [`Exif`] model — the type `gamut-tiff`'s
+    /// `TiffMetadata::exif` and the facade's `Metadata::exif` hold.
     ///
-    /// Only this one EXIF directory crosses into a DNG: the EXIF 0th IFD, GPS sub-IFD and
-    /// thumbnail describe directories the DNG container builds itself (IFD 0, and previews as
-    /// `SubIFDs` entries), so a DNG's own IFD-0 fields reach the caller through
-    /// [`DecodedDng`](crate::DecodedDng) instead. Its standard pointer fields (a camera's
-    /// `InteroperabilityIFD`) are sub-IFD groups, never raw offsets.
-    pub exif: Option<Ifd>,
-    /// The byte order of the file [`exif`](Self::exif) was read from: `Some` exactly when the
-    /// decoder returned an Exif directory, and `None` on a value built by hand.
+    /// Only the model's **Exif sub-IFD** ([`Exif::exif_ifd`]) crosses into the file, as the DNG's
+    /// `ExifIFD` (34665), with the model's **Interoperability sub-IFD** ([`Exif::interop_ifd`])
+    /// attached to it as its `InteroperabilityIFD` (40965) group. The model's 0th IFD, GPS sub-IFD
+    /// and thumbnail describe directories the DNG container builds itself (IFD 0, and previews as
+    /// `SubIFDs` entries), so the encoder does not write them and the decoder does not populate
+    /// them; a DNG's own IFD-0 fields reach the caller through
+    /// [`DecodedDng`](crate::DecodedDng) instead.
     ///
-    /// **Read-side provenance only.** An `ExifIFD` has no byte order of its own — it is written in
-    /// the file's, which [`DngEncoder::with_byte_order`](crate::DngEncoder::with_byte_order)
-    /// chooses — so the encoder ignores this field. It exists so the typed EXIF model the
-    /// `metadata` feature builds states the order the directory was actually stored in.
-    pub exif_byte_order: Option<ByteOrder>,
+    /// On read the model is in the file's byte order, its Exif sub-IFD's standard pointer fields
+    /// resolved into sub-IFD groups (never raw offsets) and a single `InteroperabilityIFD` group
+    /// lifted out into the model's Interoperability sub-IFD. On write its byte order does not
+    /// travel — the file's is [`DngEncoder::with_byte_order`](crate::DngEncoder::with_byte_order)'s.
+    pub exif: Option<Exif>,
     /// An XMP packet (UTF-8 RDF/XML), stored in the `XMP` tag (700), verbatim.
     pub xmp: Option<Vec<u8>>,
     /// A legacy IPTC-IIM dataset stream, stored in the `IPTC/NAA` tag (33723), verbatim.
@@ -83,9 +85,10 @@ impl DngMetadata {
         Self::default()
     }
 
-    /// Returns a copy carrying `exif` as the file's `ExifIFD` sub-IFD.
+    /// Returns a copy carrying `exif` as the file's EXIF (see [`exif`](Self::exif) for what of
+    /// the model a DNG holds).
     #[must_use]
-    pub fn with_exif(mut self, exif: Ifd) -> Self {
+    pub fn with_exif(mut self, exif: Exif) -> Self {
         self.exif = Some(exif);
         self
     }
@@ -111,9 +114,19 @@ impl DngMetadata {
         self
     }
 
-    /// The EXIF sub-IFD to write, or `None` when there is no EXIF content worth a directory.
-    fn exif_ifd(&self) -> Option<&Ifd> {
-        self.exif.as_ref().filter(|ifd| !ifd.fields().is_empty())
+    /// The `ExifIFD` directory to write — the model's Exif sub-IFD with its Interoperability
+    /// sub-IFD attached as an `InteroperabilityIFD` group — or `None` when the Exif sub-IFD holds
+    /// no field worth a directory.
+    fn exif_ifd(&self) -> Option<Ifd> {
+        let exif = self.exif.as_ref()?;
+        let mut directory = exif
+            .exif_ifd()
+            .filter(|ifd| !ifd.fields().is_empty())?
+            .clone();
+        if let Some(interop) = exif.interop_ifd() {
+            directory.set_sub_ifd(INTEROPERABILITY_IFD, vec![interop.clone()]);
+        }
+        Some(directory)
     }
 
     /// Whether there is nothing to embed.
@@ -137,7 +150,8 @@ impl DngMetadata {
     /// carries a pointer-typed field under a standard pointer tag, or stores one tag twice (a
     /// field and a sub-IFD group, or two groups).
     pub(crate) fn check(&self) -> Result<()> {
-        self.exif_ifd().map_or(Ok(()), check_exif_subtree)
+        self.exif_ifd()
+            .map_or(Ok(()), |exif| check_exif_subtree(&exif))
     }
 
     /// Writes the XMP / IPTC / ICC blocks into `ifd0` and returns the EXIF sub-IFD, if any.
@@ -155,7 +169,7 @@ impl DngMetadata {
         if let Some(icc) = &self.icc {
             ifd0.set(tags::ICC_PROFILE, Value::Undefined(icc.clone()));
         }
-        let mut exif = self.exif_ifd()?.clone();
+        let mut exif = self.exif_ifd()?;
         if exif.get(tags::EXIF_VERSION).is_none() {
             exif.set(
                 tags::EXIF_VERSION,
@@ -166,61 +180,46 @@ impl DngMetadata {
     }
 }
 
-/// The facade wiring behind the `metadata` feature: [`DngMetadata`]'s `TypedMetadata` impl, and
-/// the EXIF carrier [`DngEncoder`](crate::DngEncoder)'s `MetadataSink` impl writes.
+/// The EXIF model of a DNG's `ExifIFD` `directory`, read in `order`: the directory as the
+/// model's Exif sub-IFD, a single `InteroperabilityIFD` group lifted out of it into the model's
+/// own Interoperability sub-IFD — the inverse of [`DngMetadata::exif_ifd`].
+pub(crate) fn exif_model(directory: Ifd, order: ByteOrder) -> Exif {
+    let mut exif = Exif::new(order);
+    let mut sub_ifd = Ifd::new();
+    for field in directory.fields() {
+        sub_ifd.set(field.tag, field.value.clone());
+    }
+    for group in directory.sub_ifds() {
+        match (group.tag, group.ifds.as_slice()) {
+            (INTEROPERABILITY_IFD, [interop]) => exif.set_interop_ifd(interop.clone()),
+            _ => sub_ifd.set_sub_ifd(group.tag, group.ifds.clone()),
+        }
+    }
+    exif.set_exif_ifd(sub_ifd);
+    exif
+}
+
+/// The facade wiring behind the `metadata` feature: [`DngMetadata`]'s `TypedMetadata` impl.
 #[cfg(feature = "metadata")]
-pub(crate) mod typed {
-    use gamut_core::Result;
-    use gamut_ifd::tags::INTEROPERABILITY_IFD;
-    use gamut_ifd::{ByteOrder, Ifd};
-    use gamut_metadata::exif::Exif;
+mod typed {
     use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
 
     use super::DngMetadata;
 
-    /// The `ExifIFD` directory a DNG writes for the bare TIFF stream `tiff` (the
-    /// `MetadataSink::write_exif` payload), or `None` when the stream holds no Exif sub-IFD
-    /// content.
-    ///
-    /// The model's Interoperability sub-IFD is attached to the directory as the
-    /// `InteroperabilityIFD` group the decoder hands back. Its 0th IFD, GPS sub-IFD and thumbnail
-    /// are not carried: the DNG container builds those directories itself (see
-    /// [`DngMetadata::exif`]).
-    ///
-    /// # Errors
-    ///
-    /// The [`ExifError`](gamut_metadata::exif::ExifError), converted, when `tiff` is not a
-    /// readable EXIF TIFF stream.
-    pub(crate) fn exif_directory(tiff: &[u8]) -> Result<Option<Ifd>> {
-        let exif = Exif::parse(tiff)?;
-        Ok(match (exif.exif_ifd(), exif.interop_ifd()) {
-            (None, None) => None,
-            (directory, interop) => {
-                let mut directory = directory.cloned().unwrap_or_default();
-                if let Some(interop) = interop {
-                    directory.set_sub_ifd(INTEROPERABILITY_IFD, vec![interop.clone()]);
-                }
-                Some(directory)
-            }
-        })
-    }
-
-    /// The facade's [`TypedMetadata`] over the four carriers. The EXIF carrier is a parsed
-    /// directory rather than bytes, so [`blocks`](TypedMetadata::blocks) hands over only the
-    /// three byte carriers and [`metadata`](TypedMetadata::metadata) assigns the EXIF model
-    /// straight onto [`Metadata::exif`] rather than re-serialising it to bytes and parsing it
-    /// back.
+    /// The facade's [`TypedMetadata`] over the four carriers. The EXIF carrier is already the
+    /// facade's typed model, so [`blocks`](TypedMetadata::blocks) hands over only the three byte
+    /// carriers and [`metadata`](TypedMetadata::metadata) assigns the EXIF model straight onto
+    /// [`Metadata::exif`] rather than re-serialising it to bytes and parsing it back.
     ///
     /// ```
-    /// use gamut_dng::{DngMetadata, Ifd, TypedMetadata, Value};
+    /// use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, TypedMetadata, Value};
     ///
-    /// let mut exif = Ifd::new();
-    /// exif.set(34855, Value::Short(vec![400])); // PhotographicSensitivity
+    /// let mut exif = Exif::new(ByteOrder::LittleEndian);
+    /// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
     /// let meta = DngMetadata::new().with_exif(exif.clone());
     ///
-    /// assert!(meta.blocks()?.is_empty()); // EXIF is a directory here, not a byte block...
-    /// let model = meta.metadata()?.exif.expect("an EXIF model");
-    /// assert_eq!(model.exif_ifd(), Some(&exif)); // ...and reaches the unified model as one.
+    /// assert!(meta.blocks()?.is_empty()); // EXIF is a model here, not a byte block...
+    /// assert_eq!(meta.metadata()?.exif, Some(exif)); // ...and reaches the unified model as one.
     /// # Ok::<(), gamut_metadata::MetadataError>(())
     /// ```
     impl TypedMetadata for DngMetadata {
@@ -242,9 +241,7 @@ pub(crate) mod typed {
         /// The unified model: [`Metadata::parse_blocks`] over
         /// [`blocks`](TypedMetadata::blocks) (the IPTC-IIM block reconciled into the XMP graph
         /// under the default [`ConflictPolicy`](gamut_metadata::iptc::ConflictPolicy)), with
-        /// [`exif`](DngMetadata::exif) assigned onto [`Metadata::exif`] as the Exif sub-IFD of a
-        /// model in [`exif_byte_order`](DngMetadata::exif_byte_order) — or little-endian,
-        /// [`DngEncoder`](crate::DngEncoder)'s default, on a value built by hand.
+        /// [`exif`](DngMetadata::exif) assigned onto [`Metadata::exif`] as it is.
         ///
         /// # Errors
         ///
@@ -252,70 +249,30 @@ pub(crate) mod typed {
         /// parse failed.
         fn metadata(&self) -> gamut_metadata::Result<Metadata> {
             let mut unified = Metadata::parse_blocks(&self.blocks()?)?;
-            unified.exif = self.exif.as_ref().map(|directory| {
-                let mut exif = Exif::new(self.exif_byte_order.unwrap_or(ByteOrder::LittleEndian));
-                exif.set_exif_ifd(directory.clone());
-                exif
-            });
+            unified.exif.clone_from(&self.exif);
             Ok(unified)
         }
     }
 
     #[cfg(test)]
     mod tests {
-        use gamut_ifd::Value;
+        use gamut_exif::Exif;
+        use gamut_ifd::{ByteOrder, Value};
 
         use super::*;
         use crate::tags;
 
-        /// A directory carrying one ordinary field.
-        fn iso(speed: u16) -> Ifd {
-            let mut ifd = Ifd::new();
-            ifd.set(tags::ISO_SPEED_RATINGS, Value::Short(vec![speed]));
-            ifd
+        /// An EXIF model in `order` whose Exif sub-IFD carries one ordinary field.
+        fn iso_in(order: ByteOrder, speed: u16) -> Exif {
+            let mut exif = Exif::new(order);
+            exif.exif_ifd_mut()
+                .set(tags::ISO_SPEED_RATINGS, Value::Short(vec![speed]));
+            exif
         }
 
-        #[test]
-        fn exif_directory_carries_the_exif_sub_ifd_with_its_interop_group() {
-            let mut model = Exif::new(ByteOrder::LittleEndian);
-            model.set_exif_ifd(iso(400));
-            model.set_interop_ifd(iso(1));
-            model.image_mut().set(271, Value::Ascii("gamut".into()));
-            let directory = exif_directory(&model.to_bytes().unwrap())
-                .unwrap()
-                .expect("an Exif sub-IFD");
-            assert_eq!(
-                directory.get(tags::ISO_SPEED_RATINGS),
-                Some(&Value::Short(vec![400]))
-            );
-            // The 0th-IFD `Make` does not cross into the DNG's `ExifIFD`.
-            assert!(directory.get(271).is_none());
-            let groups = directory.sub_ifds();
-            assert_eq!(groups.len(), 1);
-            assert_eq!(groups[0].tag, INTEROPERABILITY_IFD);
-            assert_eq!(groups[0].ifds, vec![iso(1)]);
-        }
-
-        #[test]
-        fn exif_directory_without_an_interop_ifd_attaches_no_group() {
-            let mut model = Exif::new(ByteOrder::LittleEndian);
-            model.set_exif_ifd(iso(400));
-            let directory = exif_directory(&model.to_bytes().unwrap())
-                .unwrap()
-                .expect("an Exif sub-IFD");
-            assert!(directory.sub_ifds().is_empty());
-        }
-
-        #[test]
-        fn exif_directory_of_a_stream_with_no_exif_sub_ifd_is_none() {
-            let mut model = Exif::new(ByteOrder::LittleEndian);
-            model.image_mut().set(271, Value::Ascii("gamut".into()));
-            assert_eq!(exif_directory(&model.to_bytes().unwrap()).unwrap(), None);
-        }
-
-        #[test]
-        fn exif_directory_refuses_a_stream_that_is_not_tiff() {
-            assert!(exif_directory(b"not a TIFF stream").is_err());
+        /// [`iso_in`] little-endian.
+        fn iso(speed: u16) -> Exif {
+            iso_in(ByteOrder::LittleEndian, speed)
         }
 
         #[test]
@@ -337,17 +294,10 @@ pub(crate) mod typed {
         }
 
         #[test]
-        fn metadata_assigns_the_exif_directory_in_its_read_byte_order() {
-            for (read, expected) in [
-                (None, ByteOrder::LittleEndian),
-                (Some(ByteOrder::BigEndian), ByteOrder::BigEndian),
-            ] {
-                let mut meta = DngMetadata::new().with_exif(iso(100));
-                meta.exif_byte_order = read;
-                let exif = meta.metadata().unwrap().exif.expect("an EXIF model");
-                assert_eq!(exif.byte_order(), expected);
-                assert_eq!(exif.exif_ifd(), Some(&iso(100)));
-                assert!(exif.image().fields().is_empty());
+        fn metadata_assigns_the_exif_model_unchanged() {
+            for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+                let meta = DngMetadata::new().with_exif(iso_in(order, 100));
+                assert_eq!(meta.metadata().unwrap().exif, Some(iso_in(order, 100)));
             }
             assert_eq!(DngMetadata::new().metadata().unwrap().exif, None);
         }
@@ -366,10 +316,7 @@ pub(crate) mod typed {
                 .metadata()
                 .unwrap();
             assert_eq!(unified.xmp, parsed.xmp);
-            assert_eq!(
-                unified.exif.expect("an EXIF model").exif_ifd(),
-                Some(&iso(100))
-            );
+            assert_eq!(unified.exif, Some(iso(100)));
         }
     }
 }
@@ -470,15 +417,21 @@ fn check_exif_subtree(ifd: &Ifd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use gamut_ifd::Variant;
-    use gamut_ifd::tags::INTEROPERABILITY_IFD;
 
     use super::*;
 
-    /// An Exif sub-IFD carrying `tag` = `value`.
-    fn exif_with(tag: u16, value: Value) -> Ifd {
-        let mut exif = Ifd::new();
-        exif.set(tag, value);
+    /// A little-endian EXIF model whose Exif sub-IFD is `directory`.
+    fn model(directory: Ifd) -> Exif {
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set_exif_ifd(directory);
         exif
+    }
+
+    /// An EXIF model whose Exif sub-IFD carries `tag` = `value`.
+    fn exif_with(tag: u16, value: Value) -> Exif {
+        let mut directory = Ifd::new();
+        directory.set(tag, value);
+        model(directory)
     }
 
     #[test]
@@ -492,10 +445,77 @@ mod tests {
 
     #[test]
     fn an_exif_directory_with_no_fields_is_empty() {
-        // An `ExifIFD` holding nothing is not worth a directory, so it is not written.
-        let meta = DngMetadata::new().with_exif(Ifd::new());
-        assert!(meta.is_empty());
-        assert!(meta.apply(&mut Ifd::new()).is_none());
+        // An `ExifIFD` holding no field is not worth a directory, so it is not written — not
+        // even when the model has an Interoperability sub-IFD to attach to it, or carries
+        // directories (0th IFD, GPS) a DNG does not take from it.
+        let mut interop = Ifd::new();
+        interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+        let mut exif = model(Ifd::new());
+        exif.set_interop_ifd(interop);
+        exif.image_mut().set(271, Value::Ascii("gamut".into())); // Make
+        exif.gps_ifd_mut().set(0, Value::Byte(vec![2, 3, 0, 0])); // GPSVersionID
+        for exif in [Exif::new(ByteOrder::LittleEndian), exif] {
+            let meta = DngMetadata::new().with_exif(exif);
+            assert!(meta.is_empty());
+            assert!(meta.apply(&mut Ifd::new()).is_none());
+        }
+    }
+
+    #[test]
+    fn apply_attaches_the_models_interop_ifd_as_the_exif_directorys_group() {
+        let mut interop = Ifd::new();
+        interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+        let mut exif = exif_with(tags::ISO_SPEED_RATINGS, Value::Short(vec![400]));
+        exif.set_interop_ifd(interop.clone());
+        let written = DngMetadata::new()
+            .with_exif(exif)
+            .apply(&mut Ifd::new())
+            .expect("exif IFD");
+        let groups = written.sub_ifds();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].tag, INTEROPERABILITY_IFD);
+        assert_eq!(groups[0].ifds, vec![interop]);
+    }
+
+    #[test]
+    fn exif_model_lifts_one_interop_group_and_keeps_the_rest() {
+        let mut interop = Ifd::new();
+        interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+        let mut vendor = Ifd::new();
+        vendor.set(7, Value::Short(vec![7]));
+        let mut directory = Ifd::new();
+        directory.set(tags::ISO_SPEED_RATINGS, Value::Short(vec![400]));
+        directory.set_sub_ifd(INTEROPERABILITY_IFD, vec![interop.clone()]);
+        directory.set_sub_ifd(0xC000, vec![vendor.clone()]);
+
+        let exif = exif_model(directory, ByteOrder::BigEndian);
+        assert_eq!(exif.byte_order(), ByteOrder::BigEndian);
+        assert_eq!(exif.interop_ifd(), Some(&interop));
+        let mut expected = Ifd::new();
+        expected.set(tags::ISO_SPEED_RATINGS, Value::Short(vec![400]));
+        expected.set_sub_ifd(0xC000, vec![vendor]);
+        assert_eq!(exif.exif_ifd(), Some(&expected));
+        assert!(exif.image().fields().is_empty());
+
+        // An `InteroperabilityIFD` array is no single Interoperability sub-IFD: it stays a group.
+        let mut array = Ifd::new();
+        array.set_sub_ifd(INTEROPERABILITY_IFD, vec![interop.clone(), interop]);
+        let exif = exif_model(array.clone(), ByteOrder::LittleEndian);
+        assert_eq!(exif.interop_ifd(), None);
+        assert_eq!(exif.exif_ifd(), Some(&array));
+    }
+
+    #[test]
+    fn exif_model_inverts_apply_over_what_a_dng_holds() {
+        let mut interop = Ifd::new();
+        interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+        let mut exif = exif_with(tags::EXIF_VERSION, Value::Undefined(b"0230".to_vec()));
+        exif.set_interop_ifd(interop);
+        let written = DngMetadata::new()
+            .with_exif(exif.clone())
+            .apply(&mut Ifd::new())
+            .expect("exif IFD");
+        assert_eq!(exif_model(written, ByteOrder::LittleEndian), exif);
     }
 
     #[test]
@@ -535,7 +555,8 @@ mod tests {
     fn applies_blocks_and_carries_the_exif_sub_ifd() {
         let mut ifd = Ifd::new();
         let mut exif = exif_with(tags::ISO_SPEED_RATINGS, Value::Short(vec![400]));
-        exif.set(tags::EXPOSURE_TIME, Value::Rational(vec![(1, 250)]));
+        exif.exif_ifd_mut()
+            .set(tags::EXPOSURE_TIME, Value::Rational(vec![(1, 250)]));
         let meta = DngMetadata {
             exif: Some(exif),
             xmp: Some(b"<x:xmpmeta/>".to_vec()),
@@ -606,7 +627,7 @@ mod tests {
 
     /// The metadata carrying `exif` as its Exif sub-IFD.
     fn carrying(exif: Ifd) -> DngMetadata {
-        DngMetadata::new().with_exif(exif)
+        DngMetadata::new().with_exif(model(exif))
     }
 
     /// The message [`DngMetadata::check`] refused `meta` with.

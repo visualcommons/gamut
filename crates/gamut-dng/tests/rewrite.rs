@@ -7,7 +7,8 @@ mod common;
 
 use gamut_core::ErrorKind;
 use gamut_dng::{
-    ByteOrder, DngEncoder, DngMetadata, DngRewrite, MakerNotePreservation, deconstruct,
+    ByteOrder, DngEncoder, DngMetadata, DngRewrite, Exif, ExifTag, MakerNotePreservation,
+    deconstruct,
 };
 use gamut_ifd::{FieldType, Ifd, UnknownValue, Value, Variant, tags as ifd_tags};
 
@@ -228,9 +229,9 @@ fn every_exif_field_the_encoder_accepts_under_a_pointer_tag_reopens_as_that_fiel
             .map(|code| (code, unknown(code)));
         for (code, value) in recognised.chain(unclaimed) {
             for &tag in ifd_tags::STANDARD_POINTER_TAGS {
-                let mut exif = Ifd::new();
-                exif.set(34855, Value::Short(vec![100])); // PhotographicSensitivity
-                exif.set(tag, value.clone());
+                let mut exif = Exif::new(ByteOrder::LittleEndian);
+                exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![100]));
+                exif.exif_ifd_mut().set(tag, value.clone());
                 let mut dng = Vec::new();
                 let encoded = DngEncoder::new()
                     .with_variant(variant)

@@ -325,7 +325,7 @@ impl DngEncoder {
     /// is not 3-colour (the profile is a `3 × 3` matrix).
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error — before
     /// any pixel work — if the
-    /// [`DngMetadata::exif`] sub-IFD, or a directory nested in it, carries a field under a
+    /// Exif sub-IFD written for [`DngMetadata::exif`], or a directory nested in it, carries a field under a
     /// standard pointer tag (`SubIFDs`, `ExifIFD`, `GPSInfo`, `InteroperabilityIFD`) whose on-disk
     /// type is a pointer's own (`LONG`, `IFD`, `LONG8`, `IFD8`, judged by [`Value::type_code`],
     /// the code the reader classifies by), or stores one tag twice (a field and
@@ -613,8 +613,9 @@ impl DngEncoder {
 
 /// The facade's encoder sink (the `metadata` feature): EXIF, XMP, ICC and IPTC-IIM blocks land
 /// in the same [`DngMetadata`] carriers [`with_dng_metadata`](DngEncoder::with_dng_metadata)
-/// sets, each replacing what was there. Of an EXIF stream only the Exif sub-IFD (with its
-/// Interoperability sub-IFD) is carried — see [`DngMetadata::exif`]. A C2PA store is refused,
+/// sets, each replacing what was there. An EXIF stream is parsed into the [`DngMetadata::exif`]
+/// model, of which only the Exif sub-IFD (with its Interoperability sub-IFD) is written — see
+/// there. A C2PA store is refused,
 /// as by every sink; set one with [`with_c2pa`](DngEncoder::with_c2pa).
 #[cfg(feature = "metadata")]
 impl gamut_metadata::MetadataSink for DngEncoder {
@@ -626,7 +627,7 @@ impl gamut_metadata::MetadataSink for DngEncoder {
     ];
 
     fn write_exif(mut self, tiff: &[u8]) -> Result<Self> {
-        self.metadata.exif = crate::metadata::typed::exif_directory(tiff)?;
+        self.metadata.exif = Some(gamut_exif::Exif::parse(tiff)?);
         Ok(self)
     }
 
@@ -1675,7 +1676,6 @@ mod tests {
     #[test]
     fn each_metadata_sink_setter_writes_its_own_carrier() {
         use gamut_metadata::MetadataSink;
-        use gamut_metadata::exif::Exif;
 
         let mut exif = Exif::new(ByteOrder::LittleEndian);
         exif.exif_ifd_mut()
@@ -1689,12 +1689,10 @@ mod tests {
             .unwrap()
             .write_iptc_iim(&[0x1c, 0x02])
             .unwrap();
-        let mut expected = Ifd::new();
-        expected.set(tags::ISO_SPEED_RATINGS, Value::Short(vec![200]));
         assert_eq!(
             enc.metadata,
             DngMetadata::new()
-                .with_exif(expected)
+                .with_exif(exif)
                 .with_xmp(b"<x:xmpmeta/>".to_vec())
                 .with_icc(vec![1, 2])
                 .with_iptc(vec![0x1c, 0x02])

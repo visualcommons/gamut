@@ -518,27 +518,20 @@ fn lossless_jpeg_roundtrips_and_validates() {
 
 #[test]
 fn metadata_embeds_and_roundtrips() {
-    use gamut_dng::{ByteOrder, DngMetadata, Ifd, Value};
-    // EXIF 2.32 tag codes of the Exif sub-IFD fields this test sets.
-    const EXPOSURE_TIME: u16 = 33434;
-    const F_NUMBER: u16 = 33437;
-    const PHOTOGRAPHIC_SENSITIVITY: u16 = 34855;
-    const DATE_TIME_ORIGINAL: u16 = 36867;
-    const FOCAL_LENGTH: u16 = 37386;
-    const LENS_MODEL: u16 = 42036;
+    use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, Value};
     let raw = common::sample_raw(32, 24, 16);
-    let mut exif = Ifd::new();
-    exif.set(EXPOSURE_TIME, Value::Rational(vec![(1, 250)]));
-    exif.set(F_NUMBER, Value::Rational(vec![(28, 10)]));
-    exif.set(PHOTOGRAPHIC_SENSITIVITY, Value::Short(vec![400]));
-    exif.set(
-        DATE_TIME_ORIGINAL,
+    let mut exif = Exif::new(ByteOrder::LittleEndian);
+    exif.set_tag(ExifTag::ExposureTime, Value::Rational(vec![(1, 250)]));
+    exif.set_tag(ExifTag::FNumber, Value::Rational(vec![(28, 10)]));
+    exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+    exif.set_tag(
+        ExifTag::DateTimeOriginal,
         Value::Ascii("2026:06:13 12:00:00".to_owned()),
     );
-    exif.set(FOCAL_LENGTH, Value::Rational(vec![(50, 1)]));
+    exif.set_tag(ExifTag::FocalLength, Value::Rational(vec![(50, 1)]));
     // An entry the crate models no field for: it rides along in the same directory, so the
     // decoder needs no separate verbatim escape hatch to return it.
-    exif.set(LENS_MODEL, Value::Ascii("gamut 50mm".to_owned()));
+    exif.set_tag(ExifTag::LensModel, Value::Ascii("gamut 50mm".to_owned()));
     let meta = DngMetadata::new()
         .with_exif(exif)
         .with_xmp(br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>"#.to_vec())
@@ -556,35 +549,24 @@ fn metadata_embeds_and_roundtrips() {
     // gamut reconstructs every block.
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
     let got = &decoded.metadata;
-    let got_exif = got.exif.as_ref().expect("EXIF sub-IFD");
-    assert_eq!(
-        got_exif.get(EXPOSURE_TIME),
-        Some(&Value::Rational(vec![(1, 250)]))
-    );
-    assert_eq!(
-        got_exif.get(F_NUMBER),
-        Some(&Value::Rational(vec![(28, 10)]))
-    );
-    assert_eq!(
-        got_exif.get(PHOTOGRAPHIC_SENSITIVITY),
-        Some(&Value::Short(vec![400]))
-    );
-    assert_eq!(
-        got_exif.get(DATE_TIME_ORIGINAL),
-        Some(&Value::Ascii("2026:06:13 12:00:00".to_owned()))
-    );
-    assert_eq!(
-        got_exif.get(FOCAL_LENGTH),
-        Some(&Value::Rational(vec![(50, 1)]))
-    );
-    assert_eq!(
-        got_exif.get(LENS_MODEL),
-        Some(&Value::Ascii("gamut 50mm".to_owned()))
-    );
+    let got_exif = got.exif.as_ref().expect("EXIF model");
+    for (tag, value) in [
+        (ExifTag::ExposureTime, Value::Rational(vec![(1, 250)])),
+        (ExifTag::FNumber, Value::Rational(vec![(28, 10)])),
+        (ExifTag::PhotographicSensitivity, Value::Short(vec![400])),
+        (
+            ExifTag::DateTimeOriginal,
+            Value::Ascii("2026:06:13 12:00:00".to_owned()),
+        ),
+        (ExifTag::FocalLength, Value::Rational(vec![(50, 1)])),
+        (ExifTag::LensModel, Value::Ascii("gamut 50mm".to_owned())),
+    ] {
+        assert_eq!(got_exif.get_tag(tag), Some(&value), "{tag:?}");
+    }
     // The mandatory `ExifVersion` the encoder supplies is the only entry beyond what was set.
-    assert_eq!(got_exif.fields().len(), 7);
-    // The directory's byte order is the file's, recorded beside it.
-    assert_eq!(got.exif_byte_order, Some(ByteOrder::LittleEndian));
+    assert_eq!(got_exif.exif_ifd().expect("sub-IFD").fields().len(), 7);
+    // The model is in the file's byte order.
+    assert_eq!(got_exif.byte_order(), ByteOrder::LittleEndian);
     assert_eq!(got.xmp, meta.xmp);
     assert_eq!(got.iptc, meta.iptc);
     assert_eq!(got.icc, meta.icc);
@@ -607,15 +589,15 @@ fn metadata_embeds_and_roundtrips() {
 /// and reproduces the directory.
 #[test]
 fn exif_interoperability_ifd_survives_decode_then_reencode() {
-    use gamut_dng::{DngMetadata, Ifd, Value};
+    use gamut_dng::{DngMetadata, Exif, ExifTag, Ifd, Value};
     use gamut_ifd::tags::INTEROPERABILITY_IFD;
 
     let raw = common::sample_raw(32, 24, 16);
     let mut interop = Ifd::new();
     interop.set(1, Value::Ascii("R98".to_owned())); // InteroperabilityIndex
-    let mut exif = Ifd::new();
-    exif.set(34855, Value::Short(vec![400])); // PhotographicSensitivity
-    exif.set_sub_ifd(INTEROPERABILITY_IFD, vec![interop.clone()]);
+    let mut exif = Exif::new(ByteOrder::LittleEndian);
+    exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+    exif.set_interop_ifd(interop.clone());
     let meta = DngMetadata::new().with_exif(exif);
     let encode = |meta: DngMetadata| {
         let mut dng = Vec::new();
@@ -626,16 +608,16 @@ fn exif_interoperability_ifd_survives_decode_then_reencode() {
         dng
     };
     let decoded = DngDecoder::new().decode(&encode(meta)).expect("decode");
-    let exif_dir = |meta: &DngMetadata| meta.exif.clone().expect("EXIF sub-IFD");
-    let first = exif_dir(&decoded.metadata);
-    assert_eq!(first.get(INTEROPERABILITY_IFD), None);
-    assert_eq!(first.sub_ifds().len(), 1);
-    assert_eq!(first.sub_ifds()[0].ifds, [interop]);
+    let first = decoded.metadata.exif.clone().expect("EXIF model");
+    let directory = first.exif_ifd().expect("Exif sub-IFD");
+    assert_eq!(directory.get(INTEROPERABILITY_IFD), None);
+    assert!(directory.sub_ifds().is_empty());
+    assert_eq!(first.interop_ifd(), Some(&interop));
 
     let again = DngDecoder::new()
         .decode(&encode(decoded.metadata))
         .expect("decode the re-encoded file");
-    assert_eq!(exif_dir(&again.metadata), first);
+    assert_eq!(again.metadata.exif, Some(first));
 }
 
 #[test]
