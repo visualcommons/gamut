@@ -499,8 +499,8 @@ exactly as `gamut-av1` is on the encode side.
 
 The last decode-side gap. Section L decodes the container and hands the AV1 codestream to a
 caller-supplied `Av1CodestreamDecoder`; this section is the **software implementation of that trait** —
-what makes the seam optional and unblocks `gamut_core::DecodeImage` for AVIF (section K) on
-targets with no hardware AV1 decode.
+what makes the seam optional, so `AvifDecoder`'s `gamut_core::DecodeImage` impls (#1085) decode
+with no pushed backend on targets with no hardware AV1 decode.
 
 It lives in `gamut-av1` behind a default-on `decode` feature, not in a new crate: the decoder
 needs `cdf.rs` (the §9.4 tables), `filter.rs`, `transform.rs` and `quant.rs`, which are private to
@@ -546,7 +546,7 @@ exercise tools `gamut-av1` never emits, which its own round-trip suite cannot re
 | 10/12-bit, 4:2:0/4:2:2, monochrome, profiles 0 and 2 | §5.5.2, Annex A | ☐ | D6 |
 | Intra block copy (`allow_intrabc`) | §7.11.x | ☐ | D6 |
 | Film grain synthesis | §7.18.3 | ☐ | D6 |
-| `SoftwareAv1Decoder` + `AvifDecoder` (`DecodeImage` for Rgb8/Rgba8/Rgb16/Rgba16) | gamut-avif | ☐ | D7 |
+| `SoftwareAv1Decoder` as the implicit tail of `AvifDecoder` (which ships since #1085 with `DecodeImage` for Rgba8/Rgba16 over pushed backends), plus `DecodeImage` for Rgb8/Rgb16 | gamut-avif | ☐ | D7 |
 | libaom differential suite over the size / quantizer / content / tools matrix | (oracle) | ✅ (headers) | D3 |
 
 **Refused, by design.** Inter frames, `show_existing_frame`, `OBU_TILE_LIST`, a partial tile

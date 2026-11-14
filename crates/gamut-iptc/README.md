@@ -98,7 +98,7 @@ The v1 contract, stated precisely:
   overlong values (octet limits are enforced on write only; overlong wire values are preserved on
   read), and an IIM-inexpressible `photoshop:DateCreated` are hard errors. Reading never guesses: a
   `1:90` coded character set other than the default (Latin-1) or UTF-8 is a typed
-  `Error::Unsupported`, never mis-decoded; within a supported charset, an individually undecodable
+  `IptcError::Unsupported`, never mis-decoded; within a supported charset, an individually undecodable
   value is treated as absent.
 - **Reconciliation is per-field with a global policy.** The IPTC guidelines call for keeping the
   carriers in sync but prescribe no single winner; `ConflictPolicy` (XMP wins by default, matching

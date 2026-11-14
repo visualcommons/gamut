@@ -132,7 +132,7 @@ rather than restating it. A status of **stable** means the crate is at 1.0 or la
 | `gamut-dsp`       | Shared DSP kernels: AV1 DCT/ADST/identity/WHT, the JPEG 8×8 forward/inverse DCT, the reference decoders' chroma upsampling, quantization rounding and pixel clamps | stable (1.0 under #192)             |
 | `gamut-bitstream` | Bit readers/writers, LEB128, the AV1 §8.2 symbol (arithmetic) coder, MSB-first sample packing, the T.81 Annex K.2 Huffman table builder and Annex C canonical codes | pre-1.0, no 1.0 release issue yet; the ANS and JPEG XL prefix coders are not implemented |
 | `gamut-tonemap`   | Tone-mapping curves for HDR→SDR: the `ToneCurve` trait over the Linear, Clamp, Exposure, Reinhard, ReinhardExtended, ACES, Hable and Drago operators | stable (#188) |
-| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables, their object-safe Rust twins, and the registry fallback *contract*; this crate declares no registry — each host crate that offers a seam keeps its own | implemented |
+| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables, their object-safe Rust twins, and the one `Registry` (behind its `std` feature) every host crate that offers a seam keeps its backends in, implementing the fallback contract | implemented |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | stable; structure only, codestream carried opaquely |
 | `gamut-riff`      | RIFF container utilities (WebP)                                        | stable (#186)                      |
 | `gamut-av1`       | AV1 still-image (intra-frame) encoder + header-layer decoder — the codec layer beneath AVIF | encoder: lossless and lossy intra keyframes; decoder (default Cargo feature `decode`): OBU, header and tile-group framing of 8-bit 4:4:4 intra frames only, no sample reconstruction yet (#259) |
@@ -156,7 +156,7 @@ rather than restating it. A status of **stable** means the crate is at 1.0 or la
 | `gamut-dng`       | DNG 1.7.1 raw encoder + decoder — a TIFF/EP profile over `gamut-ifd`   | encoder + decoder (1.0 was #109), Adobe DNG SDK-gated |
 | `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut's own writers | encoder (#195); no in-house decoder by design — optional `inflate` feature bounds `miniz_oxide` for workspace decoders |
 | `gamut-png`       | PNG (W3C 3rd edition) encoder + decoder, over the still-image subset   | encoder (#24) + decoder (#249); APNG out of scope, so an animated PNG decodes as its default image |
-| `gamut-cli`       | `gamut` CLI sandbox: `convert` (decode PNG/JPEG/PPM/WebP/JXL, re-encode AVIF/WebP/TIFF/PNG/JXL/JPEG), `inspect` (TIFF/DNG byte accounting), `icc`, `isobmff`, `av1`, and the `color`, `dsp` and `bitstream` primitive inspectors | ready for use |
+| `gamut-cli`       | `gamut` CLI sandbox: `convert` (decode PNG/JPEG/PPM/WebP/JXL, re-encode AVIF/WebP/TIFF/PNG/JXL/JPEG), `inspect` (TIFF/DNG/PNG byte accounting, plus a C2PA manifest-store report for those and HEIC/AVIF/WebP), `icc`, `isobmff`, `av1`, and the `color`, `dsp` and `bitstream` primitive inspectors | ready for use |
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
 | `gamut-ffi`       | C-compatible FFI bindings                                              | provider boundary shipped (#280); consumer boundary shipped for AVIF encode and container parse (#666), the other formats pending (#242) |
 
