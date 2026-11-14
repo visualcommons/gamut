@@ -148,7 +148,7 @@ pub fn meta(children: &[Vec<u8>]) -> Vec<u8> {
 
 // ---- oracle bridges -------------------------------------------------------------------------
 
-/// [`Av1StillDecoder`] implemented with the real dav1d decoder (`dav1d-oracle`), bridged exactly
+/// [`Av1CodestreamDecoder`] implemented with the real dav1d decoder (`dav1d-oracle`), bridged exactly
 /// the way a platform decoder would be: the typed `av1C` and the raw item payload are assembled
 /// into one self-contained temporal unit with [`Av1Config::full_stream`] and handed to a Section-5
 /// decoder.
@@ -159,6 +159,10 @@ pub fn meta(children: &[Vec<u8>]) -> Vec<u8> {
 pub struct Dav1dDecoder;
 
 impl Av1CodestreamDecoder for Dav1dDecoder {
+    fn supports(&mut self, _config: &Av1Config) -> bool {
+        true
+    }
+
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;

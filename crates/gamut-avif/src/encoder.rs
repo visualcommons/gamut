@@ -1387,7 +1387,7 @@ impl AvifEncoder {
         // primary stays id 1 (and `pitm` names it) whatever is attached.
         if let Some(exif) = &self.exif {
             // HEIF/AVIF wraps the TIFF stream in a 4-byte big-endian `exif_tiff_header_offset`;
-            // `0` means the stream starts immediately after it. `AvifItem` exposes the payload
+            // `0` means the stream starts immediately after it. `HeifItem` exposes the payload
             // *including* this prefix, so both directions describe the same bytes.
             let mut payload = Vec::with_capacity(4 + exif.len());
             payload.extend_from_slice(&0u32.to_be_bytes());
@@ -1699,7 +1699,7 @@ pub(crate) fn av1c_record(c: &Av1Config) -> [u8; 4] {
 const PRIMARY_ITEM_ID: u32 = 1;
 
 /// The `mime` `content_type` that identifies an XMP metadata item (ISO/IEC 23008-12) — the value
-/// [`AvifImage::xmp`](crate::AvifImage::xmp) matches on when reading.
+/// [`HeifImage::xmp`](crate::HeifImage::xmp) matches on when reading.
 const XMP_CONTENT_TYPE: &str = "application/rdf+xml";
 
 /// The id one past the highest already assigned. Metadata items are appended to a list that starts
@@ -1711,7 +1711,7 @@ fn next_item_id(items: &[Item]) -> u32 {
 /// A metadata item describing the primary image: no properties, no pixels, and a `cdsc` reference.
 ///
 /// `cdsc` runs **metadata → described image**, so the reference lives on this item and targets the
-/// primary — the direction [`AvifImage::metadata_of`](crate::AvifImage::metadata_of) reads back.
+/// primary — the direction [`HeifImage::metadata_of`](crate::HeifImage::metadata_of) reads back.
 fn metadata_item(
     id: u32,
     item_type: [u8; 4],
@@ -1809,7 +1809,7 @@ impl EncodeImage<Rgba8> for AvifEncoder {
     ///
     /// An image whose every alpha sample is 255 is coded as [`EncodeImage<Rgb8>`] codes its colour,
     /// with no alpha auxiliary, unless
-    /// [`with_keep_opaque_alpha`](AvifEncoder::with_keep_opaque_alpha) asks to keep it.
+    /// [`OpaqueAlpha::Keep`] asks to keep it.
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
         if let Some(rgb) = self.opaque_colour::<Rgba8, Rgb8>(image)? {
             return EncodeImage::<Rgb8>::encode_image(self, rgb.as_ref(), out);
@@ -1891,7 +1891,7 @@ impl EncodeImage<Rgba16> for AvifEncoder {
     ///
     /// An image whose every alpha sample is 65535 is coded as [`EncodeImage<Rgb16>`] codes its
     /// colour, with no alpha auxiliary, unless
-    /// [`with_keep_opaque_alpha`](AvifEncoder::with_keep_opaque_alpha) asks to keep it.
+    /// [`OpaqueAlpha::Keep`] asks to keep it.
     fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
         if let Some(rgb) = self.opaque_colour::<Rgba16, Rgb16>(image)? {
             return EncodeImage::<Rgb16>::encode_image(self, rgb.as_ref(), out);
@@ -2648,7 +2648,7 @@ mod tests {
         assert_eq!(
             xmp_item.content_type.as_deref(),
             Some("application/rdf+xml"),
-            "the content type `AvifImage::xmp` matches on"
+            "the content type `HeifImage::xmp` matches on"
         );
         assert_eq!(xmp_item.payload, xmp, "packet carried verbatim");
 

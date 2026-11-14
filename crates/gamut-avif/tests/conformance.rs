@@ -31,6 +31,10 @@ use gamut_isobmff::{ColourInformation, PropertyKind};
 struct Dav1dDecoder;
 
 impl Av1CodestreamDecoder for Dav1dDecoder {
+    fn supports(&mut self, _config: &Av1Config) -> bool {
+        true
+    }
+
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;

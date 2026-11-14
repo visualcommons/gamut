@@ -331,12 +331,10 @@ pub(crate) fn run_backends(
 /// ([`Av1Config::validate_still_payload`]). A backend that wants one self-contained stream
 /// bridges the two with [`Av1Config::full_stream`].
 pub trait Av1CodestreamDecoder {
-    /// Reports whether this backend will decode an item coded under `config`. Returning `false`
-    /// is the **only** fall-through to the next backend; the default accepts every item.
-    fn supports(&mut self, config: &Av1Config) -> bool {
-        let _ = config;
-        true
-    }
+    /// Reports whether this backend will decode an item coded under `config` — its profile,
+    /// bit depth and chroma layout. Returning `false` is the **only** fall-through to the next
+    /// backend; a backend that returns `true` owns the item, and its error is the caller's.
+    fn supports(&mut self, config: &Av1Config) -> bool;
 
     /// Decodes the coded item to its planar frame — native bit depth and chroma, before any
     /// colour conversion, `clap`, `irot` or `imir`.

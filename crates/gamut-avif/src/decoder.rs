@@ -37,6 +37,9 @@ use crate::container::AvifContainer;
 /// /// A stand-in for a real AV1 decoder: a mid-grey frame of the configured layout.
 /// struct Grey;
 /// impl Av1CodestreamDecoder for Grey {
+///     fn supports(&mut self, _config: &Av1Config) -> bool {
+///         true
+///     }
 ///     fn decode_still(&mut self, config: &Av1Config, _payload: &[u8]) -> Result<DecodedFrame> {
 ///         let size = Dimensions::new(2, 2)?;
 ///         let chroma = config.chroma_subsampling();
@@ -126,12 +129,19 @@ impl Codestream for Av1 {
 ///
 /// Backends are held behind [`Arc`]`<`[`Mutex`]`<…>>`, so a clone drives **the same** backend
 /// objects, while a backend added to one afterwards is not seen by the other.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AvifDecoder {
     /// The codestream decoders, tried in the order they were added.
     backends: DecoderRegistry,
     /// The limits and chroma upsampling every decode runs under.
     options: DecodeOptions,
+}
+
+impl Default for AvifDecoder {
+    /// [`AvifDecoder::new`].
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl fmt::Debug for AvifDecoder {
@@ -149,7 +159,10 @@ impl AvifDecoder {
     /// [`ChromaUpsampling::Interpolated`] (libavif's default conversion).
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            backends: DecoderRegistry::new(),
+            options: DecodeOptions::default(),
+        }
     }
 
     /// Adds an [`Av1CodestreamDecoder`] backend. Backends are tried in the order they are added;

@@ -10,11 +10,11 @@ mod common;
 use common::Decode;
 use gamut_av1::{Obu, ObuIter};
 use gamut_avif::{
-    Av1CodestreamDecoder, Av1Config, AvifContainer, ChromaUpsampling, DecodeLimits, DecodeOptions,
-    DecodedFrame, HeifImage,
+    Av1CodestreamDecoder, Av1Config, AvifContainer, AvifDecoder, ChromaUpsampling, DecodeLimits,
+    DecodeOptions, DecodedFrame, HeifImage,
 };
 use gamut_color::{ChromaSubsampling, ColorRange, bt601_ycbcr_to_rgb};
-use gamut_core::{Error, ErrorKind, Result};
+use gamut_core::{DecodeImage, Error, ErrorKind, ImageBuf, Result, Rgba8, Rgba16};
 use gamut_isobmff::{
     CleanAperture, ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, OverlayOffset,
     Property, PropertyKind,
@@ -80,6 +80,10 @@ struct Mock {
 }
 
 impl Av1CodestreamDecoder for Mock {
+    fn supports(&mut self, _config: &Av1Config) -> bool {
+        true
+    }
+
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         // Frame OBU payload = [base, width, height].
         let frame = ObuIter::new(payload)
@@ -104,6 +108,10 @@ impl Av1CodestreamDecoder for Mock {
 #[derive(Default)]
 struct NeverCalled;
 impl Av1CodestreamDecoder for NeverCalled {
+    fn supports(&mut self, _config: &Av1Config) -> bool {
+        true
+    }
+
     fn decode_still(&mut self, _c: &Av1Config, _p: &[u8]) -> Result<DecodedFrame> {
         panic!("decoder must not be invoked");
     }
@@ -1756,7 +1764,7 @@ fn overlay_composites_at_sixteen_bit_across_mixed_depths() {
 }
 
 #[test]
-fn decode_primary_rgba16_and_container_forwarder_agree() {
+fn the_decoders_primary_rgba16_is_the_primary_items_decode() {
     let item = coded_item(7, 1, 10, 200, 4, 4, vec![colr(9, false)]);
     let bytes = file(7, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
@@ -1764,36 +1772,36 @@ fn decode_primary_rgba16_and_container_forwarder_agree() {
         .rgba16(7, &mut Mock::default())
         .unwrap()
         .into_samples();
-    let primary = container
-        .primary_rgba16(&mut Mock::default())
-        .unwrap()
-        .into_samples();
-    let image_level = container
-        .image()
-        .primary_rgba16(&mut Mock::default())
-        .unwrap()
-        .into_samples();
-    assert_eq!(by_id, primary);
-    assert_eq!(by_id, image_level);
+    let primary: ImageBuf<Rgba16> = AvifDecoder::new()
+        .with_backend(Mock::default())
+        .decode_image(&bytes)
+        .unwrap();
+    assert_eq!(by_id, primary.into_samples());
 }
 
 #[test]
-fn primary_with_options_surfaces_honour_the_chroma_upsampling() {
-    // The primary-item `*_with_options` twins decode the primary item under the options they are
-    // handed: the default options give the plain surface's output, and `Nearest` gives the item's
-    // nearest decode, which differs on this 4:2:0 frame.
+fn the_decoders_chroma_upsampling_reaches_both_rgba_surfaces() {
+    // `AvifDecoder` decodes the primary item under the upsampling it was built with: the default
+    // gives the item's default decode, and `Nearest` gives the item's nearest decode, which
+    // differs on this 4:2:0 frame.
     let item = coded_item(7, 1, 8, 15, 4, 4, vec![colr(1, false)]);
     let bytes = file(7, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
     let image = container.image();
     let nearest = DecodeOptions::default().with_chroma_upsampling(ChromaUpsampling::Nearest);
-    let rgba8 = |o| {
-        image
-            .primary_rgba8_with_options(&mut Mock::default(), o)
-            .unwrap()
-            .into_samples()
+    let decoder = |upsampling| {
+        AvifDecoder::new()
+            .with_backend(Mock::default())
+            .with_chroma_upsampling(upsampling)
     };
-    let (default8, nearest8) = (rgba8(DecodeOptions::default()), rgba8(nearest));
+    let rgba8 = |upsampling| {
+        let decoded: ImageBuf<Rgba8> = decoder(upsampling).decode_image(&bytes).unwrap();
+        decoded.into_samples()
+    };
+    let (default8, nearest8) = (
+        rgba8(ChromaUpsampling::Interpolated),
+        rgba8(ChromaUpsampling::Nearest),
+    );
     assert_eq!(
         default8,
         image.rgba8(7, &mut Mock::default()).unwrap().into_samples()
@@ -1801,13 +1809,14 @@ fn primary_with_options_surfaces_honour_the_chroma_upsampling() {
     assert_eq!(nearest8, rgba8_nearest(&container, 7).into_samples());
     assert_ne!(default8, nearest8);
 
-    let rgba16 = |o| {
-        image
-            .primary_rgba16_with_options(&mut Mock::default(), o)
-            .unwrap()
-            .into_samples()
+    let rgba16 = |upsampling| {
+        let decoded: ImageBuf<Rgba16> = decoder(upsampling).decode_image(&bytes).unwrap();
+        decoded.into_samples()
     };
-    let (default16, nearest16) = (rgba16(DecodeOptions::default()), rgba16(nearest));
+    let (default16, nearest16) = (
+        rgba16(ChromaUpsampling::Interpolated),
+        rgba16(ChromaUpsampling::Nearest),
+    );
     let item16 = |o| {
         image
             .rgba16_with_options(7, &mut Mock::default(), o)
@@ -2485,9 +2494,11 @@ fn limit_refusal<T>(result: Result<T>) -> (ErrorKind, Option<&'static str>) {
 }
 
 // The refusal messages are gamut-heif's; the origin stays this crate's.
-const DIMENSION_REFUSAL: (ErrorKind, Option<&str>) = (ErrorKind::Unsupported, Some(gamut_heif::DIMENSION_LIMIT));
+const DIMENSION_REFUSAL: (ErrorKind, Option<&str>) =
+    (ErrorKind::Unsupported, Some(gamut_heif::DIMENSION_LIMIT));
 // The refusal messages are gamut-heif's; the origin stays this crate's.
-const PIXEL_REFUSAL: (ErrorKind, Option<&str>) = (ErrorKind::Unsupported, Some(gamut_heif::PIXEL_LIMIT));
+const PIXEL_REFUSAL: (ErrorKind, Option<&str>) =
+    (ErrorKind::Unsupported, Some(gamut_heif::PIXEL_LIMIT));
 
 /// An `iovl` of the given canvas over one hidden 2x2 4:4:4 input.
 fn overlay_file(ow: u32, oh: u32) -> Vec<u8> {
@@ -2627,9 +2638,11 @@ fn a_decoded_frame_past_the_limits_is_refused() {
 // ---- decode work caps (#762) -----------------------------------------------------------------
 
 // The refusal messages are gamut-heif's; the origin stays this crate's.
-const DECODED_REFUSAL: (ErrorKind, Option<&str>) = (ErrorKind::Unsupported, Some(gamut_heif::DECODED_ITEM_LIMIT));
+const DECODED_REFUSAL: (ErrorKind, Option<&str>) =
+    (ErrorKind::Unsupported, Some(gamut_heif::DECODED_ITEM_LIMIT));
 // The refusal messages are gamut-heif's; the origin stays this crate's.
-const DERIVED_REFUSAL: (ErrorKind, Option<&str>) = (ErrorKind::Unsupported, Some(gamut_heif::DERIVED_ITEM_LIMIT));
+const DERIVED_REFUSAL: (ErrorKind, Option<&str>) =
+    (ErrorKind::Unsupported, Some(gamut_heif::DERIVED_ITEM_LIMIT));
 
 /// Limits whose size caps admit every fixture here, with the given work caps.
 fn work_caps(decoded: u32, derived: u32) -> DecodeLimits {
@@ -2644,6 +2657,10 @@ struct Counting {
 }
 
 impl Av1CodestreamDecoder for Counting {
+    fn supports(&mut self, _config: &Av1Config) -> bool {
+        true
+    }
+
     fn decode_still(&mut self, _c: &Av1Config, _p: &[u8]) -> Result<DecodedFrame> {
         self.calls += 1;
         common::decoded_frame(1, 1, 8, ChromaSubsampling::Cs400, vec![0], vec![], vec![])

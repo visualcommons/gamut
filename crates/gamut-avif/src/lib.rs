@@ -16,7 +16,7 @@
 //!
 //! A caller already holding YCbCr planes skips the colour conversion entirely:
 //! [`AvifEncoder::encode_raw_planes`] codes a [`RawPlanes`] view — borrowed
-//! [`Planar8`](gamut_color::Planar8) or 10/12-bit [`Planar16`](gamut_color::Planar16) planes, an
+//! [`Planar8`] or 10/12-bit [`Planar16`] planes, an
 //! optional alpha plane, and the CICP matrix and range they were produced under — as given, and
 //! writes `colr nclx` from that declaration.
 //!
@@ -62,6 +62,9 @@
 //! // A stub AV1 decoder: ignores the codestream and returns a 2x2 solid-gray monochrome frame.
 //! struct GrayStub;
 //! impl Av1CodestreamDecoder for GrayStub {
+//!     fn supports(&mut self, _config: &Av1Config) -> bool {
+//!         true
+//!     }
 //!     fn decode_still(&mut self, _config: &Av1Config, _payload: &[u8]) -> Result<DecodedFrame> {
 //!         let size = Dimensions::new(2, 2)?;
 //!         DecodedFrame::new(size, 8, ChromaSubsampling::Cs400, vec![128; 4], vec![], vec![])

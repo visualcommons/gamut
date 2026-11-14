@@ -1,7 +1,8 @@
 //! The AV1 OBU layer: unit-type classification ([`ObuType`]), the OBU header ([`ObuHeader`]), and
 //! the low-overhead item-payload split ([`iter_obus`]). Crate-private: `gamut-av1` exports the
 //! public OBU walk ([`gamut_av1::ObuIter`]); this copy stays only until that walk reports what
-//! [`Av1Config`](crate::Av1Config) needs from it — each OBU's size-field flag and raw bytes.
+//! [`Av1Config`](crate::Av1Config) needs from it — each OBU's size-field flag and raw bytes (#1175,
+//! #1176).
 //!
 //! This is *container scope* (issue #250): the reader classifies each OBU (sequence header vs
 //! frame vs metadata) and splits an `av01` item payload into OBUs, but never interprets an OBU

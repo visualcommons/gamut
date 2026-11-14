@@ -170,6 +170,10 @@ pub const STUB_MAX_SIDE: u8 = 16;
 pub struct StubDecoder;
 
 impl Av1CodestreamDecoder for StubDecoder {
+    fn supports(&mut self, _config: &Av1Config) -> bool {
+        true
+    }
+
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> CoreResult<DecodedFrame> {
         let from_end = |back: usize| {
             payload
