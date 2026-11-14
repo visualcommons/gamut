@@ -78,8 +78,8 @@ fn screen() -> Planar8 {
 fn psnr(src: &Planar8, recon: &ReconImage) -> f64 {
     let mut sse = 0u64;
     let mut n = 0u64;
-    for p in 0..3 {
-        for (&s, &r) in src.planes()[p].iter().zip(&recon.planes[p]) {
+    for (src_plane, recon_plane) in src.planes().iter().zip(&recon.planes) {
+        for (&s, &r) in src_plane.iter().zip(recon_plane) {
             let d = i64::from(s) - i64::from(r);
             sse += (d * d) as u64;
             n += 1;
