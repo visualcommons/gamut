@@ -51,7 +51,7 @@ classify each NAL unit (§3); `HevcConfig::validate_still_payload` enforces the 
 constraint and `HevcConfig::annex_b` emits a start-coded stream for a downstream decoder — split
 (issue #255) into `annex_b_parameter_sets` (the `hvcC` arrays alone: Android MediaCodec `csd-0`, the
 VAAPI parameter-set feed, the `AbiHevcDecoder` extradata) and `annex_b_payload` (the item payload
-alone: the matching sample buffers), whose concatenation is `annex_b`. The per-platform mapping —
+alone: the matching sample buffers, and the `AbiHevcDecoder` codestream), whose concatenation is `annex_b`. The per-platform mapping —
 including Apple VideoToolbox, which wants the raw `hvcC` and the length-prefixed payload with **no**
 conversion — is tabulated in the crate docs. Still parsing/classification only — the RBSP payloads
 stay opaque (decode is S3 / issue #18).
@@ -88,7 +88,9 @@ backend consulted. There is **no implicit software tail** — gamut ships no in-
 decoder (issue #18) — so an empty registry or an all-declining one returns an
 `ErrorKind::Unsupported` error with the `NO_BACKEND` message. `AbiHevcDecoder` adapts a `gamut_codec_abi::Decoder` (pure-Rust or
 a bridged C vtable) onto the seam: it lowers `HevcConfig` to a `HEVC_CODEC_ID` `StreamConfig` with
-Annex-B parameter sets as extradata, allocates the `u16` planes itself (`planar_pixel_format` tags
+Annex-B parameter sets as extradata, hands the backend the item payload in the same Annex-B framing
+(`annex_b_payload`, so the `hvcC` prefix width `StreamConfig` does not carry never reaches it —
+issue #1179), allocates the `u16` planes itself (`planar_pixel_format` tags
 the layout), and maps the written planes back through the validating `DecodedFrame::new`.
 
 **Implemented (S6).** The wider colour surface on the RGBA convenience path landed **additively**,

@@ -142,8 +142,11 @@ gamut_status_t gamut_png_encoder_push_backend(GamutPngEncoder *encoder,
 - **HEIC**: like the others, the handle holds the format crate's host — a
   `gamut::heic::HeifDecoder` — and wraps each pushed backend in an `AbiHevcDecoder`. An `hvcC`
   record carries no picture size, so the adapter reads it per decode call from the codestream's
-  SPS (issue #1086) rather than being built per item. There is no software HEVC tail
-  (issue #18); an empty registry decodes nothing.
+  SPS (issue #1086) rather than being built per item. It hands the backend both buffers as
+  Annex-B — the `hvcC` parameter sets as `extradata`, the item payload as the codestream, every
+  NAL unit after a `00 00 00 01` start code — so a C backend never needs the file's NAL
+  length-prefix width, which `StreamConfig` does not carry (issue #1179). There is no software
+  HEVC tail (issue #18); an empty registry decodes nothing.
 - **AVIF decode is excluded**: `AvifDecoder::with_backend` keeps `Av1CodestreamDecoder`
   backends in a registry, but `gamut-avif` has no `gamut-codec-abi` adapter for that trait, so
   a `(vtable, ctx)` pair has no type to be wrapped in. The decode direction joins the C surface
