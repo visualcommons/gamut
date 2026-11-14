@@ -58,11 +58,13 @@ impl Vp8xHeader {
     /// decodes back to the same canvas.
     pub fn to_bytes(&self) -> Result<[u8; VP8X_PAYLOAD_LEN]> {
         self.validate_canvas()?;
+        // Summed rather than OR'd: the five bits are disjoint, so `|` would have an equivalent
+        // `^` twin no test can tell apart, while each `+` has none.
         let flags = (u8::from(self.icc_profile) << 5)
-            | (u8::from(self.alpha) << 4)
-            | (u8::from(self.exif_metadata) << 3)
-            | (u8::from(self.xmp_metadata) << 2)
-            | (u8::from(self.animation) << 1);
+            + (u8::from(self.alpha) << 4)
+            + (u8::from(self.exif_metadata) << 3)
+            + (u8::from(self.xmp_metadata) << 2)
+            + (u8::from(self.animation) << 1);
         // Validated above, so neither subtraction underflows and both fit in 24 bits.
         let w = self.canvas_width - 1;
         let h = self.canvas_height - 1;
@@ -119,7 +121,10 @@ impl Vp8xHeader {
             .with_byte_offset(payload.len() as u64));
         }
         let flags = payload[0];
-        let le24 = |b: &[u8]| u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16);
+        // A zero-padded little-endian read rather than three OR'd byte lanes, whose `|` had an
+        // equivalent `^` twin; the rewrite also takes the two killable `<<` sites with it, so this
+        // closure now carries no mutants at all and the canvas round-trip tests are its cover.
+        let le24 = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], 0]);
         let header = Self {
             icc_profile: flags & 0x20 != 0,
             alpha: flags & 0x10 != 0,

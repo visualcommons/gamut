@@ -162,7 +162,9 @@ fn adst_output_permute(t: &mut [i64], n: u32) {
         let b = ((i >> 2) & 1) ^ ((i >> 3) & 1);
         let c = ((i >> 1) & 1) ^ ((i >> 2) & 1);
         let d = (i & 1) ^ ((i >> 1) & 1);
-        let idx = ((d << 3) | (c << 2) | (b << 1) | a) >> (4 - n);
+        // Summed rather than OR'd: each of a/b/c/d is one bit at its own position, so `|` would
+        // have an equivalent `^` twin no test can tell apart, while each `+` has none.
+        let idx = ((d << 3) + (c << 2) + (b << 1) + a) >> (4 - n);
         *slot = if i & 1 == 1 { -copy[idx] } else { copy[idx] };
     }
 }
