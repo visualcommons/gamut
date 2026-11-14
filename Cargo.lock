@@ -857,9 +857,11 @@ dependencies = [
 name = "gamut-heic"
 version = "0.3.0"
 dependencies = [
+ "gamut-bitstream",
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
+ "gamut-heif",
  "gamut-isobmff",
  "gamut-metadata",
  "libheif-oracle",

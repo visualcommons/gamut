@@ -13,12 +13,20 @@
 //! stream, and a malformed trailing box is tolerated (as a trailer) only once both `ftyp` and
 //! `meta` have been seen — so the byte-accounting walk and the semantic parse never disagree.
 
-use gamut_core::Result;
-use gamut_isobmff::IsoBmffImage;
+use gamut_core::{Error, Result};
+use gamut_heif::{Codestream, HeifImage, ItemKind};
+// `Segment`, `SegmentKind` and `UnknownBox` are `gamut-isobmff`'s: the walk that produces them is
+// shared with `gamut-avif` (#436), and the crate root re-exports them.
+use gamut_isobmff::{IsoBmffImage, Segment, SegmentKind, UnknownBox};
 
-use crate::image::HeifImage;
+use crate::hvcc::HevcConfig;
 
-/// A HEIF file decomposed into a byte-exact list of [`Segment`]s plus the semantic [`HeifImage`].
+/// The four-character HEIF brands that denote an HEVC still image (`references/heif` §7). `heim`/
+/// `heis` are layered-HEVC brands, read as their single (base) layer.
+const HEVC_BRANDS: [[u8; 4]; 4] = [*b"heic", *b"heix", *b"heim", *b"heis"];
+
+/// A HEIF file decomposed into a byte-exact list of [`Segment`]s plus the semantic [`HeifImage`]
+/// — the role-typed item model `gamut-heif` shares between AVIF and HEIC.
 ///
 /// # The every-byte invariant
 ///
@@ -43,11 +51,6 @@ pub struct HeifContainer<'a> {
     unknown_meta_boxes: Vec<UnknownBox<'a>>,
 }
 
-// `Segment`, `SegmentKind`, `UnknownBox` and `UnknownBoxLocation` are `gamut-isobmff`'s: the walk
-// that produces them is shared with `gamut-heic`/`gamut-avif` (#436). Re-exported here, and from
-// the crate root, so this crate's public surface is unchanged.
-pub use gamut_isobmff::{Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
-
 impl<'a> HeifContainer<'a> {
     /// Parses `data` into the total byte-accounting representation and the role-typed semantic view.
     ///
@@ -65,7 +68,8 @@ impl<'a> HeifContainer<'a> {
     /// primary item is missing or hidden. A malformed top-level box *before* both `ftyp` and `meta`
     /// are seen is a parse error; after that it is retained as a [`SegmentKind::Trailer`]. A
     /// `moov`/`trak` beside the `meta` still is not an error: it is skipped, and its bytes are one
-    /// opaque [`segments`](Self::segments) entry.
+    /// opaque [`segments`](Self::segments) entry. The primary-item errors are raised by
+    /// `gamut-heif`, which owns [`HeifImage`].
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         // Semantic parse first: it enforces the stricter rules (refusing a sequence-only file,
         // missing required boxes, …). Because it succeeds only once `ftyp`+`meta` are seen and uses
@@ -126,86 +130,72 @@ impl<'a> HeifContainer<'a> {
         })
     }
 
-    /// The role-typed semantic view of the primary still-image stream.
+    /// The role-typed semantic view of the primary still-image stream. Decode any of its items
+    /// with `gamut-heif`'s surfaces and the [`Hevc`](crate::Hevc) binding, or the primary one with
+    /// [`HeifDecoder`](crate::HeifDecoder).
     #[must_use]
     pub fn image(&self) -> &HeifImage {
         &self.image
+    }
+
+    /// Whether this file is an HEVC still image.
+    ///
+    /// True when the major brand or any compatible brand is one of `heic`/`heix`/`heim`/`heis`
+    /// (`references/heif` §7), or — for the generic structural brand `mif1` — when the primary
+    /// item is an `hvc1`/`hev1` coded item. Image-*sequence* brands (`msf1`/`hevc`/`hevx`) are out
+    /// of scope and are not treated as stills here, but a valid still-image `meta` is not rejected
+    /// for carrying one alongside `mif1` ([`IsoBmffImage::parse`] skips a track beside `meta` and
+    /// refuses a sequence-only file).
+    #[must_use]
+    pub fn is_hevc_still(&self) -> bool {
+        if HEVC_BRANDS.iter().any(|brand| self.image.has_brand(brand)) {
+            return true;
+        }
+        self.image.has_brand(b"mif1")
+            && matches!(
+                self.image.primary_item().kind(),
+                ItemKind::CodedImage { codec } if crate::Hevc::is_coded_item(&codec)
+            )
+    }
+
+    /// The parsed `hvcC` configuration of coded item `item_id` ([`HevcConfig::parse`],
+    /// `references/heif` §1).
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `item_id`
+    /// names no item or the item carries no `hvcC`, and [`HevcConfig::parse`]'s errors.
+    pub fn hevc_config(&self, item_id: u32) -> Result<HevcConfig> {
+        let item = self.image.item(item_id).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "HEIC: item id names no item")
+        })?;
+        let (_, data) = item
+            .codec_configuration()
+            .filter(|(kind, _)| *kind == b"hvcC")
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "HEIC: item has no hvcC configuration",
+                )
+            })?;
+        HevcConfig::parse(data)
+    }
+
+    /// For an HEVC coded item, whether parameter sets (VPS/SPS/PPS) may appear **inband** in its
+    /// payload: `true` for `hev1`, `false` for `hvc1` (which keeps them only in `hvcC`). `None`
+    /// when `item_id` names no item or a non-HEVC one. See `references/heif` §2.
+    #[must_use]
+    pub fn hevc_inband_parameter_sets_allowed(&self, item_id: u32) -> Option<bool> {
+        match &self.image.item(item_id)?.as_isobmff_item().item_type {
+            b"hev1" => Some(true),
+            b"hvc1" => Some(false),
+            _ => None,
+        }
     }
 
     /// The boxes inside `meta`/`iprp` that the semantic parse did not consume, surfaced verbatim.
     #[must_use]
     pub fn unknown_meta_boxes(&self) -> &[UnknownBox<'a>] {
         &self.unknown_meta_boxes
-    }
-
-    /// Decodes an item to a raw planar [`DecodedFrame`](crate::DecodedFrame) via `decoder`.
-    /// Convenience forwarding to
-    /// [`HeifImage::decode_item_planar`](crate::HeifImage::decode_item_planar).
-    ///
-    /// # Errors
-    ///
-    /// As [`HeifImage::decode_item_planar`](crate::HeifImage::decode_item_planar).
-    pub fn decode_item_planar(
-        &self,
-        id: u32,
-        decoder: &mut dyn crate::HevcDecoder,
-    ) -> Result<crate::DecodedFrame> {
-        self.image.decode_item_planar(id, decoder)
-    }
-
-    /// Decodes an item to a presentation-ready `ImageBuf<Rgba8>` via `decoder`. Convenience
-    /// forwarding to [`HeifImage::decode_item_rgba8`](crate::HeifImage::decode_item_rgba8).
-    ///
-    /// # Errors
-    ///
-    /// As [`HeifImage::decode_item_rgba8`](crate::HeifImage::decode_item_rgba8).
-    pub fn decode_item_rgba8(
-        &self,
-        id: u32,
-        decoder: &mut dyn crate::HevcDecoder,
-    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba8>> {
-        self.image.decode_item_rgba8(id, decoder)
-    }
-
-    /// Decodes the primary item to a presentation-ready `ImageBuf<Rgba8>` via `decoder`. Convenience
-    /// forwarding to [`HeifImage::decode_primary_rgba8`](crate::HeifImage::decode_primary_rgba8).
-    ///
-    /// # Errors
-    ///
-    /// As [`HeifImage::decode_primary_rgba8`](crate::HeifImage::decode_primary_rgba8).
-    pub fn decode_primary_rgba8(
-        &self,
-        decoder: &mut dyn crate::HevcDecoder,
-    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba8>> {
-        self.image.decode_primary_rgba8(decoder)
-    }
-
-    /// Decodes an item to a presentation-ready high-bit-depth `ImageBuf<Rgba16>` via `decoder`.
-    /// Convenience forwarding to
-    /// [`HeifImage::decode_item_rgba16`](crate::HeifImage::decode_item_rgba16).
-    ///
-    /// # Errors
-    ///
-    /// As [`HeifImage::decode_item_rgba16`](crate::HeifImage::decode_item_rgba16).
-    pub fn decode_item_rgba16(
-        &self,
-        id: u32,
-        decoder: &mut dyn crate::HevcDecoder,
-    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba16>> {
-        self.image.decode_item_rgba16(id, decoder)
-    }
-
-    /// Decodes the primary item to a presentation-ready high-bit-depth `ImageBuf<Rgba16>` via
-    /// `decoder`. Convenience forwarding to
-    /// [`HeifImage::decode_primary_rgba16`](crate::HeifImage::decode_primary_rgba16).
-    ///
-    /// # Errors
-    ///
-    /// As [`HeifImage::decode_primary_rgba16`](crate::HeifImage::decode_primary_rgba16).
-    pub fn decode_primary_rgba16(
-        &self,
-        decoder: &mut dyn crate::HevcDecoder,
-    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba16>> {
-        self.image.decode_primary_rgba16(decoder)
     }
 }

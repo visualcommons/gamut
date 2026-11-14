@@ -1,58 +1,61 @@
-//! HEIC/HEIF still-image **container decoder** — HEVC intra image items in an ISOBMFF container.
+//! HEIC still-image decoding: the HEVC binding over `gamut-heif`'s shared HEIF layer.
 //!
-//! This crate is decode-side and, for issue #238, covers the container, NAL, and **decode-pipeline**
-//! layers: it parses a HEIF/HEIC file into a byte-exact representation and a role-typed semantic
-//! view, decodes the `hvcC` HEVCDecoderConfigurationRecord into a typed [`HevcConfig`],
-//! splits/classifies the coded item payload into NAL units, and — around a pluggable
-//! [`HevcDecoder`] — resolves item derivation, colour, alpha, and the transformative properties to
-//! deliver planar samples or a presentation-ready [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). It does
-//! **not** encode HEIF (gamut is decode-only for this format, see `references/heif`), and it does not
-//! itself interpret the coded HEVC RBSP payloads — that codestream decode is the [`HevcDecoder`] the
-//! caller plugs in (HEVC-intra pixel reconstruction is codec scope, issue #18).
+//! HEIC is HEIF (ISO/IEC 23008-12) around HEVC intra pictures. Everything outside the coded
+//! picture — the item model, the `grid`/`iden`/`iovl` derivations, the decode limits, YCbCr → RGB,
+//! alpha, the `clap`/`irot`/`imir` transforms and the C2PA summary — is `gamut-heif`'s, written
+//! once for AVIF and HEIC. What is this crate's is the HEVC side of it: the `hvcC` record, the NAL
+//! layer, the still-image constraint, the [`Hevc`] binding that plugs them into `gamut-heif`, the
+//! [`HevcCodestreamDecoder`] backends that decode the coded picture, and the byte-accounting
+//! [`HeifContainer`]. gamut is **decode-only** for this format (see `references/heif`), and ships
+//! no HEVC codestream decoder: the coded picture is decoded by a backend the caller adds (HEVC
+//! pixel reconstruction is codec scope, issue #18).
 //!
-//! # Two layers
+//! # Decoding
 //!
-//! - [`HeifContainer`] — the **total, byte-accounting** representation. Its
-//!   [`segments`](HeifContainer::segments) are contiguous, non-overlapping, and cover every byte of
-//!   the input, so it is *structurally impossible to ignore any bits*: unknown top-level boxes are
-//!   surfaced verbatim ([`SegmentKind::Box`]), an appended vendor stream (a second top-level `ftyp`,
-//!   e.g. a Samsung motion-photo MP4) is retained opaquely ([`SegmentKind::AppendedStream`]), and
-//!   trailing non-box bytes become an explicit [`SegmentKind::Trailer`]. Boxes inside `meta` that
-//!   the semantic parse does not consume are surfaced as [`UnknownBox`]es. Vendor motion-photo
-//!   *semantics* stay downstream; this layer exposes the container's true representation.
-//!   [`HeifContainer::c2pa`] is a lens over the same walk: it locates the C2PA manifest store in a
-//!   top-level `uuid` `ContentProvenanceBox` and reports it as opaque bytes plus its exact byte
-//!   range ([`C2paManifestStore`] — a locator, never a validator).
-//!   [`HeifContainer::c2pa_summary`] is that lens shaped for *reporting*: presence as a
-//!   [`C2paPresence`] answer that keeps "C2PA framing, no store read" apart from "no C2PA box"
-//!   ([`C2paSummary::presence`]), and per store a
-//!   byte range, a size and a `box_purpose` with no bytes attached, rendered by
-//!   [`C2paSummary::report_lines`] with the [`C2PA_NOT_VALIDATED`] disclaimer inline. It also lists
-//!   every C2PA box that yielded *no* store with the reason ([`C2paUnreadBox`]), so a report can
-//!   never present a box gamut could not read through as a file carrying no provenance, and every
-//!   auxiliary `merkle` box ([`C2paMerkleBox`]) as the Merkle-tree box it is.
-//! - [`HeifImage`] — the **role-typed semantic view** over the primary still-image stream, wrapping
-//!   [`gamut_isobmff::IsoBmffImage`]. It reads roles (primary image, alpha/depth auxiliaries,
-//!   thumbnails, Exif/XMP metadata, grid/overlay derivations) as computed lenses over the items,
-//!   never duplicating state.
+//! [`HeifDecoder`] decodes a file's primary image through [`DecodeImage`](gamut_core::DecodeImage)
+//! — to [`Rgba8`](gamut_core::Rgba8) (8-bit coded frames) or [`Rgba16`](gamut_core::Rgba16) (any
+//! coded depth from 8 to 16 bits, 10-bit BT.2020 HDR included, normalised to the full 16-bit range)
+//! — or to its planar samples through [`HeifDecoder::decode_planar`], under [`DecodeLimits`]. Its
+//! backends are [`HevcCodestreamDecoder`]s added with [`HeifDecoder::with_backend`] and kept in
+//! a [`gamut_codec_abi::Registry`]: tried in the order they were added, `supports` returning
+//! `false` the only fall-through, an accepting backend's error returned unchanged.
+//! [`AbiHevcDecoder`] adapts a [`gamut_codec_abi::Decoder`] — a pure-Rust one, or a C backend
+//! through [`gamut_codec_abi::bridge::ForeignDecoder`] — into that trait.
 //!
-//! The box tree itself is the shared [`gamut_isobmff`] primitive (`ftyp`/`meta`/`iloc`/`iinf`/…);
-//! this crate layers the HEIF still-image profile and the byte-accounting guarantee on top.
+//! To decode an item other than the primary one, name the [`Hevc`] binding on `gamut-heif`'s
+//! surfaces: `container.image().decode_item_rgba8::<Hevc>(id, &backends, options)`.
+//!
+//! # The container
+//!
+//! [`HeifContainer`] is the **total, byte-accounting** representation. Its
+//! [`segments`](HeifContainer::segments) are contiguous, non-overlapping, and cover every byte of
+//! the input, so it is *structurally impossible to ignore any bits*: unknown top-level boxes are
+//! surfaced verbatim ([`SegmentKind::Box`]), an appended vendor stream (a second top-level `ftyp`,
+//! e.g. a Samsung motion-photo MP4) is retained opaquely ([`SegmentKind::AppendedStream`]), and
+//! trailing non-box bytes become an explicit [`SegmentKind::Trailer`]. Boxes inside `meta` that
+//! the semantic parse does not consume are surfaced as [`UnknownBox`]es. Its
+//! [`image`](HeifContainer::image) is `gamut-heif`'s role-typed [`HeifImage`];
+//! [`is_hevc_still`](HeifContainer::is_hevc_still) and
+//! [`hevc_config`](HeifContainer::hevc_config) are the HEVC questions about it.
+//!
+//! [`HeifContainer::c2pa`] locates the C2PA manifest store in a top-level `uuid`
+//! `ContentProvenanceBox` and reports it as opaque bytes plus its exact byte range
+//! ([`C2paManifestStore`] — a locator, never a validator); [`HeifContainer::c2pa_summary`] is the
+//! same scan shaped for *reporting* ([`C2paSummary`], with the [`C2PA_NOT_VALIDATED`] disclaimer).
 //!
 //! # HEVC configuration & NAL layer
 //!
-//! [`HevcConfig::parse`] decodes an `hvcC` record ([`references/heif`](../heif) §1) into typed
-//! profile/tier/level, chroma/bit-depth, and the parameter-set [`arrays`](HevcConfig::arrays);
-//! [`HeifItem::hevc_config`] reaches it from a coded item. [`iter_nal_units`] splits a length-prefixed
-//! `hvc1`/`hev1` payload (§2), [`NalHeader::parse`] reads the two-byte NAL header and
-//! [`NalUnitType`] classifies it (§3), [`HevcConfig::validate_still_payload`] enforces the still-image
-//! IRAP constraint, and [`HevcConfig::annex_b`] converts a payload to a start-coded NAL stream for a
-//! downstream decoder.
+//! [`HevcConfig::parse`] decodes an `hvcC` record (`references/heif` §1) into typed
+//! profile/tier/level, chroma/bit-depth, and the parameter-set [`arrays`](HevcConfig::arrays).
+//! [`iter_nal_units`] splits a length-prefixed `hvc1`/`hev1` payload (§2), [`NalHeader::parse`]
+//! reads the two-byte NAL header and [`NalUnitType`] classifies it (§3),
+//! [`HevcConfig::validate_still_payload`] enforces the still-image IRAP constraint, and
+//! [`HevcConfig::annex_b`] converts a payload to a start-coded NAL stream for a downstream decoder.
 //!
 //! # Feeding a platform decoder
 //!
-//! Hardware HEVC decoders disagree on how the parameter sets and the coded picture should arrive, so
-//! the three shapes are addressable separately. The item payload is *always* the length-prefixed
+//! Hardware HEVC decoders disagree on how the parameter sets and the coded picture should arrive,
+//! so the three shapes are addressable separately. The item payload is *always* the length-prefixed
 //! stream stored in the file ([`HevcConfig::nal_length_size`] gives the prefix width); the Annex-B
 //! emitters append to a caller-owned buffer, so a scratch `Vec<u8>` can be reused across items.
 //!
@@ -63,41 +66,24 @@
 //! | Android MediaCodec | [`HevcConfig::annex_b_parameter_sets`] ⇒ the `csd-0` buffer | [`HevcConfig::annex_b_payload`] ⇒ the sample buffers |
 //!
 //! Parameter sets may also arrive inband: an `hev1` item is allowed to carry them in the payload
-//! (and an `hvc1` item never does — [`HeifItem::hevc_inband_parameter_sets_allowed`]). The emitters
-//! do not de-duplicate, so an `hev1` stream can repeat them; H.265 decoders accept that.
-//!
-//! # Decode pipeline
-//!
-//! [`HevcDecoder`] is the pluggable HEVC-intra codestream hook a caller implements (typically
-//! wrapping a platform decoder). Around it, [`HeifImage::decode_item_planar`] returns raw
-//! [`DecodedFrame`] samples (resolving `iden`/`grid` derivation), and
-//! [`HeifImage::decode_item_rgba8`] / [`HeifImage::decode_primary_rgba8`] add colour conversion,
-//! alpha merge, `iovl` compositing, and the transformative properties to produce an
-//! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). [`HeifImage::decode_item_rgba16`] /
-//! [`HeifImage::decode_primary_rgba16`] are the same pipeline for high-bit-depth content: they take
-//! any coded depth from 8 to 16 bits — 10-bit BT.2020 HDR included — and normalize the samples to
-//! the full 16-bit range. See the [`HevcDecoder`] docs for the FFI rationale and the exact colour
-//! policy.
+//! (and an `hvc1` item never does —
+//! [`HeifContainer::hevc_inband_parameter_sets_allowed`]). The emitters do not de-duplicate, so an
+//! `hev1` stream can repeat them; H.265 decoders accept that.
 //!
 //! # Conformance
 //!
-//! The whole pipeline is checked differentially against **libheif + libde265** — plugged into the
-//! [`HevcDecoder`] seam — over gamut-authored fixtures generated at test time
+//! The whole pipeline is checked differentially against **libheif + libde265** — plugged in as an
+//! [`HevcCodestreamDecoder`] — over gamut-authored fixtures generated at test time
 //! (`tests/conformance.rs`, the dev-only `tooling/libheif-oracle`; see `references/heif` "Oracle").
 //!
 //! # Metadata
 //!
-//! [`HeifImage::exif`] / [`HeifImage::xmp`] locate the Exif and XMP items describing the primary
-//! image, [`HeifItem::exif_tiff_stream`] applies the Exif item's `exif_tiff_header_offset` to
-//! yield the TIFF stream `gamut-exif` parses, and [`HeifItem::icc_profile`] yields the `colr` ICC
-//! bytes `gamut-icc` parses. With the optional **`metadata`** Cargo feature (off by default) the
-//! same payloads are wired to the `gamut-metadata` facade's typed models through its
-//! `TypedMetadata` trait: [`HeifImage::blocks`] hands them over as `MetadataBlock`s and
-//! [`HeifImage::metadata`] parses them into a unified `Metadata`, both reporting the facade's
-//! `MetadataError` (a payload that cannot be located is `MetadataError::Core`, carrying this
-//! crate's [`Error`](gamut_core::Error)). A C2PA manifest store lives outside the item model, in a
-//! top-level `uuid` box; [`HeifContainer::c2pa`] locates it. The dependency direction stays
-//! `gamut-heic → gamut-metadata`.
+//! [`HeifDecoder::metadata`] hands over the Exif item's TIFF stream (its
+//! `exif_tiff_header_offset` applied), the XMP item's packet and the primary item's `colr` ICC
+//! profile as a [`RawMetadata`](gamut_core::RawMetadata). With the optional **`metadata`** Cargo
+//! feature (off by default) the facade's [`TypedMetadata`] is re-exported, which parses that into
+//! a unified [`Metadata`]. A C2PA manifest store lives outside the item model, in a top-level
+//! `uuid` box; [`HeifContainer::c2pa`] locates it.
 //!
 //! # Out of scope
 //!
@@ -106,20 +92,23 @@
 //!
 //! # Example
 //!
-//! Parse a HEIF file, then drive the full decode through a caller-supplied [`HevcDecoder`]. The stub
-//! here returns a solid-gray monochrome frame; a real decoder wraps a platform HEVC-intra decoder
-//! (libde265, VideoToolbox, …).
+//! Decode the primary image through a caller-supplied backend. The stub here returns a solid-grey
+//! monochrome frame; a real one wraps a platform HEVC decoder (libde265, VideoToolbox, …).
 //!
 //! ```
-//! use gamut_heic::{ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder};
-//! use gamut_core::Result;
+//! use gamut_color::ChromaSubsampling;
+//! use gamut_core::{DecodeImage, Dimensions, ImageBuf, Result, Rgba8};
+//! use gamut_heic::{DecodedFrame, HeifContainer, HeifDecoder, HevcCodestreamDecoder, HevcConfig};
 //! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind};
 //!
-//! // A stub HEVC decoder: ignores the codestream and returns a 2x2 solid-gray monochrome frame.
-//! struct GrayStub;
-//! impl HevcDecoder for GrayStub {
-//!     fn decode_intra(&mut self, _config: &HevcConfig, _payload: &[u8]) -> Result<DecodedFrame> {
-//!         DecodedFrame::new(2, 2, 8, ChromaFormat::Monochrome, vec![128; 4], vec![], vec![])
+//! // A stub HEVC decoder: ignores the codestream and returns a 2x2 solid-grey monochrome frame.
+//! struct GreyStub;
+//! impl HevcCodestreamDecoder for GreyStub {
+//!     fn supports(&mut self, _config: &HevcConfig) -> bool {
+//!         true
+//!     }
+//!     fn decode_still(&mut self, _config: &HevcConfig, _payload: &[u8]) -> Result<DecodedFrame> {
+//!         DecodedFrame::new(Dimensions::new(2, 2)?, 8, ChromaSubsampling::Cs400, vec![128; 4], vec![], vec![])
 //!     }
 //! }
 //!
@@ -149,11 +138,11 @@
 //! let bytes = img.to_bytes().unwrap();
 //!
 //! let container = HeifContainer::parse(&bytes).unwrap();
-//! assert!(container.image().is_hevc_still());
+//! assert!(container.is_hevc_still());
 //! assert_eq!(container.image().primary_item().id(), 1);
 //!
 //! // Decode the primary image to RGBA through the stub decoder.
-//! let rgba = container.image().decode_primary_rgba8(&mut GrayStub).unwrap();
+//! let rgba: ImageBuf<Rgba8> = HeifDecoder::new().with_backend(GreyStub).decode_image(&bytes).unwrap();
 //! assert_eq!((rgba.width(), rgba.height()), (2, 2));
 //! assert_eq!(rgba.as_samples()[3], 255); // opaque (no alpha auxiliary)
 //! ```
@@ -167,30 +156,34 @@ struct ReadmeDoctests;
 mod backend;
 mod c2pa;
 mod container;
-mod decode;
+mod decoder;
 mod hvcc;
-mod image;
 mod nal;
+mod sps;
 
-pub use backend::{
-    AbiHevcDecoder, BACKEND_DECLINED, HEVC_CODEC_ID, HevcDecoders, NO_BACKEND, planar_pixel_format,
-};
-pub use c2pa::{
+pub use backend::{AbiHevcDecoder, HEVC_CODEC_ID, HevcCodestreamDecoder};
+pub use container::HeifContainer;
+pub use decoder::{HeifDecoder, Hevc};
+// The foreign types this crate's signatures name, so a caller needs no direct dependency to spell
+// them.
+pub use gamut_color::{ChromaSubsampling, ChromaUpsampling};
+pub use gamut_core::{Dimensions, Orientation, RawMetadata};
+// The shared HEIF layer: the item model `HeifContainer::image` returns and the types its accessors
+// return, the decode-surface types, and the C2PA locator and summary.
+pub use gamut_heif::{
     C2PA_NOT_VALIDATED, C2paBoxPosition, C2paManifestStore, C2paMerkleBox, C2paPresence,
-    C2paStoreSummary, C2paSummary, C2paUnreadBox,
-};
-pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
-pub use decode::{DecodedFrame, HevcDecoder};
-// The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-avif` (#505).
-pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paUnreadReason};
-// The facade types named in the `metadata`-feature signatures, so a caller can spell
-// `HeifImage::metadata` / `HeifImage::blocks` without a direct dependency, and the trait those
-// accessors are methods of.
-#[cfg(feature = "metadata")]
-pub use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
-pub use hvcc::{ChromaFormat, HevcConfig, NalArray};
-pub use image::{
-    CleanAperture, ContentLightLevel, HeifImage, HeifItem, ItemKind, PixelAspectRatio,
+    C2paStoreSummary, C2paSummary, C2paUnreadBox, CleanAperture, ContentLightLevel, DecodeLimits,
+    DecodeOptions, DecodedFrame, HeifImage, HeifItem, ItemKind, MasteringDisplay, PixelAspectRatio,
     TransformativeProperty,
 };
+// The C2PA `ContentProvenanceBox` framing and the segment walk are `gamut-isobmff`'s.
+pub use gamut_isobmff::{
+    C2PA_UUID, C2paBoxPurpose, C2paUnreadReason, Segment, SegmentKind, UnknownBox,
+    UnknownBoxLocation,
+};
+// The facade types named in the `metadata`-feature docs, and `TypedMetadata`, which parses the
+// `RawMetadata` `HeifDecoder::metadata` returns.
+#[cfg(feature = "metadata")]
+pub use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
+pub use hvcc::{HevcConfig, NalArray};
 pub use nal::{NalHeader, NalUnitIter, NalUnitType, iter_nal_units};
