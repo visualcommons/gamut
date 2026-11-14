@@ -430,8 +430,8 @@ mod tests {
         assert!(is_frame_bearing(Obu::FRAME_HEADER));
         assert!(is_frame_bearing(Obu::TILE_GROUP));
         assert!(is_frame_bearing(Obu::FRAME));
-        for other in (0..=15u8)
-            .filter(|&t| ![Obu::FRAME_HEADER, Obu::TILE_GROUP, Obu::FRAME].contains(&t))
+        for other in
+            (0..=15u8).filter(|&t| ![Obu::FRAME_HEADER, Obu::TILE_GROUP, Obu::FRAME].contains(&t))
         {
             assert!(!is_frame_bearing(other), "obu_type {other}");
         }
