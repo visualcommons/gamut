@@ -41,12 +41,13 @@ use gamut_color::{
     TransferCharacteristics,
 };
 
+use crate::boundary::{bytes_in, bytes_out, status_of};
+use crate::guard;
 use crate::seam::seam_handle;
 use crate::status::{
     GAMUT_OK, GAMUT_STATUS_INVALID_INPUT, GAMUT_STATUS_NULL_ARGUMENT, GAMUT_STATUS_UNSUPPORTED,
     GamutStatus,
 };
-use crate::{bytes_in, bytes_out, guard, status_of};
 
 /// `gamut_avif_encoder_set_chroma` value: 4:4:4, full-resolution chroma.
 pub const GAMUT_CHROMA_SUBSAMPLING_444: u8 = 0;

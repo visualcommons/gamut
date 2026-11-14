@@ -204,7 +204,9 @@ void gamut_avif_image_free(GamutAvifImage *image);
   slot was configured; a zero-length slot (an empty store) is present. Setters do not touch it.
 - **Encode output** is a `Box<[u8]>` handed out as `(uint8_t *, size_t)` and released with
   `gamut_bytes_free(data, len)` — the length alone recovers the layout, so C carries no
-  capacity. On any non-OK status the out-params are `NULL`/`0`.
+  capacity. On any non-OK status the out-params are `NULL`/`0`. `gamut_bytes_free` and the
+  boundary helpers beside it (`src/boundary.rs`) are format-agnostic, so every build with any
+  format feature exports it, not only an AVIF one.
 - **Sample buffers** are validated with `ImageRef::new`'s semantics (length in *samples*); a
   misaligned `const uint16_t *` is `GAMUT_STATUS_INVALID_INPUT`, never dereferenced.
 - **Byte inputs**: `NULL` with `len == 0` is the empty slice; `NULL` with a non-zero `len` is
