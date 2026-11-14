@@ -23,9 +23,10 @@
 #      a new path and is refused too: move it by splitting it.
 #
 # Rule 4 compares against the baseline at `git merge-base HEAD BASE`, where BASE is the first
-# argument, else `origin/HEAD`, else `origin/master`. Where BASE does not resolve, or the base
-# revision has no baseline yet, rule 4 is skipped with a notice and rules 1-3 still run. CI passes
-# the pull request's target branch explicitly.
+# argument, else `origin/HEAD`, else `origin/master`. A BASE given as the argument must resolve, or
+# the check fails; a defaulted one that does not resolve skips rule 4 with a notice (a fresh clone
+# with no remote). Where the base revision has no baseline yet, rule 4 is skipped with a notice.
+# Rules 1-3 always run. CI passes the pull request's target branch explicitly.
 #
 # Pure text, no cargo, sub-second.
 set -euo pipefail
@@ -94,7 +95,12 @@ if [ -z "$base" ]; then
     fi
 fi
 if ! merge_base=$(git merge-base HEAD "$base" 2>/dev/null); then
-    echo "check-file-length: notice: '$base' does not resolve; the shrink-only rule was not checked"
+    # A base the caller named must resolve: CI names one, and a skipped rule there is a gate off.
+    if [ -n "${1:-}" ]; then
+        problem "base ref '$base' does not resolve, so the shrink-only rule cannot be checked"
+    else
+        echo "check-file-length: notice: '$base' does not resolve; the shrink-only rule was not checked"
+    fi
 elif ! base_listed=$(git show "$merge_base:$baseline" 2>/dev/null); then
     echo "check-file-length: notice: $baseline does not exist at $merge_base; the shrink-only rule was not checked"
 else
