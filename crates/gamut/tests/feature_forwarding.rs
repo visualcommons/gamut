@@ -36,6 +36,12 @@
 //! facade crate — holds because each format crate's `metadata` feature is off by default, which is
 //! that crate's property and is pinned in that crate. It is measured here only as evidence
 //! (`cargo tree -p gamut --features "jpeg,jxl,heic"` lists no facade crate), not asserted.
+//!
+//! The rest of the umbrella's feature table is pinned here for the same linkage reason: the
+//! container rule (each container primitive re-exported under the feature of its own name, and
+//! pulled in by no other umbrella feature), `avif` enabling `gamut-avif` alone, and `jxl`'s weak
+//! forward of `gamut-dng?/jxl-encode`. Each is an entry in `crates/gamut/Cargo.toml` or a `cfg` in
+//! `crates/gamut/src/lib.rs`, and none is observable from a lower crate.
 
 /// With `metadata` and all three format features on, every forwarded name resolves.
 ///
@@ -142,4 +148,132 @@ fn every_metadata_forward_is_weak_and_listed_under_metadata_alone() {
              format alone drag in the whole facade"
         );
     }
+}
+
+/// The umbrella's manifest, compiled in so the pins travel with the crate.
+const MANIFEST: &str = include_str!("../Cargo.toml");
+
+/// The `[features]` table of `manifest`, up to the next table header.
+fn features_table(manifest: &str) -> Option<&str> {
+    let after = manifest.split_once("\n[features]\n")?.1;
+    Some(after.split_once("\n[").map_or(after, |(table, _)| table))
+}
+
+/// The text between `name = [` and its closing `]` in the `[features]` table, `None` when the
+/// feature is not declared there. No entry in the table contains a `]`, so the first one closes it.
+fn feature_entries<'a>(manifest: &'a str, name: &str) -> Option<&'a str> {
+    let table = features_table(manifest)?;
+    let after_open = table.split_once(&format!("\n{name} = ["))?.1;
+    Some(after_open.split_once(']')?.0)
+}
+
+/// Each container primitive's feature enables its crate and nothing else, and no other feature
+/// enables that crate — the one rule `gamut::{ifd,riff,isobmff,heif}` are re-exported under.
+///
+/// A second `dep:gamut-ifd` (as `metadata` used to carry) pulls the container into a build that
+/// did not name it; the count is what notices one.
+#[test]
+fn each_container_feature_enables_its_crate_alone() {
+    for container in ["ifd", "riff", "isobmff", "heif"] {
+        let dep = format!("\"dep:gamut-{container}\"");
+        assert_eq!(
+            feature_entries(MANIFEST, container).map(str::trim),
+            Some(dep.as_str()),
+            "the `{container}` feature must be exactly [{dep}]"
+        );
+        assert_eq!(
+            MANIFEST.matches(dep.as_str()).count(),
+            1,
+            "{dep} is listed by a feature other than `{container}`"
+        );
+    }
+}
+
+/// `avif` enables `gamut-avif` alone; it no longer compiles `gamut-av1` without exposing it.
+#[test]
+fn avif_enables_gamut_avif_alone() {
+    assert_eq!(
+        feature_entries(MANIFEST, "avif").map(str::trim),
+        Some("\"dep:gamut-avif\""),
+    );
+}
+
+/// `jxl` forwards gamut-dng's JPEG XL encode path weakly, and only from `jxl`.
+///
+/// Without the forward, `features = ["jxl", "dng"]` builds libjxl and still refuses
+/// `Compression::JpegXl` on DNG encode; the strong form would compile gamut-dng under `jxl` alone.
+#[test]
+fn jxl_forwards_dng_jxl_encode_weakly() {
+    const WEAK: &str = "\"gamut-dng?/jxl-encode\"";
+    assert!(
+        !MANIFEST.contains("\"gamut-dng/jxl-encode\""),
+        "the forward is not weak"
+    );
+    assert!(
+        feature_entries(MANIFEST, "jxl").is_some_and(|entries| entries.contains(WEAK)),
+        "the `jxl` feature no longer lists {WEAK}"
+    );
+    assert_eq!(
+        MANIFEST.matches(WEAK).count(),
+        1,
+        "{WEAK} is listed more than once"
+    );
+}
+
+/// `all` lists every other feature the umbrella declares.
+#[test]
+fn all_lists_every_feature() {
+    let Some(table) = features_table(MANIFEST) else {
+        panic!("the umbrella's `[features]` table is not where this pin reads it")
+    };
+    let Some(all) = feature_entries(MANIFEST, "all") else {
+        panic!("the umbrella declares no `all` feature where this pin reads it")
+    };
+    let declared = table
+        .lines()
+        .filter_map(|line| line.split_once(" = [").map(|(name, _)| name))
+        .filter(|name| !name.starts_with(['#', ' ']) && !["default", "all"].contains(name));
+    let mut seen = 0;
+    for name in declared {
+        seen += 1;
+        assert!(
+            all.contains(&format!("\"{name}\"")),
+            "`all` does not list `{name}`"
+        );
+    }
+    assert!(seen > 0, "no feature was read from the table");
+}
+
+/// With every container feature on, each container resolves under its own name.
+#[cfg(all(
+    feature = "ifd",
+    feature = "riff",
+    feature = "isobmff",
+    feature = "heif"
+))]
+#[test]
+fn each_container_feature_reexports_its_crate() {
+    fn type_resolves<T>() {}
+
+    type_resolves::<gamut::ifd::Ifd>();
+    type_resolves::<gamut::riff::Chunk<'static>>();
+    type_resolves::<gamut::isobmff::IsoBmffImage>();
+    type_resolves::<gamut::heif::DecodedFrame>();
+}
+
+/// `gamut::tiff` and `gamut::dng` re-export gamut-ifd's types, not look-alikes: each is the very
+/// type `gamut::ifd` names, so a value moves between the three paths without conversion.
+#[cfg(all(feature = "ifd", feature = "tiff", feature = "dng"))]
+#[test]
+fn tiff_and_dng_reexport_the_ifd_types_themselves() {
+    /// Compiles only when both arguments name one type.
+    fn same_type<T>(_: core::marker::PhantomData<T>, _: core::marker::PhantomData<T>) {}
+    use core::marker::PhantomData as P;
+
+    same_type(P::<gamut::ifd::Ifd>, P::<gamut::tiff::Ifd>);
+    same_type(P::<gamut::ifd::Ifd>, P::<gamut::dng::Ifd>);
+    same_type(P::<gamut::ifd::Value>, P::<gamut::tiff::Value>);
+    same_type(P::<gamut::ifd::Value>, P::<gamut::dng::Value>);
+    same_type(P::<gamut::ifd::ByteOrder>, P::<gamut::tiff::ByteOrder>);
+    same_type(P::<gamut::ifd::ByteOrder>, P::<gamut::dng::ByteOrder>);
 }

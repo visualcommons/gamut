@@ -27,21 +27,35 @@ consumers depend on:
 `gamut::core`. This table is the one place the feature-to-crate map is kept; the workspace
 documents link here rather than restating it.
 
+Each container primitive (`ifd`, `riff`, `isobmff`, `heif`) is re-exported as `gamut::<name>`
+under the feature of its own name and under no other: a format feature compiles the container
+its crate builds on without exposing it. The container types a format crate's own signatures
+reach are re-exported from that format's module instead, so naming them needs no `ifd` feature.
+`gamut::tiff` and `gamut::dng` share `gamut-ifd`'s structural core (`Ifd`, `Field`, `Value`,
+`ByteOrder`, `Variant`, the `DeconstructReport` family) and its C2PA summary surface
+(`c2pa_summary`, `C2paExclusions`, …); beyond that core each carries what only its own
+signatures reach — `gamut::tiff` the tag-value codes (`Compression`, `Predictor`, …) and the
+`c2pa_exclusions` locator, `gamut::dng` the `TiffFile` that `DngRewrite` edits and the
+`C2PA_MANIFEST_STORE` tag.
+
 | Feature      | Enables                                                                  |
 | ------------ | ------------------------------------------------------------------------ |
-| `avif`       | AVIF encoder + container decoder (`gamut-avif` + `gamut-av1`)            |
+| `avif`       | AVIF encoder + decoder over pluggable AV1 backends (`gamut-avif`)        |
 | `av1`        | Standalone AV1 still-image encoder + header-layer decoder (`gamut-av1`)  |
 | `webp`       | WebP VP8/VP8L encoder + decoder (`gamut-webp`)                           |
-| `jxl`        | JPEG XL encoder (libjxl wrap) + decoder (`gamut-jxl`)                    |
-| `heic`       | HEIC decoder over pluggable HEVC backends (`gamut-heic` + `gamut-heif`)  |
+| `jxl`        | JPEG XL encoder (libjxl wrap) + decoder (`gamut-jxl`); with `dng`, also DNG's JPEG XL encode path (`gamut-dng/jxl-encode`) |
+| `heic`       | HEIC decoder over pluggable HEVC backends (`gamut-heic`)                 |
 | `vvc`        | VVC / H.266 (`gamut-vvc`) — placeholder                                  |
 | `av2`        | AV2 (`gamut-av2`) — placeholder                                          |
 | `tiff`       | TIFF 6.0 encoder + decoder (`gamut-tiff`)                                |
 | `dng`        | DNG 1.7.1 raw encoder + decoder (`gamut-dng`)                            |
 | `png`        | PNG encoder + decoder (`gamut-png`)                                      |
 | `jpeg`       | JPEG-1 (ITU-T T.81) codec (`gamut-jpeg`)                                 |
-| `isobmff`    | ISOBMFF/HEIF still-image container primitive (`gamut-isobmff`)           |
-| `metadata`   | Metadata facade + primitives (`gamut-metadata` + `exif`/`xmp`/`icc`/`iptc`/`ifd`), plus the `metadata` feature of every enabled format crate that has one, and `gamut::capability` (which format crate locates or writes which carrier) |
+| `ifd`        | TIFF/IFD directory container primitive (`gamut-ifd`)                     |
+| `riff`       | RIFF chunk container primitive (`gamut-riff`)                            |
+| `isobmff`    | ISOBMFF still-image box-tree container primitive (`gamut-isobmff`)       |
+| `heif`       | HEIF/MIAF item layer shared by AVIF and HEIC (`gamut-heif`)              |
+| `metadata`   | Metadata facade + primitives (`gamut-metadata` + `exif`/`xmp`/`icc`/`iptc`), plus the `metadata` feature of every enabled format crate that has one, and `gamut::capability` (which format crate locates or writes which carrier) |
 | `exif-describe` | `metadata` plus EXIF tag-value descriptions (`gamut_metadata::exif::describe`, via `gamut-metadata/exif-describe`) |
 | `cmm`        | ICC colour management module over `gamut-icc` profiles (`gamut-cmm`); with `jpeg`, also `JpegDecoder::decode_srgb` |
 | `tonemap`    | Scalar tone-mapping curves for HDR→SDR (`gamut-tonemap`)                 |

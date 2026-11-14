@@ -126,7 +126,7 @@ exclude_re = [
     #
     # The *other* direction is NOT excluded: `with false` is killed by
     # `typed_wiring_names_every_format`.
-    '^crates/gamut/src/capability\.rs:225:5: replace typed_wiring -> bool with true$',
+    '^crates/gamut/src/capability\.rs:228:5: replace typed_wiring -> bool with true$',
     # gamut-ifd track::subtract — disabling the merge guard is equivalent by construction: the
     # skip loop discards every claim with `end <= pos`, and the covered arm advances `pos` to
     # `r.end.min(end)`, strictly greater than `pos`, so an unmerged sorted-but-overlapping list

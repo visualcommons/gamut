@@ -64,9 +64,12 @@ pub enum Format {
     Png = 1,
     /// WebP (RIFF), `gamut-webp`.
     WebP = 2,
-    /// AVIF (ISOBMFF/HEIF over AV1), `gamut-avif`.
+    /// AVIF (HEIF over AV1), `gamut-avif` — the AV1 binding over the shared `gamut-heif` item
+    /// layer, which locates its Exif/XMP items, `colr` ICC and C2PA stores.
     Avif = 3,
-    /// HEIC/HEIF (ISOBMFF over HEVC), `gamut-heic` — decode-only.
+    /// HEIC (HEIF over HEVC), `gamut-heic` — decode-only; the HEVC binding over the same
+    /// `gamut-heif` layer as [`Avif`](Self::Avif). HEIF itself is not a format here: it has no
+    /// coded picture of its own, so a file is answered for through the binding that decodes it.
     Heic = 4,
     /// JPEG XL (ISO/IEC 18181), `gamut-jxl`.
     Jxl = 5,

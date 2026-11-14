@@ -50,7 +50,11 @@ tiff = ["gamut/tiff"]
 dng = ["gamut/dng"]
 png = ["gamut/png"]
 jpeg = ["gamut/jpeg"]
+# Container primitives: mirror only, no C surface reads them yet, so they add no exported symbol.
+ifd = ["gamut/ifd"]
+riff = ["gamut/riff"]
 isobmff = ["gamut/isobmff"]
+heif = ["gamut/heif"]
 primitives = ["gamut/primitives"]
 tonemap = ["gamut/tonemap"]
 metadata = ["gamut/metadata"]
@@ -70,7 +74,10 @@ all = [
     "dng",
     "png",
     "jpeg",
+    "ifd",
+    "riff",
     "isobmff",
+    "heif",
     "metadata",
     "exif-describe",
     "cmm",

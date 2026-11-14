@@ -33,12 +33,20 @@ gamut-dng = { workspace = true, optional = true }
 gamut-png = { workspace = true, optional = true }
 gamut-jpeg = { workspace = true, optional = true }
 
-# Optional container primitive: the ISOBMFF/HEIF still-image box tree shared by avif/heic,
-# re-exported behind the `isobmff` feature so tooling can read/write containers directly.
+# Optional container primitives, one feature each under one rule: the feature is named after the
+# crate and re-exports it as `gamut::<name>`, and nothing else re-exports it. A format feature
+# compiles the container its crate builds on but never exposes it; a caller that walks a container
+# structurally asks for that container by name.
+# - `ifd`: the TIFF/IFD directory core under gamut-tiff, gamut-dng and gamut-exif.
+gamut-ifd = { workspace = true, optional = true }
+# - `riff`: the RIFF chunk container under gamut-webp.
+gamut-riff = { workspace = true, optional = true }
+# - `isobmff`: the ISOBMFF still-image box tree under gamut-heif.
 gamut-isobmff = { workspace = true, optional = true }
+# - `heif`: the HEIF/MIAF item layer shared by gamut-avif and gamut-heic.
+gamut-heif = { workspace = true, optional = true }
 
 # Optional image-metadata primitives (issue #34), re-exported behind the `metadata` feature.
-gamut-ifd = { workspace = true, optional = true }
 gamut-icc = { workspace = true, optional = true }
 gamut-xmp = { workspace = true, optional = true }
 gamut-exif = { workspace = true, optional = true }
@@ -64,8 +72,11 @@ gamut-codec-abi = { workspace = true, optional = true }
 
 [features]
 default = []
-avif = ["dep:gamut-avif", "dep:gamut-av1"]
-jxl = ["dep:gamut-jxl"]
+avif = ["dep:gamut-avif"]
+# Weakly forwards gamut-dng's JPEG XL *encode* path (Compression = 52546): with `dng` also on, the
+# DNG encoder gets the libjxl backend the umbrella's gamut-jxl already builds. Weak, so `jxl` alone
+# never compiles gamut-dng.
+jxl = ["dep:gamut-jxl", "gamut-dng?/jxl-encode"]
 webp = ["dep:gamut-webp"]
 heic = ["dep:gamut-heic"]
 vvc = ["dep:gamut-vvc"]
@@ -75,8 +86,11 @@ tiff = ["dep:gamut-tiff"]
 dng = ["dep:gamut-dng"]
 png = ["dep:gamut-png"]
 jpeg = ["dep:gamut-jpeg"]
-# Re-export the ISOBMFF/HEIF still-image container primitive for tooling.
+# The container primitives, each re-exported under its own name (see the dependency notes above).
+ifd = ["dep:gamut-ifd"]
+riff = ["dep:gamut-riff"]
 isobmff = ["dep:gamut-isobmff"]
+heif = ["dep:gamut-heif"]
 # Re-export the shared building blocks (`color`/`dsp`/`bitstream`) for tooling.
 primitives = ["dep:gamut-color", "dep:gamut-dsp", "dep:gamut-bitstream"]
 tonemap = ["dep:gamut-tonemap"]
@@ -88,7 +102,6 @@ metadata = [
     "dep:gamut-xmp",
     "dep:gamut-icc",
     "dep:gamut-iptc",
-    "dep:gamut-ifd",
     # The format crates' own `metadata` features, which turn on their typed accessors
     # (`blocks()` / `metadata()` / `with_metadata`). Weak (`?/`), so each
     # one is enabled only when that format's feature already pulled the crate in: `metadata` alone
@@ -121,7 +134,10 @@ all = [
     "dng",
     "png",
     "jpeg",
+    "ifd",
+    "riff",
     "isobmff",
+    "heif",
     "metadata",
     "exif-describe",
     "cmm",

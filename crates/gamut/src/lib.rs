@@ -10,7 +10,11 @@
 //! [`core`] (re-exported from [`gamut-core`](https://crates.io/crates/gamut-core)) is always
 //! available and provides the shared [`core::EncodeImage`] / [`core::DecodeImage`] traits, the
 //! branded [`core::ImageRef`] / [`core::ImageBuf`] buffers, and the common [`core::Error`] type.
-//! Every other module appears only when its Cargo feature is enabled. Which feature re-exports
+//! Every other module appears only when its Cargo feature is enabled. A container primitive
+//! (`ifd`, `riff`, `isobmff`, `heif`) is re-exported only under the feature of its own name: a
+//! format feature compiles the container its crate builds on without exposing it, and the types a
+//! format crate's own signatures reach (such as `gamut-tiff`'s and `gamut-dng`'s IFD subset) are
+//! re-exported from that format's module. Which feature re-exports
 //! which crate is kept in one place, the
 //! [feature table of this crate's README](https://github.com/visualcommons/gamut/blob/master/crates/gamut/README.md#features).
 #![forbid(unsafe_code)]
@@ -58,9 +62,11 @@ pub use gamut_dsp as dsp;
 pub use gamut_exif as exif;
 #[cfg(feature = "heic")]
 pub use gamut_heic as heic;
+#[cfg(feature = "heif")]
+pub use gamut_heif as heif;
 #[cfg(feature = "metadata")]
 pub use gamut_icc as icc;
-#[cfg(feature = "metadata")]
+#[cfg(feature = "ifd")]
 pub use gamut_ifd as ifd;
 #[cfg(feature = "metadata")]
 pub use gamut_iptc as iptc;
@@ -74,6 +80,8 @@ pub use gamut_jxl as jxl;
 pub use gamut_metadata as metadata;
 #[cfg(feature = "png")]
 pub use gamut_png as png;
+#[cfg(feature = "riff")]
+pub use gamut_riff as riff;
 #[cfg(feature = "tiff")]
 pub use gamut_tiff as tiff;
 #[cfg(feature = "tonemap")]

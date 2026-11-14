@@ -27,10 +27,10 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   `default = []`. The feature-to-crate map is kept once, in
   [`crates/gamut/README.md`](crates/gamut/README.md#features). ← core, av1 (optional), av2
   (optional), avif (optional), bitstream (optional), cmm (optional), codec-abi (optional), color (optional), dng (optional),
-  dsp (optional), exif (optional), heic (optional), icc (optional), ifd (optional), iptc
-  (optional), isobmff (optional), jpeg (optional), jxl (optional), metadata (optional), png
-  (optional), tiff (optional), tonemap (optional), vvc (optional), webp (optional), xmp
-  (optional).
+  dsp (optional), exif (optional), heic (optional), heif (optional), icc (optional), ifd
+  (optional), iptc (optional), isobmff (optional), jpeg (optional), jxl (optional), metadata
+  (optional), png (optional), riff (optional), tiff (optional), tonemap (optional), vvc
+  (optional), webp (optional), xmp (optional).
 - **gamut-core** — `EncodeImage`/`DecodeImage` traits, image buffers, `Dimensions`, `Error`, plus the
   format-agnostic `convert` module: the one place any `Pixel` layout converts to another
   (grey↔RGB, alpha add/drop/composite, 8↔16-bit), lossless by default with loss opted into per
