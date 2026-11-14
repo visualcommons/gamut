@@ -347,6 +347,31 @@ impl JxlModular {
 }
 
 impl OutputFormat {
+    /// The extensions `convert` reads as this format besides [`extension`](Self::extension).
+    fn aliases(self) -> &'static [&'static str] {
+        match self {
+            OutputFormat::Tiff => &["tif"],
+            OutputFormat::Jpeg => &["jpeg"],
+            OutputFormat::Avif | OutputFormat::Webp | OutputFormat::Png | OutputFormat::Jxl => &[],
+        }
+    }
+
+    /// Every output extension `convert` reads, for the message refusing any other:
+    /// `'avif', …, 'jpg'/'jpeg'`, each format's own extension first and its aliases after a `/`.
+    pub(crate) fn supported_extensions() -> String {
+        Self::value_variants()
+            .iter()
+            .map(|format| {
+                std::iter::once(format.extension())
+                    .chain(format.aliases().iter().copied())
+                    .map(|ext| format!("'{ext}'"))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// The file extension an output of this format is given when `convert` names it.
     fn extension(self) -> &'static str {
         match self {
@@ -1332,21 +1357,18 @@ fn utf8_xmp(xmp: &[u8]) -> Option<&str> {
 
 /// The output format an output file's extension names, for when `--format` is not given.
 fn format_of(output: &Path) -> Result<OutputFormat, CliError> {
-    match output
+    let Some(ext) = output
         .extension()
         .and_then(|ext| ext.to_str())
         .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("avif") => Ok(OutputFormat::Avif),
-        Some("webp") => Ok(OutputFormat::Webp),
-        Some("tiff" | "tif") => Ok(OutputFormat::Tiff),
-        Some("png") => Ok(OutputFormat::Png),
-        Some("jxl") => Ok(OutputFormat::Jxl),
-        Some("jpg" | "jpeg") => Ok(OutputFormat::Jpeg),
-        Some(other) => Err(CliError::UnsupportedOutput(other.to_string())),
-        None => Err(CliError::UnsupportedOutput("<none>".to_string())),
-    }
+    else {
+        return Err(CliError::UnsupportedOutput("<none>".to_string()));
+    };
+    OutputFormat::value_variants()
+        .iter()
+        .copied()
+        .find(|format| format.extension() == ext || format.aliases().contains(&ext.as_str()))
+        .ok_or(CliError::UnsupportedOutput(ext))
 }
 
 #[cfg(test)]
@@ -1360,7 +1382,7 @@ mod tests {
     use super::{
         AvifEffort, AvifEncoder, BitDepth, ChromaSubsampling, ConvertArgs, Dimensions,
         InputMetadata, Job, JpegChroma, MatrixCoefficients, OutputFormat, Plan, PngEffort, Samples,
-        avif_encoder, carry, plan, png_effort,
+        avif_encoder, carry, format_of, plan, png_effort,
     };
     use crate::error::CliError;
 
@@ -1716,5 +1738,38 @@ mod tests {
         let into = |format| carry(&meta, format, Some(Samples::Colour), dims).iptc_iim;
         assert_eq!(into(OutputFormat::Tiff).as_deref(), Some(&b"iim"[..]));
         assert_eq!(into(OutputFormat::Webp), None);
+    }
+
+    /// Each extension the refusal lists names its format, case-insensitively; any other is
+    /// refused with that list.
+    #[test]
+    fn an_output_extension_names_the_format_the_refusal_lists_it_under() {
+        let of = |name: &str| format_of(std::path::Path::new(name));
+        for (ext, format) in [
+            ("avif", OutputFormat::Avif),
+            ("webp", OutputFormat::Webp),
+            ("tiff", OutputFormat::Tiff),
+            ("tif", OutputFormat::Tiff),
+            ("png", OutputFormat::Png),
+            ("jxl", OutputFormat::Jxl),
+            ("jpg", OutputFormat::Jpeg),
+            ("jpeg", OutputFormat::Jpeg),
+        ] {
+            assert_eq!(of(&format!("out.{ext}")).unwrap(), format, "{ext}");
+            assert_eq!(
+                of(&format!("out.{}", ext.to_ascii_uppercase())).unwrap(),
+                format,
+                "{ext}"
+            );
+        }
+        assert_eq!(
+            of("out.bmp").unwrap_err().to_string(),
+            "unsupported output format: bmp (supported: 'avif', 'webp', 'tiff'/'tif', 'png', \
+             'jxl', 'jpg'/'jpeg')"
+        );
+        assert!(matches!(
+            of("out"),
+            Err(CliError::UnsupportedOutput(ext)) if ext == "<none>"
+        ));
     }
 }
