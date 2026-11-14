@@ -166,7 +166,7 @@ impl ProfileHeader {
     /// (§7.2.11 Table 21, bit 0).
     #[must_use]
     pub fn is_embedded(&self) -> bool {
-        self.flags & (1 << 0) != 0
+        self.flags & 1 != 0
     }
 
     /// Whether the profile-flags field marks this profile as unusable independently of the embedded
@@ -180,7 +180,7 @@ impl ProfileHeader {
     /// (§7.2.14 Table 22, bit 0).
     #[must_use]
     pub fn is_transparency(&self) -> bool {
-        self.attributes & (1 << 0) != 0
+        self.attributes & 1 != 0
     }
 
     /// Whether the device-attributes field marks the media as matte rather than glossy
