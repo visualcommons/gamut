@@ -88,7 +88,19 @@ fn documented_refusal(error: &Error, cap: usize) -> Result<&'static str, Violati
 ///
 /// Returns the [`Violation`] naming the first clause that did not hold.
 pub fn inflation_stays_within_cap(data: &[u8], max_out: usize) -> Result<(), Violation> {
-    let out = match inflate_zlib(data, max_out, ORIGIN) {
+    outcomes_honour_cap(max_out, |cap| inflate_zlib(data, cap, ORIGIN))
+}
+
+/// Checks the outcomes `inflate` returns for one stream under the caps the law asks about —
+/// `max_out`, then the output's own length `n`, then `n - 1` — against the law's clauses.
+///
+/// Split from [`inflation_stays_within_cap`] so the unit tests below can supply a deliberately
+/// broken inflater and show each clause can fail.
+fn outcomes_honour_cap(
+    max_out: usize,
+    mut inflate: impl FnMut(usize) -> Result<Vec<u8>, Error>,
+) -> Result<(), Violation> {
+    let out = match inflate(max_out) {
         Ok(out) => out,
         Err(error) => return documented_refusal(&error, max_out).map(drop),
     };
@@ -99,7 +111,7 @@ pub fn inflation_stays_within_cap(data: &[u8], max_out: usize) -> Result<(), Vio
             format!("cap {max_out}: inflated {n} bytes"),
         ));
     }
-    match inflate_zlib(data, n, ORIGIN) {
+    match inflate(n) {
         Ok(exact) if exact == out => {}
         Ok(exact) => {
             return Err(Violation::new(
@@ -120,11 +132,123 @@ pub fn inflation_stays_within_cap(data: &[u8], max_out: usize) -> Result<(), Vio
     let Some(short) = n.checked_sub(1) else {
         return Ok(());
     };
-    match inflate_zlib(data, short, ORIGIN) {
+    match inflate(short) {
         Err(error) if documented_refusal(&error, short)? == OVER_CAP => Ok(()),
         outcome => Err(Violation::new(
             LAW,
             format!("cap {short}: a {n}-byte stream gave {outcome:?}, not the over-cap refusal"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // `invariants.rs` is excluded from mutation, so these are not mutation-driven. They exist so
+    // that a law which can no longer *fail* is caught: a law stuck at `Ok(())` would make every
+    // property over it vacuous while still passing. Each test supplies an inflater that honours
+    // the contract except in the one clause it names.
+
+    use gamut_core::{Error, ErrorKind};
+
+    use super::{CORRUPT, LAW, ORIGIN, OVER_CAP, Violation, outcomes_honour_cap};
+
+    const PAYLOAD: &[u8] = b"abcd";
+
+    /// The contract's own behaviour for a stream that inflates to [`PAYLOAD`].
+    fn honest(cap: usize) -> Result<Vec<u8>, Error> {
+        if cap < PAYLOAD.len() {
+            Err(Error::invalid_input(ORIGIN, OVER_CAP))
+        } else {
+            Ok(PAYLOAD.to_vec())
+        }
+    }
+
+    fn violation(
+        max_out: usize,
+        inflate: impl FnMut(usize) -> Result<Vec<u8>, Error>,
+    ) -> Violation {
+        let v = outcomes_honour_cap(max_out, inflate).unwrap_err();
+        assert_eq!(v.law(), LAW);
+        assert_eq!(v.to_string(), format!("{}: {}", v.law(), v.detail()));
+        v
+    }
+
+    #[test]
+    fn the_contract_satisfies_the_cap_law() {
+        assert_eq!(outcomes_honour_cap(8, honest), Ok(()));
+        assert_eq!(outcomes_honour_cap(PAYLOAD.len(), honest), Ok(()));
+        assert_eq!(outcomes_honour_cap(2, honest), Ok(()));
+        assert_eq!(outcomes_honour_cap(0, |_| Ok(Vec::new())), Ok(()));
+        let corrupt = |_| Err(Error::invalid_input(ORIGIN, CORRUPT));
+        assert_eq!(outcomes_honour_cap(8, corrupt), Ok(()));
+    }
+
+    #[test]
+    fn an_output_past_the_cap_violates_the_cap_law() {
+        let v = violation(2, |_| Ok(PAYLOAD.to_vec()));
+        assert!(v.detail().contains("inflated 4 bytes"), "{v}");
+    }
+
+    #[test]
+    fn different_bytes_under_the_exact_cap_violate_the_cap_law() {
+        let v = violation(8, |cap| {
+            if cap == PAYLOAD.len() {
+                Ok(b"abce".to_vec())
+            } else {
+                honest(cap)
+            }
+        });
+        assert!(v.detail().contains("differing"), "{v}");
+    }
+
+    #[test]
+    fn a_refusal_under_the_exact_cap_violates_the_cap_law() {
+        let v = violation(8, |cap| {
+            if cap == PAYLOAD.len() {
+                Err(Error::invalid_input(ORIGIN, OVER_CAP))
+            } else {
+                honest(cap)
+            }
+        });
+        assert!(v.detail().contains("refused a stream"), "{v}");
+    }
+
+    #[test]
+    fn success_one_byte_under_the_output_violates_the_cap_law() {
+        let v = violation(8, |_| Ok(PAYLOAD.to_vec()));
+        assert!(v.detail().contains("not the over-cap refusal"), "{v}");
+    }
+
+    #[test]
+    fn a_corrupt_refusal_one_byte_under_the_output_violates_the_cap_law() {
+        let v = violation(8, |cap| {
+            if cap < PAYLOAD.len() {
+                Err(Error::invalid_input(ORIGIN, CORRUPT))
+            } else {
+                honest(cap)
+            }
+        });
+        assert!(v.detail().contains("not the over-cap refusal"), "{v}");
+    }
+
+    #[test]
+    fn each_undocumented_refusal_violates_the_cap_law() {
+        let other = || Error::invalid_input(ORIGIN, "some other refusal");
+        let foreign = || Error::invalid_input("elsewhere", CORRUPT);
+        let unsupported = || Error::unsupported(ORIGIN, CORRUPT);
+        assert_ne!(unsupported().kind(), ErrorKind::InvalidInput);
+        for refusal in [other, foreign, unsupported] {
+            let v = violation(8, |_| Err(refusal()));
+            assert!(v.detail().contains("undocumented refusal"), "{v}");
+            // The same refusal one byte under the output is held to the same clause.
+            let v = violation(8, |cap| {
+                if cap < PAYLOAD.len() {
+                    Err(refusal())
+                } else {
+                    honest(cap)
+                }
+            });
+            assert!(v.detail().contains("undocumented refusal"), "{v}");
+        }
     }
 }
