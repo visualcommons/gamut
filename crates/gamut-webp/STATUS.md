@@ -293,7 +293,7 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | container parse + format routing (`VP8L` decoded; `VP8`/`VP8X` return `Unsupported`) | RFC 9649 §2 | ✅ | M0 |
 | tier-1 oracle: internal forward/inverse round-trips (transforms, coders) | — | ✅ | M0 |
 | tier-2 oracle: hermetic native decoder reproduces encoder output | — | ✅ | M0 |
-| tier-3 oracle: `libwebp-sys` differential (enc→libwebp-dec, libwebp-enc→dec) | — | ✅ | M0 |
+| tier-3 oracle: libwebp differential (enc→libwebp-dec, libwebp-enc→dec) through `tooling/libwebp-oracle`; the YUV-plane half drives the private VP8 frame coder inline in `src/vp8/frame.rs`, the RGB/RGBA/alpha/metadata half the public API in `tests/oracle.rs` | issue #1163 | ✅ | M0 |
 | embedded-metadata API (`WebpDecoder::metadata` → `RawMetadata`; `with_icc_profile`/`with_exif`/`with_xmp`) | issue #302 | ✅ | M4 |
 | tier-3 oracle: libwebpmux metadata differential (gamut↔libwebp `ICCP`/`EXIF`/`XMP `, flags + order) | — | ✅ | M4 |
 | CLI `gamut convert … .webp` (encode) + `.webp` decode input | gamut-cli | ✅ | M0 |
@@ -306,4 +306,3 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | VP8 dead-zone quantizer (AC only; DC stays round-to-nearest) | issue #32 | ✅ | M4 |
 | near-lossless preprocessing (`NearLossless`, host-side RGB quantization before VP8L) | issue #261 | ✅ | M4 |
 | wasm / ffi bindings for WebP | gamut-{wasm,ffi} | ☐ | future |
-| codec internals private: `alpha` and `vp8l` are; `vp8` is still `#[doc(hidden)] pub` because the libwebp differential suite (`tests/oracle.rs`) drives its frame coder and cannot move inline under `#![forbid(unsafe_code)]` until the libwebp FFI wrappers move to a `tooling/` oracle crate — not supported surface | de-slop | ◐ | — |

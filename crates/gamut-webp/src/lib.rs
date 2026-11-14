@@ -131,13 +131,8 @@ mod config;
 mod decoder;
 mod encoder;
 mod metadata;
+mod vp8;
 mod vp8l;
-
-// Still reachable from outside the crate only because the libwebp differential suite in
-// `tests/oracle.rs` drives the VP8 frame coder directly and cannot move inline under
-// `#![forbid(unsafe_code)]`; see `STATUS.md`. Not part of the supported surface.
-#[doc(hidden)]
-pub mod vp8;
 
 pub use backend::{
     AbiWebpDecoder, AbiWebpEncoder, DecodedWebp, VP8_CODEC_ID, VP8L_CODEC_ID, WebpCodestream,

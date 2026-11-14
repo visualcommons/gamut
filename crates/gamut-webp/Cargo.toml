@@ -35,8 +35,10 @@ default = []
 metadata = ["dep:gamut-metadata"]
 
 [dev-dependencies]
-# libwebp as the differential-test oracle (FFI). Dev-only: the shipped library is C-free.
-libwebp-sys2.workspace = true
+# libwebp as the differential-test oracle, through safe wrappers that own the FFI `unsafe` this
+# crate forbids — so the inline `vp8::frame` tests can call it too. Dev-only, excluded from the
+# workspace; see tooling/libwebp-oracle. The shipped library is C-free.
+libwebp-oracle = { path = "../../tooling/libwebp-oracle" }
 divan.workspace = true
 # exiv2 as the container-level metadata oracle (FFI to a vendored, statically-linked exiv2 built
 # from the `third_party/exiv2` + `third_party/expat` submodules): it reads what the `metadata`
