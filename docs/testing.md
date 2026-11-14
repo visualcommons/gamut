@@ -34,7 +34,7 @@ Placement is mechanical. Two questions, in order:
      `tests/backend.rs`, and the FFI wrappers in `gamut-riff`'s `tests/common/mod.rs`. Moving
      such wrappers into a dev-only `tooling/` oracle crate lifts the reason: the `unsafe` then
      lives in that crate, and the tests can sit inline — `gamut-webp`'s now live in
-     `tooling/libwebp-oracle`, and its VP8 frame tests sit in `src/vp8/frame.rs`. The six
+     `tooling/libwebp-oracle`, and its VP8 frame tests sit in `src/vp8/frame/`. The six
      hot-path crates (`gamut-png`, `gamut-deflate`, `gamut-dsp`, `gamut-color`, `gamut-cmm`,
      `gamut-jpeg`) are `deny`, not `forbid`, so this reason no longer *forces* them up — an
      `unsafe` assertion there can carry

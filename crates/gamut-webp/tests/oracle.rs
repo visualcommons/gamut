@@ -8,7 +8,8 @@
 //!   - the `ALPH` plane and the `ICCP`/`EXIF`/`XMP ` chunks in both directions.
 //!
 //! The YUV-plane suite, which drives the VP8 frame coder's quantizer, filter, segmentation and
-//! partition knobs directly, lives inline beside it in `src/vp8/frame.rs` (issue #1163).
+//! partition knobs directly, lives inline beside it in `src/vp8/frame/oracle_tests.rs`
+//! (issue #1163).
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
 use gamut_webp::{ChromaUpsampling, WebpDecoder, WebpEncoder};

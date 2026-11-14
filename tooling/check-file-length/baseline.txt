@@ -74,5 +74,4 @@ crates/gamut-webp/src/vp8/encoder.rs
 crates/gamut-webp/src/vp8l/encoder.rs
 crates/gamut-webp/src/vp8l/prefix.rs
 crates/gamut-webp/tests/backends.rs
-crates/gamut-webp/tests/oracle.rs
 crates/gamut-xmp/src/writer.rs
