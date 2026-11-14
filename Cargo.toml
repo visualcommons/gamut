@@ -39,6 +39,9 @@ exclude = [
     "tooling/libjpeg-oracle",
     "tooling/jpegli-oracle",
     "tooling/exiv2-oracle",
+    # Dev-only libwebp differential oracle (issue #1163): owns the `unsafe` FFI so gamut-webp's
+    # inline tests can call libwebp under that crate's `#![forbid(unsafe_code)]`.
+    "tooling/libwebp-oracle",
     "tooling/libheif-oracle",
     # Dev-only perceptual-metric oracle (issue #972): SSIMULACRA 2 scores for gamut-jpeg's quality
     # experiment arms, over the external pure-Rust `ssimulacra2` crate. Excluded so a plain
@@ -105,9 +108,11 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # nightly-adjacent paths; the listed per-arch features are cfg-gated internally and safe to enable
 # on every target (including wasm32, where they compile out).
 jxl = { version = "0.4.3", default-features = false, features = ["sse42", "avx", "neon"] }
-# libwebp FFI — used ONLY as a dev-dependency oracle in gamut-webp's differential tests, never
-# in shipped code. Handwritten bindings (no bindgen/libclang); statically links bundled libwebp,
-# so the test build needs a C toolchain while the library itself stays C-free.
+# libwebp FFI — used ONLY as a dev-dependency oracle, never in shipped code: gamut-riff's container
+# differential takes it from here, and gamut-webp's through `tooling/libwebp-oracle`, which, being
+# excluded from the workspace, declares its own requirement — keep the two versions in step.
+# Handwritten bindings (no bindgen/libclang); statically links bundled libwebp, so the test build
+# needs a C toolchain while the library itself stays C-free.
 #   * `static` builds the bundled libwebp sources unconditionally instead of probing pkg-config for a
 #     system libwebp. That makes the oracle hermetic (the workspace policy: no system-installed
 #     codecs) and, with `mux` below, avoids a partial system install — a libwebp without libwebpmux —

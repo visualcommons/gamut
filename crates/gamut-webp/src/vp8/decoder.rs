@@ -195,7 +195,8 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     // RFC 6386 §9.1: the 3-bit version selects decoding profiles 0–3; 4–7 are undefined, and libwebp
     // rejects them, so we do too. Profiles 1–3 differ from 0 only in the inter-frame reconstruction
     // filter and a loop-filter hint; for intra key frames the explicit filter-type bit governs, so
-    // 0–3 reconstruct identically here (pinned against libwebp in tests/oracle.rs).
+    // 0–3 reconstruct identically here (pinned against libwebp by
+    // `frame::oracle_tests::gamut_decodes_patched_vp8_profiles_like_libwebp`).
     if chunk.version > 3 {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),

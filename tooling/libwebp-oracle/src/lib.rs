@@ -1,18 +1,25 @@
-//! Shared test-support for the libwebp differential oracle.
+//! Dev-only differential oracle around a statically-linked **libwebp** (via `libwebp-sys2`).
 //!
-//! libwebp (via the `libwebp-sys2` dev-dependency) is gamut-webp's reference oracle: lossless coding
-//! must round-trip bit-exactly through it, and a libwebp-encoded file must decode identically in
-//! gamut. All `unsafe` FFI is confined to this module behind safe wrappers, so the shipped
-//! `gamut-webp` library stays `#![forbid(unsafe_code)]` (the `forbid` is per-crate and does not
-//! cover these integration-test crates).
+//! libwebp is gamut-webp's reference implementation: lossless coding must round-trip bit-exactly
+//! through it, a gamut-encoded VP8 stream must decode in libwebp to the same YUV planes gamut's own
+//! decoder produces, and a libwebp-encoded file must decode identically in gamut. This crate wraps
+//! the libwebp entry points those checks need — decode to YUV/RGBA, lossless and lossy encode
+//! (including the advanced `WebPEncode` path, [`libwebp_encode_lossy_rgba_config`]), the
+//! RGBA→YUV conversion, and libwebpmux's metadata read/write — behind a safe API.
 //!
-//! These wrappers are the harness the per-milestone differential tests build on; today the only
-//! test is a libwebp self-round-trip that proves the harness (FFI + linked libwebp) works before any
-//! gamut codec exists. As the VP8L/VP8 paths land, tests here will compare gamut's encoder output to
-//! libwebp's decode (and vice versa).
+//! All `unsafe` FFI is confined to this crate. That is the point of it being a crate: gamut-webp is
+//! `#![forbid(unsafe_code)]`, which also covers its `#[cfg(test)]` modules, so its differential
+//! tests that drive crate-private items (the VP8 frame coder) can call libwebp only through a
+//! dependency that owns the `unsafe` (issue #1163). Every wrapper panics on a libwebp error: these
+//! are test assertions, not a fallible API.
+//!
+//! [`fixtures`] holds the deterministic RGBA inputs the differential suite feeds both coders.
 
 use std::ffi::{c_int, c_void};
 use std::slice;
+
+/// libwebp's `VP8X` feature-flag bits, as [`LibwebpMetadata::feature_flags`] reports them.
+pub use libwebp_sys::{ALPHA_FLAG, EXIF_FLAG, ICCP_FLAG, XMP_FLAG};
 
 /// A YUV 4:2:0 image decoded by libwebp: a full-resolution luma plane and half-resolution chroma.
 pub struct DecodedYuv {
@@ -396,64 +403,77 @@ pub fn libwebp_decode_rgba_nofancy(webp: &[u8]) -> DecodedRgba {
     }
 }
 
-/// Generates a deterministic, fully-opaque RGBA test image with enough structure and variation to
-/// exercise the codec. Alpha is held at 255 so libwebp's default lossless mode (which may rewrite
-/// the RGB of transparent pixels) preserves every channel bit-exactly.
-#[must_use]
-pub fn pattern_rgba(width: u32, height: u32) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for y in 0..height {
-        for x in 0..width {
-            rgba.push(((x * 7 + y * 3) & 0xff) as u8); // R
-            rgba.push(((x ^ (y * 5)) & 0xff) as u8); // G
-            rgba.push(((x * x + y) & 0xff) as u8); // B
-            rgba.push(0xff); // A (opaque)
-        }
-    }
-    rgba
-}
+pub mod fixtures {
+    //! Deterministic, RNG-free RGBA inputs the differential suite feeds both libwebp and gamut. They
+    //! carry no libwebp dependency; they live here so the integration tests and gamut-webp's inline
+    //! oracle tests draw from one corpus.
 
-/// Generates a deterministic, fully-opaque RGBA image with **photographic-like statistics**: smooth
-/// low-frequency gradients and a coarse blob (large correlated regions, the bulk of a real photo)
-/// overlaid with low-amplitude high-frequency detail and a few hard rectangle edges. This drives the
-/// encoder down realistic residual/token/back-reference paths that the purely algebraic
-/// [`pattern_rgba`] never reaches, while staying RNG-free so the corpus is reproducible and
-/// version-controlled. `seed` varies the content. Alpha is held at 255 (see [`pattern_rgba`]).
-#[must_use]
-pub fn photo_like_rgba(width: u32, height: u32, seed: u32) -> Vec<u8> {
-    let (w, h) = (i64::from(width).max(1), i64::from(height).max(1));
-    // Small integer value-noise: hash (x, y, seed) into a high-frequency byte in `0..=255`.
-    let hash = |x: i64, y: i64| -> i64 {
-        let mut v = x.wrapping_mul(374_761_393)
-            ^ y.wrapping_mul(668_265_263)
-            ^ i64::from(seed).wrapping_mul(2_246_822_519);
-        v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
-        (v ^ (v >> 16)) & 0xff
-    };
-    let clamp = |v: i64| v.clamp(0, 255) as u8;
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for y in 0..h {
-        for x in 0..w {
-            // Low-frequency smooth base: per-channel ramps plus a shared diagonal so large regions
-            // correlate (what spatial prediction and LZ77 exploit).
-            let base_r = x * 200 / w + y * 30 / h;
-            let base_g = y * 200 / h + (x + y) * 20 / (w + h);
-            let base_b = (x + y) * 160 / (w + h) + 40;
-            // Low-amplitude detail (sensor-noise / texture analogue) and a few hard luminance steps
-            // (sharp edges exercise B_PRED mode selection and the loop filter).
-            let detail = (hash(x, y) - 128) / 12;
-            let edge = if (x * 3 / w) % 2 == 0 && (y * 3 / h) % 2 == 0 {
-                40
-            } else {
-                0
-            };
-            rgba.push(clamp(base_r + detail + edge)); // R
-            rgba.push(clamp(base_g + detail)); // G
-            rgba.push(clamp(base_b - detail + edge)); // B
-            rgba.push(0xff); // A (opaque)
+    /// Larger canvases that push past the small-block regime (≤255px): VP8 macroblock grids spanning
+    /// many rows, and VP8L entropy-image regions plus LZ77 back-references whose distances only exceed
+    /// 256 above this size. `(300, 70)` is deliberately not a multiple of libwebp's histogram block
+    /// size, so it straddles entropy-image tile boundaries.
+    pub const LARGE_DIMENSIONS: &[(u32, u32)] =
+        &[(256, 256), (384, 288), (640, 480), (1024, 768), (300, 70)];
+
+    /// Generates a deterministic, fully-opaque RGBA test image with enough structure and variation to
+    /// exercise the codec. Alpha is held at 255 so libwebp's default lossless mode (which may rewrite
+    /// the RGB of transparent pixels) preserves every channel bit-exactly.
+    #[must_use]
+    pub fn pattern_rgba(width: u32, height: u32) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                rgba.push(((x * 7 + y * 3) & 0xff) as u8); // R
+                rgba.push(((x ^ (y * 5)) & 0xff) as u8); // G
+                rgba.push(((x * x + y) & 0xff) as u8); // B
+                rgba.push(0xff); // A (opaque)
+            }
         }
+        rgba
     }
-    rgba
+
+    /// Generates a deterministic, fully-opaque RGBA image with **photographic-like statistics**: smooth
+    /// low-frequency gradients and a coarse blob (large correlated regions, the bulk of a real photo)
+    /// overlaid with low-amplitude high-frequency detail and a few hard rectangle edges. This drives the
+    /// encoder down realistic residual/token/back-reference paths that the purely algebraic
+    /// [`pattern_rgba`] never reaches, while staying RNG-free so the corpus is reproducible and
+    /// version-controlled. `seed` varies the content. Alpha is held at 255 (see [`pattern_rgba`]).
+    #[must_use]
+    pub fn photo_like_rgba(width: u32, height: u32, seed: u32) -> Vec<u8> {
+        let (w, h) = (i64::from(width).max(1), i64::from(height).max(1));
+        // Small integer value-noise: hash (x, y, seed) into a high-frequency byte in `0..=255`.
+        let hash = |x: i64, y: i64| -> i64 {
+            let mut v = x.wrapping_mul(374_761_393)
+                ^ y.wrapping_mul(668_265_263)
+                ^ i64::from(seed).wrapping_mul(2_246_822_519);
+            v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+            (v ^ (v >> 16)) & 0xff
+        };
+        let clamp = |v: i64| v.clamp(0, 255) as u8;
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..h {
+            for x in 0..w {
+                // Low-frequency smooth base: per-channel ramps plus a shared diagonal so large regions
+                // correlate (what spatial prediction and LZ77 exploit).
+                let base_r = x * 200 / w + y * 30 / h;
+                let base_g = y * 200 / h + (x + y) * 20 / (w + h);
+                let base_b = (x + y) * 160 / (w + h) + 40;
+                // Low-amplitude detail (sensor-noise / texture analogue) and a few hard luminance steps
+                // (sharp edges exercise B_PRED mode selection and the loop filter).
+                let detail = (hash(x, y) - 128) / 12;
+                let edge = if (x * 3 / w) % 2 == 0 && (y * 3 / h) % 2 == 0 {
+                    40
+                } else {
+                    0
+                };
+                rgba.push(clamp(base_r + detail + edge)); // R
+                rgba.push(clamp(base_g + detail)); // G
+                rgba.push(clamp(base_b - detail + edge)); // B
+                rgba.push(0xff); // A (opaque)
+            }
+        }
+        rgba
+    }
 }
 
 /// The metadata a WebP file carries, as libwebp's **muxer** reads it: the three chunk payloads plus
