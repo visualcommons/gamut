@@ -621,7 +621,7 @@ exclude_re = [
     # its low 8 bits are always zero and never overlap the freshly-read byte (0..=255). Disjoint
     # operands ⇒ `|` is identical to `^`; the `| -> ^` mutant is provably equivalent (same shape as
     # the gamut-ifd `Value::decode` / gamut-iptc `IimBlock::parse` byte-assembly entries above).
-    '^crates/gamut-heic/src/hvcc\.rs:435:49: replace \| with \^ in Reader<.a>::u48$',
+    '^crates/gamut-heic/src/hvcc\.rs:436:49: replace \| with \^ in Reader<.a>::u48$',
     # `NalHeader::parse` (nal.rs) packs `nuh_layer_id` from two disjoint bit fields:
     # `(u16::from(b0 & 0x01) << 5) | u16::from(b1 >> 3)`. The left operand contributes only bit 5
     # (0 or 32); the right only bits 0..=4 (`b1 >> 3` is 0..=31). The operands never share a bit, so
