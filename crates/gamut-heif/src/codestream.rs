@@ -23,7 +23,7 @@ pub const BACKEND_POISONED: &str = "HEIF: a codestream backend's lock was poison
 /// `image.decode_item_rgba8::<Binding>(id, &backends, options)`.
 ///
 /// The backends are a [`Registry`] of the codec's own **typed** backend trait —
-/// [`Backend`](Self::Backend) is that trait as an object, `dyn HevcDecoder + Send` for instance —
+/// [`Backend`](Self::Backend) is that trait as an object, `dyn HevcCodestreamDecoder + Send` for instance —
 /// so a pure-Rust backend and a `gamut-codec-abi` adapter over a C one enter by the same door, and
 /// the registry's contract holds unchanged: backends are tried in push order,
 /// [`supports`](Self::supports) returning `false` is the only fall-through, and a backend that

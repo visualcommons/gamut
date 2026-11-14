@@ -1,9 +1,10 @@
 # gamut-heic
 
-`gamut-heic` is a pure-Rust HEIC/HEIF still-image **container decoder** — HEVC (H.265) intra image
-items wrapped in an ISOBMFF container. gamut is **decode-only** for this format: this crate parses
-HEIF/HEIC and decodes it through a caller-supplied HEVC decoder (the `HevcDecoder` hook); it does
-**not** encode it (see [`references/heif`](../../references/heif/README.md)).
+`gamut-heic` is a pure-Rust HEIC still-image **decoder** — HEVC (H.265) intra image items wrapped
+in a HEIF container — built as the HEVC binding over [`gamut-heif`](../gamut-heif), the HEIF/MIAF
+layer it shares with AVIF. gamut is **decode-only** for this format: this crate parses HEIC and
+decodes it through caller-supplied HEVC decoders (`HevcCodestreamDecoder` backends of a
+`HeifDecoder`); it does **not** encode it (see [`references/heif`](../../references/heif/README.md)).
 
 ## Goals
 
@@ -19,12 +20,13 @@ Part of the [gamut](../../README.md) workspace, this crate provides HEIC **decod
   shared [`gamut-isobmff`](../gamut-isobmff) box walker) and typed errors replace panics.
 - **Clean-slate from the spec.** Implemented directly from the HEIF/MIAF/14496-15 specs (see
   [`references/heif`](../../references/heif/README.md)) rather than wrapping libheif/libde265.
-- **Sharing the AVIF container.** It reuses [`gamut-isobmff`](../gamut-isobmff) — the same ISOBMFF
-  box tree that backs AVIF — for the `ftyp`/`meta`/`iloc`/`iinf`/`iprp`… grammar, layering the HEIF
-  still-image profile and the byte-accounting guarantee on top.
-- **Pluggable codestream decoder.** Per issue #238, the HEVC-intra pixel decode sits behind the
-  `HevcDecoder` hook: the container layer hands each decoder-ready item to the backends a caller
-  pushes, and this crate ships no software HEVC decoder of its own.
+- **Sharing the AVIF layer.** The item model, the `grid`/`iden`/`iovl` derivations, the decode
+  limits, the RGBA presentation and the C2PA summary are [`gamut-heif`](../gamut-heif)'s, over the
+  [`gamut-isobmff`](../gamut-isobmff) box tree that backs AVIF too; this crate adds the HEVC side
+  (`hvcC`, the NAL layer, the still-image constraint) and the byte-accounting guarantee.
+- **Pluggable codestream decoder.** Per issue #238, the HEVC-intra pixel decode sits behind
+  `HevcCodestreamDecoder` backends held in the shared `gamut-codec-abi` registry, and this crate
+  ships no software HEVC decoder of its own; `AbiHevcDecoder` brings in a C backend.
 
 Note: HEVC is patent-encumbered, unlike gamut's royalty-free focus formats; this crate is
 decode-side scaffolding and may move or be dropped as the project's scope sharpens (see the
@@ -37,12 +39,13 @@ workspace README's "Scope").
   and shadow-walks `meta`/`iprp` for boxes the semantic layer does not consume (`unknown_meta_boxes`).
   `c2pa()` / `c2pa_manifest_stores()` are lenses over that walk: they locate the C2PA manifest store
   in a top-level `uuid` `ContentProvenanceBox` and hand back its opaque bytes and exact byte range.
-- **`HeifImage` / `HeifItem`** — the role-typed semantic view over the primary still-image stream
-  (wrapping `gamut_isobmff::IsoBmffImage`): brands and `is_hevc_still()`, the validated primary
-  item, item kinds and typed properties (`ispe`/`irot`/`imir`/`clap`/`pasp`/`pixi`/`colr`/`clli`/
-  `hvcC`), and relationship lenses (thumbnails, alpha/depth auxiliaries, premultiplication,
-  Exif/XMP metadata, grid/overlay derivations, `altr` alternatives). Every accessor is a computed
-  lens — no state is duplicated out of the underlying model.
+  `is_hevc_still()` and `hevc_config(item_id)` are the HEVC questions about the file.
+- **`HeifImage` / `HeifItem`** — `gamut-heif`'s role-typed semantic view over the primary
+  still-image stream, re-exported: the validated primary item, item kinds and typed properties,
+  and relationship lenses (thumbnails, alpha/depth auxiliaries, Exif/XMP metadata, derivations).
+- **`HeifDecoder`** — decodes the primary image through `DecodeImage` to `Rgba8`/`Rgba16`, or to
+  its planar samples, through the `HevcCodestreamDecoder` backends added with `with_backend`. Any
+  other item decodes through `gamut-heif`'s surfaces with the `Hevc` binding.
 
 ## Usage
 
@@ -52,7 +55,7 @@ use gamut_heic::HeifContainer;
 # fn demo(bytes: &[u8]) -> gamut_core::Result<()> {
 let container = HeifContainer::parse(bytes)?;
 let image = container.image();
-if image.is_hevc_still() {
+if container.is_hevc_still() {
     let primary = image.primary_item();
     let dims = primary.dimensions();
     let alpha = image.alpha_auxiliary_of(primary.id());
@@ -89,7 +92,7 @@ Correctness is verified differentially against **libheif + libde265** — the de
 23008-12 reference reader — via the dev-only [`tooling/libheif-oracle`](../../tooling/libheif-oracle)
 crate (`crates/gamut-heic/tests/conformance.rs`). Fixtures are generated **at test time** with
 libheif + kvazaar (`encode_rgba_to_heic`), so no binary fixtures are committed. The suite plugs the
-reference HEVC decoder into the crate's pluggable `HevcDecoder` seam (`De265Decoder`) and cross-checks
+reference HEVC decoder in as an `HevcCodestreamDecoder` backend (`De265Decoder`) and cross-checks
 container structure (vs libheif's introspection), presentation pixels (vs libheif's RGBA decode, a
 tight measured bound), planar samples (bit-exact vs a direct libde265 decode — proving the NAL
 split/config delivery), `irot` orientation direction, motion-photo byte accounting, and hvcC↔YUV
@@ -101,11 +104,12 @@ C libraries build from source on the first run. See [`references/heif`](../../re
 
 ## Status
 
-Container-parsing / byte-accounting / role layer, the typed `hvcC` record + NAL demux, the pluggable
-`HevcDecoder` decode pipeline, and the libheif differential oracle are all implemented (issue #238),
-as is the high-bit-depth (10/12-bit, BT.709/BT.2020) `Rgba16` presentation surface (issue #303). The
-C2PA manifest-store locator (issue #429, under the #239 provenance epic) is implemented as a lens
-over the byte-accounting walk.
+Container-parsing / byte-accounting layer, the typed `hvcC` record + NAL demux, the `HeifDecoder`
+over pluggable `HevcCodestreamDecoder` backends, and the libheif differential oracle are all
+implemented (issue #238), as is the high-bit-depth (10/12-bit, BT.709/BT.2020) `Rgba16`
+presentation surface (issue #303). The role layer, the decode pipeline and the C2PA summary are
+`gamut-heif`'s since issue #1086. The C2PA manifest-store locator (issue #429, under the #239
+provenance epic) is a lens over the byte-accounting walk.
 Encoding is **not** provided. See [`STATUS.md`](STATUS.md) for the full component ledger.
 
 ## License

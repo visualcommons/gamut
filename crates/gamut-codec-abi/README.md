@@ -34,6 +34,6 @@ retry a later backend. `Send` is bound by the host at insertion, not required by
 
 ## Design
 
-Mirrors the `gamut_heic::HevcDecoder` precedent — a single object-safe method, borrowed bytes in,
+Mirrors the `gamut_heic::HevcCodestreamDecoder` precedent — an object-safe trait, borrowed bytes in,
 owned plain data out — generalized to a two-way, C-shaped vtable. See the crate-level docs for the
 full contract.

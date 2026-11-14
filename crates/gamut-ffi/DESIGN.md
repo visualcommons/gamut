@@ -111,9 +111,10 @@ Every `extern "C"` entry point wraps its body in `catch_unwind`; a panic becomes
 - **Provider boundary (C implements Rust traits)** — carried by **`gamut-codec-abi`**
   (issue #241, sub-issue #272): its `#[repr(C)]` descriptors/vtables and `Foreign*` bridges are
   the sanctioned mechanism for foreign implementations plugging into gamut, including
-  C-implemented hooks such as `gamut_heic::HevcDecoder` and the codestream backends. This
-  crate must not grow a parallel vtable convention. `HevcDecoder` remains the *shape* template
-  for new Rust hooks: a single object-safe method, borrowed bytes in, owned plain data out.
+  C-implemented hooks such as `gamut_heic::HevcCodestreamDecoder` and the other codestream
+  backends. This crate must not grow a parallel vtable convention. `HevcCodestreamDecoder`
+  remains the *shape* template for new Rust hooks: object-safe, borrowed bytes in, owned plain
+  data out.
   The C entry points over this mechanism are live — see the next section.
 
 ## Provider boundary (implemented, issue #280)
@@ -138,11 +139,11 @@ gamut_status_t gamut_png_encoder_push_backend(GamutPngEncoder *encoder,
 - Thread contract: pushing asserts the backend is usable from any thread (the Rust registries
   bound `Send`; the bridges are `unsafe impl Send` on exactly that assertion). Handles
   themselves are single-threaded.
-- **HEIC**: the handle stores the pushed `ForeignDecoder`s raw (in push order) rather than
-  pre-built adapters — an `hvcC` record carries no picture size, so `AbiHevcDecoder` needs each
-  item's `ispe` dimensions and is built per item at decode time, borrowing the stored backend
-  through `gamut-codec-abi`'s `&mut` blanket impls (destroy-on-drop stays with the handle).
-  There is no software HEVC tail (issue #18); an empty registry decodes nothing.
+- **HEIC**: like the others, the handle holds the format crate's host — a
+  `gamut::heic::HeifDecoder` — and wraps each pushed backend in an `AbiHevcDecoder`. An `hvcC`
+  record carries no picture size, so the adapter reads it per decode call from the codestream's
+  SPS (issue #1086) rather than being built per item. There is no software HEVC tail
+  (issue #18); an empty registry decodes nothing.
 - **AVIF decode is excluded**: `AvifDecoder::with_backend` keeps `Av1CodestreamDecoder`
   backends in a registry, but `gamut-avif` has no `gamut-codec-abi` adapter for that trait, so
   a `(vtable, ctx)` pair has no type to be wrapped in. The decode direction joins the C surface

@@ -2,7 +2,7 @@
 //!
 //! This is the issue-#238 story made real: a third-party HEVC decoder (libde265, reached through the
 //! `libheif-oracle` dev crate) is plugged into `gamut-heic`'s pure-Rust container pipeline via the
-//! crate's pluggable [`gamut_heic::HevcDecoder`] seam, and the whole path is checked differentially
+//! crate's pluggable [`gamut_heic::HevcCodestreamDecoder`] seam, and the whole path is checked differentially
 //! against the de-facto reference reader (libheif). Fixtures are generated at test time with
 //! libheif + kvazaar (`encode_rgba_to_heic`), so **no binary fixtures are committed**.
 //!
@@ -18,12 +18,16 @@
 //! chroma upsample + BT.601 integer conversion differs slightly from libheif's (bilinear upsample).
 //! Measured maxima are documented at each assertion.
 
+mod common;
+
 use std::sync::OnceLock;
 
-use gamut_core::{Error, ErrorKind};
+use common::Decode;
+use gamut_codec_abi::{Decoder, ImageDesc, Status, StreamConfig};
+use gamut_core::{DecodeImage, Error, ErrorKind, ImageBuf, Rgba8};
 use gamut_heic::{
-    ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder, HevcDecoders, NO_BACKEND,
-    iter_nal_units,
+    AbiHevcDecoder, ChromaSubsampling, DecodedFrame, HeifContainer, HeifDecoder,
+    HevcCodestreamDecoder, HevcConfig, iter_nal_units,
 };
 use libheif_oracle::{EncodeOpts, NclxProfile, OracleChroma};
 
@@ -44,15 +48,20 @@ fn nclx_bt601_full() -> NclxProfile {
 //   De265Decoder — the third-party HEVC-intra decoder plugged into the pure-Rust pipeline
 // ============================================================================================
 
-/// A [`HevcDecoder`] that bridges `gamut-heic`'s container pipeline to libde265 (via the
+/// A [`HevcCodestreamDecoder`] that bridges `gamut-heic`'s container pipeline to libde265 (via the
 /// `libheif-oracle` crate's `decode_hevc_intra`). It splits the item payload into NAL units with the
 /// crate's own [`iter_nal_units`], delivers the `hvcC` parameter sets as libde265 config NALs, and
 /// maps the reconstructed YUV back into a [`DecodedFrame`]. Plugging a real HEVC decoder in behind
 /// this trait is exactly what issue #238's decoder seam exists for.
+#[derive(Default)]
 struct De265Decoder;
 
-impl HevcDecoder for De265Decoder {
-    fn decode_intra(
+impl HevcCodestreamDecoder for De265Decoder {
+    fn supports(&mut self, _config: &HevcConfig) -> bool {
+        true
+    }
+
+    fn decode_still(
         &mut self,
         config: &HevcConfig,
         payload: &[u8],
@@ -67,13 +76,13 @@ impl HevcDecoder for De265Decoder {
             )
         })?;
         let chroma = match yuv.chroma {
-            OracleChroma::Mono => ChromaFormat::Monochrome,
-            OracleChroma::Yuv420 => ChromaFormat::Yuv420,
-            OracleChroma::Yuv422 => ChromaFormat::Yuv422,
-            OracleChroma::Yuv444 => ChromaFormat::Yuv444,
+            OracleChroma::Mono => ChromaSubsampling::Cs400,
+            OracleChroma::Yuv420 => ChromaSubsampling::Cs420,
+            OracleChroma::Yuv422 => ChromaSubsampling::Cs422,
+            OracleChroma::Yuv444 => ChromaSubsampling::Cs444,
         };
         let [y, cb, cr] = yuv.planes;
-        DecodedFrame::new(yuv.width, yuv.height, yuv.bit_depth, chroma, y, cb, cr)
+        common::frame(yuv.width, yuv.height, yuv.bit_depth, chroma, y, cb, cr)
     }
 }
 
@@ -423,7 +432,7 @@ fn t2_presentation_pixels_match_libheif() {
     let heic = full_fixture();
     let container = HeifContainer::parse(heic).expect("parse");
     let ours = container
-        .decode_primary_rgba8(&mut De265Decoder)
+        .primary_rgba8(&mut De265Decoder)
         .expect("gamut-heic decodes primary to RGBA");
     let (w, h, theirs) =
         libheif_oracle::decode_primary_rgba(heic).expect("libheif decodes primary");
@@ -445,7 +454,7 @@ fn t2_presentation_pixels_match_libheif() {
     // widens by exactly 257 (65535 == 255 · 257). This is the widening invariant against a genuine
     // codestream rather than the mock decoder.
     let wide = container
-        .decode_primary_rgba16(&mut De265Decoder)
+        .primary_rgba16(&mut De265Decoder)
         .expect("gamut-heic decodes primary to RGBA16");
     assert_eq!((wide.width(), wide.height()), (w, h));
     for (i, (&narrow, &widened)) in ours.as_samples().iter().zip(wide.as_samples()).enumerate() {
@@ -475,7 +484,7 @@ fn t2b_lossless_gray_tight_bound() {
     let heic = lossless_gray_fixture();
     let container = HeifContainer::parse(heic).expect("parse");
     let ours = container
-        .decode_primary_rgba8(&mut De265Decoder)
+        .primary_rgba8(&mut De265Decoder)
         .expect("decode primary");
     let (w, h, theirs) = libheif_oracle::decode_primary_rgba(heic).expect("libheif decode");
     assert_eq!((ours.width(), ours.height()), (w, h));
@@ -509,14 +518,13 @@ fn t3_planar_is_bit_exact_with_direct_decode() {
 
     // Decode the primary through the full container pipeline (NAL split + config delivery).
     let frame = container
-        .decode_item_planar(primary.id(), &mut De265Decoder)
+        .planar(primary.id(), &mut De265Decoder)
         .expect("planar decode of primary");
 
     // Decode the exact same payload directly, bypassing the container plumbing entirely.
-    let config = primary
-        .hevc_config()
-        .expect("primary carries hvcC")
-        .expect("hvcC parses");
+    let config = container
+        .hevc_config(primary.id())
+        .expect("primary carries a parseable hvcC");
     let payload = &primary.as_isobmff_item().payload;
     let cfg = config_nals(&config);
     let pics = picture_nals(payload, config.nal_length_size()).expect("split payload");
@@ -530,10 +538,10 @@ fn t3_planar_is_bit_exact_with_direct_decode() {
     );
     assert_eq!(frame.bit_depth(), direct.bit_depth);
     let expect_chroma = match direct.chroma {
-        OracleChroma::Mono => ChromaFormat::Monochrome,
-        OracleChroma::Yuv420 => ChromaFormat::Yuv420,
-        OracleChroma::Yuv422 => ChromaFormat::Yuv422,
-        OracleChroma::Yuv444 => ChromaFormat::Yuv444,
+        OracleChroma::Mono => ChromaSubsampling::Cs400,
+        OracleChroma::Yuv420 => ChromaSubsampling::Cs420,
+        OracleChroma::Yuv422 => ChromaSubsampling::Cs422,
+        OracleChroma::Yuv444 => ChromaSubsampling::Cs444,
     };
     assert_eq!(frame.chroma(), expect_chroma);
     assert_eq!(frame.y(), direct.planes[0].as_slice(), "luma plane differs");
@@ -573,7 +581,7 @@ fn t4_orientation_matches_libheif() {
     );
 
     let ours = container
-        .decode_primary_rgba8(&mut De265Decoder)
+        .primary_rgba8(&mut De265Decoder)
         .expect("decode primary with transform applied");
     let (w, h, theirs) = libheif_oracle::decode_primary_rgba(heic).expect("libheif decode");
 
@@ -622,7 +630,7 @@ fn t4_mirror_axes_match_libheif() {
         );
 
         let ours = container
-            .decode_primary_rgba8(&mut De265Decoder)
+            .primary_rgba8(&mut De265Decoder)
             .expect("decode primary with mirror applied");
         let (w, h, theirs) = libheif_oracle::decode_primary_rgba(&heic).expect("libheif decode");
         assert_eq!((ours.width(), ours.height()), (ORI_W, ORI_H));
@@ -713,9 +721,9 @@ fn t5_motion_photo_overlay_decodes_identically() {
     // The still decodes identically to the pristine file — appended data changes nothing.
     let pristine_pixels = HeifContainer::parse(pristine)
         .unwrap()
-        .decode_primary_rgba8(&mut De265Decoder)
+        .primary_rgba8(&mut De265Decoder)
         .unwrap();
-    let motion_pixels = container.decode_primary_rgba8(&mut De265Decoder).unwrap();
+    let motion_pixels = container.primary_rgba8(&mut De265Decoder).unwrap();
     assert_eq!(
         pristine_pixels.as_samples(),
         motion_pixels.as_samples(),
@@ -754,10 +762,10 @@ fn t5b_trailer_bytes_surfaced() {
     assert!(container.appended_stream().is_none());
 
     // Pixels unchanged from pristine.
-    let motion = container.decode_primary_rgba8(&mut De265Decoder).unwrap();
+    let motion = container.primary_rgba8(&mut De265Decoder).unwrap();
     let pristine_px = HeifContainer::parse(pristine)
         .unwrap()
-        .decode_primary_rgba8(&mut De265Decoder)
+        .primary_rgba8(&mut De265Decoder)
         .unwrap();
     assert_eq!(motion.as_samples(), pristine_px.as_samples());
     eprintln!(
@@ -776,10 +784,9 @@ fn t6_hvcc_coherent_with_oracle_yuv() {
     let container = HeifContainer::parse(heic).expect("parse");
     let primary = container.image().primary_item();
 
-    let config = primary
-        .hevc_config()
-        .expect("primary carries an hvcC")
-        .expect("hvcC parses");
+    let config = container
+        .hevc_config(primary.id())
+        .expect("primary carries a parseable hvcC");
 
     // Decode the same payload to get the ground-truth YUV facts.
     let payload = &primary.as_isobmff_item().payload;
@@ -789,13 +796,13 @@ fn t6_hvcc_coherent_with_oracle_yuv() {
 
     // Chroma format from hvcC matches the decoded chroma.
     let expect_chroma = match yuv.chroma {
-        OracleChroma::Mono => ChromaFormat::Monochrome,
-        OracleChroma::Yuv420 => ChromaFormat::Yuv420,
-        OracleChroma::Yuv422 => ChromaFormat::Yuv422,
-        OracleChroma::Yuv444 => ChromaFormat::Yuv444,
+        OracleChroma::Mono => ChromaSubsampling::Cs400,
+        OracleChroma::Yuv420 => ChromaSubsampling::Cs420,
+        OracleChroma::Yuv422 => ChromaSubsampling::Cs422,
+        OracleChroma::Yuv444 => ChromaSubsampling::Cs444,
     };
     assert_eq!(
-        config.chroma_format(),
+        config.chroma_subsampling(),
         expect_chroma,
         "hvcC chroma_format_idc disagrees with the decoded chroma"
     );
@@ -821,40 +828,34 @@ fn t6_hvcc_coherent_with_oracle_yuv() {
 
     eprintln!(
         "t6 hvcC sanity: chroma={:?} depth={} nal_len={ls} profile_idc={}",
-        config.chroma_format(),
+        config.chroma_subsampling(),
         config.bit_depth_luma(),
         config.general_profile_idc
     );
 }
 
 // ============================================================================================
-//   Test 7 — The reference decoder driven through the HevcDecoders registry (issue #273)
+//   Test 7 — The reference decoder driven through HeifDecoder's registry (issues #273, #1086)
 // ============================================================================================
 
-/// The registry is a drop-in for a single `&mut dyn HevcDecoder`: pushing the libde265-backed
-/// `De265Decoder` as the only backend must decode the fixture *identically* to passing that backend
-/// directly, and an empty registry must decline with an `ErrorKind::Unsupported` error carrying
-/// `NO_BACKEND` — gamut ships
-/// no in-tree software HEVC decoder (issue #18), so there is no implicit fallback tail.
+/// `HeifDecoder` with the libde265-backed `De265Decoder` as its only backend must decode the
+/// fixture *identically* to the shared pipeline driven with that backend directly, and a decoder
+/// with no backend must decline with an `ErrorKind::Unsupported` error carrying `NO_BACKEND` —
+/// gamut ships no in-tree software HEVC decoder (issue #18), so there is no implicit fallback tail.
 #[test]
 fn t7_registry_drives_the_reference_backend() {
     let heic = full_fixture();
     let container = HeifContainer::parse(heic).expect("parse");
     let primary_id = container.image().primary_item().id();
 
-    // Baseline: the backend used directly, exactly as tests 1-6 do.
+    // Baseline: the backend driven through the pipeline directly, exactly as tests 1-6 do.
     let direct = container
-        .decode_item_planar(primary_id, &mut De265Decoder)
+        .planar(primary_id, &mut De265Decoder)
         .expect("direct planar decode");
 
-    // Through the registry, at the same call site with the same signature.
-    let mut decoders = HevcDecoders::new();
-    decoders.push_backend(De265Decoder);
-    assert_eq!(decoders.len(), 1);
-    let via_registry = container
-        .decode_item_planar(primary_id, &mut decoders)
-        .expect("registry planar decode");
-
+    // Through the decoder's registry.
+    let decoder = HeifDecoder::new().with_backend(De265Decoder);
+    let via_registry = decoder.decode_planar(heic).expect("registry planar decode");
     assert_eq!(
         via_registry, direct,
         "registry decode differs from direct decode"
@@ -862,11 +863,9 @@ fn t7_registry_drives_the_reference_backend() {
 
     // The presentation path routes through the same seam.
     let rgba_direct = container
-        .decode_primary_rgba8(&mut De265Decoder)
+        .primary_rgba8(&mut De265Decoder)
         .expect("direct rgba decode");
-    let rgba_registry = container
-        .decode_primary_rgba8(&mut decoders)
-        .expect("registry rgba decode");
+    let rgba_registry: ImageBuf<Rgba8> = decoder.decode_image(heic).expect("registry rgba decode");
     assert_eq!(
         rgba_registry.as_samples(),
         rgba_direct.as_samples(),
@@ -874,18 +873,163 @@ fn t7_registry_drives_the_reference_backend() {
     );
 
     // No backends ⇒ no implicit software fallback.
-    let mut empty = HevcDecoders::new();
-    assert!(empty.is_empty());
-    let err = container
-        .decode_item_planar(primary_id, &mut empty)
-        .expect_err("an empty registry cannot decode");
+    let err = HeifDecoder::new()
+        .decode_planar(heic)
+        .expect_err("a decoder with no backend cannot decode");
     assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert_eq!(err.static_message(), Some(NO_BACKEND));
+    assert_eq!(err.static_message(), Some(gamut_heif::NO_BACKEND));
 
     eprintln!(
-        "t7 registry: {}x{} {:?} decoded identically through HevcDecoders",
+        "t7 registry: {}x{} {:?} decoded identically through HeifDecoder",
         direct.width(),
         direct.height(),
         direct.chroma()
     );
+}
+
+// ============================================================================================
+//   Test 8 — The codec-abi seam: libde265 behind AbiHevcDecoder (issue #1086)
+// ============================================================================================
+
+/// A `gamut-codec-abi` [`Decoder`] over libde265 — the shape a C backend has: it receives the
+/// `hvcC` parameter sets as Annex-B `extradata`, the item payload as the codestream, and planes
+/// the adapter sized, and writes the decoded picture into them.
+///
+/// The seam's `StreamConfig` does not carry the NAL length-prefix width, so the backend is told it
+/// at construction (a real C backend would read it from the `hvcC` it was handed out of band).
+struct De265Abi {
+    nal_length_size: usize,
+}
+
+/// The backend could not split the payload, libde265 failed, or the planes the adapter sized do
+/// not fit the decoded picture — distinct statuses, so a failure names its cause.
+const SPLIT_FAILED: Status = Status(2);
+const DECODE_FAILED: Status = Status(3);
+const SIZE_MISMATCH: Status = Status(4);
+
+impl Decoder for De265Abi {
+    fn supports(&mut self, cfg: &StreamConfig) -> bool {
+        cfg.codec_id == gamut_heic::HEVC_CODEC_ID
+    }
+
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
+        // SAFETY: the adapter keeps `extradata` alive for the duration of the call.
+        let extradata = unsafe { cfg.extradata() };
+        // Every parameter set is prefixed with a four-byte start code; a NAL unit cannot contain
+        // one (emulation prevention), so splitting on it recovers the units.
+        let config_nals = split_annex_b(extradata);
+        let Ok(pics) = picture_nals(codestream, self.nal_length_size) else {
+            return SPLIT_FAILED;
+        };
+        let Ok(yuv) = libheif_oracle::decode_hevc_intra(&config_nals, &pics) else {
+            return DECODE_FAILED;
+        };
+        if (yuv.width, yuv.height, u32::from(yuv.bit_depth))
+            != (out.width, out.height, out.bit_depth)
+        {
+            return SIZE_MISMATCH;
+        }
+        for (plane, samples) in yuv.planes.iter().enumerate().take(out.plane_count as usize) {
+            let row = out.strides[plane] / 2;
+            if row == 0 || samples.len() % row != 0 {
+                return SIZE_MISMATCH;
+            }
+            // SAFETY: the adapter allocated `stride / 2 * rows` u16 samples for this plane, and
+            // the decoded plane has exactly that many (its rows are the plane's rows).
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(out.planes[plane].cast::<u16>(), samples.len())
+            };
+            dst.copy_from_slice(samples);
+        }
+        Status::OK
+    }
+}
+
+/// The NAL units of an Annex-B stream whose every unit is prefixed with `00 00 00 01`.
+fn split_annex_b(stream: &[u8]) -> Vec<&[u8]> {
+    const START: [u8; 4] = [0, 0, 0, 1];
+    let mut units = Vec::new();
+    let mut rest = stream;
+    while let Some(after) = rest.strip_prefix(&START) {
+        let end = after
+            .windows(4)
+            .position(|w| w == START)
+            .unwrap_or(after.len());
+        units.push(&after[..end]);
+        rest = &after[end..];
+    }
+    assert!(rest.is_empty(), "extradata is not start-code framed");
+    units
+}
+
+/// A fixture whose size is not a multiple of kvazaar's 8-sample minimum coding block, so the coded
+/// picture is larger than the presented one.
+const ODD_W: u32 = 37;
+const ODD_H: u32 = 21;
+
+fn odd_size_fixture() -> &'static [u8] {
+    static FIXTURE: OnceLock<Vec<u8>> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let src = gradient_rgba(ODD_W, ODD_H, false);
+        libheif_oracle::encode_rgba_to_heic(
+            ODD_W,
+            ODD_H,
+            &src,
+            &EncodeOpts {
+                quality: 90,
+                nclx: Some(nclx_bt601_full()),
+                ..Default::default()
+            },
+        )
+        .expect("encode odd-size fixture")
+    })
+}
+
+/// The adapter sizes its planes from the codestream's SPS. Driving libde265 through it must give
+/// planes identical to `De265Decoder`'s — whose size is libde265's own output — so the SPS walk
+/// agrees with the reference decoder on every fixture.
+#[test]
+fn t8_the_abi_adapter_sizes_planes_as_the_reference_decoder_does() {
+    for heic in [full_fixture(), orientation_fixture(), odd_size_fixture()] {
+        let container = HeifContainer::parse(heic).expect("parse");
+        let primary_id = container.image().primary_item().id();
+        let config = container.hevc_config(primary_id).expect("hvcC");
+
+        let direct = container
+            .planar(primary_id, &mut De265Decoder)
+            .expect("direct planar decode");
+        let via_abi = HeifDecoder::new()
+            .with_backend(AbiHevcDecoder::new(De265Abi {
+                nal_length_size: config.nal_length_size(),
+            }))
+            .decode_planar(heic)
+            .expect("planar decode through the codec-abi adapter");
+        assert_eq!(
+            via_abi, direct,
+            "codec-abi decode differs from direct decode"
+        );
+        eprintln!(
+            "t8 codec-abi: {}x{} {:?} identical through AbiHevcDecoder",
+            direct.width(),
+            direct.height(),
+            direct.chroma()
+        );
+    }
+
+    // libheif's kvazaar path pads an odd-size source to the next multiple of 8 and crops it back
+    // with a `clap` rather than an SPS conformance window, so the coded picture is 40x24 and the
+    // presented one the source size — on both readers. (A conformance-window crop is therefore
+    // proven against the crate's own SPS fixtures, not this oracle; see `tests/backend.rs`.)
+    let heic = odd_size_fixture();
+    let container = HeifContainer::parse(heic).expect("parse");
+    let frame = container
+        .planar(container.image().primary_item().id(), &mut De265Decoder)
+        .expect("decode");
+    assert_eq!((frame.width(), frame.height()), (40, 24));
+    let rgba = container
+        .primary_rgba8(&mut De265Decoder)
+        .expect("presentation decode");
+    let (w, h, _) = libheif_oracle::decode_primary_rgba(heic).expect("libheif decode");
+    assert_eq!((rgba.width(), rgba.height()), (w, h));
+    assert_eq!((w, h), (ODD_W, ODD_H));
 }

@@ -33,7 +33,7 @@ documents link here rather than restating it.
 | `av1`        | Standalone AV1 still-image encoder + header-layer decoder (`gamut-av1`)  |
 | `webp`       | WebP VP8/VP8L encoder + decoder (`gamut-webp`)                           |
 | `jxl`        | JPEG XL encoder (libjxl wrap) + decoder (`gamut-jxl`)                    |
-| `heic`       | HEIC/HEIF decode-only container (`gamut-heic`)                           |
+| `heic`       | HEIC decoder over pluggable HEVC backends (`gamut-heic` + `gamut-heif`)  |
 | `vvc`        | VVC / H.266 (`gamut-vvc`) — placeholder                                  |
 | `av2`        | AV2 (`gamut-av2`) — placeholder                                          |
 | `tiff`       | TIFF 6.0 encoder + decoder (`gamut-tiff`)                                |

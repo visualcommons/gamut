@@ -91,7 +91,7 @@ extents with timing and flags. Nothing in the tree inspects those bytes.
 
 Where a consumer wants to plug a decoder in, it does so through the hook shape
 [`AGENTS.md`](../AGENTS.md) already mandates — the
-[`gamut_heic::HevcDecoder`](../crates/gamut-heic) shape: one object-safe method,
+[`gamut_heic::HevcCodestreamDecoder`](../crates/gamut-heic) shape: an object-safe trait,
 borrowed bytes in, owned plain data out — bridged to [`gamut-codec-abi`](../crates/gamut-codec-abi)
 so a C/FFI backend and a pure-Rust one enter by the same door. gamut ships **no** software tail for
 audio or video codecs, so unlike the image formats there is no implicit fallback; a job with no

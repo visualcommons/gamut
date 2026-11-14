@@ -1,46 +1,31 @@
 //! HEIC seam handle: [`GamutHeicDecoder`] and its C entry points.
 //!
-//! The HEIC seam is the HEVC intra codestream (`hvc1`, decode direction — gamut ships **no**
-//! software HEVC tail, issue #18, so an empty registry decodes nothing). Unlike the other
-//! formats, the handle stores the pushed [`ForeignDecoder`]s raw, in push order, rather than
-//! pre-built `AbiHevcDecoder` adapters: an `hvcC` record carries no picture size, so the
-//! adapter needs each item's `ispe` dimensions and can only be built per decoded item. The
-//! consumer entry points of issue #242 lend each stored backend to a fresh per-item adapter
-//! (`AbiHevcDecoder::new(&mut foreign, dims)` via `gamut-codec-abi`'s `&mut` blanket impl) —
-//! the composition pinned by the const block below and by gamut-heic's
-//! `abi_borrowed_backend` test.
+//! The HEIC seam is the HEVC intra codestream (`HEVC_CODEC_ID`, decode direction). Each pushed
+//! backend is wrapped in an `AbiHevcDecoder` and added to the handle's `HeifDecoder`, tried in
+//! push order; gamut ships **no** software HEVC tail (issue #18), so an empty registry decodes
+//! nothing. The adapter sizes each picture from the codestream's SPS per decode call, so one
+//! adapter serves every item a file holds.
 
 use core::ffi::c_void;
 
 use gamut_codec_abi::DecoderVTable;
-use gamut_codec_abi::bridge::ForeignDecoder;
 
 use crate::seam::seam_handle;
 use crate::status::GamutStatus;
 
-/// Opaque handle over the HEIC HEVC-decode backend registry (push order).
+/// Opaque handle over a `gamut::heic::HeifDecoder` and its HEVC backend registry (push order).
 pub struct GamutHeicDecoder {
-    inner: Vec<ForeignDecoder>,
+    inner: gamut::heic::HeifDecoder,
 }
-
-// Living-shim tie to the Rust seam this handle feeds: a stored ForeignDecoder must remain
-// lendable to a per-item AbiHevcDecoder. If gamut-heic's adapter contract drifts, this fails
-// to compile here rather than at issue #242's decode entry point.
-const _: () = {
-    fn _per_item_adapter(
-        backend: &mut ForeignDecoder,
-        dimensions: gamut::core::Dimensions,
-    ) -> impl gamut::heic::HevcDecoder + '_ {
-        gamut::heic::AbiHevcDecoder::new(backend, dimensions)
-    }
-};
 
 seam_handle! {
     handle = GamutHeicDecoder,
-    host = Vec<ForeignDecoder>,
-    new = Vec::new(),
+    host = gamut::heic::HeifDecoder,
+    new = gamut::heic::HeifDecoder::new(),
     seam = decoder,
-    push = |host, backend| { host.push(backend); },
+    push = |host, backend| {
+        *host = core::mem::take(host).with_backend(gamut::heic::AbiHevcDecoder::new(backend));
+    },
     fns = (gamut_heic_decoder_new, gamut_heic_decoder_free, gamut_heic_decoder_push_backend),
     tests = heic_decoder_tests,
 }

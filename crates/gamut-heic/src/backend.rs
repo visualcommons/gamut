@@ -1,31 +1,28 @@
-//! Backend selection for the [`HevcDecoder`] seam (issue #273): the ordered [`HevcDecoders`]
-//! registry and the [`AbiHevcDecoder`] adapter over a [`gamut_codec_abi::Decoder`].
+//! The HEVC codestream backend seam: the typed [`HevcCodestreamDecoder`] trait a caller plugs a
+//! platform or reference HEVC decoder into, and the [`AbiHevcDecoder`] adapter that bridges a
+//! [`gamut_codec_abi::Decoder`] (and, through [`gamut_codec_abi::bridge::ForeignDecoder`], a
+//! C/`-sys` backend) onto it.
 //!
-//! `gamut-heic` owns the container but not the HEVC codestream (issue #18), so every decode is
-//! driven through a caller-supplied [`HevcDecoder`]. This module retrofits the #241 *registry*
-//! shape onto that single hook, **additively**: [`HevcDecoders`] is itself a [`HevcDecoder`], so it
-//! drops into every existing `&mut dyn HevcDecoder` call site
-//! ([`HeifImage::decode_item_planar`](crate::HeifImage::decode_item_planar),
-//! [`decode_item_rgba8`](crate::HeifImage::decode_item_rgba8),
-//! [`decode_primary_rgba8`](crate::HeifImage::decode_primary_rgba8)) with no signature change.
+//! `gamut-heic` owns everything around the coded picture through `gamut-heif`, but not the HEVC
+//! codestream itself (issue #18). [`HeifDecoder`](crate::HeifDecoder) keeps its backends in a
+//! [`gamut_codec_abi::Registry`], whose fallback contract is the workspace-wide one:
 //!
-//! # Fallback contract
-//!
-//! Mirrors [`gamut_codec_abi`]'s contract exactly:
-//!
-//! - Backends are tried in **push order**.
-//! - [`HevcDecoder::supports`] returning `false` — or a late [`Status::UNSUPPORTED`] surfaced as the
-//!   [`BACKEND_DECLINED`] sentinel — is the **only** signal that falls through to the next backend.
-//! - A backend that accepts and then fails **propagates**: its error is returned unchanged and no
-//!   later backend is consulted, so a partial result is never silently masked.
-//! - There is **no implicit software tail**: gamut ships no in-tree HEVC codestream decoder (issue
-//!   #18). An empty registry, or one where every backend declines, returns an
-//!   [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
+//! - Backends are tried in **the order they were added**
+//!   ([`HeifDecoder::with_backend`](crate::HeifDecoder::with_backend)).
+//! - [`supports`](HevcCodestreamDecoder::supports) returning `false` — or, across the C seam,
+//!   [`Decoder::supports`] returning `false` — is the **only** fall-through signal.
+//! - A backend that *accepts* a job and then fails returns its error unchanged; nothing after it is
+//!   tried, so a partial result is never silently masked by a retry.
+//! - There is **no implicit software tail**: gamut ships no HEVC codestream decoder, so a coded
+//!   item no backend accepts is refused with [`gamut_heif::NO_BACKEND`].
 
 use gamut_codec_abi::{Decoder, ImageDesc, MAX_PLANES, StreamConfig, codec_id, pixel_format};
-use gamut_core::{Dimensions, Error, Result};
+use gamut_color::ChromaSubsampling;
+use gamut_core::{Error, Result};
+use gamut_heif::{DecodeLimits, DecodedFrame};
 
-use crate::{ChromaFormat, DecodedFrame, HevcConfig, HevcDecoder};
+use crate::hvcc::HevcConfig;
+use crate::sps;
 
 /// The codec identifier [`AbiHevcDecoder`] writes into [`StreamConfig::codec_id`]: the big-endian
 /// FourCC `hvc1` (`0x68766331`).
@@ -34,241 +31,165 @@ use crate::{ChromaFormat, DecodedFrame, HevcConfig, HevcDecoder};
 /// part of the seam's wire contract and never changes.
 pub const HEVC_CODEC_ID: u32 = codec_id(*b"hvc1");
 
-/// The [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) message a backend returns to
-/// decline a codestream **after** its
-/// [`HevcDecoder::supports`] already said `true` — the "late decline".
-///
-/// [`HevcDecoders`] treats exactly this message as a fall-through (it tries the next backend);
-/// every other error propagates. [`AbiHevcDecoder`] produces it when its wrapped backend returns
+/// The message of the terminal error [`AbiHevcDecoder`] returns when its backend reports
 /// [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) from
-/// [`decode`](gamut_codec_abi::Decoder::decode), which is the C-side spelling of the same signal.
-pub const BACKEND_DECLINED: &str = "HEIC: HEVC backend declined the codestream after accepting it";
+/// [`decode`](gamut_codec_abi::Decoder::decode), after its `supports` accepted the job.
+pub(crate) const LATE_DECLINE: &str =
+    "HEIC: HEVC backend declined the codestream after accepting it";
 
-/// The [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) message [`HevcDecoders`]
-/// returns when no backend accepted the job —
-/// an empty registry, or every backend declining.
+/// The message of the error [`AbiHevcDecoder`] returns when the system refuses a plane.
+pub(crate) const PLANE_ALLOCATION: &str = "HEIC: out of memory allocating a decode plane";
+
+/// The message of the terminal error [`AbiHevcDecoder`] returns for any other non-OK status.
+pub(crate) const BACKEND_FAILED: &str = "HEIC: HEVC backend returned a failure status";
+
+/// A pluggable HEVC **codestream decoder** backend: decodes one coded `hvc1`/`hev1` item to planar
+/// samples.
 ///
-/// gamut ships no in-tree software HEVC decoder (issue #18), so there is no implicit fallback tail
-/// after the pushed backends.
-pub const NO_BACKEND: &str =
-    "HEIC: no HEVC backend accepted the codestream (gamut ships no software HEVC decoder)";
-
-/// An ordered registry of HEVC codestream backends that is **itself** a [`HevcDecoder`].
+/// gamut-heic decodes the container — and everything around the coded picture — itself; the HEVC
+/// codestream is handed to a backend the caller adds with
+/// [`HeifDecoder::with_backend`](crate::HeifDecoder::with_backend) (libde265, VideoToolbox,
+/// MediaCodec, a hardware block, …). The shape is the workspace's codestream-hook one: object-safe,
+/// borrowed bytes in, owned plain data out. `Send` is not a supertrait; the decoder requires it
+/// where a backend is added. A C or `-sys` backend reaches this trait through [`AbiHevcDecoder`]
+/// rather than implementing it directly.
 ///
-/// Push backends in preference order with [`push_backend`](Self::push_backend); hand the registry
-/// to any decode entry point exactly where a single backend would go:
-///
-/// ```
-/// use gamut_heic::{ChromaFormat, DecodedFrame, HevcConfig, HevcDecoder, HevcDecoders};
-/// use gamut_core::Result;
-///
-/// struct Gray;
-/// impl HevcDecoder for Gray {
-///     fn decode_intra(&mut self, _c: &HevcConfig, _p: &[u8]) -> Result<DecodedFrame> {
-///         DecodedFrame::new(2, 2, 8, ChromaFormat::Monochrome, vec![128; 4], vec![], vec![])
-///     }
-/// }
-///
-/// # // Minimal valid hvcC: 23-byte header, lengthSizeMinusOne = 3, numOfArrays = 0.
-/// # let mut raw = vec![0u8; 23];
-/// # raw[0] = 1;
-/// # raw[21] = 0b0000_0011;
-/// # raw[22] = 0;
-/// let config = HevcConfig::parse(&raw).unwrap();
-///
-/// let mut decoders = HevcDecoders::new();
-/// decoders.push_backend(Gray);
-/// assert_eq!(decoders.len(), 1);
-/// // `decoders` is a `HevcDecoder`, so it goes wherever `&mut Gray` would:
-/// let frame = decoders.decode_intra(&config, &[]).unwrap();
-/// assert_eq!(frame.width(), 2);
-/// ```
-///
-/// Backends are stored as `Box<dyn HevcDecoder + Send>`: [`HevcDecoder`] deliberately has no `Send`
-/// supertrait (a single-threaded backend stays usable), so `Send` is bound here, at insertion. The
-/// registry is threaded through the decode calls as an argument rather than stored behind a shared
-/// handle, so no interior mutability (`Arc`/`Mutex`) is involved.
-///
-/// See the [`HevcDecoder`] docs for the fallback contract.
-#[derive(Default)]
-pub struct HevcDecoders {
-    backends: Vec<Box<dyn HevcDecoder + Send>>,
-}
+/// `config` is the item's parsed `hvcC` record and `payload` the item's length-prefixed NAL unit
+/// stream, already checked against the still-image constraint
+/// ([`HevcConfig::validate_still_payload`]: every VCL NAL unit is an IRAP picture). A backend that
+/// wants one Annex-B stream bridges the two with [`HevcConfig::annex_b`]; the crate docs tabulate
+/// what each platform decoder API wants.
+pub trait HevcCodestreamDecoder {
+    /// Reports whether this backend will decode a picture coded under `config` — its profile,
+    /// tier, level, chroma format and bit depth. Returning `false` is the **only** fall-through to
+    /// the next backend; a backend that returns `true` owns the item, and its error is the
+    /// caller's.
+    fn supports(&mut self, config: &HevcConfig) -> bool;
 
-impl core::fmt::Debug for HevcDecoders {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("HevcDecoders")
-            .field("backends", &self.backends.len())
-            .finish()
-    }
-}
-
-impl HevcDecoders {
-    /// Creates an empty registry. Decoding through it before any
-    /// [`push_backend`](Self::push_backend) yields an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error ([`NO_BACKEND`]).
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            backends: Vec::new(),
-        }
-    }
-
-    /// Appends `backend` to the end of the try order and returns `&mut self` for chaining.
-    ///
-    /// Order is preference order: the first backend whose [`HevcDecoder::supports`] returns `true`
-    /// (and that does not late-decline) handles the codestream.
-    pub fn push_backend(&mut self, backend: impl HevcDecoder + Send + 'static) -> &mut Self {
-        self.backends.push(Box::new(backend));
-        self
-    }
-
-    /// The number of registered backends.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.backends.len()
-    }
-
-    /// Returns `true` iff no backend has been pushed.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.backends.is_empty()
-    }
-}
-
-impl HevcDecoder for HevcDecoders {
-    /// `true` iff **any** registered backend supports `config`. Backends are queried in push order
-    /// and the query short-circuits at the first acceptance.
-    fn supports(&mut self, config: &HevcConfig) -> bool {
-        self.backends.iter_mut().any(|b| b.supports(config))
-    }
-
-    /// Decodes through the first backend that accepts the job.
+    /// Decodes the coded item to its planar frame — native bit depth and chroma, before any colour
+    /// conversion, `clap`, `irot` or `imir` — whose dimensions are the **post-conformance-window
+    /// crop** luma dimensions.
     ///
     /// # Errors
     ///
-    /// Propagates the accepting backend's error unchanged (no later backend is tried), or returns
-    /// an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error with the
-    /// [`NO_BACKEND`] message when every backend declines.
-    fn decode_intra(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame> {
-        for backend in &mut self.backends {
-            if !backend.supports(config) {
-                continue;
-            }
-            match backend.decode_intra(config, payload) {
-                Err(error)
-                    if error.kind() == gamut_core::ErrorKind::Unsupported
-                        && error.static_message() == Some(BACKEND_DECLINED) =>
-                {
-                    continue;
-                }
-                outcome => return outcome,
-            }
-        }
-        Err(Error::unsupported(env!("CARGO_PKG_NAME"), NO_BACKEND))
-    }
+    /// The backend's own error, returned to the caller unchanged: a backend that accepted the job
+    /// owns it.
+    fn decode_still(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame>;
 }
 
-/// Adapts a [`gamut_codec_abi::Decoder`] — the workspace's `repr(C)`-shaped codestream seam, whether
-/// a pure-Rust backend or a foreign vtable bridged through
-/// [`gamut_codec_abi::bridge::ForeignDecoder`] — into a [`HevcDecoder`].
+/// Adapts a [`gamut_codec_abi::Decoder`] — the workspace's `repr(C)`-shaped codestream seam,
+/// whether a pure-Rust backend or a foreign vtable bridged through
+/// [`gamut_codec_abi::bridge::ForeignDecoder`] — into an [`HevcCodestreamDecoder`].
 ///
 /// # What it translates
 ///
 /// - **Down**: [`HevcConfig`] becomes a [`StreamConfig`] with [`codec_id`](StreamConfig::codec_id)
-///   [`HEVC_CODEC_ID`], the adapter's [`dimensions`](Self::dimensions), the record's luma bit depth,
-///   and the `hvcC` parameter sets as Annex-B `extradata` (exactly what
-///   [`HevcConfig::annex_b_parameter_sets`] emits). The item payload is passed through as the
-///   codestream, still length-prefixed.
+///   [`HEVC_CODEC_ID`], the picture size, the record's luma bit depth, and the `hvcC` parameter
+///   sets as Annex-B `extradata` (exactly what [`HevcConfig::annex_b_parameter_sets`] emits). The
+///   item payload is passed through as the codestream, still length-prefixed.
 /// - **Up**: the adapter allocates the `u16` planes itself, hands their pointers to the backend in
-///   an [`ImageDesc`] (one plane for [`ChromaFormat::Monochrome`], otherwise Y/Cb/Cr; strides are
-///   `plane_width * 2` bytes; [`pixel_format`](ImageDesc::pixel_format) is
-///   [`planar_pixel_format`]), then rebuilds a [`DecodedFrame`] through the validating
-///   [`DecodedFrame::new`].
+///   an [`ImageDesc`] (one plane for monochrome, otherwise Y/Cb/Cr; strides are `plane_width * 2`
+///   bytes; the [`pixel_format`](ImageDesc::pixel_format) is the classic FourCC of the chroma
+///   layout — `Y800`, `I420`, `I422` or `I444` — with samples always `u16` in native byte order and
+///   [`bit_depth`](ImageDesc::bit_depth) carrying the real depth), then rebuilds a
+///   [`DecodedFrame`] through the validating [`DecodedFrame::new`].
 ///
-/// # Why dimensions are supplied
+/// # Where the picture size comes from
 ///
-/// An `hvcC` record carries no picture size, so the adapter is constructed with the item's `ispe`
-/// dimensions (`HeifItem::dimensions`) — the buffer the backend writes into must be sized before
-/// the call.
+/// An `hvcC` record carries no picture size, and the planes must be sized before the call, so each
+/// call reads it from the codestream itself: `pic_width_in_luma_samples` and
+/// `pic_height_in_luma_samples` of the first SPS — the record's, or an `hev1` payload's inband one —
+/// less its conformance window (ITU-T H.265 §7.4.3.2.1), the cropped picture a decoder outputs. One
+/// adapter therefore serves every item of a file, whatever its size, and sits in a
+/// [`HeifDecoder`](crate::HeifDecoder) like any other backend. [`supports`](Decoder::supports) is
+/// asked with the same size.
+///
+/// # Resource limits
+///
+/// The SPS is as untrusted as the rest of the file — `pic_width_in_luma_samples` is a `ue(v)`
+/// reaching `2^32 - 1` — and the adapter allocates its planes before the backend runs, so it
+/// checks the SPS size against its own [`DecodeLimits`] ([`with_limits`](Self::with_limits);
+/// [`DecodeLimits::default`] unless set) first, and reserves the planes fallibly. A picture past
+/// the limits is refused with [`DecodeLimits::check`]'s
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, and an allocation the
+/// system refuses is an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error too,
+/// never an abort; the backend is not called in either case. A [`HeifDecoder`](crate::HeifDecoder)
+/// cannot reach into its backends, so a caller who raises its limits raises the adapter's to
+/// match.
 ///
 /// # Status mapping
 ///
-/// [`Status::OK`](gamut_codec_abi::Status::OK) ⇒ a validated [`DecodedFrame`].
-/// [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) returned late from
-/// [`decode`](Decoder::decode) ⇒ an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported)
-/// error carrying [`BACKEND_DECLINED`], the sentinel [`HevcDecoders`] falls through on. Any other
-/// non-OK status ⇒ an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error —
-/// terminal,
-/// and it propagates out of the registry.
+/// [`Status::OK`](gamut_codec_abi::Status::OK) ⇒ a validated [`DecodedFrame`]. Any other status
+/// [`decode`](Decoder::decode) returns is terminal — the backend accepted the job — and propagates
+/// unchanged out of the registry: [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) as
+/// an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, every other status as
+/// an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error, each carrying the
+/// status code in its detail. Only `supports` falls through.
 #[derive(Debug, Clone, Copy)]
 pub struct AbiHevcDecoder<D> {
     backend: D,
-    dimensions: Dimensions,
+    /// The caps the SPS picture size is checked against before the planes are allocated.
+    limits: DecodeLimits,
 }
 
-/// The [`ImageDesc::pixel_format`] tag for the planar samples the seam exchanges: the classic
-/// FourCC of the chroma layout — `Y800`, `I420`, `I422`, or `I444`.
-///
-/// Samples are **always** `u16` in native byte order regardless of the coded bit depth (matching
-/// [`DecodedFrame`]'s uniform plane type); [`ImageDesc::bit_depth`] carries the real bit depth.
-#[must_use]
-pub const fn planar_pixel_format(chroma: ChromaFormat) -> u32 {
+/// The [`ImageDesc::pixel_format`] tag for planar samples of `chroma`: the classic FourCC of the
+/// chroma layout. `chroma` is always one an `hvcC` record can declare.
+fn planar_pixel_format(chroma: ChromaSubsampling) -> u32 {
     match chroma {
-        ChromaFormat::Monochrome => pixel_format::Y800,
-        ChromaFormat::Yuv420 => pixel_format::I420,
-        ChromaFormat::Yuv422 => pixel_format::I422,
-        ChromaFormat::Yuv444 => pixel_format::I444,
+        ChromaSubsampling::Cs400 => pixel_format::Y800,
+        ChromaSubsampling::Cs420 => pixel_format::I420,
+        ChromaSubsampling::Cs422 => pixel_format::I422,
+        _ => pixel_format::I444,
     }
 }
 
 impl<D: Decoder> AbiHevcDecoder<D> {
-    /// Wraps `backend`, decoding pictures of `dimensions` (the item's `ispe` size).
+    /// Wraps `backend`, under [`DecodeLimits::default`].
     #[must_use]
-    pub fn new(backend: D, dimensions: Dimensions) -> Self {
+    pub fn new(backend: D) -> Self {
         Self {
             backend,
-            dimensions,
+            limits: DecodeLimits::default(),
         }
     }
 
-    /// The picture dimensions this adapter allocates output planes for.
+    /// Replaces the caps the codestream's picture size is checked against before any plane is
+    /// allocated (see [Resource limits](Self#resource-limits)).
     #[must_use]
-    pub fn dimensions(&self) -> Dimensions {
-        self.dimensions
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Borrows the wrapped backend.
     #[must_use]
-    pub fn backend(&self) -> &D {
+    pub fn get_ref(&self) -> &D {
         &self.backend
     }
 
     /// Mutably borrows the wrapped backend.
     #[must_use]
-    pub fn backend_mut(&mut self) -> &mut D {
+    pub fn get_mut(&mut self) -> &mut D {
         &mut self.backend
     }
 
     /// Consumes the adapter, returning the wrapped backend.
     #[must_use]
-    pub fn into_backend(self) -> D {
+    pub fn into_inner(self) -> D {
         self.backend
     }
 
-    /// Builds the `hvcC` parameter sets as an Annex-B `extradata` blob.
-    fn extradata(config: &HevcConfig) -> Vec<u8> {
-        let mut out = Vec::new();
-        config.annex_b_parameter_sets(&mut out);
-        out
-    }
-
-    /// Builds the [`StreamConfig`] for `config`, borrowing `extradata` for the call.
-    fn stream_config(&self, config: &HevcConfig, extradata: &[u8]) -> StreamConfig {
+    /// The [`StreamConfig`] for a `width` × `height` picture coded under `config`, borrowing
+    /// `extradata` for the call.
+    fn stream_config(
+        config: &HevcConfig,
+        (width, height): (u32, u32),
+        extradata: &[u8],
+    ) -> StreamConfig {
         let mut cfg = StreamConfig::new(
             HEVC_CODEC_ID,
-            self.dimensions.width(),
-            self.dimensions.height(),
+            width,
+            height,
             u32::from(config.bit_depth_luma()),
         );
         cfg.extradata = extradata.as_ptr();
@@ -277,53 +198,77 @@ impl<D: Decoder> AbiHevcDecoder<D> {
     }
 }
 
-impl<D: Decoder> HevcDecoder for AbiHevcDecoder<D> {
-    /// Forwards to [`Decoder::supports`] with the lowered [`StreamConfig`]. Lowering a parsed
-    /// [`HevcConfig`] is infallible (the parameter sets come from the record, not the payload), so
-    /// this probe reflects only the backend's own answer.
+/// A zeroed plane of `len` samples, reserved fallibly: a reservation the system refuses is an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error rather than an abort.
+fn zeroed_plane(len: usize) -> Result<Vec<u16>> {
+    let mut plane = Vec::new();
+    plane
+        .try_reserve_exact(len)
+        .map_err(|_| Error::unsupported(env!("CARGO_PKG_NAME"), PLANE_ALLOCATION))?;
+    plane.resize(len, 0);
+    Ok(plane)
+}
+
+/// The `hvcC` parameter sets as an Annex-B `extradata` blob.
+fn extradata(config: &HevcConfig) -> Vec<u8> {
+    let mut out = Vec::new();
+    config.annex_b_parameter_sets(&mut out);
+    out
+}
+
+impl<D: Decoder> HevcCodestreamDecoder for AbiHevcDecoder<D> {
+    /// Forwards to [`Decoder::supports`] with the lowered [`StreamConfig`]. The picture size comes
+    /// from the record's SPS; a record without one is lowered with a `0 × 0` size, since a hev1
+    /// item's inband SPS is not in reach here — [`decode_still`](Self::decode_still) reads it.
     fn supports(&mut self, config: &HevcConfig) -> bool {
-        let extradata = Self::extradata(config);
-        let cfg = self.stream_config(config, &extradata);
-        self.backend.supports(&cfg)
+        let size = sps::output_size(config, &[]).map_or((0, 0), |d| (d.width(), d.height()));
+        let extradata = extradata(config);
+        self.backend
+            .supports(&Self::stream_config(config, size, &extradata))
     }
 
-    /// Runs the wrapped backend and maps its planes back through [`DecodedFrame::new`].
+    /// Runs the wrapped backend into planes sized by the codestream's SPS, and maps them back
+    /// through [`DecodedFrame::new`].
     ///
     /// # Errors
     ///
-    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error with the
-    /// [`BACKEND_DECLINED`] message when the backend returns
-    /// [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED); an
-    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for
-    /// any other non-OK status, for a picture whose size overflows `usize`, or from
-    /// [`DecodedFrame::new`]'s validation.
-    fn decode_intra(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame> {
-        let width = self.dimensions.width();
-        let height = self.dimensions.height();
-        let chroma = config.chroma_format();
+    /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when no SPS
+    /// states the picture size or the SPS is malformed, when the picture's size overflows `usize`,
+    /// or from [`DecodedFrame::new`]'s validation; an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the picture is
+    /// past the adapter's [`DecodeLimits`] or a plane cannot be allocated, both before the backend
+    /// runs; and the backend's non-OK status, as the [type docs](Self#status-mapping) map it.
+    fn decode_still(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame> {
+        let size = sps::output_size(config, payload)?;
+        let (width, height) = (size.width(), size.height());
+        // The SPS is the file's claim, sized up to `2^32 - 1` a side: hold it to the limits before
+        // a single plane exists.
+        self.limits.check(width, height, env!("CARGO_PKG_NAME"))?;
+        let chroma = config.chroma_subsampling();
         let bit_depth = config.bit_depth_luma();
-        let luma_len = self.dimensions.num_pixels().ok_or_else(|| {
+        let luma_len = size.num_pixels().ok_or_else(|| {
             Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "HEIF: frame dimensions overflow usize",
+                "HEIC: frame dimensions overflow usize",
             )
         })?;
         let (chroma_w, chroma_h) = chroma.chroma_dimensions(width, height);
         // Cannot overflow: each chroma dimension is at most its luma dimension, and `luma_len` fit.
         let chroma_len = chroma_w as usize * chroma_h as usize;
+        let monochrome = chroma == ChromaSubsampling::Cs400;
 
-        let mut y = vec![0u16; luma_len];
-        let (mut cb, mut cr) = if chroma == ChromaFormat::Monochrome {
+        let mut y = zeroed_plane(luma_len)?;
+        let (mut cb, mut cr) = if monochrome {
             (Vec::new(), Vec::new())
         } else {
-            (vec![0u16; chroma_len], vec![0u16; chroma_len])
+            (zeroed_plane(chroma_len)?, zeroed_plane(chroma_len)?)
         };
 
         let mut planes: [*mut u8; MAX_PLANES] = [core::ptr::null_mut(); MAX_PLANES];
         let mut strides = [0usize; MAX_PLANES];
         planes[0] = y.as_mut_ptr().cast::<u8>();
         strides[0] = width as usize * core::mem::size_of::<u16>();
-        let plane_count = if chroma == ChromaFormat::Monochrome {
+        let plane_count = if monochrome {
             1
         } else {
             planes[1] = cb.as_mut_ptr().cast::<u8>();
@@ -342,20 +287,39 @@ impl<D: Decoder> HevcDecoder for AbiHevcDecoder<D> {
             strides,
         );
 
-        let extradata = Self::extradata(config);
-        let cfg = self.stream_config(config, &extradata);
+        let extradata = extradata(config);
+        let cfg = Self::stream_config(config, (width, height), &extradata);
         let status = self.backend.decode(&cfg, payload, &out);
-        if status.is_unsupported() {
-            return Err(Error::unsupported(env!("CARGO_PKG_NAME"), BACKEND_DECLINED)
-                .with_detail(format!("codec-abi status {}", status.0)));
-        }
         if !status.is_ok() {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "HEIF: HEVC backend returned a failure status",
-            )
-            .with_detail(format!("codec-abi status {}", status.0)));
+            let error = if status.is_unsupported() {
+                Error::unsupported(env!("CARGO_PKG_NAME"), LATE_DECLINE)
+            } else {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), BACKEND_FAILED)
+            };
+            return Err(error.with_detail(format!("codec-abi status {}", status.0)));
         }
-        DecodedFrame::new(width, height, bit_depth, chroma, y, cb, cr)
+        DecodedFrame::new(size, bit_depth, chroma, y, cb, cr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zeroed_plane_refuses_an_impossible_allocation_instead_of_aborting() {
+        assert_eq!(zeroed_plane(3).unwrap(), vec![0, 0, 0]);
+        // usize::MAX u16s is past isize::MAX bytes, so the reservation fails without allocating.
+        let error = zeroed_plane(usize::MAX).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(error.static_message(), Some(PLANE_ALLOCATION));
+    }
+
+    #[test]
+    fn planar_pixel_formats_are_the_classic_fourccs() {
+        assert_eq!(planar_pixel_format(ChromaSubsampling::Cs400), 0x5938_3030); // "Y800"
+        assert_eq!(planar_pixel_format(ChromaSubsampling::Cs420), 0x4934_3230); // "I420"
+        assert_eq!(planar_pixel_format(ChromaSubsampling::Cs422), 0x4934_3232); // "I422"
+        assert_eq!(planar_pixel_format(ChromaSubsampling::Cs444), 0x4934_3434); // "I444"
     }
 }

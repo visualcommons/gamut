@@ -34,7 +34,7 @@ a readable TIFF whose IFD 0 carries `DNGVersion` (50706) is a DNG, else TIFF.
 
 The `ftyp` test is a **route, not a verdict**. It says the file is ISOBMFF, not which still image it
 is, so the command parses the container and *confirms* it before printing anything: first with
-`gamut-heic`'s own `HeifImage::is_hevc_still`, which sends it to the HEIC arm, and — when that
+`gamut-heic`'s own `HeifContainer::is_hevc_still`, which sends it to the HEIC arm, and — when that
 declines — with `gamut-avif`'s own `AvifContainer::is_av1_still`, which sends it to the AVIF arm
 (`references/heif` §7 for both). A file neither confirms exits `1` with `<path>: unsupported
 container brand '<brand>' — …` and prints no report. The HEIC confirmation runs only once
@@ -187,8 +187,8 @@ section describes; only a test that drives the built binary is. Those tests are 
 | the near-miss count reaches stdout and disclaims provenance | `a_uuid_box_of_another_extended_type_reaches_stdout_as_a_count` |
 | the disclaimer and the store's own line reach the terminal unabridged | `a_located_store_reaches_the_terminal_with_the_non_validation_disclaimer` |
 
-The wording of each line, the headline's four shapes and the file ordering are `gamut-heic`'s own
-contract and are pinned there, inside the mutation gate.
+The wording of each line, the headline's four shapes and the file ordering are `gamut-heif`'s own
+contract (the `C2paSummary` `gamut-heic` and `gamut-avif` share) and are pinned there, inside the mutation gate.
 
 **A machine consumer reads `--output json`, not the prose.** Every distinction above is carried by
 stdout and none by the exit code, which is deliberate — two exit codes are the command's contract,
@@ -199,7 +199,7 @@ matching on the text report's wording is matching on wording this document is fr
 Nothing in that report is a verdict. gamut locates a manifest store and never validates one — no
 signature, no hash binding, no trust list (C2PA 2.4 §15.12; `references/c2pa/README.md`) — and the
 line that reports a store says so, because "C2PA: present" printed beside EXIF and ICC otherwise
-reads as *verified*. The wording lives in `gamut-heic` (`C2PA_NOT_VALIDATED`) so that every host
+reads as *verified*. The wording lives in `gamut-heif` (`C2PA_NOT_VALIDATED`, re-exported by `gamut-heic`) so that every host
 renders the same words and none can reword the disclaimer away; that crate's tests pin the wording,
 and `gamut-cli`'s `tests/inspect_c2pa.rs` pins that this command carries it to the terminal
 unabridged. The store's bytes are never printed at any verbosity: they are opaque to gamut,

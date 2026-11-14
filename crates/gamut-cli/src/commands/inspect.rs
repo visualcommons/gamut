@@ -33,7 +33,7 @@
 //!
 //! The sniff routes an ISOBMFF file — anything whose first box is `ftyp` — to `inspect_isobmff`,
 //! which *confirms* it with `gamut-heic`'s own
-//! [`HeifImage::is_hevc_still`](gamut::heic::HeifImage::is_hevc_still) and then `gamut-avif`'s
+//! [`HeifContainer::is_hevc_still`](gamut::heic::HeifContainer::is_hevc_still) and then `gamut-avif`'s
 //! [`AvifContainer::is_av1_still`](gamut::avif::AvifContainer::is_av1_still) after the parses it performs
 //! anyway, reporting an unsupported container brand when neither confirms it. The predicates are
 //! not restated here: a brand list in this file would have to be exhaustive over the still-image
@@ -1117,7 +1117,7 @@ fn route_label(name: &str, route: Route) -> String {
 /// goes to the HEIC report, an AV1 still image to the AVIF one, and anything else is an unsupported
 /// container.
 ///
-/// The confirmations are the format crates' own predicates — `HeifImage::is_hevc_still` and
+/// The confirmations are the format crates' own predicates — `HeifContainer::is_hevc_still` and
 /// `AvifContainer::is_av1_still`, each including the `mif1` case the major brand alone cannot settle —
 /// so no brand list lives here. HEIC is tried first, which is the order this command always had;
 /// an AVIF is parsed only once the HEIC confirmation declines. A file neither crate confirms keeps
@@ -1126,7 +1126,7 @@ fn route_label(name: &str, route: Route) -> String {
 fn inspect_isobmff(to: Target<'_>, data: &[u8]) -> Result<(), CliError> {
     let heic = gamut::heic::HeifContainer::parse(data);
     if let Ok(container) = &heic
-        && container.image().is_hevc_still()
+        && container.is_hevc_still()
     {
         return report_heic(to, container);
     }
@@ -1163,7 +1163,7 @@ fn report_heic(to: Target<'_>, container: &gamut::heic::HeifContainer<'_>) -> Re
                 summary.detail_line_count(),
             );
         }
-        Output::Json => print_provenance_json(to, Format::Heic, heic_c2pa_json(&summary)),
+        Output::Json => print_provenance_json(to, Format::Heic, heif_c2pa_json(&summary)),
     }
     Ok(())
 }
@@ -1181,7 +1181,7 @@ fn report_avif(to: Target<'_>, container: &gamut::avif::AvifContainer<'_>) -> Re
                 summary.detail_line_count(),
             );
         }
-        Output::Json => print_provenance_json(to, Format::Avif, avif_c2pa_json(&summary)),
+        Output::Json => print_provenance_json(to, Format::Avif, heif_c2pa_json(&summary)),
     }
     Ok(())
 }
@@ -1258,12 +1258,15 @@ fn print_provenance_json(to: Target<'_>, format: Format, c2pa: Json) {
     print_json(&Json::Object(doc));
 }
 
-/// A HEIC `C2paSummary` as data — every list uncapped, the store bytes never included.
+/// A HEIC or AVIF `C2paSummary` as data — the one summary `gamut-heif` shares between the two
+/// crates — every list uncapped, the store bytes never included.
 ///
-/// `not_validated` carries `gamut-heic`'s own disclaimer for the same reason the text report's
-/// headline does: "a store is present" reads as *verified* to a program's author as much as to a
-/// terminal's reader.
-fn heic_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
+/// Both crates' summaries name the same two regions (issue #505): `range` (and `size`) the store
+/// trimmed to its JUMBF `LBox`, so `extent` is `"store"`, and `slot` the box-bounded slot after the
+/// merkle offset — the store *plus any padding*. `not_validated` carries the summary's own
+/// disclaimer for the same reason the text report's headline does: "a store is present" reads as
+/// *verified* to a program's author as much as to a terminal's reader.
+fn heif_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
     use gamut::heic::{C2paBoxPosition as Position, C2paUnreadReason as Reason};
     let position = |p: Position| match p {
         Position::BeforeMediaData => "before_media_data",
@@ -1280,84 +1283,6 @@ fn heic_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
     };
     Json::Object(vec![
         ("not_validated", Json::from(gamut::heic::C2PA_NOT_VALIDATED)),
-        (
-            "stores",
-            Json::Array(
-                summary
-                    .stores
-                    .iter()
-                    .map(|s| {
-                        Json::Object(vec![
-                            ("purpose", Json::from(s.purpose.as_str())),
-                            ("extent", Json::from("store")),
-                            ("size", Json::from(s.size())),
-                            ("range", span(s.range.start, s.range.end)),
-                            ("slot", span(s.slot.start, s.slot.end)),
-                            ("position", Json::from(position(s.position))),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-        (
-            "unread",
-            Json::Array(
-                summary
-                    .unread
-                    .iter()
-                    .map(|u| {
-                        Json::Object(vec![
-                            ("range", span(u.range.start, u.range.end)),
-                            ("reason", Json::from(reason(u.reason))),
-                            ("description", Json::from(u.reason.describe())),
-                            ("position", Json::from(position(u.position))),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-        (
-            "merkle",
-            Json::Array(
-                summary
-                    .merkle
-                    .iter()
-                    .map(|m| {
-                        Json::Object(vec![
-                            ("range", span(m.range.start, m.range.end)),
-                            ("position", Json::from(position(m.position))),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-        ("other_uuid_boxes", Json::from(summary.other_uuid_boxes)),
-    ])
-}
-
-/// An AVIF `C2paSummary` as data — [`heic_c2pa_json`]'s shape over the shared `gamut-heif` summary
-/// `gamut-avif` reports.
-///
-/// Both crates' summaries name the same two regions (issue #505): `range` (and `size`) the store
-/// trimmed to its JUMBF `LBox`, so `extent` is `"store"` for both, and `slot` the box-bounded slot
-/// after the merkle offset — the store *plus any padding*.
-fn avif_c2pa_json(summary: &gamut::avif::C2paSummary) -> Json {
-    use gamut::avif::{C2paBoxPosition as Position, C2paUnreadReason as Reason};
-    let position = |p: Position| match p {
-        Position::BeforeMediaData => "before_media_data",
-        Position::AfterMediaData => "after_media_data",
-        Position::AfterMovieBox => "after_movie_box",
-        _ => "other",
-    };
-    let reason = |r: Reason| match r {
-        Reason::Truncated => "truncated",
-        Reason::NotVersionZero => "not_version_zero",
-        Reason::UnknownPurpose => "unknown_purpose",
-        Reason::NoStoreBound => "no_store_bound",
-        _ => "other",
-    };
-    Json::Object(vec![
-        ("not_validated", Json::from(gamut::avif::C2PA_NOT_VALIDATED)),
         (
             "stores",
             Json::Array(

@@ -89,11 +89,12 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   `metadata` feature). Like gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw
   `MetadataBlock`-ready payloads, and wires them to the facade's typed models only behind that
   feature.
-- **gamut-heic** — decode-only HEIF/HEIC container: full-fidelity byte-accounting parse
-  (every input byte maps to a box, appended motion-photo stream, or explicit trailer), typed
-  `hvcC`/NAL layer, pluggable `HevcDecoder` hook for platform HEVC decoders (HEVC bitstream
-  decode itself is out of scope here). ← isobmff, core, codec-abi, color, metadata (optional,
-  `metadata` feature).
+- **gamut-heic** — decode-only HEIC: the HEVC binding over gamut-heif (`Hevc` + a `HeifDecoder`
+  implementing `DecodeImage`), full-fidelity byte-accounting parse (every input byte maps to a
+  box, appended motion-photo stream, or explicit trailer), typed `hvcC`/NAL layer, pluggable
+  `HevcCodestreamDecoder` backends for platform HEVC decoders (HEVC bitstream decode itself is
+  out of scope here). ← heif, isobmff, core, codec-abi, color, bitstream (the `ue(v)` reader
+  that sizes `AbiHevcDecoder`'s planes from the SPS), metadata (optional, `metadata` feature).
 - **gamut-heif** — the shared HEIF/MIAF still-image layer (issue #1078) under gamut-avif and
   gamut-heic: the role-typed item model, the `iden`/`grid` derivation walk, `DecodeLimits` /
   `DecodeOptions`, planar-to-RGBA presentation (with `iovl`, alpha and `clap`/`irot`/`imir`) and
@@ -335,12 +336,12 @@ repo — nothing here sets file modes — so do not work around it by editing bu
   the sealed `Pixel` matrix (runtime tag: `gamut_core::PixelFormat`); configs are plain data —
   `Copy` structs, fieldless enums with an explicit `repr` and permanent append-only
   discriminants, or payloads reachable through accessors; new extension hooks follow the
-  `gamut_heic::HevcDecoder` shape (single object-safe method, borrowed bytes in, owned plain
-  data out). The C ABI contract is `crates/gamut-ffi/DESIGN.md`; `gamut-ffi`'s feature table
+  `gamut_heic::HevcCodestreamDecoder` shape (object-safe, borrowed bytes in, owned plain data
+  out). The C ABI contract is `crates/gamut-ffi/DESIGN.md`; `gamut-ffi`'s feature table
   strictly mirrors `gamut`'s (`mise run check-ffi-features`, enforced in CI).
 - Exposing the codestream: a format crate that lets callers swap in a foreign or alternate
   codestream backend does so through **one** seam, `gamut-codec-abi`, never a bespoke one.
-  Pattern: a **typed trait per format** (the `gamut_heic::HevcDecoder` shape — object-safe,
+  Pattern: a **typed trait per format** (the `gamut_heic::HevcCodestreamDecoder` shape — object-safe,
   borrowed bytes in, owned plain data out, named for the codestream it decodes) plus a thin
   **codec-abi adapter** bridging that typed trait to the shared `Decoder`/`Encoder` twins and
   their `repr(C)` vtables, so a C/`-sys` backend and a pure-Rust one enter by the same door.

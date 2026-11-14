@@ -1,6 +1,6 @@
 [package]
 name = "gamut-heic"
-description = "HEIC/HEIF still-image container decoder (HEVC intra items in an ISOBMFF container) with a pluggable codestream-decoder hook."
+description = "HEIC still-image decoder: the HEVC binding over gamut-heif's shared HEIF layer, with pluggable HEVC codestream-decoder backends."
 version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -16,19 +16,26 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-gamut-codec-abi.workspace = true
+# The shared backend `Registry` (behind its `std` feature) `HeifDecoder` runs its HEVC backends
+# through, and the `Decoder` seam `AbiHevcDecoder` adapts.
+gamut-codec-abi = { workspace = true, features = ["std"] }
 gamut-core.workspace = true
 gamut-color.workspace = true
+# The `ue(v)` reader the SPS walk sizes `AbiHevcDecoder`'s output planes with.
+gamut-bitstream.workspace = true
 gamut-isobmff.workspace = true
-# Typed metadata (issue #420): the unified `Metadata` model over the Exif / XMP items and `colr`
-# ICC profile this crate locates. Optional and off by default, and a *normal* dependency (never
-# dev-only) so release ordering follows it (`mise run check-release-deps`).
+# The shared HEIF/MIAF layer: the item model, the derivation walk, the decode limits, the RGBA
+# presentation and the C2PA summary, which this crate binds HEVC into (issue #1086).
+gamut-heif.workspace = true
+# Typed metadata (issue #420): the facade types that parse the `RawMetadata` `HeifDecoder::metadata`
+# returns. Optional and off by default, and a *normal* dependency (never dev-only) so release
+# ordering follows it (`mise run check-release-deps`).
 gamut-metadata = { workspace = true, optional = true }
 
 [features]
 default = []
-# Typed metadata wiring: `HeifImage::blocks` / `HeifImage::metadata` over the `gamut-metadata`
-# facade (decode-only, like the crate).
+# Typed metadata wiring: re-exports the `gamut-metadata` facade's `TypedMetadata`, which parses the
+# `RawMetadata` `HeifDecoder::metadata` returns (that method itself is always available).
 metadata = ["dep:gamut-metadata"]
 
 [dev-dependencies]

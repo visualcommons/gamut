@@ -14,7 +14,7 @@ use crate::pipeline::{MAX_CHANNELS, Pipeline};
 ///
 /// The single entry point every CMM product implements — a [`Pipeline`] today;
 /// linked profile transforms and chains in later phases. Object-safe by design (the
-/// `gamut_heic::HevcDecoder` shape: one dispatchable method over borrowed data, plain data out),
+/// `gamut_heic::HevcCodestreamDecoder` shape: borrowed data in, plain data out),
 /// so a transform can be boxed, held behind `&dyn Transform`, and later carried over the
 /// C-portable seam.
 ///

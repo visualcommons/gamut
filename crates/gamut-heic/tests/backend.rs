@@ -1,55 +1,76 @@
-//! Backend-selection tests (issue #273): the ordered [`HevcDecoders`] registry and the
+//! Backend-selection tests (issues #273, #1086): [`HeifDecoder`]'s ordered backend registry and the
 //! [`AbiHevcDecoder`] adapter over the `gamut-codec-abi` decoder seam.
 //!
 //! These live as an integration test (not an in-crate `#[cfg(test)]` module) because exercising the
 //! ABI adapter means *being* a C-shaped backend — writing samples through the `ImageDesc` plane
 //! pointers — which the library's `#![forbid(unsafe_code)]` rightly disallows.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 
+use common::{hvcc_bytes, sps_nal};
 use gamut_codec_abi::{Decoder, ImageDesc, Status, StreamConfig};
 use gamut_core::{Dimensions, Error, ErrorKind};
 use gamut_heic::{
-    AbiHevcDecoder, BACKEND_DECLINED, ChromaFormat, DecodedFrame, HEVC_CODEC_ID, HevcConfig,
-    HevcDecoder, HevcDecoders, NO_BACKEND, planar_pixel_format,
+    AbiHevcDecoder, ChromaSubsampling, DecodeLimits, DecodedFrame, HEVC_CODEC_ID, HeifDecoder,
+    HevcCodestreamDecoder, HevcConfig,
 };
+use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind};
 
 // ============================================================================================
 //   Fixtures
 // ============================================================================================
 
-/// A minimal valid `hvcC`: the 23-byte header with `lengthSizeMinusOne = 3` and no arrays.
-fn hvcc_bytes() -> Vec<u8> {
-    let mut v = vec![0u8; 23];
-    v[0] = 1; // configurationVersion
-    v[21] = 0b0000_0011; // ... | lengthSizeMinusOne = 3
-    v[22] = 0; // numOfArrays
-    v
+/// The `hvcC` NAL unit type of a VPS, an SPS.
+const VPS: u8 = 32;
+const SPS: u8 = 33;
+
+/// A one-NAL IDR_W_RADL payload (type 19: header byte 0x26) with a 4-byte length prefix.
+const IDR_PAYLOAD: [u8; 7] = [0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xDD];
+
+/// A parsed config whose record carries an SPS for a `width` × `height` picture: monochrome, 8-bit.
+fn config_sized(width: u32, height: u32) -> HevcConfig {
+    HevcConfig::parse(&hvcc_bytes(&[(SPS, &sps_nal(0, (width, height), None))]))
+        .expect("hvcC with an SPS parses")
 }
 
-/// A parsed minimal config: monochrome, 8-bit.
+/// The registry tests' config: a 2x2 monochrome picture.
 fn config() -> HevcConfig {
-    HevcConfig::parse(&hvcc_bytes()).expect("minimal hvcC parses")
+    config_sized(2, 2)
 }
 
-/// The same config with one VPS parameter-set array, so `annex_b` extradata is non-empty.
-fn config_with_vps() -> HevcConfig {
-    let mut v = hvcc_bytes();
-    v[22] = 1; // numOfArrays
-    v.push(0x80 | 32); // array_completeness | NAL_unit_type = 32 (VPS)
-    v.extend_from_slice(&1u16.to_be_bytes()); // numNalus
-    v.extend_from_slice(&3u16.to_be_bytes()); // nalUnitLength
-    v.extend_from_slice(&[0x40, 0x01, 0x0C]); // the VPS NAL
-    HevcConfig::parse(&v).expect("hvcC with a VPS array parses")
+/// A one-item `heic` file whose `hvc1` primary carries `hvcc` and `payload`.
+fn heic_file(item_type: [u8; 4], hvcc: Vec<u8>, payload: Vec<u8>) -> Vec<u8> {
+    let item = Item::new(1, item_type)
+        .with_properties(vec![Property::new(
+            true,
+            PropertyKind::CodecConfiguration {
+                kind: *b"hvcC",
+                data: hvcc,
+            },
+        )])
+        .with_payload(payload);
+    IsoBmffImage::new(*b"heic", vec![*b"heic", *b"mif1"], 1, vec![item])
+        .to_bytes()
+        .expect("the model is writable")
+}
+
+/// The registry tests' file: one 2x2 monochrome `hvc1` item.
+fn file() -> Vec<u8> {
+    heic_file(
+        *b"hvc1",
+        hvcc_bytes(&[(SPS, &sps_nal(0, (2, 2), None))]),
+        IDR_PAYLOAD.to_vec(),
+    )
 }
 
 /// A 2x2 monochrome frame with a recognisable sample value.
 fn frame(value: u16) -> DecodedFrame {
     DecodedFrame::new(
-        2,
-        2,
+        Dimensions::new(2, 2).expect("dimensions"),
         8,
-        ChromaFormat::Monochrome,
+        ChromaSubsampling::Cs400,
         vec![value; 4],
         vec![],
         vec![],
@@ -73,13 +94,16 @@ fn entries(log: &Log) -> Vec<String> {
 enum Outcome {
     /// Succeed, returning a mono frame whose samples are this value.
     Frame(u16),
-    /// Fail terminally — must propagate out of the registry.
+    /// Fail terminally with `InvalidInput` — must propagate out of the registry.
     Fail,
-    /// Decline late via the [`BACKEND_DECLINED`] sentinel — must fall through.
-    LateDecline,
+    /// Fail with an `ErrorKind::Unsupported` error after accepting — terminal too.
+    Unsupported,
 }
 
-/// A scriptable [`HevcDecoder`] that records every call it receives.
+/// The message of [`Outcome::Unsupported`]'s error.
+const PROBE_UNSUPPORTED: &str = "probe: unsupported HEVC profile";
+
+/// A scriptable [`HevcCodestreamDecoder`] that records every call it receives.
 struct Probe {
     name: &'static str,
     supports: bool,
@@ -105,13 +129,13 @@ impl Probe {
     }
 }
 
-impl HevcDecoder for Probe {
+impl HevcCodestreamDecoder for Probe {
     fn supports(&mut self, _config: &HevcConfig) -> bool {
         self.record("supports");
         self.supports
     }
 
-    fn decode_intra(
+    fn decode_still(
         &mut self,
         _config: &HevcConfig,
         _payload: &[u8],
@@ -123,9 +147,10 @@ impl HevcDecoder for Probe {
                 env!("CARGO_PKG_NAME"),
                 "probe: terminal backend failure",
             )),
-            Outcome::LateDecline => {
-                Err(Error::unsupported(env!("CARGO_PKG_NAME"), BACKEND_DECLINED))
-            }
+            Outcome::Unsupported => Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                PROBE_UNSUPPORTED,
+            )),
         }
     }
 }
@@ -135,44 +160,35 @@ impl HevcDecoder for Probe {
 // ============================================================================================
 
 #[test]
-fn empty_registry_is_empty_and_declines() {
-    let mut decoders = HevcDecoders::new();
-    assert_eq!(decoders.len(), 0);
-    assert!(decoders.is_empty());
-    assert!(!decoders.supports(&config()));
-
-    let err = decoders
-        .decode_intra(&config(), &[])
-        .expect_err("an empty registry cannot decode");
+fn an_empty_decoder_declines_with_no_backend() {
+    let err = HeifDecoder::new()
+        .decode_planar(&file())
+        .expect_err("a decoder with no backend cannot decode");
     assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert_eq!(err.static_message(), Some(NO_BACKEND));
+    assert_eq!(err.static_message(), Some(gamut_heif::NO_BACKEND));
     assert_eq!(err.origin(), Some("gamut-heic"));
 }
 
 #[test]
-fn default_matches_new() {
-    let mut decoders = HevcDecoders::default();
-    assert!(decoders.is_empty());
-    assert_eq!(format!("{decoders:?}"), "HevcDecoders { backends: 0 }");
+fn default_matches_new_and_debug_counts_backends() {
+    let decoder = HeifDecoder::default();
+    assert!(format!("{decoder:?}").starts_with("HeifDecoder { backends: 0,"));
 
     let log = log();
-    decoders.push_backend(Probe::new("a", true, Outcome::Frame(7), &log));
-    assert_eq!(format!("{decoders:?}"), "HevcDecoders { backends: 1 }");
-    assert_eq!(decoders.len(), 1);
-    assert!(!decoders.is_empty());
+    let decoder = decoder.with_backend(Probe::new("a", true, Outcome::Frame(7), &log));
+    assert!(format!("{decoder:?}").starts_with("HeifDecoder { backends: 1,"));
 }
 
 #[test]
-fn push_backend_chains_and_preserves_order() {
+fn with_backend_chains_and_preserves_order() {
     let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(Probe::new("first", false, Outcome::Frame(1), &log))
-        .push_backend(Probe::new("second", true, Outcome::Frame(2), &log))
-        .push_backend(Probe::new("third", true, Outcome::Frame(3), &log));
-    assert_eq!(decoders.len(), 3);
+    let decoder = HeifDecoder::new()
+        .with_backend(Probe::new("first", false, Outcome::Frame(1), &log))
+        .with_backend(Probe::new("second", true, Outcome::Frame(2), &log))
+        .with_backend(Probe::new("third", true, Outcome::Frame(3), &log));
+    assert!(format!("{decoder:?}").starts_with("HeifDecoder { backends: 3,"));
 
-    let decoded = decoders.decode_intra(&config(), &[]).expect("second wins");
+    let decoded = decoder.decode_planar(&file()).expect("second wins");
     assert_eq!(decoded.y(), &[2, 2, 2, 2]);
     // `first` declined, `second` accepted and decoded; `third` was never reached.
     assert_eq!(
@@ -184,12 +200,11 @@ fn push_backend_chains_and_preserves_order() {
 #[test]
 fn first_supporting_backend_wins() {
     let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(Probe::new("a", true, Outcome::Frame(11), &log))
-        .push_backend(Probe::new("b", true, Outcome::Frame(22), &log));
+    let decoder = HeifDecoder::new()
+        .with_backend(Probe::new("a", true, Outcome::Frame(11), &log))
+        .with_backend(Probe::new("b", true, Outcome::Frame(22), &log));
 
-    let decoded = decoders.decode_intra(&config(), &[]).expect("a wins");
+    let decoded = decoder.decode_planar(&file()).expect("a wins");
     assert_eq!(decoded.y(), &[11, 11, 11, 11]);
     assert_eq!(entries(&log), ["a:supports", "a:decode"]);
 }
@@ -197,13 +212,12 @@ fn first_supporting_backend_wins() {
 #[test]
 fn accepted_then_failed_propagates_and_stops() {
     let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(Probe::new("failing", true, Outcome::Fail, &log))
-        .push_backend(Probe::new("rescue", true, Outcome::Frame(9), &log));
+    let decoder = HeifDecoder::new()
+        .with_backend(Probe::new("failing", true, Outcome::Fail, &log))
+        .with_backend(Probe::new("rescue", true, Outcome::Frame(9), &log));
 
-    let err = decoders
-        .decode_intra(&config(), &[])
+    let err = decoder
+        .decode_planar(&file())
         .expect_err("the accepting backend's error propagates");
     assert!(
         err.kind() == ErrorKind::InvalidInput
@@ -213,130 +227,50 @@ fn accepted_then_failed_propagates_and_stops() {
     assert_eq!(entries(&log), ["failing:supports", "failing:decode"]);
 }
 
+/// `supports() == false` is the only fall-through: a backend that accepts and then reports
+/// `ErrorKind::Unsupported` has still accepted the job, so its error propagates unchanged and no
+/// later backend is consulted. (Before #1086 a `BACKEND_DECLINED` sentinel fell through here.)
 #[test]
-fn late_decline_falls_through_to_the_next_backend() {
+fn an_unsupported_error_after_accepting_is_terminal() {
     let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(Probe::new("late", true, Outcome::LateDecline, &log))
-        .push_backend(Probe::new("next", true, Outcome::Frame(5), &log));
+    let decoder = HeifDecoder::new()
+        .with_backend(Probe::new("late", true, Outcome::Unsupported, &log))
+        .with_backend(Probe::new("next", true, Outcome::Frame(5), &log));
 
-    let decoded = decoders.decode_intra(&config(), &[]).expect("next decodes");
-    assert_eq!(decoded.y(), &[5, 5, 5, 5]);
-    assert_eq!(
-        entries(&log),
-        [
-            "late:supports",
-            "late:decode",
-            "next:supports",
-            "next:decode"
-        ]
-    );
+    let err = decoder
+        .decode_planar(&file())
+        .expect_err("a late Unsupported is terminal");
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(err.static_message(), Some(PROBE_UNSUPPORTED));
+    assert_eq!(entries(&log), ["late:supports", "late:decode"]);
 }
 
 #[test]
-fn all_declining_backends_yield_unsupported() {
+fn all_declining_backends_yield_no_backend() {
     let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(Probe::new("a", false, Outcome::Frame(1), &log))
-        .push_backend(Probe::new("b", true, Outcome::LateDecline, &log));
+    let decoder = HeifDecoder::new()
+        .with_backend(Probe::new("a", false, Outcome::Frame(1), &log))
+        .with_backend(Probe::new("b", false, Outcome::Frame(2), &log));
 
-    let err = decoders
-        .decode_intra(&config(), &[])
+    let err = decoder
+        .decode_planar(&file())
         .expect_err("every backend declined");
     assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert_eq!(err.static_message(), Some(NO_BACKEND));
+    assert_eq!(err.static_message(), Some(gamut_heif::NO_BACKEND));
+    // Every backend was asked, in order, and none decoded.
+    assert_eq!(entries(&log), ["a:supports", "b:supports"]);
+}
+
+#[test]
+fn backend_selection_short_circuits_at_the_first_acceptance() {
+    let log = log();
+    let decoder = HeifDecoder::new()
+        .with_backend(Probe::new("a", false, Outcome::Frame(1), &log))
+        .with_backend(Probe::new("b", true, Outcome::Frame(2), &log))
+        .with_backend(Probe::new("c", true, Outcome::Frame(3), &log));
+
+    decoder.decode_planar(&file()).expect("b decodes");
     assert_eq!(entries(&log), ["a:supports", "b:supports", "b:decode"]);
-}
-
-/// Only the exact [`BACKEND_DECLINED`] sentinel is a late decline: an accepting backend that fails
-/// with *some other* `ErrorKind::Unsupported` error has still accepted the job, so its error propagates and
-/// no later backend is consulted.
-#[test]
-fn other_unsupported_errors_are_terminal_not_a_late_decline() {
-    const OTHER: &str = "probe: unsupported HEVC profile";
-
-    struct Picky {
-        log: Log,
-    }
-    impl HevcDecoder for Picky {
-        fn decode_intra(
-            &mut self,
-            _config: &HevcConfig,
-            _payload: &[u8],
-        ) -> gamut_core::Result<DecodedFrame> {
-            self.log
-                .lock()
-                .expect("log lock")
-                .push("picky:decode".into());
-            Err(Error::unsupported(env!("CARGO_PKG_NAME"), OTHER))
-        }
-    }
-
-    let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(Picky {
-            log: Arc::clone(&log),
-        })
-        .push_backend(Probe::new("rescue", true, Outcome::Frame(4), &log));
-
-    let err = decoders
-        .decode_intra(&config(), &[])
-        .expect_err("a non-sentinel Unsupported is terminal");
-    assert!(err.kind() == ErrorKind::Unsupported && err.static_message() == Some(OTHER));
-    assert_eq!(entries(&log), ["picky:decode"]);
-}
-
-#[test]
-fn registry_supports_is_any_and_short_circuits() {
-    let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(Probe::new("a", false, Outcome::Frame(1), &log))
-        .push_backend(Probe::new("b", true, Outcome::Frame(2), &log))
-        .push_backend(Probe::new("c", true, Outcome::Frame(3), &log));
-
-    assert!(decoders.supports(&config()));
-    assert_eq!(entries(&log), ["a:supports", "b:supports"]);
-}
-
-#[test]
-fn registry_supports_is_false_when_all_decline() {
-    let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(Probe::new("a", false, Outcome::Frame(1), &log))
-        .push_backend(Probe::new("b", false, Outcome::Frame(2), &log));
-
-    assert!(!decoders.supports(&config()));
-    assert_eq!(entries(&log), ["a:supports", "b:supports"]);
-}
-
-/// The defaulted trait method keeps pre-registry implementations working: a `HevcDecoder` that
-/// only implements `decode_intra` supports everything.
-#[test]
-fn default_supports_is_true() {
-    struct Legacy;
-    impl HevcDecoder for Legacy {
-        fn decode_intra(
-            &mut self,
-            _config: &HevcConfig,
-            _payload: &[u8],
-        ) -> gamut_core::Result<DecodedFrame> {
-            Ok(frame(3))
-        }
-    }
-
-    assert!(Legacy.supports(&config()));
-    let mut decoders = HevcDecoders::new();
-    decoders.push_backend(Legacy);
-    assert!(decoders.supports(&config()));
-    assert_eq!(
-        decoders.decode_intra(&config(), &[]).expect("decodes").y(),
-        &[3, 3, 3, 3]
-    );
 }
 
 // ============================================================================================
@@ -348,13 +282,9 @@ fn codec_id_is_the_hvc1_fourcc() {
     assert_eq!(HEVC_CODEC_ID, 0x6876_6331);
 }
 
-#[test]
-fn planar_pixel_formats_are_the_classic_fourccs() {
-    assert_eq!(planar_pixel_format(ChromaFormat::Monochrome), 0x5938_3030); // "Y800"
-    assert_eq!(planar_pixel_format(ChromaFormat::Yuv420), 0x4934_3230); // "I420"
-    assert_eq!(planar_pixel_format(ChromaFormat::Yuv422), 0x4934_3232); // "I422"
-    assert_eq!(planar_pixel_format(ChromaFormat::Yuv444), 0x4934_3434); // "I444"
-}
+/// The `ImageDesc::pixel_format` FourCCs the adapter hands down: `Y800`, `I420`, `I422`, `I444`.
+const Y800: u32 = 0x5938_3030;
+const I420: u32 = 0x4934_3230;
 
 /// What an [`AbiProbe`] does when `decode` is called.
 #[derive(Clone, Copy)]
@@ -456,7 +386,7 @@ fn fill_planes(out: &ImageDesc, value: u16) {
     // Chroma plane dimensions are recoverable from the stride (bytes per row / 2) and the pixel
     // format's vertical subsampling.
     let chroma_w = out.strides[1] / 2;
-    let chroma_h = if out.pixel_format == planar_pixel_format(ChromaFormat::Yuv420) {
+    let chroma_h = if out.pixel_format == I420 {
         (out.height as usize).div_ceil(2)
     } else {
         out.height as usize
@@ -471,163 +401,236 @@ fn fill_planes(out: &ImageDesc, value: u16) {
 
 #[test]
 fn abi_adapter_lowers_config_and_maps_planes() {
-    let mut cfg = config_with_vps();
+    let vps = [0x40, 0x01, 0x0C];
+    let sps = sps_nal(1, (5, 3), None);
+    let mut cfg = HevcConfig::parse(&hvcc_bytes(&[(VPS, &vps), (SPS, &sps)]))
+        .expect("hvcC with a VPS and an SPS parses");
     cfg.chroma_format_idc = 1; // 4:2:0
     cfg.bit_depth_luma_minus8 = 2; // 10-bit
     cfg.bit_depth_chroma_minus8 = 2;
 
-    let dims = Dimensions::new(5, 3).expect("dimensions");
-    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(300)), dims);
-    assert_eq!(adapter.dimensions(), dims);
-
-    let payload = [0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xDD];
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(300)));
     let decoded = adapter
-        .decode_intra(&cfg, &payload)
+        .decode_still(&cfg, &IDR_PAYLOAD)
         .expect("the backend decodes");
 
-    // Frame contract: 5x3 luma, ceil-divided 3x2 chroma, 10-bit, 4:2:0.
+    // Frame contract: the SPS's 5x3 luma, ceil-divided 3x2 chroma, 10-bit, 4:2:0.
     assert_eq!((decoded.width(), decoded.height()), (5, 3));
     assert_eq!(decoded.bit_depth(), 10);
-    assert_eq!(decoded.chroma(), ChromaFormat::Yuv420);
+    assert_eq!(decoded.chroma(), ChromaSubsampling::Cs420);
     assert_eq!(decoded.chroma_dimensions(), (3, 2));
     assert_eq!(decoded.y(), &[300; 15]);
     assert_eq!(decoded.cb(), &[301; 6]);
     assert_eq!(decoded.cr(), &[302; 6]);
 
-    // Descriptors the adapter handed down.
-    let probe = adapter.backend();
+    // Descriptors the adapter handed down: the extradata is the record's parameter sets in
+    // Annex-B, exactly as `annex_b_parameter_sets` emits them.
+    let probe = adapter.get_ref();
     assert_eq!(probe.decode_calls, 1);
     let mut expected_extradata = Vec::new();
-    cfg.annex_b(&[], &mut expected_extradata)
-        .expect("annex_b emits the parameter sets");
-    assert_eq!(
-        expected_extradata,
-        [0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0C]
-    );
+    cfg.annex_b_parameter_sets(&mut expected_extradata);
+    let mut spelled = vec![0x00, 0x00, 0x00, 0x01];
+    spelled.extend_from_slice(&vps);
+    spelled.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+    spelled.extend_from_slice(&sps);
+    assert_eq!(expected_extradata, spelled);
     assert_eq!(
         probe.seen_cfg.clone().expect("cfg seen"),
         (HEVC_CODEC_ID, 5, 3, 10, expected_extradata)
     );
-    assert_eq!(probe.seen_codestream, payload);
+    assert_eq!(probe.seen_codestream, IDR_PAYLOAD);
     assert_eq!(
         probe.seen_out.expect("out seen"),
-        (
-            planar_pixel_format(ChromaFormat::Yuv420),
-            5,
-            3,
-            10,
-            3,
-            [10, 6, 6, 0]
-        )
+        (I420, 5, 3, 10, 3, [10, 6, 6, 0])
     );
 }
 
 #[test]
 fn abi_adapter_maps_a_monochrome_frame_to_one_plane() {
-    let cfg = config(); // chroma_format_idc = 0, 8-bit
-    let dims = Dimensions::new(4, 2).expect("dimensions");
-    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(42)), dims);
+    let cfg = config_sized(4, 2); // chroma_format_idc = 0, 8-bit
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(42)));
 
-    let decoded = adapter.decode_intra(&cfg, &[]).expect("decodes");
-    assert_eq!(decoded.chroma(), ChromaFormat::Monochrome);
+    let decoded = adapter.decode_still(&cfg, &[]).expect("decodes");
+    assert_eq!(decoded.chroma(), ChromaSubsampling::Cs400);
     assert_eq!(decoded.y(), &[42; 8]);
     assert!(decoded.cb().is_empty());
     assert!(decoded.cr().is_empty());
 
-    let out = adapter.backend().seen_out.expect("out seen");
+    let out = adapter.get_ref().seen_out.expect("out seen");
+    assert_eq!(out, (Y800, 4, 2, 8, 1, [8, 0, 0, 0]));
+}
+
+#[test]
+fn abi_adapter_sizes_the_planes_by_the_conformance_window() {
+    // 4:2:0 crops in units of two: left 1 + right 2 columns, top 0 + bottom 1 row of chroma.
+    let cfg = HevcConfig::parse(&hvcc_bytes(&[(
+        SPS,
+        &sps_nal(1, (16, 8), Some([1, 2, 0, 1])),
+    )]))
+    .expect("hvcC parses");
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)));
+    let decoded = adapter.decode_still(&cfg, &[]).expect("decodes");
+    // The record's chroma_format_idc is 0, so the planes are monochrome; the crop is the SPS's.
+    assert_eq!((decoded.width(), decoded.height()), (16 - 6, 8 - 2));
+    let seen = adapter.get_ref().seen_cfg.clone().expect("cfg seen");
+    assert_eq!((seen.1, seen.2), (10, 6));
+}
+
+#[test]
+fn abi_adapter_reads_an_hev1_payloads_inband_sps_when_the_record_has_none() {
+    let cfg = HevcConfig::parse(&hvcc_bytes(&[])).expect("hvcC parses");
+    let sps = sps_nal(0, (6, 4), None);
+    let mut payload = (sps.len() as u32).to_be_bytes().to_vec();
+    payload.extend_from_slice(&sps);
+    payload.extend_from_slice(&IDR_PAYLOAD);
+
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(9)));
+    let decoded = adapter.decode_still(&cfg, &payload).expect("decodes");
+    assert_eq!((decoded.width(), decoded.height()), (6, 4));
+    assert_eq!(adapter.get_ref().seen_codestream, payload);
+}
+
+#[test]
+fn abi_adapter_refuses_a_picture_no_sps_sizes() {
+    let cfg = HevcConfig::parse(&hvcc_bytes(&[])).expect("hvcC parses");
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)));
+    let err = adapter
+        .decode_still(&cfg, &IDR_PAYLOAD)
+        .expect_err("no SPS, no plane size");
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
     assert_eq!(
-        out,
-        (
-            planar_pixel_format(ChromaFormat::Monochrome),
-            4,
-            2,
-            8,
-            1,
-            [8, 0, 0, 0]
-        )
+        err.static_message(),
+        Some("HEIC: no SPS states the coded picture size")
     );
+    // The backend was never handed planes it could not be told the size of.
+    assert_eq!(adapter.get_ref().decode_calls, 0);
+}
+
+#[test]
+fn abi_adapter_refuses_an_sps_past_the_default_limits_before_allocating() {
+    // A 2^31 × 2^31 SPS: its u16 luma plane alone is 2^63 bytes, a capacity overflow were it
+    // allocated.
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)));
+    let err = adapter
+        .decode_still(&config_sized(1 << 31, 1 << 31), &IDR_PAYLOAD)
+        .expect_err("past DecodeLimits::default");
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(err.static_message(), Some(gamut_heif::DIMENSION_LIMIT));
+    assert_eq!(adapter.get_ref().decode_calls, 0);
+}
+
+#[test]
+fn abi_adapter_holds_the_sps_to_the_limits_it_is_given() {
+    let decode = |limits| {
+        AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)))
+            .with_limits(limits)
+            .decode_still(&config_sized(4, 2), &IDR_PAYLOAD)
+    };
+    let refusal = |limits| {
+        decode(limits)
+            .expect_err("past the limits")
+            .static_message()
+    };
+    assert_eq!(
+        refusal(DecodeLimits::new(3, 100)),
+        Some(gamut_heif::DIMENSION_LIMIT)
+    );
+    assert_eq!(
+        refusal(DecodeLimits::new(4, 7)),
+        Some(gamut_heif::PIXEL_LIMIT)
+    );
+    let decoded = decode(DecodeLimits::new(4, 8)).expect("exactly at the limits");
+    assert_eq!((decoded.width(), decoded.height()), (4, 2));
 }
 
 #[test]
 fn abi_adapter_supports_forwards_to_the_backend() {
-    let dims = Dimensions::new(2, 2).expect("dimensions");
-    let mut yes = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)), dims);
-    assert!(yes.supports(&config()));
-    assert_eq!(yes.backend().supports_calls, 1);
-    assert_eq!(
-        yes.backend().seen_cfg.clone().expect("cfg seen").0,
-        HEVC_CODEC_ID
-    );
+    let mut yes = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)));
+    assert!(yes.supports(&config_sized(6, 4)));
+    assert_eq!(yes.get_ref().supports_calls, 1);
+    let seen = yes.get_ref().seen_cfg.clone().expect("cfg seen");
+    // The record's SPS sizes the probe too.
+    assert_eq!((seen.0, seen.1, seen.2), (HEVC_CODEC_ID, 6, 4));
 
-    let mut no = AbiHevcDecoder::new(AbiProbe::new(false, AbiOutcome::Fill(1)), dims);
+    let mut no = AbiHevcDecoder::new(AbiProbe::new(false, AbiOutcome::Fill(1)));
     assert!(!no.supports(&config()));
-    assert_eq!(no.backend().supports_calls, 1);
+    assert_eq!(no.get_ref().supports_calls, 1);
 }
 
 #[test]
-fn abi_adapter_late_unsupported_falls_through_the_registry() {
-    let dims = Dimensions::new(2, 2).expect("dimensions");
-    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::LateUnsupported), dims);
+fn abi_adapter_late_unsupported_is_terminal() {
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::LateUnsupported));
     let err = adapter
-        .decode_intra(&config(), &[])
-        .expect_err("UNSUPPORTED is a decline");
+        .decode_still(&config(), &[])
+        .expect_err("a late UNSUPPORTED is an error");
     assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert_eq!(err.static_message(), Some(BACKEND_DECLINED));
+    assert_eq!(
+        err.static_message(),
+        Some("HEIC: HEVC backend declined the codestream after accepting it")
+    );
     assert_eq!(err.detail(), Some("codec-abi status -1"));
 
-    // ... and the registry treats it as a fall-through, reaching the next backend.
+    // ... and the registry does not fall through on it: the next backend is never consulted.
     let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(AbiHevcDecoder::new(
-            AbiProbe::new(true, AbiOutcome::LateUnsupported),
-            dims,
-        ))
-        .push_backend(Probe::new("next", true, Outcome::Frame(6), &log));
-    let decoded = decoders.decode_intra(&config(), &[]).expect("next decodes");
-    assert_eq!(decoded.y(), &[6, 6, 6, 6]);
-    assert_eq!(entries(&log), ["next:supports", "next:decode"]);
-}
-
-#[test]
-fn abi_adapter_other_failure_status_propagates() {
-    let dims = Dimensions::new(2, 2).expect("dimensions");
-    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fail), dims);
-    let err = adapter
-        .decode_intra(&config(), &[])
-        .expect_err("a non-OK status is terminal");
-    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    let decoder = HeifDecoder::new()
+        .with_backend(AbiHevcDecoder::new(AbiProbe::new(
+            true,
+            AbiOutcome::LateUnsupported,
+        )))
+        .with_backend(Probe::new("next", true, Outcome::Frame(6), &log));
+    let err = decoder.decode_planar(&file()).expect_err("terminal");
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(
         err.static_message(),
-        Some("HEIF: HEVC backend returned a failure status")
-    );
-    assert_eq!(err.detail(), Some("codec-abi status 7"));
-
-    // Through the registry: terminal, so a later backend is never consulted.
-    let log = log();
-    let mut decoders = HevcDecoders::new();
-    decoders
-        .push_backend(AbiHevcDecoder::new(
-            AbiProbe::new(true, AbiOutcome::Fail),
-            dims,
-        ))
-        .push_backend(Probe::new("rescue", true, Outcome::Frame(6), &log));
-    let err = decoders
-        .decode_intra(&config(), &[])
-        .expect_err("propagates");
-    assert_eq!(err.kind(), ErrorKind::InvalidInput);
-    assert_eq!(
-        err.static_message(),
-        Some("HEIF: HEVC backend returned a failure status")
+        Some("HEIC: HEVC backend declined the codestream after accepting it")
     );
     assert!(entries(&log).is_empty());
 }
 
 #[test]
+fn abi_adapter_other_failure_status_propagates() {
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fail));
+    let err = adapter
+        .decode_still(&config(), &[])
+        .expect_err("a non-OK status is terminal");
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        err.static_message(),
+        Some("HEIC: HEVC backend returned a failure status")
+    );
+    assert_eq!(err.detail(), Some("codec-abi status 7"));
+
+    // Through the registry: terminal, so a later backend is never consulted.
+    let log = log();
+    let decoder = HeifDecoder::new()
+        .with_backend(AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fail)))
+        .with_backend(Probe::new("rescue", true, Outcome::Frame(6), &log));
+    let err = decoder.decode_planar(&file()).expect_err("propagates");
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        err.static_message(),
+        Some("HEIC: HEVC backend returned a failure status")
+    );
+    assert!(entries(&log).is_empty());
+}
+
+#[test]
+fn abi_adapter_decodes_through_the_decoder() {
+    // The adapter is a backend like any other: in a HeifDecoder it decodes an hvc1 file whose
+    // record SPS states the size.
+    let decoder = HeifDecoder::new().with_backend(AbiHevcDecoder::new(AbiProbe::new(
+        true,
+        AbiOutcome::Fill(77),
+    )));
+    let decoded = decoder.decode_planar(&file()).expect("decodes");
+    assert_eq!((decoded.width(), decoded.height()), (2, 2));
+    assert_eq!(decoded.y(), &[77; 4]);
+}
+
+#[test]
 fn abi_adapter_backend_accessors_round_trip() {
-    let dims = Dimensions::new(2, 2).expect("dimensions");
-    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)), dims);
-    adapter.backend_mut().supports_calls = 5;
-    assert_eq!(adapter.backend().supports_calls, 5);
-    assert_eq!(adapter.into_backend().supports_calls, 5);
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)));
+    adapter.get_mut().supports_calls = 5;
+    assert_eq!(adapter.get_ref().supports_calls, 5);
+    assert_eq!(adapter.into_inner().supports_calls, 5);
 }

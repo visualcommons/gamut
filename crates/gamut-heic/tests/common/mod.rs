@@ -3,7 +3,226 @@
 //! normalising writer cannot express.
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
+use std::sync::{Arc, Mutex};
+
+use gamut_bitstream::BitWriter;
+use gamut_codec_abi::Registry;
+use gamut_core::{Dimensions, ImageBuf, Result, Rgba8, Rgba16};
+use gamut_heic::{
+    ChromaSubsampling, ChromaUpsampling, DecodeLimits, DecodeOptions, DecodedFrame, HeifContainer,
+    HeifImage, Hevc, HevcCodestreamDecoder,
+};
 use gamut_isobmff::{IsoBmffImage, Item, ItemReference, Property, PropertyKind};
+
+// ---- HEVC parameter sets -------------------------------------------------------------------
+
+/// Writes `value` as `ue(v)` (ITU-T H.265 §9.2).
+fn ue(w: &mut BitWriter, value: u32) {
+    let coded = u64::from(value) + 1;
+    let bits = 64 - coded.leading_zeros();
+    w.put_bits(0, bits - 1);
+    w.put_bits(coded as u32, bits);
+}
+
+/// A minimal SPS NAL unit (header included, emulation prevention applied) stating a
+/// `width` × `height` picture of `chroma_format_idc`, cropped by the conformance window `window`
+/// (left, right, top, bottom, in chroma units) when given. Only the prefix
+/// `AbiHevcDecoder` reads is meaningful; no sub-layers.
+pub fn sps_nal(
+    chroma_format_idc: u32,
+    (width, height): (u32, u32),
+    window: Option<[u32; 4]>,
+) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    w.put_bits(0, 4); // sps_video_parameter_set_id
+    w.put_bits(0, 3); // sps_max_sub_layers_minus1
+    w.put_bit(1); // sps_temporal_id_nesting_flag
+    // The 96-bit general profile_tier_level(): profile_idc 1 (Main), the rest zero.
+    w.put_bits(0b0000_0001, 8);
+    w.put_bits(0, 32);
+    w.put_bits(0, 32);
+    w.put_bits(0, 16);
+    w.put_bits(90, 8); // general_level_idc
+    ue(&mut w, 0); // sps_seq_parameter_set_id
+    ue(&mut w, chroma_format_idc);
+    if chroma_format_idc == 3 {
+        w.put_bit(0); // separate_colour_plane_flag
+    }
+    ue(&mut w, width);
+    ue(&mut w, height);
+    w.put_bit(u8::from(window.is_some()));
+    for offset in window.iter().flatten() {
+        ue(&mut w, *offset);
+    }
+    w.put_bit(1); // rbsp_stop_one_bit
+    w.align();
+    let mut nal = vec![0x42, 0x01]; // nal_unit_type 33 (SPS)
+    let mut zeros = 0;
+    for byte in w.into_bytes() {
+        if zeros == 2 && byte <= 3 {
+            nal.push(3);
+            zeros = 0;
+        }
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+        nal.push(byte);
+    }
+    nal
+}
+
+/// An `hvcC` record: the 23-byte header with `lengthSizeMinusOne = 3` (monochrome, 8-bit), then
+/// one single-NAL array per `(NAL_unit_type, nal)` entry.
+pub fn hvcc_bytes(arrays: &[(u8, &[u8])]) -> Vec<u8> {
+    let mut v = vec![0u8; 23];
+    v[0] = 1; // configurationVersion
+    v[21] = 0b0000_0011; // ... | lengthSizeMinusOne = 3
+    v[22] = arrays.len() as u8; // numOfArrays
+    for &(ty, nal) in arrays {
+        v.push(0x80 | ty); // array_completeness | NAL_unit_type
+        v.extend_from_slice(&1u16.to_be_bytes()); // numNalus
+        v.extend_from_slice(&(nal.len() as u16).to_be_bytes()); // nalUnitLength
+        v.extend_from_slice(nal);
+    }
+    v
+}
+
+// ---- decoding through the shared pipeline --------------------------------------------------
+
+/// A [`DecodedFrame`] from a width and height rather than a [`Dimensions`], the shape this suite's
+/// stub decoders were written in.
+pub fn frame(
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    chroma: ChromaSubsampling,
+    y: Vec<u16>,
+    cb: Vec<u16>,
+    cr: Vec<u16>,
+) -> Result<DecodedFrame> {
+    DecodedFrame::new(
+        Dimensions::new(width, height)?,
+        bit_depth,
+        chroma,
+        y,
+        cb,
+        cr,
+    )
+}
+
+/// The options [`gamut_heic::HeifDecoder::new`] decodes under: the default limits and
+/// nearest-neighbour chroma upsampling.
+pub fn heic_options() -> DecodeOptions {
+    DecodeOptions::default().with_chroma_upsampling(ChromaUpsampling::Nearest)
+}
+
+/// Runs `decode` with `decoder` as the one backend of an [`Hevc`] registry, handing the decoder
+/// back afterwards — so a test can inspect what a stateful decoder recorded, as it could when the
+/// pipeline borrowed it.
+pub fn with_backend<D, R>(
+    decoder: &mut D,
+    decode: impl FnOnce(&Registry<dyn HevcCodestreamDecoder + Send>) -> R,
+) -> R
+where
+    D: HevcCodestreamDecoder + Send + Default + 'static,
+{
+    let shared = Arc::new(Mutex::new(std::mem::take(decoder)));
+    let mut backends: Registry<dyn HevcCodestreamDecoder + Send> = Registry::new();
+    backends.push(shared.clone());
+    let out = decode(&backends);
+    drop(backends);
+    *decoder = Arc::try_unwrap(shared)
+        .ok()
+        .expect("the registry was dropped")
+        .into_inner()
+        .expect("the decoder did not panic");
+    out
+}
+
+/// The `gamut-heif` decode surfaces bound to [`Hevc`] and one test decoder, under
+/// [`heic_options`] unless a test passes its own: an item (or the primary one), a decoder, and
+/// optionally limits or options.
+pub trait Decode {
+    /// The semantic view decoded from.
+    fn heif(&self) -> &HeifImage;
+
+    fn planar<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+    ) -> Result<DecodedFrame> {
+        self.planar_with_limits(id, d, DecodeLimits::default())
+    }
+
+    fn planar_with_limits<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        limits: DecodeLimits,
+    ) -> Result<DecodedFrame> {
+        with_backend(d, |b| self.heif().decode_item_planar::<Hevc>(id, b, limits))
+    }
+
+    fn rgba8<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.rgba8_with_options(id, d, heic_options())
+    }
+
+    fn rgba8_with_options<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba8>> {
+        with_backend(d, |b| self.heif().decode_item_rgba8::<Hevc>(id, b, options))
+    }
+
+    fn rgba16<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.rgba16_with_options(id, d, heic_options())
+    }
+
+    fn rgba16_with_options<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba16>> {
+        with_backend(d, |b| {
+            self.heif().decode_item_rgba16::<Hevc>(id, b, options)
+        })
+    }
+
+    fn primary_rgba8<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.rgba8(self.heif().primary_item().id(), d)
+    }
+
+    fn primary_rgba16<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.rgba16(self.heif().primary_item().id(), d)
+    }
+}
+
+impl Decode for HeifImage {
+    fn heif(&self) -> &HeifImage {
+        self
+    }
+}
+
+impl Decode for HeifContainer<'_> {
+    fn heif(&self) -> &HeifImage {
+        self.image()
+    }
+}
 
 // ---- model builders (write-based fixtures) -------------------------------------------------
 

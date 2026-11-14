@@ -13,52 +13,6 @@ use gamut_core::{Error, Result};
 
 use crate::nal::{NalHeader, NalUnitType, iter_nal_units};
 
-/// The chroma sampling format, from `chroma_format_idc` (`references/heif` §1: 0 = mono, 1 = 4:2:0,
-/// 2 = 4:2:2, 3 = 4:4:4).
-///
-/// `#[repr(u8)]` with explicit discriminants equal to `chroma_format_idc` (0..=3), so the value is
-/// stable across the FFI boundary a platform decoder crosses (issue #238's C-compatibility goal):
-/// a `-sys` shim can pass the raw discriminant without a translation table.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ChromaFormat {
-    /// Monochrome (`chroma_format_idc` 0): a single luma plane, no chroma.
-    Monochrome = 0,
-    /// 4:2:0 (`chroma_format_idc` 1): chroma sub-sampled by two horizontally and vertically.
-    Yuv420 = 1,
-    /// 4:2:2 (`chroma_format_idc` 2): chroma sub-sampled by two horizontally.
-    Yuv422 = 2,
-    /// 4:4:4 (`chroma_format_idc` 3): full-resolution chroma.
-    Yuv444 = 3,
-}
-
-impl ChromaFormat {
-    /// The equivalent [`ChromaSubsampling`], gamut's shared plane-geometry vocabulary.
-    ///
-    /// A total mapping: this type's discriminants are the codec's `chroma_format_idc`, while
-    /// `ChromaSubsampling`'s are gamut's own, so the two never share a numbering and convert
-    /// explicitly.
-    #[must_use]
-    pub fn subsampling(self) -> ChromaSubsampling {
-        match self {
-            ChromaFormat::Monochrome => ChromaSubsampling::Cs400,
-            ChromaFormat::Yuv420 => ChromaSubsampling::Cs420,
-            ChromaFormat::Yuv422 => ChromaSubsampling::Cs422,
-            ChromaFormat::Yuv444 => ChromaSubsampling::Cs444,
-        }
-    }
-
-    /// The dimensions of each chroma (Cb/Cr) plane for a luma plane of `width` × `height`, using
-    /// **ceiling** division on the subsampled axes so an odd luma dimension keeps the half-covering
-    /// edge sample: 4:2:0 ⇒ `(ceil(width/2), ceil(height/2))`, 4:2:2 ⇒ `(ceil(width/2), height)`,
-    /// 4:4:4 ⇒ `(width, height)`. [`Monochrome`](Self::Monochrome) has no chroma, so it returns
-    /// `(0, 0)`.
-    #[must_use]
-    pub fn chroma_dimensions(self, width: u32, height: u32) -> (u32, u32) {
-        self.subsampling().chroma_dimensions(width, height)
-    }
-}
-
 /// One parameter-set array of a [`HevcConfig`] (`references/heif` §1): all NAL units sharing a
 /// `NAL_unit_type`, in file order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,7 +52,7 @@ pub struct HevcConfig {
     pub min_spatial_segmentation_idc: u16,
     /// `parallelismType` (2 bits) — 0 = unknown/mixed, 1 = slice, 2 = tile, 3 = WPP.
     pub parallelism_type: u8,
-    /// `chroma_format_idc` (2 bits) — see [`chroma_format`](Self::chroma_format).
+    /// `chroma_format_idc` (2 bits) — see [`chroma_subsampling`](Self::chroma_subsampling).
     pub chroma_format_idc: u8,
     /// `bit_depth_luma_minus8` (3 bits) — see [`bit_depth_luma`](Self::bit_depth_luma).
     pub bit_depth_luma_minus8: u8,
@@ -236,15 +190,16 @@ impl HevcConfig {
         self.bit_depth_chroma_minus8 + 8
     }
 
-    /// The chroma sampling format, mapping `chroma_format_idc` `0..=3` to a [`ChromaFormat`].
+    /// The chroma sampling `chroma_format_idc` declares (`references/heif` §1): 0 is monochrome
+    /// ([`Cs400`](ChromaSubsampling::Cs400)), 1 is 4:2:0, 2 is 4:2:2 and 3 is 4:4:4.
     #[must_use]
-    pub fn chroma_format(&self) -> ChromaFormat {
+    pub fn chroma_subsampling(&self) -> ChromaSubsampling {
         match self.chroma_format_idc {
-            0 => ChromaFormat::Monochrome,
-            1 => ChromaFormat::Yuv420,
-            2 => ChromaFormat::Yuv422,
+            0 => ChromaSubsampling::Cs400,
+            1 => ChromaSubsampling::Cs420,
+            2 => ChromaSubsampling::Cs422,
             // `chroma_format_idc` is a 2-bit field, so the only remaining value is 3.
-            _ => ChromaFormat::Yuv444,
+            _ => ChromaSubsampling::Cs444,
         }
     }
 
@@ -314,7 +269,7 @@ impl HevcConfig {
     ///
     /// Emitting nothing is valid and not an error: an `hev1` record may carry its parameter sets
     /// inband in the item payload instead (see
-    /// [`HeifItem::hevc_inband_parameter_sets_allowed`](crate::HeifItem::hevc_inband_parameter_sets_allowed)).
+    /// [`HeifContainer::hevc_inband_parameter_sets_allowed`](crate::HeifContainer::hevc_inband_parameter_sets_allowed)).
     ///
     /// # Example
     ///
@@ -490,22 +445,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chroma_format_maps_onto_the_shared_subsampling_vocabulary() {
-        // Total mapping, asserted per variant so a mutant that collapses two arms dies. The two
-        // enums deliberately do not share a numbering: these discriminants are HEVC's
-        // `chroma_format_idc`, `ChromaSubsampling`'s are gamut's own.
-        assert_eq!(
-            ChromaFormat::Monochrome.subsampling(),
-            ChromaSubsampling::Cs400
-        );
-        assert_eq!(ChromaFormat::Yuv420.subsampling(), ChromaSubsampling::Cs420);
-        assert_eq!(ChromaFormat::Yuv422.subsampling(), ChromaSubsampling::Cs422);
-        assert_eq!(ChromaFormat::Yuv444.subsampling(), ChromaSubsampling::Cs444);
-        // The delegation preserves the documented ceiling-division behaviour on odd dimensions,
-        // which is the property `DecodedFrame`'s plane sizing depends on.
-        assert_eq!(ChromaFormat::Yuv420.chroma_dimensions(17, 13), (9, 7));
-        assert_eq!(ChromaFormat::Yuv422.chroma_dimensions(17, 13), (9, 13));
-        assert_eq!(ChromaFormat::Yuv444.chroma_dimensions(17, 13), (17, 13));
-        assert_eq!(ChromaFormat::Monochrome.chroma_dimensions(17, 13), (0, 0));
+    fn chroma_format_idc_maps_onto_the_shared_subsampling_vocabulary() {
+        // Total mapping, asserted per value so a mutant that collapses two arms dies. The
+        // numberings deliberately differ: `chroma_format_idc` is HEVC's, `ChromaSubsampling`'s
+        // discriminants are gamut's own.
+        let mut raw = vec![0u8; 23];
+        raw[0] = 1;
+        raw[21] = 0b11;
+        for (idc, chroma) in [
+            (0, ChromaSubsampling::Cs400),
+            (1, ChromaSubsampling::Cs420),
+            (2, ChromaSubsampling::Cs422),
+            (3, ChromaSubsampling::Cs444),
+        ] {
+            // reserved(6) | chroma_format_idc(2), reserved bits set as a writer sets them.
+            raw[16] = 0xFC | idc;
+            assert_eq!(
+                HevcConfig::parse(&raw).unwrap().chroma_subsampling(),
+                chroma
+            );
+        }
     }
 }
