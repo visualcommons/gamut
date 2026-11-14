@@ -6,9 +6,9 @@
 //! directory, at the end of the file, verbatim.
 
 use gamut_core::{Bilevel, Dimensions, EncodeImage, ImageRef, Indexed8, Rgb8, Rgb16, Rgba8};
+use gamut_ifd::{c2pa_exclusions, read};
 use gamut_tiff::{
-    ByteOrder, Palette8, SpanKind, TiffDecoder, TiffEncoder, TiffMetadata, c2pa_exclusions,
-    deconstruct, read, tags,
+    ByteOrder, Palette, SpanKind, TiffDecoder, TiffEncoder, Variant, deconstruct, tags,
 };
 
 /// A store whose bytes are neither a palindrome nor a repetition, so a byte-swapped copy of it
@@ -34,7 +34,7 @@ fn encoded_with_store() -> (Vec<u8>, gamut_tiff::TiffEncodeReport) {
     let mut bytes = Vec::new();
     let report = TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
-        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .with_c2pa(STORE)
         .encode_with_report(image(&pixels, 17, 13), &mut bytes)
         .expect("encode");
     (bytes, report)
@@ -112,7 +112,7 @@ fn the_tile_path_places_the_store_too() {
     let report = TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
         .with_tiling(16, 16)
-        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .with_c2pa(STORE)
         .encode_with_report(image(&pixels, 32, 32), &mut bytes)
         .expect("encode");
     let range = report.c2pa.expect("a store was written").store();
@@ -128,8 +128,8 @@ fn a_bigtiff_carries_the_store_with_its_wider_count_field() {
     let mut bytes = Vec::new();
     let report = TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
-        .with_big_tiff(true)
-        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .with_variant(Variant::Big)
+        .with_c2pa(STORE)
         .encode_with_report(image(&pixels, 17, 13), &mut bytes)
         .expect("encode");
     let excl = report.c2pa.expect("a store was written");
@@ -143,25 +143,32 @@ fn a_bigtiff_carries_the_store_with_its_wider_count_field() {
 
 #[test]
 fn the_palette_path_places_the_store_and_reports_it_through_the_locator() {
-    // `encode_palette8` needs a separate colour table, so it is an inherent method rather than an
+    // `encode_indexed8` needs a separate colour table, so it is an inherent method rather than an
     // `EncodeImage` impl and `encode_with_report` cannot reach it. STATUS, README and the docs all
     // say such a file still carries a store and still reports it through `c2pa_exclusions`; this
     // is what makes that true rather than merely claimed.
     let indices: Vec<u8> = (0..16 * 16).map(|i| (i % 251) as u8).collect();
-    let palette =
-        Palette8::from_rgb_triples(&(0..768).map(|i| (i % 251) as u8).collect::<Vec<_>>())
-            .expect("palette");
+    let rgb: Vec<[u8; 3]> = (0..256u32)
+        .map(|i| {
+            [
+                (3 * i % 251) as u8,
+                ((3 * i + 1) % 251) as u8,
+                ((3 * i + 2) % 251) as u8,
+            ]
+        })
+        .collect();
+    let palette = Palette::new(&rgb).expect("palette");
     let mut bytes = Vec::new();
     TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
-        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
-        .encode_palette8(
+        .with_c2pa(STORE)
+        .encode_indexed8(
             ImageRef::<Indexed8>::new(&indices, Dimensions::new(16, 16).unwrap()).expect("indices"),
             &palette,
             &mut bytes,
         )
         .expect("encode");
-    let range = c2pa_exclusions(&bytes)
+    let range = c2pa_exclusions(&bytes[..])
         .expect("locate")
         .expect("a store")
         .store();
@@ -186,14 +193,14 @@ fn a_multipage_document_puts_the_entry_in_its_last_page() {
     let mut bytes = Vec::new();
     TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
-        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .with_c2pa(STORE)
         .encode_pages_rgb8(&[page, page], &mut bytes)
         .expect("encode");
     let file = read(&bytes).expect("read");
     assert_eq!(file.ifds.len(), 2);
     assert_eq!(file.ifds[0].get(tags::C2PA_MANIFEST_STORE), None);
     assert!(file.ifds[1].get(tags::C2PA_MANIFEST_STORE).is_some());
-    let range = c2pa_exclusions(&bytes)
+    let range = c2pa_exclusions(&bytes[..])
         .expect("locate")
         .expect("a store")
         .store();
@@ -212,7 +219,7 @@ fn the_pixel_paths_that_pack_their_own_buffer_place_the_store_too() {
     let dims = Dimensions::new(4, 4).unwrap();
     let encoder = TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
-        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()));
+        .with_c2pa(STORE);
     let files = [
         (
             "the 16-bit path",
@@ -234,7 +241,7 @@ fn the_pixel_paths_that_pack_their_own_buffer_place_the_store_too() {
         ),
     ];
     for (path, bytes) in files {
-        let range = c2pa_exclusions(&bytes)
+        let range = c2pa_exclusions(&bytes[..])
             .expect("locate")
             .unwrap_or_else(|| panic!("{path} wrote no store"))
             .store();
@@ -256,7 +263,7 @@ fn a_file_without_a_store_has_no_exclusion_ranges() {
         .expect("encode");
     assert_eq!(report.c2pa, None);
     assert_eq!(report.len, bytes.len());
-    assert_eq!(c2pa_exclusions(&bytes).expect("locate"), None);
+    assert_eq!(c2pa_exclusions(&bytes[..]).expect("locate"), None);
 }
 
 #[test]

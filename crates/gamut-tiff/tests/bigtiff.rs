@@ -1,7 +1,7 @@
 //! BigTIFF (64-bit offset) conformance cross-checks (P20).
 //!
 //! BigTIFF only widens the container — the colour/compression/pixel layers are identical — so
-//! these mirror the classic cross-checks with `.with_big_tiff(true)`:
+//! these mirror the classic cross-checks with `.with_variant(Variant::Big)`:
 //!   A. gamut round-trips (encode → gamut decode);
 //!   B. gamut encodes BigTIFF → libtiff decodes back to the source pixels;
 //!   C. libtiff encodes BigTIFF → gamut decodes (exercising 64-bit `LONG8` strip offsets).
@@ -10,7 +10,8 @@
 //! unchanged; only its encode side opts into the "w8" mode via `encode_*_bigtiff`.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_tiff::{ByteOrder, Compression, TiffDecoder, TiffEncoder, Variant, read};
+use gamut_ifd::read;
+use gamut_tiff::{ByteOrder, Compression, TiffDecoder, TiffEncoder, Variant};
 use libtiff_oracle::Compression as OracleCompression;
 
 mod common;
@@ -38,7 +39,7 @@ fn bigtiff_roundtrips_in_gamut() {
             let mut tiff = Vec::new();
             TiffEncoder::new()
                 .with_byte_order(order)
-                .with_big_tiff(true)
+                .with_variant(Variant::Big)
                 .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut tiff)
                 .expect("encode");
             assert_is_bigtiff(&tiff);
@@ -58,7 +59,7 @@ fn bigtiff_roundtrips_in_gamut() {
             let mut tiff = Vec::new();
             TiffEncoder::new()
                 .with_byte_order(order)
-                .with_big_tiff(true)
+                .with_variant(Variant::Big)
                 .encode_image(ImageRef::<Gray8>::new(&gray, dims).unwrap(), &mut tiff)
                 .expect("encode");
             assert_is_bigtiff(&tiff);
@@ -79,7 +80,7 @@ fn gamut_bigtiff_is_decoded_by_libtiff() {
         let rgb = rgb_pattern(w, h);
         let mut tiff = Vec::new();
         TiffEncoder::new()
-            .with_big_tiff(true)
+            .with_variant(Variant::Big)
             .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut tiff)
             .expect("encode");
         assert_is_bigtiff(&tiff);
@@ -90,7 +91,7 @@ fn gamut_bigtiff_is_decoded_by_libtiff() {
         let gray = gray_pattern(w, h);
         let mut tiff = Vec::new();
         TiffEncoder::new()
-            .with_big_tiff(true)
+            .with_variant(Variant::Big)
             .encode_image(ImageRef::<Gray8>::new(&gray, dims).unwrap(), &mut tiff)
             .expect("encode");
         let dec = libtiff_oracle::decode_tiff(&tiff).expect("libtiff decode");
@@ -149,7 +150,7 @@ fn bigtiff_compression_variants_cross_check() {
     ] {
         let mut tiff = Vec::new();
         TiffEncoder::new()
-            .with_big_tiff(true)
+            .with_variant(Variant::Big)
             .with_compression(compression)
             .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut tiff)
             .expect("encode");
@@ -181,7 +182,7 @@ fn bigtiff_tiled_is_decoded_by_libtiff() {
     let dims = Dimensions::new(w, h).unwrap();
     let mut tiff = Vec::new();
     TiffEncoder::new()
-        .with_big_tiff(true)
+        .with_variant(Variant::Big)
         .with_tiling(16, 16)
         .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut tiff)
         .expect("encode");
@@ -217,7 +218,7 @@ fn bigtiff_multipage_is_decoded_by_libtiff() {
     ];
     let mut tiff = Vec::new();
     TiffEncoder::new()
-        .with_big_tiff(true)
+        .with_variant(Variant::Big)
         .encode_pages_rgb8(&pages, &mut tiff)
         .expect("encode");
     assert_is_bigtiff(&tiff);

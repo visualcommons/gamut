@@ -118,7 +118,7 @@ fn icc_from_image<D: ImageDecoder>(
 
 /// Reads the ICC profile from a TIFF/DNG `ICCProfile` tag (34675) in the first IFD.
 fn icc_from_tiff(data: &[u8]) -> Result<Option<Vec<u8>>, CliError> {
-    let file = gamut::tiff::read(data)?;
+    let file = gamut::ifd::read(data)?;
     Ok(file
         .ifds
         .first()

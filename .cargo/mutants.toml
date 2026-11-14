@@ -126,7 +126,7 @@ exclude_re = [
     #
     # The *other* direction is NOT excluded: `with false` is killed by
     # `typed_wiring_names_every_format`.
-    '^crates/gamut/src/capability\.rs:226:5: replace typed_wiring -> bool with true$',
+    '^crates/gamut/src/capability\.rs:225:5: replace typed_wiring -> bool with true$',
     # gamut-ifd track::subtract — disabling the merge guard is equivalent by construction: the
     # skip loop discards every claim with `end <= pos`, and the covered arm advances `pos` to
     # `r.end.min(end)`, strictly greater than `pos`, so an unmerged sorted-but-overlapping list
@@ -243,17 +243,6 @@ exclude_re = [
     # the `n` it shifts is only consumed on an iteration that never executes, so `n >>= 8` is dead.
     # `>>= → <<=` is unobservable. (The loop-bound and `e`/`n` init mutants stay live and are caught.)
     '^crates/gamut-bitstream/src/symbol\.rs:190:19: replace >>= with <<= in SymbolEncoder::finish$',
-    # gamut-tiff `within_size_limit` is the shared *allocation* guard behind `stored_total`
-    # (decode_page_samples) and `tile_size` (decode_tiles): relaxing `>` to `==`/`>=` only changes
-    # whether a 64 MiB+ buffer is reserved before the (still inevitable) decode error — the malformed
-    # file is rejected either way, so the Ok/Err outcome a functional test can see is unchanged.
-    # (`> -> <` flips the guard for every normal image and is caught.) The guard lives in its own
-    # three-line function precisely so these two entries stay scoped to that one comparison, rather
-    # than blanketing every `>` its callers may grow. Removing the guard entirely is a *separate*
-    # mutant, killed by the two size-cap tests in tests/decoder_validation.rs, which assert the
-    # distinct cap messages rather than a bare `is_err()`.
-    '^crates/gamut-tiff/src/decoder\.rs:72:14: replace > with == in within_size_limit$',
-    '^crates/gamut-tiff/src/decoder\.rs:72:14: replace > with >= in within_size_limit$',
     # gamut-riff `Vp8xHeader::to_bytes`: the feature-flag byte ORs five single bits each shifted to
     # a distinct position (`icc<<5 | alpha<<4 | ...`), so the operands are disjoint and `|` == `^`.
     # gamut-riff `Vp8xHeader::parse`: the `le24` closure ORs three bytes at offsets 0/8/16

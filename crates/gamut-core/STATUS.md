@@ -75,9 +75,9 @@ backward-compatible; removing or reshaping any of the above would not.
   `slice[i]`), not error handling.
 
 ## Deferred / tracked follow-ups (all additive — none blocks v1)
-- **Adopting the shared `Palette`.** `Palette` ships here and `gamut-png` takes and returns it
-  (`PngEncoder::encode_indexed8`, `DecodedPng::palette`), but `gamut-tiff` (`Palette8`) still
-  defines its own palette type. `Indexed8` still has no `EncodeImage` path, because the
+- **`Indexed8` and the shared `Palette`.** `Palette` ships here; `gamut-png` takes and returns it
+  (`PngEncoder::encode_indexed8`, `DecodedPng::palette`) and `gamut-tiff` takes it
+  (`TiffEncoder::encode_indexed8`, #1082). `Indexed8` still has no `EncodeImage` path, because the
   single-buffer trait shape cannot carry the table alongside the indices.
 
 ## Validation

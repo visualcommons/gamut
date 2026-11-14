@@ -233,7 +233,7 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
         ),
         Format::Tiff => (
             summarize(gamut::tiff::deconstruct(&data)?),
-            gamut::tiff::c2pa_summary(&data)?,
+            gamut::tiff::c2pa_summary(&data[..])?,
         ),
         Format::Png | Format::Heic | Format::Avif | Format::Webp => {
             unreachable!("handled above")
@@ -296,7 +296,7 @@ fn sniff(data: &[u8]) -> Format {
     if data.get(4..8) == Some(b"ftyp") {
         return Format::Heic;
     }
-    if let Ok(file) = gamut::tiff::read(data)
+    if let Ok(file) = gamut::ifd::read(data)
         && file
             .ifds
             .first()

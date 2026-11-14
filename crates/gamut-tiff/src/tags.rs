@@ -93,7 +93,8 @@ pub const INTEROPERABILITY_IFD: u16 = gamut_ifd::tags::INTEROPERABILITY_IFD;
 /// A private tag in TIFF 6.0 §7 terms, but one this crate now reads and writes, so
 /// [`is_known_tag`] recognises it. Its placement and exclusion rules are gamut-ifd's
 /// ([`gamut_ifd::append_c2pa_store`], [`gamut_ifd::C2paExclusions`]);
-/// the payload is carried verbatim ([`TiffMetadata::c2pa`](crate::TiffMetadata::c2pa)).
+/// the payload is written verbatim by [`TiffEncoder::with_c2pa`](crate::TiffEncoder::with_c2pa) and read back
+/// as [`TiffMetadata::c2pa`](crate::TiffMetadata::c2pa).
 pub const C2PA_MANIFEST_STORE: u16 = gamut_ifd::C2PA_MANIFEST_STORE;
 
 /// Whether `tag` is one this crate recognises — every tag TIFF 6.0 defines, read from the shared

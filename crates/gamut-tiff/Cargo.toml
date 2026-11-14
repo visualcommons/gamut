@@ -24,6 +24,11 @@ gamut-deflate = { workspace = true, features = ["inflate"] }
 # The IFD container core (byte order, field types, IFD chain, two-pass offset writer). `bigtiff`
 # enables the 64-bit BigTIFF variant the codec writes/reads.
 gamut-ifd = { workspace = true, features = ["bigtiff"] }
+# The EXIF model over the same IFD container: `TiffMetadata::exif` is gamut-exif's `Exif`, the
+# type `gamut-dng`'s `DngMetadata::exif` and the facade's `Metadata::exif` hold, because a TIFF's
+# Exif carriers are directories of the page itself rather than one byte block. A normal
+# dependency: the model is the carrier's type with or without the `metadata` feature.
+gamut-exif.workspace = true
 # Typed metadata (issue #510): the unified `Metadata` model over the `ExifIFD` directory and the
 # XMP / IPTC-IIM / ICC / C2PA payloads `TiffMetadata` carries. Optional and off by default, and a
 # *normal* dependency (never dev-only), so release ordering follows it

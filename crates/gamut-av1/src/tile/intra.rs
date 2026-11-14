@@ -1039,8 +1039,8 @@ mod tests {
         let mut e = FrameEncoder::new(&two, 40);
         // A palette block's chroma must also equal its DC prediction, which reads the
         // reconstruction — empty here, so the neighbours are primed to the flat chroma value.
-        for plane in 1..3 {
-            e.recon[plane].fill(128);
+        for plane in &mut e.recon[1..3] {
+            plane.fill(128);
         }
         let pal = e.decide_palette(2, 2, 8).expect("two colours ⇒ palette");
         assert_eq!(pal.colors, vec![30, 210], "sorted distinct luma colours");
@@ -1091,8 +1091,8 @@ mod tests {
             }
         });
         let mut e = FrameEncoder::new(&two, 40);
-        for plane in 1..3 {
-            e.recon[plane].fill(128);
+        for plane in &mut e.recon[1..3] {
+            plane.fill(128);
         }
         let pal = e.decide_palette(2, 2, 8).expect("palette");
         // Primed non-zero so the context clear the palette path performs is observable at all — it

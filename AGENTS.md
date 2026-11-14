@@ -131,8 +131,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
 - **gamut-tiff** — natively still-image TIFF 6.0; its IFD/tag container is the shared
   **gamut-ifd** primitive (with `bigtiff`), not isobmff/riff. Adds pixel modes plus
   compressions (None/PackBits/LZW/CCITT/Deflate; JPEG-in-TIFF deferred). ← ifd, core,
-  bitstream, deflate (Deflate encode, and decode via its `inflate` feature), metadata (optional,
-  `metadata` feature).
+  bitstream, deflate (Deflate encode, and decode via its `inflate` feature), exif (the
+  `TiffMetadata::exif` model), metadata (optional, `metadata` feature).
 - **gamut-dng** — DNG (Adobe Digital Negative) 1.7.1 raw encoder + decoder, a TIFF/EP
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw
   photometry, uncompressed/Deflate/lossless-JPEG/JPEG XL, colour-calibration profile,

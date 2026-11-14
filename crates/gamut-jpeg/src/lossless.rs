@@ -590,11 +590,11 @@ fn parse_sos(data: &[u8], pos: usize, frame: &Frame) -> Result<Scan> {
         ));
     }
     let mut table_ids = Vec::with_capacity(ns);
-    for c in 0..ns {
+    for (c, &id) in frame.component_ids.iter().enumerate() {
         let spec = data.get(pos + 3 + 2 * c..pos + 5 + 2 * c).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated SOS components")
         })?;
-        if spec[0] != frame.component_ids[c] {
+        if spec[0] != id {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: lossless-JPEG scan components must follow the frame order",

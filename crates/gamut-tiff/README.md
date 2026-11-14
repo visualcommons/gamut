@@ -67,14 +67,18 @@ compression schemes land additively on this frozen surface (see Status).
 - **Compression** — uncompressed, PackBits, LZW (+ strip predictor), and Adobe Deflate
   (+ horizontal differencing on strips or tiles), plus the bilevel CCITT schemes Modified Huffman
   (Group 3 1-D) and Group 4 (T.6).
-- **Metadata** — `TiffEncoder::with_tiff_metadata` / `TiffDecoder::metadata` carry an Exif sub-IFD
-  (`ExifIFD`, 34665, as a `gamut_ifd::Ifd`), a GPS sub-IFD (`GPSInfo`, 34853) and the Exif
-  0th-IFD fields a TIFF holds in its own IFD 0 (`TiffMetadata::ifd0`, limited to the descriptive
-  EXIF 2.32 §4.6.4 Table 4 tags of `IFD0_EXIF_TAGS` — `ImageDescription`, `Make`, `Model`,
-  `Orientation`, `Software`, `DateTime`, `Artist`, `WhitePoint`, `PrimaryChromaticities`,
-  `Copyright`; the encode refuses any other tag there, because the rest of IFD 0 is the
-  encoder's), plus opaque XMP (700), IPTC-IIM (33723), ICC (34675)
-  and C2PA (52545) payloads — the raw blocks the workspace's metadata facade consumes. Byte
+- **Metadata** — `TiffEncoder::with_tiff_metadata` / `TiffDecoder::metadata` carry the EXIF as
+  the shared `Exif` model (`TiffMetadata::exif`, gamut-exif's type, as `gamut-dng` holds it): its
+  Exif sub-IFD as `ExifIFD` (34665), its GPS sub-IFD as `GPSInfo` (34853) and its 0th-IFD fields
+  in the page's own IFD 0, limited to the descriptive EXIF 2.32 §4.6.4 Table 4 tags of
+  `IFD0_EXIF_TAGS` — `ImageDescription`, `Make`, `Model`, `Orientation`, `Software`, `DateTime`,
+  `Artist`, `WhitePoint`, `PrimaryChromaticities`, `Copyright`. Any other 0th-IFD tag, and a
+  thumbnail (which would be a page of its own), is left behind and named by
+  `TiffEncoder::metadata_notices` rather than refused, because the rest of IFD 0 is the
+  encoder's. Opaque XMP (700), IPTC-IIM (33723) and ICC (34675) payloads — the raw blocks the
+  workspace's metadata facade consumes — are also set by the raw `with_xmp`, `with_iptc_iim` and
+  `with_icc_profile` (and `with_exif` parses an EXIF stream into the model); the C2PA store
+  (52545) a file carries is read back, and set for an encoder's own output with `with_c2pa`. Byte
   payloads are verbatim; the Exif directory's *entries* are carried unchanged but its ordering is
   normalised (ascending tag, duplicate tags collapsed, a child's next-IFD pointer ignored), and a
   tag the caller gave both a field and a sub-IFD group is refused rather than normalised — that
@@ -119,12 +123,10 @@ compression schemes land additively on this frozen surface (see Status).
 **Deferred — planned, additive** (see the [STATUS.md](STATUS.md) scope ledger): YCbCr (§21),
 CIE L\*a\*b\* / RGB colorimetry (§20, §23), new-style JPEG-in-TIFF (§22, `Compression = 7`), and
 smaller items (CCITT Group 3 2-D, planar config, IEEE-float and 32-bit samples, 4-bit grayscale,
-halftone hints). The metadata payloads are carried as raw bytes rather than parsed here; the
-optional `metadata` feature wires them to the typed [`gamut-metadata`](../gamut-metadata) facade
-(`TiffMetadata` implements `TypedMetadata`, and `TiffEncoder::with_metadata` /
-`with_encoded_metadata` embed a facade `Metadata`). The typed EXIF path maps the model's 0th-IFD
-fields, Exif, Interoperability and GPS sub-IFDs; a model holding a thumbnail (which a TIFF would
-hold as a page of its own) or a 0th-IFD field outside `IFD0_EXIF_TAGS` is refused.
+halftone hints). The byte payloads are carried as raw bytes rather than parsed here; the optional
+`metadata` feature wires them to the typed [`gamut-metadata`](../gamut-metadata) facade
+(`TiffMetadata` implements `TypedMetadata`, and `TiffEncoder` is a `MetadataSink`, whose
+`with_metadata` / `with_encoded_metadata` embed a facade `Metadata` through the raw setters).
 **Permanently out of scope:** old-style JPEG (§22, `Compression = 6`), deprecated and
 unimplementable-as-specified per TIFF Technical Note 2.
 

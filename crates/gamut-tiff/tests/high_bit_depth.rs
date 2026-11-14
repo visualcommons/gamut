@@ -8,8 +8,12 @@ use gamut_core::{
 };
 use gamut_tiff::{
     ByteOrder, Compression, Ifd, PhotometricInterpretation, Predictor, SampleFormat, TiffDecoder,
-    TiffEncoder, Value, Variant, read, tags, write_image,
+    TiffEncoder, Value, Variant, tags,
 };
+
+mod common;
+use common::write_image;
+use gamut_ifd::read;
 use libtiff_oracle::Compression as OC;
 
 /// Sizes include 1x1, a size smaller than one tile, and 17x13 — deliberately not a multiple of 16,
@@ -443,7 +447,7 @@ fn sixteen_bit_narrows_to_eight_only_under_a_depth_policy() {
         "the default decoder refuses to narrow"
     );
 
-    let dec = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    let dec = TiffDecoder::new().with_convert_policy(ConvertPolicy::permissive());
     let got: ImageBuf<Gray8> = dec.decode_image(&tiff).expect("decode");
     assert_eq!(got.as_samples(), &[0x00u8, 0x01, 0x01, 0x02, 0xFF]);
 }
@@ -465,7 +469,7 @@ fn sixteen_bit_rgb_narrows_through_the_eight_bit_surface() {
         "the default decoder refuses to narrow"
     );
 
-    let dec = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    let dec = TiffDecoder::new().with_convert_policy(ConvertPolicy::permissive());
     let got: ImageBuf<Rgb8> = dec.decode_image(&tiff).expect("decode");
     assert_eq!(got.as_samples(), expected.as_slice());
     let page = dec.decode_page(&tiff, 0).expect("decode_page");
@@ -579,7 +583,7 @@ fn sixteen_bit_cmyk_reaches_eight_bit_ink_only_under_a_depth_policy() {
         "the default decoder refuses to narrow ink samples"
     );
 
-    let dec = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    let dec = TiffDecoder::new().with_convert_policy(ConvertPolicy::permissive());
     let got: ImageBuf<Cmyk8> = dec.decode_image(&tiff).expect("decode");
     let expected: Vec<u8> = samples
         .iter()

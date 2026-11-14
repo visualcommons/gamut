@@ -106,8 +106,8 @@ fn validate_progression(scan: &ScanHeader, comps: &mut [ProgComp]) -> Result<()>
                 "JPEG: progressive AC scan before the component's DC scan",
             ));
         }
-        for k in lo..=hi {
-            match (scan.ah, c.coded_al[k]) {
+        for &coded in &c.coded_al[lo..=hi] {
+            match (scan.ah, coded) {
                 // First pass of a band: the position must not have been coded yet (no overlap).
                 (0, None) => {}
                 (0, Some(_)) => {

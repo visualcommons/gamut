@@ -18,7 +18,7 @@ use gamut_ifd::{BlockRun, ByteOrder, Ifd, Variant, write_with_blocks};
 ///
 /// Returns an error if the stream is not representable in the selected variant's widths (see
 /// [`gamut_ifd::write`]).
-pub fn write_image(
+pub(crate) fn write_image(
     order: ByteOrder,
     variant: Variant,
     ifd: &Ifd,
@@ -35,7 +35,7 @@ pub fn write_image(
 ///
 /// Returns an error if the stream is not representable in the selected variant's widths (see
 /// [`gamut_ifd::write`]).
-pub fn write_image_tiled(
+pub(crate) fn write_image_tiled(
     order: ByteOrder,
     variant: Variant,
     ifd: &Ifd,
@@ -53,7 +53,7 @@ pub fn write_image_tiled(
 ///
 /// Returns an error if the stream is not representable in the selected variant's widths (see
 /// [`gamut_ifd::write`]).
-pub fn write_multipage(
+pub(crate) fn write_multipage(
     order: ByteOrder,
     variant: Variant,
     pages: &[(Ifd, Vec<Vec<u8>>)],
