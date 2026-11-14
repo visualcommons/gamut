@@ -97,6 +97,7 @@ over normalised inputs, per the section above.
 | `avif_clean_alpha` | `gamut-avif` | `cleaning_8_bit_rgba_keeps_the_composite`, `cleaning_16_bit_rgba_keeps_the_composite` |
 | `avif_parse_decode` | `gamut-avif` | `decoding_stays_within_limits` |
 | `heif_decode_limits` | `gamut-heif` | `decoding_stays_within_limits` |
+| `deflate_inflate_zlib` | `gamut-deflate` | `inflation_stays_within_cap` |
 | `color_gray8_view` | `gamut-color` | `gray8_view_is_lossless_widening_then_gray16_view` |
 
 One file per crate, deliberately, so adding a crate is an additive change — with two exceptions,
@@ -114,6 +115,9 @@ target therefore searches. `heif_decode_limits` is the same driver one layer dow
 `IsoBmffImage::parse` and `HeifImage::new` and decodes every item through `gamut-heif`'s own stub
 codec binding (`hvc1` items, a four-byte `hvcC`), so the shared derivation walk is searched with no
 codec crate in front of it, under the same trailer-borne limits and the same ceiling.
+`deflate_inflate_zlib` is likewise its crate's robustness target: it hands the engine's bytes, past
+a two-byte little-endian cap, to `inflate_zlib`, the untrusted-input entry point `docs/testing.md`
+names for `gamut-deflate`.
 
 `Drago` is held to monotonicity only where `Drago::is_monotonic` says it claims it (#439); every
 other operator promises it unconditionally, and all of them are driven through the other three
@@ -168,8 +172,9 @@ defect, not a restatement of a documented default:
 | `xmp_parse` | `gamut-xmp` | `XmpMeta::parse` | — |
 | `iptc_read_irb` | `gamut-iptc` | `IptcReader::read_irb`, then `read` | default conflict policy |
 
-`gamut-deflate` has no target because it has no decoder, and `gamut-av2`/`gamut-vvc` none because
-they are stubs with no function bodies.
+`gamut-deflate`'s entry point, `inflate_zlib`, is driven by the law target `deflate_inflate_zlib`
+above rather than here, and `gamut-av2`/`gamut-vvc` have none because they are stubs with no
+function bodies.
 
 **Two of them ran slowly by design, not by defect.** In the 60-second local run that preceded them,
 `webp_decode` and `jxl_decode` both wrote `slow-unit-*` artifacts and ran at under a hundred
@@ -437,6 +442,12 @@ extent offset that shrink moves rewritten to match, its `ispe` set to the 11 × 
 decodes from the payload's first two bytes, and a four-byte limits trailer (an 8-pixel side, 100
 pixels) that refuses it. A real HEIC `hvcC` never passes the stub's configuration check, so without
 it the target would spend its budget rediscovering that body before reaching a decode.
+
+`corpus/deflate_inflate_zlib/` (#1144) holds three seeds, each a two-byte little-endian cap equal
+to the payload's length followed by `gamut-deflate`'s own `Level::Best` zlib output, one per
+DEFLATE block type so each enters the inflater through its own code: `text-dynamic.bin` (6157 bytes
+of numbered text, a dynamic-Huffman block), `short-fixed.bin` (`gamut`, a fixed-Huffman block) and
+`noise-stored.bin` (96 hashed bytes, a stored block).
 
 Beyond those, **a seed is added whenever a listed check turns out to have no witness in the
 corpus** — that is what the injection audit above is for, and a check whose only witness has to be

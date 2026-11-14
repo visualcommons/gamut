@@ -20,6 +20,10 @@ workspace = true
 # `miniz_oxide` and reporting failures as `gamut-core` errors under the caller's origin.
 [features]
 inflate = ["dep:gamut-core", "dep:miniz_oxide"]
+# Exposes the `invariants` module (the bounded-inflate law) to an out-of-tree fuzz driver; it
+# implies `inflate`, the surface the law is over. `doc(hidden)`, no SemVer guarantee, and never
+# enabled by the `gamut` umbrella; the crate's own tests get it via `cfg(test)`.
+test-support = ["inflate"]
 
 [dependencies]
 gamut-core = { workspace = true, optional = true }
@@ -36,6 +40,8 @@ zlib-oracle = { path = "../../tooling/zlib-oracle" }
 # with). The benches assert `Level::Best` earns its keep against both.
 divan.workspace = true
 miniz_oxide = "0.8"
+# The pinned-seed property driving `invariants`' bounded-inflate law (`docs/testing.md`).
+proptest.workspace = true
 zopfli = "0.8"
 
 [[bench]]

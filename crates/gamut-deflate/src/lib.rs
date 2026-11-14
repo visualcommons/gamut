@@ -68,6 +68,13 @@ mod encoder;
 mod huffman;
 #[cfg(feature = "inflate")]
 mod inflate;
+// The executable law over `inflate_zlib`, for the property test and an out-of-tree fuzz driver
+// (`test-support`). Not part of the stable API; see `docs/testing.md`.
+// A plain comment, not `///`: outer docs here would make rustdoc resolve the module's own `//!`
+// intra-doc links from the crate root, where its items are not in scope.
+#[cfg(all(feature = "inflate", any(test, feature = "test-support")))]
+#[doc(hidden)]
+pub mod invariants;
 mod lz77;
 mod symbols;
 mod zlib;

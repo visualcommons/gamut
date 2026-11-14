@@ -44,6 +44,7 @@ gamut-tonemap = { path = "../../crates/gamut-tonemap", features = ["test-support
 gamut-avif = { path = "../../crates/gamut-avif", features = ["test-support"] }
 gamut-heif = { path = "../../crates/gamut-heif", features = ["test-support"] }
 gamut-color = { path = "../../crates/gamut-color", features = ["test-support"] }
+gamut-deflate = { path = "../../crates/gamut-deflate", features = ["test-support"] }
 gamut-tiff = { path = "../../crates/gamut-tiff" }
 gamut-dng = { path = "../../crates/gamut-dng" }
 gamut-isobmff = { path = "../../crates/gamut-isobmff" }
@@ -114,6 +115,13 @@ bench = false
 [[bin]]
 name = "heif_decode_limits"
 path = "fuzz_targets/heif_decode_limits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deflate_inflate_zlib"
+path = "fuzz_targets/deflate_inflate_zlib.rs"
 test = false
 doc = false
 bench = false

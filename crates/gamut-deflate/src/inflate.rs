@@ -111,4 +111,77 @@ mod tests {
         stream[last] ^= 0xFF;
         assert_corrupt(inflate_zlib(&stream, 16, ORIGIN)); // wrong Adler-32
     }
+
+    /// The bounded-inflate law (`crate::invariants`), sampled here at a pinned seed and searched
+    /// unbounded by the fuzz tier's `deflate_inflate_zlib` target.
+    mod cap_law {
+        use proptest::collection;
+        use proptest::prelude::{Just, Strategy, prop_oneof, proptest};
+        use proptest::test_runner::{Config, RngSeed};
+
+        use super::zlib;
+        use crate::invariants::inflation_stays_within_cap;
+
+        /// The workspace property-test configuration (`docs/testing.md`): pinned seed, bounded
+        /// shrinking, no failure persistence.
+        fn config() -> Config {
+            Config {
+                cases: 512,
+                max_shrink_iters: 2048,
+                max_shrink_time: 10_000,
+                rng_seed: RngSeed::Fixed(0x6761_6D75_745F_6466),
+                failure_persistence: None,
+                ..Config::default()
+            }
+        }
+
+        /// A stream and a cap: this crate's own zlib output — intact, or with one byte flipped or
+        /// the tail cut — so most cases reach a real decode, plus arbitrary bytes for the
+        /// header-refusal path. Payloads draw from four symbols so they compress into
+        /// back-references, and the cap lands on either side of the payload's length.
+        fn stream_and_cap() -> impl Strategy<Value = (Vec<u8>, usize)> {
+            let payload = collection::vec(0u8..4, 0..512);
+            let encoded = (payload, any_flip(), 0usize..1024).prop_map(|(payload, flip, cap)| {
+                let mut stream = zlib(&payload);
+                match flip {
+                    Damage::None => {}
+                    Damage::Flip(at, mask) => {
+                        let at = at % stream.len();
+                        stream[at] ^= mask;
+                    }
+                    Damage::Cut(keep) => stream.truncate(keep % stream.len()),
+                }
+                (stream, cap)
+            });
+            let arbitrary = (collection::vec(proptest::num::u8::ANY, 0..64), 0usize..1024);
+            prop_oneof![3 => encoded, 1 => arbitrary]
+        }
+
+        #[derive(Debug, Clone)]
+        enum Damage {
+            None,
+            Flip(usize, u8),
+            Cut(usize),
+        }
+
+        fn any_flip() -> impl Strategy<Value = Damage> {
+            prop_oneof![
+                Just(Damage::None),
+                (proptest::num::usize::ANY, 1u8..=255)
+                    .prop_map(|(at, mask)| Damage::Flip(at, mask)),
+                proptest::num::usize::ANY.prop_map(Damage::Cut),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(config())]
+
+            #[test]
+            fn inflation_stays_within_cap_holds((stream, cap) in stream_and_cap()) {
+                if let Err(violation) = inflation_stays_within_cap(&stream, cap) {
+                    panic!("{violation}");
+                }
+            }
+        }
+    }
 }
