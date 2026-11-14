@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/visualcommons/gamut/compare/gamut-core-v3.0.0...gamut-core-v4.0.0) - 2026-11-14
+
+### Other
+
+- *(gamut-tiff)* [**breaking**] shared IFD layer, configurable limits and the workspace metadata shape ([#1168](https://github.com/visualcommons/gamut/pull/1168))
+- *(gamut-png)* [**breaking**] workspace knobs, typed ancillary setters, shared registry and metadata sink ([#1155](https://github.com/visualcommons/gamut/pull/1155))
+- *(gamut-color)* [**breaking**] type ChromaSubsampling::factors as Dimensions ([#1145](https://github.com/visualcommons/gamut/pull/1145))
+- *(gamut-ifd)* [**breaking**] named-struct returns, one audited reader, core Segment, flat C2PA exports ([#1140](https://github.com/visualcommons/gamut/pull/1140))
+- *(gamut-color)* [**breaking**] one chroma/CICP vocabulary, kernels to gamut-dsp, Color spelling ([#1135](https://github.com/visualcommons/gamut/pull/1135))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- *(gamut-core)* [**breaking**] opaque Error, private Dimensions fields, shared vocabulary ([#1126](https://github.com/visualcommons/gamut/pull/1126))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-core-v2.0.1...gamut-core-v3.0.0) - 2026-10-12
 
 ### Added
