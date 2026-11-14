@@ -27,11 +27,16 @@
 //! This module is the test oracle, not the system under test, so `.cargo/mutants.toml` excludes
 //! `crates/*/src/invariants.rs` from mutation.
 
-use gamut_core::Result as CoreResult;
+use std::sync::{Arc, Mutex};
+
+use gamut_codec_abi::Registry;
+use gamut_core::{Dimensions, Result as CoreResult};
+use gamut_heif::{
+    DECODED_ITEM_LIMIT, DERIVED_ITEM_LIMIT, DIMENSION_LIMIT, DecodeOptions, PIXEL_LIMIT,
+};
 
 use crate::clean_alpha::clean_rgba;
-use crate::decode::{DECODED_ITEM_LIMIT, DERIVED_ITEM_LIMIT, DIMENSION_LIMIT, PIXEL_LIMIT};
-use crate::{Av1Config, Av1StillDecoder, AvifContainer, DecodeLimits, DecodedFrame};
+use crate::{Av1, Av1CodestreamDecoder, Av1Config, AvifContainer, DecodeLimits, DecodedFrame};
 
 /// A sample type the law reads, with the alpha value that means fully opaque.
 pub(crate) trait Scale: Copy + Into<u32> {
@@ -164,7 +169,11 @@ pub const STUB_MAX_SIDE: u8 = 16;
 #[derive(Debug, Clone, Default)]
 pub struct StubDecoder;
 
-impl Av1StillDecoder for StubDecoder {
+impl Av1CodestreamDecoder for StubDecoder {
+    fn supports(&mut self, _config: &Av1Config) -> bool {
+        true
+    }
+
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> CoreResult<DecodedFrame> {
         let from_end = |back: usize| {
             payload
@@ -174,7 +183,7 @@ impl Av1StillDecoder for StubDecoder {
         };
         let side = u32::from(STUB_MAX_SIDE);
         let (width, height) = (1 + from_end(2) % side, 1 + from_end(1) % side);
-        let chroma = config.chroma_format();
+        let chroma = config.chroma_subsampling();
         let sample = |i: usize| {
             payload
                 .get(i % payload.len().max(1))
@@ -182,14 +191,10 @@ impl Av1StillDecoder for StubDecoder {
         };
         let luma = (width * height) as usize;
         let (cw, ch) = chroma.chroma_dimensions(width, height);
-        let chroma_len = if chroma == crate::ChromaFormat::Monochrome {
-            0
-        } else {
-            (cw * ch) as usize
-        };
+        // Monochrome's chroma dimensions are `(0, 0)`, so this is empty for it.
+        let chroma_len = (cw * ch) as usize;
         DecodedFrame::new(
-            width,
-            height,
+            Dimensions::new(width, height)?,
             config.bit_depth(),
             chroma,
             (0..luma).map(sample).collect(),
@@ -270,17 +275,20 @@ pub fn decoding_stays_within_limits(
         limits.max_decoded_items.min(ceiling.max_decoded_items),
         limits.max_derived_items.min(ceiling.max_derived_items),
     );
+    let mut backends: Registry<dyn Av1CodestreamDecoder + Send> = Registry::new();
+    backends.push(Arc::new(Mutex::new(StubDecoder)));
+    let options = |l| DecodeOptions::default().with_limits(l);
     for item in image.items() {
         let id = item.id();
         let planar = |l| {
             image
-                .decode_item_planar_with_limits(id, &mut StubDecoder, l)
+                .decode_item_planar::<Av1>(id, &backends, l)
                 .map(|f| (f.width(), f.height(), [f.y(), f.cb(), f.cr()].concat()))
         };
         runs_agree_within_limits("planar", id, limits, planar(limits), planar(ceiling))?;
         let rgba8 = |l| {
             image
-                .decode_item_rgba8_with_limits(id, &mut StubDecoder, l)
+                .decode_item_rgba8::<Av1>(id, &backends, options(l))
                 .map(|b| {
                     let samples = b.as_samples().iter().map(|&s| u16::from(s)).collect();
                     (b.width(), b.height(), samples)
@@ -289,7 +297,7 @@ pub fn decoding_stays_within_limits(
         runs_agree_within_limits("rgba8", id, limits, rgba8(limits), rgba8(ceiling))?;
         let rgba16 = |l| {
             image
-                .decode_item_rgba16_with_limits(id, &mut StubDecoder, l)
+                .decode_item_rgba16::<Av1>(id, &backends, options(l))
                 .map(|b| (b.width(), b.height(), b.as_samples().to_vec()))
         };
         runs_agree_within_limits("rgba16", id, limits, rgba16(limits), rgba16(ceiling))?;
@@ -306,10 +314,10 @@ mod tests {
     // property over it vacuous while still passing.
 
     use gamut_core::Error;
+    use gamut_heif::{DECODED_ITEM_LIMIT, DERIVED_ITEM_LIMIT, DIMENSION_LIMIT, PIXEL_LIMIT};
 
     use super::{composite_is_unchanged, premultiply, runs_agree_within_limits};
     use crate::DecodeLimits;
-    use crate::decode::{DECODED_ITEM_LIMIT, DERIVED_ITEM_LIMIT, DIMENSION_LIMIT, PIXEL_LIMIT};
 
     const LIMITS: DecodeLimits = DecodeLimits::new(4, 12);
 

@@ -7,8 +7,8 @@
 //! installed. Building these tests therefore needs cmake/meson/ninja/nasm and the checked-out
 //! submodules (`git submodule update --init --recursive`).
 
-use gamut_avif::{AvifEncoder, Mirror, Rotation};
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use gamut_avif::AvifEncoder;
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Orientation, Rgb8};
 
 /// Source RGB pattern (structure + variation to exercise nonzero coefficients).
 fn rgb_at(x: u32, y: u32) -> (u8, u8, u8) {
@@ -125,7 +125,7 @@ fn lossy_roundtrip_via_libavif() {
                 &planes,
                 &gamut_av1::Av1EncodeConfig::new(qidx)
                     .with_color(lossy_colour())
-                    .with_effort(AvifEncoder::lossy(quality).effort()),
+                    .with_effort(AvifEncoder::lossy(quality).config().effort),
             )
             .unwrap()
             .recon;
@@ -255,16 +255,9 @@ fn orientation_transforms_roundtrip_via_libavif() {
     // returned samples, so the stored planes are unchanged — the lossless pixels still round-trip.
     let (w, h) = (24u32, 16u32);
     let rgb = source_rgb(w, h);
-    for (rot, mir) in [
-        (Rotation::Ccw90, None),
-        (Rotation::None, Some(Mirror::TopBottom)),
-        (Rotation::Ccw270, Some(Mirror::LeftRight)),
-        (Rotation::Ccw180, Some(Mirror::TopBottom)),
-    ] {
-        let mut enc = AvifEncoder::new().with_rotation(rot);
-        if let Some(mirror) = mir {
-            enc = enc.with_mirror(mirror);
-        }
+    for exif in 1..=8 {
+        let orientation = Orientation::from_exif_value(exif).unwrap();
+        let enc = AvifEncoder::new().with_orientation(orientation);
         let mut avif = Vec::new();
         enc.encode_image(
             ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap(),
@@ -273,7 +266,7 @@ fn orientation_transforms_roundtrip_via_libavif() {
         .unwrap();
 
         let decoded = libavif_oracle::decode_avif(&avif)
-            .unwrap_or_else(|e| panic!("libavif rejected irot={rot:?} imir={mir:?}: {e}"));
+            .unwrap_or_else(|e| panic!("libavif rejected {orientation:?}: {e}"));
         assert_eq!(
             (decoded.width, decoded.height),
             (w, h),
@@ -284,11 +277,7 @@ fn orientation_transforms_roundtrip_via_libavif() {
             for x in 0..w {
                 let i = (y * w + x) as usize;
                 let (r, g, b) = rgb_at(x, y);
-                assert_eq!(
-                    yp[i],
-                    u16::from(g),
-                    "Y at ({x},{y}) irot={rot:?} imir={mir:?}"
-                );
+                assert_eq!(yp[i], u16::from(g), "Y at ({x},{y}) {orientation:?}");
                 assert_eq!(up[i], u16::from(b));
                 assert_eq!(vp[i], u16::from(r));
             }
@@ -325,7 +314,7 @@ fn every_chroma_format_roundtrips_via_libavif() {
                 &planes,
                 &gamut_av1::Av1EncodeConfig::new(quality_to_quant(60))
                     .with_color(lossy_colour())
-                    .with_effort(AvifEncoder::lossy(60).effort()),
+                    .with_effort(AvifEncoder::lossy(60).config().effort),
             )
             .unwrap()
             .recon;

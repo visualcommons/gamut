@@ -17,7 +17,7 @@
 
 mod common;
 
-use common::{Dav1dDecoder, av01_item};
+use common::{Dav1dDecoder, Decode, av01_item};
 use gamut_avif::{
     AvifContainer, AvifEncoder, C2PA_NOT_VALIDATED, C2PA_UUID, C2paBoxPosition, C2paBoxPurpose,
     SegmentKind,
@@ -75,13 +75,15 @@ fn two_equal_length_stores_give_files_that_differ_exactly_in_the_reported_slot()
     let b = payload(0x11 ^ 0xff, LEN);
     assert!(a.iter().zip(&b).all(|(x, y)| x != y), "every byte differs");
 
-    let (file_a, report_a) = AvifEncoder::new()
+    let mut file_a = Vec::new();
+    let report_a = AvifEncoder::new()
         .with_c2pa(&a)
-        .encode_with_report(image(&rgb))
+        .encode_with_report(image(&rgb), &mut file_a)
         .expect("encode a");
-    let (file_b, report_b) = AvifEncoder::new()
+    let mut file_b = Vec::new();
+    let report_b = AvifEncoder::new()
         .with_c2pa(&b)
-        .encode_with_report(image(&rgb))
+        .encode_with_report(image(&rgb), &mut file_b)
         .expect("encode b");
 
     let range = report_a.c2pa.expect("a slot was written");
@@ -102,9 +104,11 @@ fn patching_a_reserved_slot_at_the_reported_range_reproduces_the_written_store_f
     let rgb = source_rgb();
     let store = payload(0x22, LEN);
 
-    let (mut reserved, report) = AvifEncoder::new()
+    let mut reserved = Vec::new();
+    let report = AvifEncoder::new()
         .with_c2pa_reserved(LEN)
-        .encode_with_report(image(&rgb))
+        .unwrap()
+        .encode_with_report(image(&rgb), &mut reserved)
         .expect("encode reserved");
     let range = report.c2pa.expect("a slot was reserved");
     assert_eq!(range.end - range.start, LEN as u64);
@@ -137,17 +141,19 @@ fn encode_with_report_yields_encode_to_vec_bytes_and_no_range_when_unconfigured(
     let plain = AvifEncoder::new()
         .encode_to_vec(image(&rgb))
         .expect("encode");
-    let (bytes, report) = AvifEncoder::new()
-        .encode_with_report(image(&rgb))
+    let mut bytes = Vec::new();
+    let report = AvifEncoder::new()
+        .encode_with_report(image(&rgb), &mut bytes)
         .expect("encode with report");
     assert_eq!(bytes, plain, "the same encode, with a report alongside");
     assert_eq!(report.c2pa, None);
 
     // With a slot, the bytes are still the trait's bytes.
-    let reserved = AvifEncoder::new().with_c2pa_reserved(64);
+    let reserved = AvifEncoder::new().with_c2pa_reserved(64).unwrap();
     let plain = reserved.encode_to_vec(image(&rgb)).expect("encode");
-    let (bytes, report) = reserved
-        .encode_with_report(image(&rgb))
+    let mut bytes = Vec::new();
+    let report = reserved
+        .encode_with_report(image(&rgb), &mut bytes)
         .expect("encode with report");
     assert_eq!(bytes, plain);
     assert_eq!(report.c2pa.map(|r| r.end - r.start), Some(64));
@@ -156,9 +162,11 @@ fn encode_with_report_yields_encode_to_vec_bytes_and_no_range_when_unconfigured(
 #[test]
 fn the_crate_locates_the_slot_it_reserved_at_the_reported_range() {
     let rgb = source_rgb();
-    let (bytes, report) = AvifEncoder::new()
+    let mut bytes = Vec::new();
+    let report = AvifEncoder::new()
         .with_c2pa_reserved(128)
-        .encode_with_report(image(&rgb))
+        .unwrap()
+        .encode_with_report(image(&rgb), &mut bytes)
         .expect("encode");
     let container = AvifContainer::parse(&bytes).expect("gamut-avif parses its own output");
     let store = container.c2pa_slot().expect("the slot is located");
@@ -202,9 +210,10 @@ fn with_c2pa_writes_and_locates_a_store_shorter_than_a_jumbf_box_header() {
     let rgb = source_rgb();
     for len in 0..8 {
         let store = payload(0x44, len);
-        let (bytes, report) = AvifEncoder::new()
+        let mut bytes = Vec::new();
+        let report = AvifEncoder::new()
             .with_c2pa(&store)
-            .encode_with_report(image(&rgb))
+            .encode_with_report(image(&rgb), &mut bytes)
             .unwrap_or_else(|err| panic!("a {len}-byte store is written: {err}"));
         let range = report.c2pa.expect("a slot was written");
         assert_eq!(
@@ -269,12 +278,12 @@ fn a_file_mid_update_reports_its_original_and_update_stores_in_file_order() {
 }
 
 #[test]
-fn a_store_after_a_top_level_moov_and_before_mdat_reports_before_media_data() {
-    // A pin of today's behaviour, not of §A.5.3: that clause names `moov` as a boundary beside
-    // `mdat`, but the locator's walk treats only `mdat` as one. An `avis` file's `moov` does reach
-    // a parsed AVIF (`conformance.rs`, `animated_sequence_parses_its_still_and_accounts_the_track`),
-    // so a store between `moov` and `mdat` is reachable and reports `BeforeMediaData` with the
-    // plain located headline. A change to that is a decision, and flips this pin with it.
+fn a_store_after_a_top_level_moov_and_before_mdat_reports_after_the_movie_box() {
+    // §A.5.3 names `moov` as a boundary beside `mdat`, and the shared HEIF summary treats it as
+    // one (D17 flipped this pin from `BeforeMediaData`). An `avis` file's `moov` does reach a
+    // parsed AVIF (`conformance.rs`, `animated_sequence_parses_its_still_and_accounts_the_track`),
+    // so a store between `moov` and `mdat` is reachable and reports `AfterMovieBox`; the headline
+    // stays the plain located one, the position being a detail-line note.
     //
     // `IsoBmffImage::to_bytes` refuses a `moov` top-level box, so the file is written with a `free`
     // box of the same length in its place and the four type bytes are rewritten afterwards: every
@@ -329,7 +338,8 @@ fn a_store_after_a_top_level_moov_and_before_mdat_reports_before_media_data() {
         bytes.get(range.start as usize..range.end as usize),
         Some(&store[..])
     );
-    assert_eq!(summary.stores[0].position, C2paBoxPosition::BeforeMediaData);
+    // D17: a `moov` is a position boundary for the shared summary, as it was for gamut-heic's.
+    assert_eq!(summary.stores[0].position, C2paBoxPosition::AfterMovieBox);
     assert_eq!(
         summary.summary_lines(),
         [format!(
@@ -359,6 +369,7 @@ fn libavif_decodes_a_file_carrying_a_reserved_slot_unchanged() {
         .expect("encode");
     let reserved = AvifEncoder::new()
         .with_c2pa_reserved(4096)
+        .unwrap()
         .encode_to_vec(image(&rgb))
         .expect("encode");
     assert!(reserved.len() > bare.len(), "the slot is actually stored");
@@ -402,16 +413,17 @@ fn dav1d_through_the_crate_decodes_a_file_carrying_a_reserved_slot_unchanged() {
         .expect("encode");
     let reserved = AvifEncoder::new()
         .with_c2pa_reserved(4096)
+        .unwrap()
         .encode_to_vec(image(&rgb))
         .expect("encode");
 
     let a = AvifContainer::parse(&bare)
         .expect("parses")
-        .decode_primary_rgba8(&mut Dav1dDecoder)
+        .primary_rgba8(&mut Dav1dDecoder)
         .expect("decodes");
     let b = AvifContainer::parse(&reserved)
         .expect("parses")
-        .decode_primary_rgba8(&mut Dav1dDecoder)
+        .primary_rgba8(&mut Dav1dDecoder)
         .expect("decodes");
     assert_eq!(a.as_samples(), b.as_samples());
     for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {

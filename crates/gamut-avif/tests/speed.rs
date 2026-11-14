@@ -105,11 +105,14 @@ fn rgba8_stills(effort: Effort) -> [StillWithRecon; 2] {
 fn effort_defaults_to_the_codec_default_and_reports_the_chosen_preset() {
     // The default has one owner, `gamut-av1`: both constructors take `Effort::default()`, which is
     // the middle preset.
-    assert_eq!(AvifEncoder::lossy(50).effort(), Effort::default());
-    assert_eq!(AvifEncoder::lossless().effort(), Effort::default());
+    assert_eq!(AvifEncoder::lossy(50).config().effort, Effort::default());
+    assert_eq!(AvifEncoder::lossless().config().effort, Effort::default());
     assert_eq!(Effort::default(), Effort::Balanced);
     for &effort in Effort::ALL {
-        assert_eq!(AvifEncoder::lossy(50).with_effort(effort).effort(), effort);
+        assert_eq!(
+            AvifEncoder::lossy(50).with_effort(effort).config().effort,
+            effort
+        );
     }
 }
 

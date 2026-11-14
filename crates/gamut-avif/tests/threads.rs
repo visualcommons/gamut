@@ -10,7 +10,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Color, Av1EncodeConfig, Tiling};
-use gamut_avif::{Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
+use gamut_avif::{Av1CodestreamEncoder, Av1EncodeRequest, AvifEncoder};
 use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr};
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Result, Rgb8, Rgba8, Rgba16};
 
@@ -100,11 +100,11 @@ where
 
 #[test]
 fn threads_default_to_one_and_report_the_chosen_cap() {
-    assert_eq!(AvifEncoder::new().threads(), threads(1));
-    assert_eq!(AvifEncoder::lossy(50).threads(), threads(1));
-    assert_eq!(AvifEncoder::new().with_threads(None).threads(), None);
+    assert_eq!(AvifEncoder::new().config().threads, threads(1));
+    assert_eq!(AvifEncoder::lossy(50).config().threads, threads(1));
+    assert_eq!(AvifEncoder::new().with_threads(None).config().threads, None);
     assert_eq!(
-        AvifEncoder::new().with_threads(threads(6)).threads(),
+        AvifEncoder::new().with_threads(threads(6)).config().threads,
         threads(6)
     );
 }
@@ -168,7 +168,7 @@ fn libavif_reconstructs_a_multithreaded_rgba_encode_to_the_av1_reconstruction() 
     let config = |colour| {
         Av1EncodeConfig::new(Q50)
             .with_color(colour)
-            .with_effort(AvifEncoder::lossy(50).effort())
+            .with_effort(AvifEncoder::lossy(50).config().effort)
     };
     let colour_recon = gamut_av1::encode_still_with_recon(&colour_planes, &config(colour))
         .unwrap()
@@ -198,7 +198,7 @@ fn libavif_reconstructs_a_multithreaded_rgba_encode_to_the_av1_reconstruction() 
 /// encoder still codes the file.
 struct Recorder(Arc<Mutex<Vec<usize>>>);
 
-impl Av1StillEncoder for Recorder {
+impl Av1CodestreamEncoder for Recorder {
     fn supports(&mut self, req: &Av1EncodeRequest) -> bool {
         self.0.lock().unwrap().push(req.threads().get());
         false
@@ -220,7 +220,7 @@ where
 {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut encoder = encoder;
-    encoder.push_backend(Recorder(Arc::clone(&seen)));
+    encoder = encoder.with_backend(Recorder(Arc::clone(&seen)));
     encode::<P>(&encoder, px);
     seen.lock().unwrap().clone()
 }

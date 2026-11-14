@@ -50,15 +50,40 @@
 #define GAMUT_CHROMA_SUBSAMPLING_400 3
 
 /**
- * `gamut_avif_encoder_set_mirror` value: top and bottom exchanged (the `imir` axis `0`,
- * ISO/IEC 23008-12:2022 §6.5.12).
+ * `gamut_avif_encoder_set_alpha_mode` value: the colour is unassociated and coded as given
+ * (`AlphaMode::Unassociated`, the default).
  */
-#define GAMUT_AVIF_MIRROR_TOP_BOTTOM 0
+#define GAMUT_AVIF_ALPHA_UNASSOCIATED 0
 
 /**
- * `gamut_avif_encoder_set_mirror` value: left and right exchanged (the `imir` axis `1`).
+ * `gamut_avif_encoder_set_alpha_mode` value: the colour is already premultiplied and declared
+ * with `prem` (`AlphaMode::Premultiplied`).
  */
-#define GAMUT_AVIF_MIRROR_LEFT_RIGHT 1
+#define GAMUT_AVIF_ALPHA_PREMULTIPLIED 1
+
+/**
+ * `gamut_avif_encoder_set_alpha_mode` value: the encoder premultiplies unassociated colour and
+ * declares it with `prem` (`AlphaMode::PremultiplyOnEncode`).
+ */
+#define GAMUT_AVIF_ALPHA_PREMULTIPLY_ON_ENCODE 2
+
+/**
+ * `gamut_avif_encoder_set_alpha_mode` value: the encoder cleans the colour hidden under
+ * transparency before a lossy encode (`AlphaMode::CleanOnEncode`).
+ */
+#define GAMUT_AVIF_ALPHA_CLEAN_ON_ENCODE 3
+
+/**
+ * `gamut_avif_encoder_set_opaque_alpha` value: a fully opaque RGBA input drops its alpha
+ * auxiliary (`OpaqueAlpha::Drop`, the default).
+ */
+#define GAMUT_AVIF_OPAQUE_ALPHA_DROP 0
+
+/**
+ * `gamut_avif_encoder_set_opaque_alpha` value: a fully opaque RGBA input keeps its alpha
+ * auxiliary (`OpaqueAlpha::Keep`).
+ */
+#define GAMUT_AVIF_OPAQUE_ALPHA_KEEP 1
 
 /**
  * `gamut_png_encoder_set_palette_order` value: a caller-supplied palette keeps the order it
@@ -78,7 +103,7 @@
 typedef struct GamutAvifEncoder GamutAvifEncoder;
 
 /**
- * Opaque handle over a parsed AVIF file (`gamut::avif::AvifImage`, the role-typed view
+ * Opaque handle over a parsed AVIF file (`gamut::avif::HeifImage`, the role-typed view
  * `AvifContainer::parse` builds). It owns every payload, so it outlives the input buffer.
  */
 typedef struct GamutAvifImage GamutAvifImage;
@@ -559,55 +584,10 @@ gamut_status_t gamut_avif_encoder_set_alpha_quality(struct GamutAvifEncoder *enc
                                                     uint8_t quality);
 
 /**
- * Declares that an RGBA input's colour values are already premultiplied by alpha
- * (`AvifEncoder::with_premultiplied_alpha`) — a declaration, not a conversion; written as a
- * `prem` reference. Ignored by inputs without alpha.
- *
- * Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
- *
- * # Safety
- *
- * `encoder` is `NULL` or a live encoder handle.
- */
-gamut_status_t gamut_avif_encoder_set_premultiplied_alpha(struct GamutAvifEncoder *encoder,
-                                                          bool premultiplied);
-
-/**
- * Keeps the alpha auxiliary of an RGBA input whose every alpha sample is fully opaque (255, or
- * 65535) when `keep` is `true` (`AvifEncoder::with_keep_opaque_alpha`). Without this call, or
- * with `false`, such an input drops its alpha and encodes as the file
- * `gamut_avif_encoder_encode_rgb8` / `gamut_avif_encoder_encode_rgb16` writes for its colour.
- * Set it when a consumer needs the alpha item present regardless of its values. Ignored by
- * inputs without alpha and by inputs with any non-opaque alpha sample, which always keep it.
- *
- * Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
- *
- * # Safety
- *
- * `encoder` is `NULL` or a live encoder handle.
- */
-gamut_status_t gamut_avif_encoder_set_keep_opaque_alpha(struct GamutAvifEncoder *encoder,
-                                                        bool keep);
-
-/**
- * Records an `irot` display rotation of `quarter_turns_ccw` anti-clockwise quarter turns
- * (`0..=3`; `0` writes no `irot`), applied by a reader — the stored pixels are unchanged
- * (`AvifEncoder::with_rotation`).
- *
- * Returns `GAMUT_STATUS_INVALID_INPUT` for a value above `3`, `GAMUT_STATUS_NULL_ARGUMENT` on
- * a `NULL` encoder.
- *
- * # Safety
- *
- * `encoder` is `NULL` or a live encoder handle.
- */
-gamut_status_t gamut_avif_encoder_set_rotation(struct GamutAvifEncoder *encoder,
-                                               uint8_t quarter_turns_ccw);
-
-/**
- * Records an `imir` display mirror, one of the `GAMUT_AVIF_MIRROR_*` constants, applied by a
- * reader — the stored pixels are unchanged (`AvifEncoder::with_mirror`). As in Rust, a mirror
- * once set can be replaced but not removed.
+ * Selects how an RGBA input's colour relates to its alpha, one of the `GAMUT_AVIF_ALPHA_*`
+ * constants (`AvifEncoder::with_alpha_mode`): unassociated, already premultiplied (declared with
+ * `prem`), premultiplied by the encoder, or cleaned under transparency before a lossy encode.
+ * Ignored by inputs without alpha.
  *
  * Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants,
  * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
@@ -616,7 +596,40 @@ gamut_status_t gamut_avif_encoder_set_rotation(struct GamutAvifEncoder *encoder,
  *
  * `encoder` is `NULL` or a live encoder handle.
  */
-gamut_status_t gamut_avif_encoder_set_mirror(struct GamutAvifEncoder *encoder, uint8_t mirror);
+gamut_status_t gamut_avif_encoder_set_alpha_mode(struct GamutAvifEncoder *encoder, uint8_t mode);
+
+/**
+ * Selects whether an RGBA input whose every alpha sample is fully opaque (255, or 65535) keeps
+ * its alpha auxiliary, one of the `GAMUT_AVIF_OPAQUE_ALPHA_*` constants
+ * (`AvifEncoder::with_opaque_alpha`). By default such an input drops its alpha and encodes as
+ * the file `gamut_avif_encoder_encode_rgb8` / `gamut_avif_encoder_encode_rgb16` writes for its
+ * colour. Ignored by inputs without alpha and by inputs with any non-opaque alpha sample, which
+ * always keep it.
+ *
+ * Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants,
+ * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_opaque_alpha(struct GamutAvifEncoder *encoder,
+                                                   uint8_t opaque_alpha);
+
+/**
+ * Records the display orientation a reader applies, by its EXIF `Orientation` value (`1..=8`;
+ * `1` writes neither `irot` nor `imir`), as `irot`/`imir` item properties — the stored pixels
+ * are unchanged (`AvifEncoder::with_orientation`). A later call replaces it.
+ *
+ * Returns `GAMUT_STATUS_INVALID_INPUT` for a value outside `1..=8`,
+ * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_orientation(struct GamutAvifEncoder *encoder,
+                                                  uint8_t exif_orientation);
 
 /**
  * Embeds an ICC profile, carried verbatim as a `colr` `prof` box
@@ -675,9 +688,9 @@ gamut_status_t gamut_avif_encoder_set_xmp(struct GamutAvifEncoder *encoder,
  * `gamut_avif_encoder_c2pa_slot` reports where the slot landed; the signer writes a store of at
  * most `len` bytes there, and nothing else in the file moves.
  *
- * This setter cannot reject `len`: as in Rust, an unusable length (below 8 bytes, or one too
- * large to frame) is refused by the encode that follows (`GAMUT_STATUS_INVALID_INPUT`, or
- * `GAMUT_STATUS_UNSUPPORTED` for a box at or beyond 4 GiB). This call, or
+ * As in Rust, an unusable length is refused here, leaving the encoder as it was:
+ * `GAMUT_STATUS_INVALID_INPUT` below 8 bytes or for one too large to frame, and
+ * `GAMUT_STATUS_UNSUPPORTED` for a box at or beyond 4 GiB. This call, or
  * `gamut_avif_encoder_set_c2pa`, replaces any earlier one. Returns
  * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
  *
@@ -755,10 +768,10 @@ gamut_status_t gamut_avif_encoder_encode_rgb8(const struct GamutAvifEncoder *enc
 
 /**
  * Encodes interleaved 8-bit RGBA samples (unassociated alpha unless
- * `gamut_avif_encoder_set_premultiplied_alpha` says otherwise) to an AVIF file with an alpha
+ * `gamut_avif_encoder_set_alpha_mode` says otherwise) to an AVIF file with an alpha
  * auxiliary. An input whose every alpha sample is 255 is fully opaque: its alpha is dropped
  * and the file is the one `gamut_avif_encoder_encode_rgb8` writes for its colour, with no
- * alpha auxiliary, unless `gamut_avif_encoder_set_keep_opaque_alpha` keeps it. `samples_len`
+ * alpha auxiliary, unless `gamut_avif_encoder_set_opaque_alpha` keeps it. `samples_len`
  * counts samples (`width * height * 4`); otherwise as `gamut_avif_encoder_encode_rgb8`.
  *
  * # Safety
@@ -811,7 +824,7 @@ gamut_status_t gamut_avif_encoder_encode_rgb16(const struct GamutAvifEncoder *en
  * Encodes interleaved 16-bit RGBA samples (full 16-bit scale) with an alpha auxiliary. An
  * input whose every alpha sample is 65535 is fully opaque: its alpha is dropped and the file is
  * the one `gamut_avif_encoder_encode_rgb16` writes for its colour, with no alpha auxiliary,
- * unless `gamut_avif_encoder_set_keep_opaque_alpha` keeps it. Opacity is judged on the input
+ * unless `gamut_avif_encoder_set_opaque_alpha` keeps it. Opacity is judged on the input
  * samples, so an alpha of 65534 keeps the auxiliary even where it truncates to the coded
  * maximum. `samples_len` counts samples (`width * height * 4`); otherwise as
  * `gamut_avif_encoder_encode_rgb16`.
@@ -904,8 +917,9 @@ gamut_status_t gamut_avif_image_av1c(const struct GamutAvifImage *image,
 
 /**
  * The Exif payload describing the primary item, borrowed from `image` — **raw**, including
- * HEIF's 4-byte big-endian `exif_tiff_header_offset` prefix (as `AvifImage::exif` exposes it
- * and libheif returns it); the TIFF stream starts that many bytes after the prefix.
+ * HEIF's 4-byte big-endian `exif_tiff_header_offset` prefix (as the payload of the
+ * `HeifImage::exif` item carries it and libheif returns it); the TIFF stream starts that many
+ * bytes after the prefix.
  *
  * `GAMUT_OK` with `*data == NULL`, `*len == 0` when there is none;
  * `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
@@ -949,7 +963,7 @@ gamut_status_t gamut_avif_image_icc_profile(const struct GamutAvifImage *image,
 
 /**
  * Writes whether the primary item's colour values are premultiplied by its alpha auxiliary
- * (a `prem` reference; `AvifImage::is_premultiplied`) to `*premultiplied`.
+ * (a `prem` reference; `HeifImage::is_premultiplied`) to `*premultiplied`.
  *
  * Returns `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
  *

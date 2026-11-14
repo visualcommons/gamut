@@ -1,5 +1,5 @@
 //! Differential conformance for the AVIF decode surface (issue #250): the container view, the
-//! `Av1StillDecoder` seam, and both presentation surfaces are checked against **libavif**
+//! `Av1CodestreamDecoder` seam, and both presentation surfaces are checked against **libavif**
 //! (`introspect`/`decode_rgba`, dav1d-backed) and against **dav1d directly** (`decode_obu` through
 //! the same seam a platform decoder would use), over the libavif conformance corpus committed in
 //! `third_party/libavif/tests/data` plus this crate's own encoder output.
@@ -8,25 +8,33 @@
 //! C toolchain (cmake/meson/ninja; nasm is vendored) — the same set the existing encoder oracle
 //! tests already need.
 
+mod common;
+
 use std::path::PathBuf;
 
+use common::Decode;
 use gamut_avif::{
-    Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, AvifImage, ChromaFormat,
-    ChromaUpsampling, DecodeOptions, DecodedFrame, Mirror, Rotation, SegmentKind,
+    Av1CodestreamDecoder, Av1Config, AvifContainer, AvifEncoder, ChromaUpsampling, DecodeOptions,
+    DecodedFrame, HeifImage, ItemKind, SegmentKind,
 };
 use gamut_color::{ChromaSubsampling, ColorRange, MatrixCoefficients};
-use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Orientation, Result, Rgb8};
 use gamut_isobmff::{ColourInformation, PropertyKind};
 
-// ---- the dav1d bridge: an Av1StillDecoder over the raw codestream oracle ---------------------
+// ---- the dav1d bridge: an Av1CodestreamDecoder over the raw codestream oracle ---------------------
 
-/// [`Av1StillDecoder`] implemented with the real dav1d decoder (`dav1d-oracle`), bridged exactly
+/// [`Av1CodestreamDecoder`] implemented with the real dav1d decoder (`dav1d-oracle`), bridged exactly
 /// the way a platform decoder would be: the typed `av1C` + raw item payload are assembled into
 /// one self-contained temporal unit with [`Av1Config::full_stream`] and handed to a Section-5
 /// decoder.
+#[derive(Default)]
 struct Dav1dDecoder;
 
-impl Av1StillDecoder for Dav1dDecoder {
+impl Av1CodestreamDecoder for Dav1dDecoder {
+    fn supports(&mut self, _config: &Av1Config) -> bool {
+        true
+    }
+
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;
@@ -36,11 +44,11 @@ impl Av1StillDecoder for Dav1dDecoder {
                 "conformance: dav1d rejected the stream",
             )
         })?;
-        let chroma = config.chroma_format();
+        let chroma = config.chroma_subsampling();
         let [y, u, v] = pic.planes;
         // `DecodedFrame::new` validates the plane lengths against the av1C-derived chroma, so a
         // config/codestream mismatch fails loudly here.
-        DecodedFrame::new(pic.width, pic.height, pic.bit_depth, chroma, y, u, v)
+        common::decoded_frame(pic.width, pic.height, pic.bit_depth, chroma, y, u, v)
     }
 }
 
@@ -122,7 +130,7 @@ fn structure_agrees_with_libavif() {
         let container =
             AvifContainer::parse(&data).unwrap_or_else(|e| panic!("{name}: gamut parse: {e:?}"));
         let img = container.image();
-        assert!(img.is_av1_still(), "{name}");
+        assert!(container.is_av1_still(), "{name}");
         let primary = img.primary_item();
 
         // Presentation dimensions: libavif reports the primary's ispe; a grid's ispe is its
@@ -139,24 +147,24 @@ fn structure_agrees_with_libavif() {
 
         // av1C facts vs libavif's parsed depth/format. For a derived (grid) primary the config
         // lives on the tiles; resolve through the first derivation source then.
-        let coded = if primary.av1_config().is_some() {
+        let coded = if container.av1_config(primary.id()).is_ok() {
             primary
         } else {
             img.derivation_sources(primary.id())[0]
         };
-        let config = coded.av1_config().expect("av1C present").unwrap();
+        let config = container.av1_config(coded.id()).expect("av1C present");
         assert_eq!(
             u32::from(config.bit_depth()),
             u32::from(oracle.depth),
             "{name}: depth"
         );
         let oracle_chroma = match oracle.yuv_format {
-            1 => ChromaFormat::Yuv444,
-            2 => ChromaFormat::Yuv422,
-            3 => ChromaFormat::Yuv420,
-            _ => ChromaFormat::Monochrome,
+            1 => ChromaSubsampling::Cs444,
+            2 => ChromaSubsampling::Cs422,
+            3 => ChromaSubsampling::Cs420,
+            _ => ChromaSubsampling::Cs400,
         };
-        assert_eq!(config.chroma_format(), oracle_chroma, "{name}: chroma");
+        assert_eq!(config.chroma_subsampling(), oracle_chroma, "{name}: chroma");
 
         // CICP from the nclx colr (when the file's first colr is nclx; `paris` carries ICC too,
         // checked below via the property scan).
@@ -189,8 +197,8 @@ fn structure_agrees_with_libavif() {
         );
 
         // Transform values, wire-exact.
-        assert_eq!(primary.rotation(), oracle.irot_angle, "{name}: irot");
-        assert_eq!(primary.mirror(), oracle.imir_axis, "{name}: imir");
+        assert_eq!(common::irot(&primary), oracle.irot_angle, "{name}: irot");
+        assert_eq!(common::imir(&primary), oracle.imir_axis, "{name}: imir");
         let clap = primary.clean_aperture().map(|c| {
             [
                 c.width_n,
@@ -295,7 +303,7 @@ fn presentation_pixels_agree_with_libavif() {
         let nearest = DecodeOptions::default().with_chroma_upsampling(ChromaUpsampling::Nearest);
         let ours = container
             .image()
-            .decode_item_rgba8_with_options(
+            .rgba8_with_options(
                 container.image().primary_item().id(),
                 &mut Dav1dDecoder,
                 nearest,
@@ -351,7 +359,7 @@ fn default_presentation_matches_libavif_default_upsampling() {
             .unwrap_or_else(|e| panic!("{label}: libavif decode_rgba: {e}"));
         let container = AvifContainer::parse(data).unwrap();
         let ours = container
-            .decode_item_rgba8(container.image().primary_item().id(), &mut Dav1dDecoder)
+            .rgba8(container.image().primary_item().id(), &mut Dav1dDecoder)
             .unwrap_or_else(|e| panic!("{label}: gamut rgba decode: {e:?}"));
         assert_eq!((ours.width(), ours.height()), (ow, oh), "{label}: dims");
         let diff = rgba_diff(ours.as_samples(), &oracle);
@@ -379,8 +387,8 @@ fn self_encoded_lossless_is_bit_exact_end_to_end() {
     let rgb = source_rgb(w, h);
     let data = encode(AvifEncoder::lossless(), &rgb, w, h);
     let container = AvifContainer::parse(&data).unwrap();
-    assert!(container.image().is_av1_still());
-    let rgba = container.decode_primary_rgba8(&mut Dav1dDecoder).unwrap();
+    assert!(container.is_av1_still());
+    let rgba = container.primary_rgba8(&mut Dav1dDecoder).unwrap();
     assert_eq!((rgba.width(), rgba.height()), (w, h));
     for (px, src) in rgba
         .as_samples()
@@ -401,25 +409,26 @@ fn self_encoded_orientation_round_trips_through_the_decoder() {
     let (w, h) = (8u32, 6u32);
     let rgb = source_rgb(w, h);
     let data = encode(
-        AvifEncoder::lossless()
-            .with_rotation(Rotation::Ccw90)
-            .with_mirror(Mirror::LeftRight),
+        // A quarter turn anti-clockwise, then left↔right.
+        AvifEncoder::lossless().with_orientation(Orientation::AntiTranspose),
         &rgb,
         w,
         h,
     );
 
-    // Wire agreement: libavif sees irot angle 1 and imir axis 1 (left↔right per 23008-12:2022).
+    // Wire agreement: the anti-transpose is written as libavif writes it, irot angle 3 then imir
+    // axis 0 (top↔bottom per 23008-12:2022) — the same display transform as a quarter turn
+    // anti-clockwise then left↔right — and libavif sees those values.
     let oracle = libavif_oracle::introspect(&data).unwrap();
-    assert_eq!(oracle.irot_angle, Some(1));
-    assert_eq!(oracle.imir_axis, Some(1));
+    assert_eq!(oracle.irot_angle, Some(3));
+    assert_eq!(oracle.imir_axis, Some(0));
     let container = AvifContainer::parse(&data).unwrap();
-    assert_eq!(container.image().primary_item().rotation(), Some(1));
-    assert_eq!(container.image().primary_item().mirror(), Some(1));
+    assert_eq!(common::irot(&container.image().primary_item()), Some(3));
+    assert_eq!(common::imir(&container.image().primary_item()), Some(0));
 
     // Pixel direction: rotate the source 90° CCW, then mirror left↔right — reference transforms
     // written independently of the pipeline's.
-    let rgba = container.decode_primary_rgba8(&mut Dav1dDecoder).unwrap();
+    let rgba = container.primary_rgba8(&mut Dav1dDecoder).unwrap();
     assert_eq!((rgba.width(), rgba.height()), (h, w));
     let (nw, nh) = (h as usize, w as usize);
     let (wu, _) = (w as usize, h as usize);
@@ -448,14 +457,12 @@ fn planar_decode_is_bit_exact_against_raw_dav1d_and_libavif() {
     let container = AvifContainer::parse(&data).unwrap();
     let img = container.image();
     let primary = img.primary_item();
-    let frame = img
-        .decode_item_planar(primary.id(), &mut Dav1dDecoder)
-        .unwrap();
+    let frame = img.planar(primary.id(), &mut Dav1dDecoder).unwrap();
     assert_eq!(frame.bit_depth(), 10);
-    assert_eq!(frame.chroma(), ChromaFormat::Yuv444);
+    assert_eq!(frame.chroma(), ChromaSubsampling::Cs444);
 
     // (a) direct dav1d over the raw item payload.
-    let config = primary.av1_config().unwrap().unwrap();
+    let config = container.av1_config(primary.id()).unwrap();
     let mut stream = Vec::new();
     config
         .full_stream(&primary.as_isobmff_item().payload, &mut stream)
@@ -477,7 +484,7 @@ fn planar_decode_is_bit_exact_against_raw_dav1d_and_libavif() {
 
     // The 8-bit RGBA surface still declines the 10-bit frame rather than narrowing it.
     assert!(matches!(
-        container.decode_item_rgba8(primary.id(), &mut Dav1dDecoder),
+        container.rgba8(primary.id(), &mut Dav1dDecoder),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
@@ -495,7 +502,7 @@ fn planar_decode_is_bit_exact_against_raw_dav1d_and_libavif() {
         "corpus file's matrix changed; revisit this test"
     );
     assert!(matches!(
-        container.decode_primary_rgba16(&mut Dav1dDecoder),
+        container.primary_rgba16(&mut Dav1dDecoder),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
@@ -511,10 +518,10 @@ fn wide_surface_widens_a_real_eight_bit_codestream_exactly() {
     let data = corpus("io/kodim03_yuv420_8bpc.avif");
     let container = AvifContainer::parse(&data).unwrap();
     let narrow = container
-        .decode_primary_rgba8(&mut Dav1dDecoder)
+        .primary_rgba8(&mut Dav1dDecoder)
         .expect("8-bit RGBA decode");
     let wide = container
-        .decode_primary_rgba16(&mut Dav1dDecoder)
+        .primary_rgba16(&mut Dav1dDecoder)
         .expect("16-bit RGBA decode");
     assert_eq!(
         (narrow.width(), narrow.height()),
@@ -559,8 +566,8 @@ fn appended_stream_preserves_decode_and_accounts_every_byte() {
         Some(appended.len() - clean.len())
     );
     // The appended stream changes nothing about the primary decode.
-    let a = c_clean.decode_primary_rgba8(&mut Dav1dDecoder).unwrap();
-    let b = c_appended.decode_primary_rgba8(&mut Dav1dDecoder).unwrap();
+    let a = c_clean.primary_rgba8(&mut Dav1dDecoder).unwrap();
+    let b = c_appended.primary_rgba8(&mut Dav1dDecoder).unwrap();
     assert_eq!(a.as_samples(), b.as_samples());
 }
 
@@ -577,16 +584,14 @@ fn av1c_agrees_with_the_decoded_frames() {
         let container = AvifContainer::parse(&data).unwrap();
         let img = container.image();
         for item in img.items() {
-            let Some(config) = item.av1_config() else {
+            if !matches!(item.codec_configuration(), Some((b"av1C", _))) {
                 continue;
-            };
-            let config = config.unwrap();
+            }
+            let config = container.av1_config(item.id()).unwrap();
             // The pipeline validates the payload, decodes through dav1d, and `DecodedFrame::new`
             // re-checks the plane geometry against the av1C-derived chroma — so a mismatch
             // between the record and the actual codestream cannot pass.
-            let frame = img
-                .decode_item_planar(item.id(), &mut Dav1dDecoder)
-                .unwrap();
+            let frame = img.planar(item.id(), &mut Dav1dDecoder).unwrap();
             assert_eq!(
                 frame.bit_depth(),
                 config.bit_depth(),
@@ -595,7 +600,7 @@ fn av1c_agrees_with_the_decoded_frames() {
             );
             assert_eq!(
                 frame.chroma(),
-                config.chroma_format(),
+                config.chroma_subsampling(),
                 "{name}: item {}",
                 item.id()
             );
@@ -639,7 +644,7 @@ fn alpha_merge_agrees_with_libavif() {
     }
     let container = AvifContainer::parse(&data).unwrap();
     let ours = container
-        .decode_item_rgba8(container.image().primary_item().id(), &mut Dav1dDecoder)
+        .rgba8(container.image().primary_item().id(), &mut Dav1dDecoder)
         .unwrap();
     assert_eq!((ours.width(), ours.height()), (rw, rh));
     let diff = rgba_diff(ours.as_samples(), &oracle_rgba);
@@ -671,8 +676,8 @@ fn non_essential_transforms_diverge_documented() {
     assert!(libavif_oracle::introspect(&data).is_err());
     let container = AvifContainer::parse(&data).unwrap();
     let primary = container.image().primary_item();
-    assert_eq!(primary.rotation(), Some(1));
-    assert!(primary.mirror().is_some());
+    assert_eq!(common::irot(&primary), Some(1));
+    assert!(common::imir(&primary).is_some());
     assert!(primary.clean_aperture().is_some());
     assert!(primary.is_miaf_transform_ordered());
 }
@@ -698,12 +703,12 @@ fn animated_sequence_parses_its_still_and_accounts_the_track() {
         let data = corpus(name);
         let container = AvifContainer::parse(&data).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
-            container.image().primary_item().kind().is_av1(),
+            (container.image().primary_item().kind() == ItemKind::CodedImage { codec: *b"av01" }),
             "{name}: primary still is an av01 item"
         );
         // `avis` is not a still brand, but each fixture also lists `avif`/`mif1`, so the
         // still-image predicate keeps its meaning and holds (#652).
-        assert!(container.image().is_av1_still(), "{name}: is an AV1 still");
+        assert!(container.is_av1_still(), "{name}: is an AV1 still");
         assert!(
             gamut_core::segment::covers(container.segments(), data.len()),
             "{name}: segments tile the file"
@@ -728,7 +733,7 @@ fn sequence_primary_still_decodes_bit_exact_against_libavif_primary_item() {
         let container = AvifContainer::parse(&data).unwrap_or_else(|e| panic!("{name}: {e}"));
         let frame = container
             .image()
-            .decode_item_planar(container.image().primary_item().id(), &mut Dav1dDecoder)
+            .planar(container.image().primary_item().id(), &mut Dav1dDecoder)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         let oracle = libavif_oracle::decode_primary_item(&data)
             .unwrap_or_else(|e| panic!("{name}: libavif: {e}"));
@@ -777,9 +782,7 @@ fn no_ispe_file_still_parses_and_decodes() {
     let container = AvifContainer::parse(&data).unwrap();
     let img = container.image();
     let primary = img.primary_item();
-    let frame = img
-        .decode_item_planar(primary.id(), &mut Dav1dDecoder)
-        .unwrap();
+    let frame = img.planar(primary.id(), &mut Dav1dDecoder).unwrap();
     let oracle = libavif_oracle::introspect(&data).unwrap();
     assert_eq!(
         (frame.width(), frame.height()),
@@ -802,7 +805,7 @@ fn strip_colr(bytes: &[u8]) -> Vec<u8> {
 
 /// The coded item whose sequence header governs the primary's colour: the primary itself, or a
 /// grid primary's first tile (the one libavif harvests CICP from).
-fn colour_source_id(img: &AvifImage) -> u32 {
+fn colour_source_id(img: &HeifImage) -> u32 {
     let primary = img.primary_item().id();
     img.derivation_sources(primary)
         .first()
@@ -874,7 +877,7 @@ fn sequence_header_fields_agree_with_libavif() {
             .unwrap_or_else(|e| panic!("{name}: libavif introspect: {e}"));
         let container = AvifContainer::parse(&data).unwrap();
         let img = container.image();
-        let colour = img
+        let colour = container
             .av1_sequence_header(colour_source_id(img))
             .unwrap_or_else(|e| panic!("{name}: sequence header: {e:?}"))
             .color;
@@ -915,7 +918,7 @@ fn colr_stripped_file_presents_like_the_original_and_like_libavif() {
     let decode = |bytes: &[u8]| {
         AvifContainer::parse(bytes)
             .unwrap()
-            .decode_primary_rgba8(&mut Dav1dDecoder)
+            .primary_rgba8(&mut Dav1dDecoder)
             .unwrap()
             .into_samples()
     };

@@ -34,7 +34,7 @@
 //! The sniff routes an ISOBMFF file — anything whose first box is `ftyp` — to `inspect_isobmff`,
 //! which *confirms* it with `gamut-heic`'s own
 //! [`HeifImage::is_hevc_still`](gamut::heic::HeifImage::is_hevc_still) and then `gamut-avif`'s
-//! [`AvifImage::is_av1_still`](gamut::avif::AvifImage::is_av1_still) after the parses it performs
+//! [`AvifContainer::is_av1_still`](gamut::avif::AvifContainer::is_av1_still) after the parses it performs
 //! anyway, reporting an unsupported container brand when neither confirms it. The predicates are
 //! not restated here: a brand list in this file would have to be exhaustive over the still-image
 //! brands — `mif2`, `avci` and `avcs` beside `heic`/`heix`/`heim`/`heis`/`mif1`, and `avif`/`avio`
@@ -1118,7 +1118,7 @@ fn route_label(name: &str, route: Route) -> String {
 /// container.
 ///
 /// The confirmations are the format crates' own predicates — `HeifImage::is_hevc_still` and
-/// `AvifImage::is_av1_still`, each including the `mif1` case the major brand alone cannot settle —
+/// `AvifContainer::is_av1_still`, each including the `mif1` case the major brand alone cannot settle —
 /// so no brand list lives here. HEIC is tried first, which is the order this command always had;
 /// an AVIF is parsed only once the HEIC confirmation declines. A file neither crate confirms keeps
 /// the HEIC arm's outcome: its parse error (a top-level `moov`, say), or the unsupported-brand
@@ -1131,7 +1131,7 @@ fn inspect_isobmff(to: Target<'_>, data: &[u8]) -> Result<(), CliError> {
         return report_heic(to, container);
     }
     if let Ok(container) = gamut::avif::AvifContainer::parse(data)
-        && container.image().is_av1_still()
+        && container.is_av1_still()
     {
         return report_avif(to, &container);
     }
@@ -1335,7 +1335,8 @@ fn heic_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
     ])
 }
 
-/// An AVIF `C2paSummary` as data — [`heic_c2pa_json`]'s shape over `gamut-avif`'s summary.
+/// An AVIF `C2paSummary` as data — [`heic_c2pa_json`]'s shape over the shared `gamut-heif` summary
+/// `gamut-avif` reports.
 ///
 /// Both crates' summaries name the same two regions (issue #505): `range` (and `size`) the store
 /// trimmed to its JUMBF `LBox`, so `extent` is `"store"` for both, and `slot` the box-bounded slot
@@ -1345,6 +1346,7 @@ fn avif_c2pa_json(summary: &gamut::avif::C2paSummary) -> Json {
     let position = |p: Position| match p {
         Position::BeforeMediaData => "before_media_data",
         Position::AfterMediaData => "after_media_data",
+        Position::AfterMovieBox => "after_movie_box",
         _ => "other",
     };
     let reason = |r: Reason| match r {

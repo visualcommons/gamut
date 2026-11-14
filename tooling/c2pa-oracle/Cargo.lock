@@ -969,7 +969,7 @@ dependencies = [
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
- "gamut-dsp",
+ "gamut-heif",
  "gamut-isobmff",
 ]
 
@@ -1042,6 +1042,17 @@ dependencies = [
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
+ "gamut-isobmff",
+]
+
+[[package]]
+name = "gamut-heif"
+version = "0.1.0"
+dependencies = [
+ "gamut-codec-abi",
+ "gamut-color",
+ "gamut-core",
+ "gamut-dsp",
  "gamut-isobmff",
 ]
 

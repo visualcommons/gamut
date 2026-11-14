@@ -9,7 +9,7 @@
 mod common;
 
 use common::{av01_item, bx, clean_file};
-use gamut_avif::{AvifContainer, SegmentKind};
+use gamut_avif::{AvifContainer, OpaqueAlpha, SegmentKind};
 
 /// Asserts the every-byte invariant through the shared predicate,
 /// [`gamut_core::segment::covers`], whose own negative cases are pinned once in `gamut-core`
@@ -134,7 +134,7 @@ fn encoder_output_accounts_totally() {
     assert_covers(&c, data.len());
     assert_eq!(box_types(&c), vec![*b"ftyp", *b"meta", *b"mdat"]);
     assert!(c.unknown_meta_boxes().is_empty());
-    assert!(c.image().is_av1_still());
+    assert!(c.is_av1_still());
 }
 
 /// The `iloc`-resolved payload length of `item_id` in a parsed file.
@@ -176,8 +176,9 @@ fn encode_with_report_sizes_are_the_colour_and_alpha_iloc_extents() {
     let image = ImageRef::<Rgba8>::new(&rgba, Dimensions::new(W, H).unwrap()).unwrap();
     // The fixture's alpha is opaque, which by default codes no alpha auxiliary at all; keep it, so
     // there is an alpha extent to report.
-    let encoder = gamut_avif::AvifEncoder::new().with_keep_opaque_alpha(true);
-    let (bytes, report) = encoder.encode_with_report(image).unwrap();
+    let encoder = gamut_avif::AvifEncoder::new().with_opaque_alpha(OpaqueAlpha::Keep);
+    let mut bytes = Vec::new();
+    let report = encoder.encode_with_report(image, &mut bytes).unwrap();
     assert_eq!(bytes, encoder.encode_to_vec(image).unwrap());
 
     let c = AvifContainer::parse(&bytes).unwrap();
@@ -199,8 +200,9 @@ fn encode_with_report_alpha_bytes_is_zero_without_alpha() {
     use gamut_core::{Dimensions, ImageRef, Rgb8};
     let rgb: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 5) as u8).collect();
     let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap();
-    let (bytes, report) = gamut_avif::AvifEncoder::new()
-        .encode_with_report(image)
+    let mut bytes = Vec::new();
+    let report = gamut_avif::AvifEncoder::new()
+        .encode_with_report(image, &mut bytes)
         .unwrap();
 
     let c = AvifContainer::parse(&bytes).unwrap();

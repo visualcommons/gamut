@@ -81,9 +81,10 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   ← core, bitstream (the T.81 Annex K.2 optimal-table builder and Annex C canonical codes),
   codec-abi, color, dsp, cmm (optional, `cmm` feature: `decode_srgb` applies the embedded ICC
   profile), icc (optional, `cmm` feature), metadata (optional, `metadata` feature).
-- **gamut-avif** ← av1, isobmff, core, color, codec-abi (pluggable `Av1StillEncoder`
-  codestream seam; `gamut-av1` is the implicit software tail), dsp (libavif's chroma
-  upsampling kernel), metadata (optional, `metadata` feature).
+- **gamut-avif** — the AV1 binding over gamut-heif. ← av1, isobmff, core, color, codec-abi
+  (the `Av1CodestreamEncoder`/`Av1CodestreamDecoder` seams; `gamut-av1` is the implicit
+  software encode tail), heif (the shared item model, derivation walk and RGBA presentation),
+  metadata (optional, `metadata` feature).
 - **gamut-webp** — WebP codec. ← core, codec-abi, color, dsp, riff, metadata (optional,
   `metadata` feature). Like gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw
   `MetadataBlock`-ready payloads, and wires them to the facade's typed models only behind that

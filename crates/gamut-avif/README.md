@@ -7,7 +7,7 @@ This is the high-level crate most users want: give it pixels, get a complete `.a
 give it a `.avif` file and a codestream decoder, get pixels. It is orchestration only —
 [`gamut-av1`](../gamut-av1) does the AV1 coding and [`gamut-isobmff`](../gamut-isobmff)
 reads/writes the container; on the decode side the AV1 codestream itself is supplied through the
-pluggable `Av1StillDecoder` seam (a platform hardware decoder, dav1d, …) until the workspace's
+pluggable `Av1CodestreamDecoder` seam (a platform hardware decoder, dav1d, …) until the workspace's
 pure-Rust AV1 decoder lands.
 
 ## Goals
@@ -42,7 +42,7 @@ let dims = Dimensions::new(width, height).expect("non-zero dimensions");
 let image = ImageRef::<Rgb8>::new(&rgb, dims).expect("buffer length matches dimensions");
 
 // Lossless by default. `AvifEncoder::lossy(quality)` (0..=100) trades fidelity for a smaller
-// file; `with_rotation` / `with_mirror` add display-orientation transforms.
+// file; `with_orientation` adds the display-orientation transforms.
 let avif = AvifEncoder::new().encode_to_vec(image).expect("encode");
 std::fs::write("out.avif", &avif).unwrap();
 ```
@@ -96,12 +96,14 @@ assert_eq!(&avif[4..8], b"ftyp");
 # Ok::<(), gamut_core::Error>(())
 ```
 
-Decoding (issue #250): `AvifContainer::parse` gives a byte-accounting view plus the role-typed
-`AvifImage` lens (primary item, alpha/depth auxiliaries, thumbnails, Exif/XMP, grid/overlay,
-typed `av1C` and OBU layers); `decode_item_planar` hands each coded item's `Av1Config` + OBU
-payload to your `Av1StillDecoder` and reassembles the result, while `decode_primary_rgba8` adds
-colour conversion, alpha merge, and the `clap`/`irot`/`imir` transforms. See the crate docs for a
-worked example.
+Decoding: gamut-avif is the AV1 binding over [`gamut-heif`](../gamut-heif), the HEIF/MIAF layer it
+shares with `gamut-heic`. `AvifDecoder::new().with_backend(..)` implements `DecodeImage` for `Rgba8`
+and `Rgba16` and offers `decode_planar`, handing each coded item's `Av1Config` + OBU payload to
+your `Av1CodestreamDecoder` and reassembling the result with colour conversion, alpha merge, and
+the `clap`/`irot`/`imir` transforms. `AvifContainer::parse` gives the byte-accounting view and the
+role-typed `HeifImage` (primary item, alpha/depth auxiliaries, thumbnails, Exif/XMP,
+grid/overlay), with the typed `av1C` and sequence header on the container. See the crate docs for
+a worked example.
 
 ## Status
 
@@ -131,15 +133,14 @@ codestream untouched; libavif reads every one of them back byte-for-byte.
 **Content credentials (C2PA).** A C2PA manifest store cannot be handed to an encoder complete —
 its hard binding digests the finished file — so the encoder reserves rather than receives:
 `with_c2pa_reserved(len)` writes a top-level `uuid` `ContentProvenanceBox` (C2PA 2.4 §A.5.1) after
-`ftyp` around a slot of `len` zero bytes, and `encode_with_report` returns the same bytes
-`encode_to_vec` would plus the slot's byte range, which a signer then patches in place; nothing
-else in the file moves. `with_c2pa(bytes)` writes a store the caller has already computed over
+`ftyp` around a slot of `len` zero bytes, and `encode_with_report` appends the same bytes
+`encode_image` would and reports the slot's byte range, which a signer then patches in place;
+nothing else in the file moves. `with_c2pa(bytes)` writes a store the caller has already computed over
 this exact output. A `len` that could never hold a store — below the 8-byte JUMBF box header, or
-beyond what a buffer holds — is refused by the encode that follows, since the builder itself cannot
-fail; on 64-bit targets a third refusal, `ErrorKind::Unsupported` and made before the slot is
+beyond what a buffer holds — is refused when the reservation is set; on 64-bit targets a third refusal, `ErrorKind::Unsupported` and made before the slot is
 allocated, is a box at or beyond 4 GiB, which a top-level box's 32-bit size field cannot express
-(on 32-bit targets such as `wasm32` a buffer holds under 2 GiB, so the encode's other refusal is
-the limit and the 4 GiB one is never reached). That minimum bounds
+(on 32-bit targets such as `wasm32` a buffer holds under 2 GiB, so the other refusal is the limit
+and the 4 GiB one is never reached). That minimum bounds
 the *reservation* alone: `with_c2pa(bytes)` carries a supplied slice verbatim. On read, `AvifContainer::c2pa_slot` reports the located slot's bytes, purpose and
 range, and demands nothing of its length: a degenerate slot that is genuinely there is reported
 as found. The store is opaque here — gamut locates and carries, it never validates — and the range
@@ -149,20 +150,19 @@ is for patching and byte accounting, not a hash exclusion range (BMFF assets bin
 Output is verified against real decoders (`libavif`, `dav1d`, `libaom`), linked from vendored
 `third_party/` submodules rather than system-installed binaries.
 
-**Decode surface.** The container read + codestream handoff (issue #250, mirroring what
-`gamut-heic` ships for HEIF): byte-accounting parse, the full item/property/derivation model, the
-typed `av1C`/OBU layer with the AVIF still-image payload validation, planar decode with
-grid/identity reassembly, and the RGBA presentation paths — 8-bit (`decode_primary_rgba8`) and
-high-bit-depth (`decode_primary_rgba16`, 10/12-bit normalized to full-range 16-bit), with
-identity / BT.601 / BT.709 / BT.2020-NCL / monochrome colour, libavif's bilinear chroma
-upsampling by default (nearest-neighbour through `DecodeOptions`), alpha merge, overlay compositing,
-`clap`/`irot`/`imir`. Validated differentially against
+**Decode surface.** The container read + codestream handoff over `gamut-heif`: byte-accounting
+parse, the full item/property/derivation model, the typed `av1C` layer with the AVIF still-image
+payload validation, planar decode with grid/identity reassembly, and the RGBA presentation paths —
+8-bit and high-bit-depth (`AvifDecoder`'s `DecodeImage<Rgba8>` / `DecodeImage<Rgba16>`, 10/12-bit
+normalized to full-range 16-bit), with identity / BT.601 / BT.709 / BT.2020-NCL / monochrome
+colour, libavif's bilinear chroma upsampling by default (nearest-neighbour through
+`with_chroma_upsampling`), alpha merge, overlay compositing, `clap`/`irot`/`imir`. Validated differentially against
 libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
 specs: **deferred, planned** features (subsampled chroma on the RGBA paths, the HDR
 metadata properties beyond CICP tagging and `clli`/`mdcv`, gain maps, layered/progressive images,
-the pure-Rust AV1 codestream decoder, the decoder backend registry, …) all land semver-minor on the
+the pure-Rust AV1 codestream decoder, the decode-side `gamut-codec-abi` adapter, …) all land semver-minor on the
 current major's surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per
 the image-first workspace charter.
 

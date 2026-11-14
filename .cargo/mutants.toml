@@ -289,11 +289,14 @@ exclude_re = [
     # order, skip-on-false, short-circuit) is fully covered by `tests/backend.rs`, and the overriding
     # implementations' `supports` mutants are not excluded.
     '^crates/gamut-heic/src/decode\.rs:108:9: replace HevcDecoder::supports -> bool with true$',
-    # (gamut-avif `AvifEncoder::lossless` has no entry. One argued its `-> Default::default()`
-    # replacement byte-identical when its body was `Self::default()`; the body now builds the
-    # struct and `Default::default` is defined as `Self::lossless()`, so the replacement recurses
-    # until the stack overflows and every test that constructs an encoder catches it. The entry
-    # had been anchored a line below the body and matched nothing (#1162).)
+    # gamut-avif `AvifEncoder::lossless` is again `Self::default()` (#1085): the default
+    # configuration *is* lossless, and `Default::default` builds the encoder itself. While
+    # `lossless` built the struct and `Default` called it, the replacement recursed; once the
+    # constructors went through `from_config` the recursion became a loop, which hung the suite
+    # (a TIMEOUT, so a survivor), so `Default` now calls nothing. The `-> Default::default()`
+    # replacement of `lossless` is then byte-identical — provably equivalent, unkillable — as for
+    # `WebpEncoder::lossless` below; `lossless_is_the_default_mode` pins what it returns.
+    '^crates/gamut-avif/src/encoder\.rs:383:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
     # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same

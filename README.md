@@ -137,7 +137,7 @@ rather than restating it. A status of **stable** means the crate is at 1.0 or la
 | `gamut-riff`      | RIFF container utilities (WebP)                                        | stable (#186)                      |
 | `gamut-av1`       | AV1 still-image (intra-frame) encoder + header-layer decoder — the codec layer beneath AVIF | encoder: lossless and lossy intra keyframes; decoder (default Cargo feature `decode`): OBU, header and tile-group framing of 8-bit 4:4:4 intra frames only, no sample reconstruction yet (#259) |
 | `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor        | placeholder                            |
-| `gamut-avif`      | AVIF encoder + container decoder — AV1 still frames in ISOBMFF         | encoder (8/10/12-bit) + container decode (#250); AV1 codestream decode via the `Av1StillDecoder` seam |
+| `gamut-avif`      | AVIF encoder + container decoder — AV1 still frames in ISOBMFF         | encoder (8/10/12-bit) + `AvifDecoder` over `gamut-heif`; AV1 codestream decode via the `Av1CodestreamDecoder` seam |
 | `gamut-jxl`       | JPEG XL encoder (libjxl wrap) + decoder (pure-Rust jxl-rs)             | encoder + decoder (#243)               |
 | `gamut-jxl-sys`   | Static libjxl 0.12.0 FFI declarations — native core of `gamut-jxl` encode | encoder backend (#243)                 |
 | `gamut-jpeg`      | JPEG-1 (ISO/IEC 10918-1) encoder + decoder — baseline & progressive; the jpegli-style XYB colour mode encodes natively and decodes to sRGB through `gamut-cmm` behind the `cmm` feature | encoder + decoder (#28, P1–P17) |

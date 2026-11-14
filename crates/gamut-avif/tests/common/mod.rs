@@ -3,8 +3,14 @@
 //! normalising writer cannot express.
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
-use gamut_avif::{Av1Config, Av1StillDecoder, DecodedFrame};
-use gamut_core::{Error, Result};
+use std::sync::{Arc, Mutex};
+
+use gamut_avif::{
+    Av1, Av1CodestreamDecoder, Av1Config, AvifContainer, DecodeLimits, DecodeOptions, DecodedFrame,
+    HeifImage,
+};
+use gamut_codec_abi::Registry;
+use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8, Rgba16};
 use gamut_isobmff::{IsoBmffImage, Item, ItemReference, Property, PropertyKind};
 
 /// A minimal valid `av1C` record: High profile (4:4:4), level 0, 8-bit, empty `configOBUs`.
@@ -142,16 +148,21 @@ pub fn meta(children: &[Vec<u8>]) -> Vec<u8> {
 
 // ---- oracle bridges -------------------------------------------------------------------------
 
-/// [`Av1StillDecoder`] implemented with the real dav1d decoder (`dav1d-oracle`), bridged exactly
+/// [`Av1CodestreamDecoder`] implemented with the real dav1d decoder (`dav1d-oracle`), bridged exactly
 /// the way a platform decoder would be: the typed `av1C` and the raw item payload are assembled
 /// into one self-contained temporal unit with [`Av1Config::full_stream`] and handed to a Section-5
 /// decoder.
 ///
 /// Shared here because more than one integration test decodes a file it just encoded; each binary
 /// that does declares `mod common;` and the rest carry it under this file's `allow(dead_code)`.
+#[derive(Default)]
 pub struct Dav1dDecoder;
 
-impl Av1StillDecoder for Dav1dDecoder {
+impl Av1CodestreamDecoder for Dav1dDecoder {
+    fn supports(&mut self, _config: &Av1Config) -> bool {
+        true
+    }
+
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
         let mut stream = Vec::new();
         config.full_stream(payload, &mut stream)?;
@@ -162,13 +173,212 @@ impl Av1StillDecoder for Dav1dDecoder {
         // `DecodedFrame::new` validates the plane lengths against the av1C-derived chroma, so a
         // config/codestream mismatch fails loudly here rather than decoding to nonsense.
         DecodedFrame::new(
-            picture.width,
-            picture.height,
+            Dimensions::new(picture.width, picture.height)?,
             picture.bit_depth,
-            config.chroma_format(),
+            config.chroma_subsampling(),
             y,
             u,
             v,
         )
+    }
+}
+
+// ---- decoding through one test decoder ------------------------------------------------------
+
+/// The `irot` angle (anti-clockwise quarter turns) item `item` carries, as on the wire.
+pub fn irot(item: &gamut_avif::HeifItem<'_>) -> Option<u8> {
+    item.transformative_properties()
+        .iter()
+        .find_map(|p| match p {
+            gamut_heif::TransformativeProperty::Rotation(turns) => Some(*turns),
+            _ => None,
+        })
+}
+
+/// The `imir` axis item `item` carries, as on the wire.
+pub fn imir(item: &gamut_avif::HeifItem<'_>) -> Option<u8> {
+    item.transformative_properties()
+        .iter()
+        .find_map(|p| match p {
+            gamut_heif::TransformativeProperty::Mirror(axis) => Some(*axis),
+            _ => None,
+        })
+}
+
+/// [`DecodedFrame::new`] over a `width × height` luma size, refusing a zero side as the frame does.
+pub fn decoded_frame(
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    chroma: gamut_avif::ChromaSubsampling,
+    y: Vec<u16>,
+    cb: Vec<u16>,
+    cr: Vec<u16>,
+) -> Result<DecodedFrame> {
+    DecodedFrame::new(
+        Dimensions::new(width, height)?,
+        bit_depth,
+        chroma,
+        y,
+        cb,
+        cr,
+    )
+}
+
+/// Runs `decode` with `decoder` as the one backend of an `Av1` registry, handing the decoder back
+/// afterwards — so a test can inspect what a stateful decoder recorded, as it could when the
+/// pipeline borrowed it.
+pub fn with_backend<D, R>(
+    decoder: &mut D,
+    decode: impl FnOnce(&Registry<dyn Av1CodestreamDecoder + Send>) -> R,
+) -> R
+where
+    D: Av1CodestreamDecoder + Send + Default + 'static,
+{
+    let shared = Arc::new(Mutex::new(std::mem::take(decoder)));
+    let mut backends: Registry<dyn Av1CodestreamDecoder + Send> = Registry::new();
+    backends.push(shared.clone());
+    let out = decode(&backends);
+    drop(backends);
+    *decoder = Arc::try_unwrap(shared)
+        .ok()
+        .expect("the registry was dropped")
+        .into_inner()
+        .expect("the decoder did not panic");
+    out
+}
+
+/// The `gamut-heif` decode surfaces bound to [`Av1`] and one test decoder, in the shapes this
+/// suite's assertions were written against: an item (or the primary one), a decoder, and
+/// optionally limits or options.
+pub trait Decode {
+    /// The semantic view decoded from.
+    fn heif(&self) -> &HeifImage;
+
+    fn planar<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+    ) -> Result<DecodedFrame> {
+        self.planar_with_limits(id, d, DecodeLimits::default())
+    }
+
+    fn planar_with_limits<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        limits: DecodeLimits,
+    ) -> Result<DecodedFrame> {
+        with_backend(d, |b| self.heif().decode_item_planar::<Av1>(id, b, limits))
+    }
+
+    fn rgba8<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.rgba8_with_options(id, d, DecodeOptions::default())
+    }
+
+    fn rgba8_with_limits<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        limits: DecodeLimits,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.rgba8_with_options(id, d, DecodeOptions::default().with_limits(limits))
+    }
+
+    fn rgba8_with_options<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba8>> {
+        with_backend(d, |b| self.heif().decode_item_rgba8::<Av1>(id, b, options))
+    }
+
+    fn rgba16<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.rgba16_with_options(id, d, DecodeOptions::default())
+    }
+
+    fn rgba16_with_limits<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        limits: DecodeLimits,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.rgba16_with_options(id, d, DecodeOptions::default().with_limits(limits))
+    }
+
+    fn rgba16_with_options<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba16>> {
+        with_backend(d, |b| self.heif().decode_item_rgba16::<Av1>(id, b, options))
+    }
+
+    fn primary_rgba8<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.rgba8(self.heif().primary_item().id(), d)
+    }
+
+    fn primary_rgba8_with_limits<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+        limits: DecodeLimits,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.rgba8_with_limits(self.heif().primary_item().id(), d, limits)
+    }
+
+    fn primary_rgba8_with_options<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.rgba8_with_options(self.heif().primary_item().id(), d, options)
+    }
+
+    fn primary_rgba16<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.rgba16(self.heif().primary_item().id(), d)
+    }
+
+    fn primary_rgba16_with_limits<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+        limits: DecodeLimits,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.rgba16_with_limits(self.heif().primary_item().id(), d, limits)
+    }
+
+    fn primary_rgba16_with_options<D: Av1CodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.rgba16_with_options(self.heif().primary_item().id(), d, options)
+    }
+}
+
+impl Decode for HeifImage {
+    fn heif(&self) -> &HeifImage {
+        self
+    }
+}
+
+impl Decode for AvifContainer<'_> {
+    fn heif(&self) -> &HeifImage {
+        self.image()
     }
 }

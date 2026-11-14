@@ -524,9 +524,10 @@ fn an_avif_the_encoder_signed_reports_its_store_at_the_encoders_range() {
     // the store fills the slot the encoder reported, and its bytes are never printed.
     let rgb = [0x40u8; 8 * 8 * 3];
     let store = jumbf_store(b"STORE-BYTES-NEVER-PRINTED");
-    let (file, report) = gamut::avif::AvifEncoder::new()
+    let mut file = Vec::new();
+    let report = gamut::avif::AvifEncoder::new()
         .with_c2pa(&store)
-        .encode_with_report(rgb_image(&rgb))
+        .encode_with_report(rgb_image(&rgb), &mut file)
         .expect("encode");
     let range = report.c2pa.expect("a slot was written");
     let out = run_inspect("signed.avif", &file, None);
@@ -974,9 +975,10 @@ fn json_output_reports_an_avif_store_and_its_slot_at_the_encoders_range() {
     let rgb = [0x40u8; 8 * 8 * 3];
     let store = jumbf_store(b"STORE-BYTES-NEVER-PRINTED");
     let padded = [&store[..], &[0xEE; 4]].concat();
-    let (file, report) = gamut::avif::AvifEncoder::new()
+    let mut file = Vec::new();
+    let report = gamut::avif::AvifEncoder::new()
         .with_c2pa(&padded)
-        .encode_with_report(rgb_image(&rgb))
+        .encode_with_report(rgb_image(&rgb), &mut file)
         .expect("encode");
     let slot = report.c2pa.expect("a slot was written");
     let (out, doc) = run_inspect_json("signed-json.avif", &file, None);
@@ -1048,6 +1050,7 @@ fn json_output_lists_an_unfilled_reserved_avif_slot_as_bounding_no_store() {
     let rgb = [0x40u8; 8 * 8 * 3];
     let file = gamut::avif::AvifEncoder::new()
         .with_c2pa_reserved(64)
+        .expect("a usable reservation")
         .encode_to_vec(rgb_image(&rgb))
         .expect("encode");
     let summary = gamut::avif::AvifContainer::parse(&file)

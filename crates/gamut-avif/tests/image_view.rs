@@ -8,12 +8,10 @@ use common::{
     AV1C_444_8BIT, av01_item, av1c, cat, clean_file, ftyp, hdlr, iinf_v0, infe_v2, ispe, item,
     meta, pitm_v0,
 };
-use gamut_avif::{
-    AvifContainer, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay, PixelAspectRatio,
-    TransformativeProperty,
-};
-use gamut_core::{Cicp, ErrorKind};
-use gamut_isobmff::{ColourInformation, Property, PropertyKind};
+use gamut_avif::{AvifContainer, ContentLightLevel, ItemKind, MasteringDisplay};
+use gamut_core::{Cicp, ErrorKind, Orientation};
+use gamut_heif::TransformativeProperty;
+use gamut_isobmff::{CleanAperture, ColourInformation, PixelAspectRatio, Property, PropertyKind};
 
 fn prop(essential: bool, kind: PropertyKind) -> Property {
     Property::new(essential, kind)
@@ -59,14 +57,14 @@ fn item_kind_classification_and_av1_predicate() {
     // av01: the AV1 coded image.
     let av01 = img.item(1).unwrap();
     assert_eq!(av01.kind(), ItemKind::CodedImage { codec: *b"av01" });
-    assert!(av01.kind().is_coded_image());
-    assert!(av01.kind().is_av1());
+    assert!(matches!(av01.kind(), ItemKind::CodedImage { .. }));
+    assert_eq!(av01.kind(), ItemKind::CodedImage { codec: *b"av01" });
 
     // hvc1: a coded image a HEIF-family file may carry, but not AV1.
     let hvc1 = img.item(2).unwrap();
     assert_eq!(hvc1.kind(), ItemKind::CodedImage { codec: *b"hvc1" });
-    assert!(hvc1.kind().is_coded_image());
-    assert!(!hvc1.kind().is_av1());
+    assert!(matches!(hvc1.kind(), ItemKind::CodedImage { .. }));
+    assert_ne!(hvc1.kind(), ItemKind::CodedImage { codec: *b"av01" });
 }
 
 #[test]
@@ -98,15 +96,26 @@ fn av1_config_lens_distinguishes_absent_foreign_and_malformed() {
     let c = AvifContainer::parse(&data).unwrap();
     let img = c.image();
 
-    let valid = img.item(1).unwrap().av1_config().expect("present").unwrap();
+    let valid = c.av1_config(1).unwrap();
     assert_eq!(valid.seq_profile, 1);
     assert_eq!(valid.bit_depth(), 8);
-    assert!(img.item(2).unwrap().av1_config().is_none());
-    assert!(img.item(3).unwrap().av1_config().is_none());
-    assert!(matches!(
-        img.item(4).unwrap().av1_config(),
-        Some(Err(error)) if error.kind() == ErrorKind::InvalidInput
-    ));
+    // Absent and malformed stay distinct: the container's refusal, or the record's own.
+    for absent in [2, 3] {
+        assert_eq!(
+            c.av1_config(absent).unwrap_err().static_message(),
+            Some("AVIF: item has no av1C configuration")
+        );
+    }
+    let malformed = c.av1_config(4).unwrap_err();
+    assert_eq!(malformed.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        malformed.static_message(),
+        Some("AVIF: av1C marker must be 1")
+    );
+    assert_eq!(
+        c.av1_config(99).unwrap_err().static_message(),
+        Some("AVIF: item id names no item")
+    );
 
     // The raw record stays reachable opaquely alongside the typed lens.
     let (kind, body) = img.item(1).unwrap().codec_configuration().unwrap();
@@ -351,12 +360,25 @@ fn rotation_and_mirror_accessors_pin_exact_values() {
     let c = AvifContainer::parse(&data).unwrap();
     let img = c.image();
 
-    assert_eq!(img.item(1).unwrap().rotation(), Some(3));
-    assert_eq!(img.item(1).unwrap().mirror(), Some(1));
-    assert_eq!(img.item(2).unwrap().mirror(), Some(0));
-    assert_eq!(img.item(2).unwrap().rotation(), None);
-    assert_eq!(img.item(3).unwrap().rotation(), None);
-    assert_eq!(img.item(3).unwrap().mirror(), None);
+    assert_eq!(
+        img.item(1).unwrap().transformative_properties(),
+        [
+            TransformativeProperty::Rotation(3),
+            TransformativeProperty::Mirror(1)
+        ]
+    );
+    // A quarter turn clockwise, then left↔right: the transpose.
+    assert_eq!(img.item(1).unwrap().orientation(), Orientation::Transpose);
+    assert_eq!(
+        img.item(2).unwrap().transformative_properties(),
+        [TransformativeProperty::Mirror(0)]
+    );
+    assert_eq!(
+        img.item(2).unwrap().orientation(),
+        Orientation::FlipVertical
+    );
+    assert!(img.item(3).unwrap().transformative_properties().is_empty());
+    assert_eq!(img.item(3).unwrap().orientation(), Orientation::Identity);
 }
 
 #[test]
@@ -371,7 +393,10 @@ fn unknown_item_type_is_not_classified_as_coded() {
     let c = AvifContainer::parse(&data).unwrap();
     let it = c.image().item(2).unwrap();
     assert_eq!(it.kind(), ItemKind::Unknown(*b"zzzz"));
-    assert!(!it.kind().is_coded_image());
+    assert!(!matches!(it.kind(), ItemKind::CodedImage { .. }));
     // The coded classifier remains true for a real coded item (the positive direction).
-    assert!(c.image().item(1).unwrap().kind().is_coded_image());
+    assert!(matches!(
+        c.image().item(1).unwrap().kind(),
+        ItemKind::CodedImage { .. }
+    ));
 }

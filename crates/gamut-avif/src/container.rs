@@ -14,12 +14,23 @@
 //! stream, and a malformed trailing box is tolerated (as a trailer) only once both `ftyp` and
 //! `meta` have been seen — so the byte-accounting walk and the semantic parse never disagree.
 
-use gamut_core::Result;
-use gamut_isobmff::IsoBmffImage;
+use gamut_av1::SequenceHeader;
+use gamut_core::{Error, Result};
+use gamut_heif::{HeifImage, ItemKind};
+// `Segment`, `SegmentKind` and `UnknownBox` are `gamut-isobmff`'s: the walk that produces them is
+// shared with `gamut-heic` (#436), and the crate root re-exports them.
+use gamut_isobmff::{IsoBmffImage, Segment, SegmentKind, UnknownBox};
 
-use crate::image::AvifImage;
+use crate::av1c::Av1Config;
 
-/// An AVIF file decomposed into a byte-exact list of [`Segment`]s plus the semantic [`AvifImage`].
+/// The four-character AVIF brands that denote an AV1 still image (AVIF v1.2.0 §8.3): `avif` for a
+/// still image file, `avio` for a file whose primary item (or its sources) are intra-only AV1
+/// image items. The sequence brand `avis` is deliberately absent — image sequences are out of
+/// scope (gamut is image-first).
+const AV1_STILL_BRANDS: [[u8; 4]; 2] = [*b"avif", *b"avio"];
+
+/// An AVIF file decomposed into a byte-exact list of [`Segment`]s plus the semantic
+/// [`HeifImage`] — the role-typed item model `gamut-heif` shares between AVIF and HEIC.
 ///
 /// # The every-byte invariant
 ///
@@ -41,20 +52,15 @@ use crate::image::AvifImage;
 pub struct AvifContainer<'a> {
     data: &'a [u8],
     segments: Vec<Segment<'a>>,
-    image: AvifImage,
+    image: HeifImage,
     unknown_meta_boxes: Vec<UnknownBox<'a>>,
 }
-
-// `Segment`, `SegmentKind`, `UnknownBox` and `UnknownBoxLocation` are `gamut-isobmff`'s: the walk
-// that produces them is shared with `gamut-heic`/`gamut-avif` (#436). Re-exported here, and from
-// the crate root, so this crate's public surface is unchanged.
-pub use gamut_isobmff::{Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 
 impl<'a> AvifContainer<'a> {
     /// Parses `data` into the total byte-accounting representation and the role-typed semantic
     /// view.
     ///
-    /// The semantic layer is [`IsoBmffImage::parse`] wrapped in an [`AvifImage`], which
+    /// The semantic layer is [`IsoBmffImage::parse`] wrapped in a [`HeifImage`], which
     /// additionally validates the primary item at parse time (the `pitm` id must name an existing,
     /// non-hidden item — ISO/IEC 23008-12). The byte-accounting layer walks the top-level boxes
     /// into [`segments`](Self::segments) covering every byte, and shadow-walks `meta` for boxes
@@ -64,8 +70,8 @@ impl<'a> AvifContainer<'a> {
     ///
     /// Propagates every [`IsoBmffImage::parse`] error (a missing/truncated required box, an
     /// out-of-scope feature such as a sequence-only `avis` file, …) and returns an
-    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the primary item
-    /// is missing or hidden. A malformed top-level box *before* both `ftyp` and `meta` are seen is a parse
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error (raised by
+    /// `gamut-heif`) if the primary item is missing or hidden. A malformed top-level box *before* both `ftyp` and `meta` are seen is a parse
     /// error; after that it is retained as a [`SegmentKind::Trailer`]. A `moov`/`trak` beside the
     /// `meta` still is not an error: it is skipped, and its bytes are one opaque
     /// [`segments`](Self::segments) entry, so an `avis` image sequence that carries a primary
@@ -76,7 +82,7 @@ impl<'a> AvifContainer<'a> {
         // missing required boxes, …). Because it succeeds only once `ftyp`+`meta`
         // are seen and uses the identical `BoxReader` walk, the byte-accounting walk below cannot
         // then disagree.
-        let image = AvifImage::new(IsoBmffImage::parse(data)?)?;
+        let image = HeifImage::new(IsoBmffImage::parse(data)?)?;
         let walk = gamut_isobmff::walk_segments(data)?;
         let unknown_meta_boxes = match walk.meta_body {
             Some(body) => gamut_isobmff::walk_meta_children(body)?,
@@ -147,87 +153,81 @@ impl<'a> AvifContainer<'a> {
         self.boxes().any(|(ty, _)| ty == *b"moov")
     }
 
-    /// The role-typed semantic view of the primary still-image stream.
+    /// The role-typed semantic view of the primary still-image stream. Decode any of its items
+    /// with `gamut-heif`'s surfaces and the [`Av1`](crate::Av1) binding, or the primary one with
+    /// [`AvifDecoder`](crate::AvifDecoder).
     #[must_use]
-    pub fn image(&self) -> &AvifImage {
+    pub fn image(&self) -> &HeifImage {
         &self.image
+    }
+
+    /// Whether this file is an AV1 still image.
+    ///
+    /// True when the major brand or any compatible brand is `avif` or `avio` (AVIF v1.2.0 §8.3),
+    /// or — for the generic structural brand `mif1` — when the primary item is an `av01` coded
+    /// item. The image-*sequence* brand (`avis`) alone does not make a still, but a file carrying
+    /// it is not rejected either: an `avis` file that also declares an image brand for its
+    /// primary item (which AVIF v1.2.0 §6.3's NOTE permits but does not require) is an AV1 still
+    /// by `avif` or by `mif1` plus `av01`, and the track beside `meta` is skipped
+    /// ([`has_image_sequence`](Self::has_image_sequence) reports it).
+    #[must_use]
+    pub fn is_av1_still(&self) -> bool {
+        if AV1_STILL_BRANDS
+            .iter()
+            .any(|brand| self.image.has_brand(brand))
+        {
+            return true;
+        }
+        self.image.has_brand(b"mif1")
+            && self.image.primary_item().kind() == ItemKind::CodedImage { codec: *b"av01" }
+    }
+
+    /// The parsed `av1C` configuration of coded item `item_id`.
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `item_id`
+    /// names no item or the item carries no `av1C`, and [`Av1Config::parse`]'s errors.
+    pub fn av1_config(&self, item_id: u32) -> Result<Av1Config> {
+        self.av1_item(item_id).map(|(config, _)| config)
+    }
+
+    /// Parses the AV1 sequence header (AV1 §5.5) of coded item `item_id` through `gamut-av1`: the
+    /// colour, bit depth and dimensions its samples were coded at.
+    ///
+    /// Works on any coded item with an `av1C`: pass the primary item's id for the colour image,
+    /// and [`HeifImage::alpha_auxiliary_of`]'s for its alpha plane. The header is the one
+    /// [`Av1Config::sequence_header`] selects (the payload's, else `configOBUs`'). When the item has
+    /// no `colr`, this header's `color_config` is what the RGBA surfaces de-matrix with.
+    ///
+    /// # Errors
+    ///
+    /// As [`av1_config`](Self::av1_config), and [`Av1Config::sequence_header`]'s errors.
+    pub fn av1_sequence_header(&self, item_id: u32) -> Result<SequenceHeader> {
+        let (config, payload) = self.av1_item(item_id)?;
+        config.sequence_header(payload)
+    }
+
+    /// Item `item_id`'s parsed `av1C` and its payload.
+    fn av1_item(&self, item_id: u32) -> Result<(Av1Config, &[u8])> {
+        let item = self.image.item(item_id).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: item id names no item")
+        })?;
+        let config = item
+            .codec_configuration()
+            .filter(|(kind, _)| *kind == b"av1C")
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: item has no av1C configuration",
+                )
+            })?;
+        Ok((Av1Config::parse(config.1)?, &item.as_isobmff_item().payload))
     }
 
     /// The boxes inside `meta`/`iprp` that the semantic parse did not consume, surfaced verbatim.
     #[must_use]
     pub fn unknown_meta_boxes(&self) -> &[UnknownBox<'a>] {
         &self.unknown_meta_boxes
-    }
-
-    /// Decodes an item to a raw planar [`DecodedFrame`](crate::DecodedFrame) via `decoder`.
-    /// Convenience forwarding to
-    /// [`AvifImage::decode_item_planar`](crate::AvifImage::decode_item_planar).
-    ///
-    /// # Errors
-    ///
-    /// As [`AvifImage::decode_item_planar`](crate::AvifImage::decode_item_planar).
-    pub fn decode_item_planar(
-        &self,
-        id: u32,
-        decoder: &mut dyn crate::Av1StillDecoder,
-    ) -> Result<crate::DecodedFrame> {
-        self.image.decode_item_planar(id, decoder)
-    }
-
-    /// Decodes an item to a presentation-ready `ImageBuf<Rgba8>` via `decoder`. Convenience
-    /// forwarding to [`AvifImage::decode_item_rgba8`](crate::AvifImage::decode_item_rgba8).
-    ///
-    /// # Errors
-    ///
-    /// As [`AvifImage::decode_item_rgba8`](crate::AvifImage::decode_item_rgba8).
-    pub fn decode_item_rgba8(
-        &self,
-        id: u32,
-        decoder: &mut dyn crate::Av1StillDecoder,
-    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba8>> {
-        self.image.decode_item_rgba8(id, decoder)
-    }
-
-    /// Decodes the primary item to a presentation-ready `ImageBuf<Rgba8>` via `decoder`.
-    /// Convenience forwarding to
-    /// [`AvifImage::decode_primary_rgba8`](crate::AvifImage::decode_primary_rgba8).
-    ///
-    /// # Errors
-    ///
-    /// As [`AvifImage::decode_primary_rgba8`](crate::AvifImage::decode_primary_rgba8).
-    pub fn decode_primary_rgba8(
-        &self,
-        decoder: &mut dyn crate::Av1StillDecoder,
-    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba8>> {
-        self.image.decode_primary_rgba8(decoder)
-    }
-
-    /// Decodes an item to a presentation-ready high-bit-depth `ImageBuf<Rgba16>` via `decoder`.
-    /// Convenience forwarding to
-    /// [`AvifImage::decode_item_rgba16`](crate::AvifImage::decode_item_rgba16).
-    ///
-    /// # Errors
-    ///
-    /// As [`AvifImage::decode_item_rgba16`](crate::AvifImage::decode_item_rgba16).
-    pub fn decode_item_rgba16(
-        &self,
-        id: u32,
-        decoder: &mut dyn crate::Av1StillDecoder,
-    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba16>> {
-        self.image.decode_item_rgba16(id, decoder)
-    }
-
-    /// Decodes the primary item to a presentation-ready high-bit-depth `ImageBuf<Rgba16>` via
-    /// `decoder`. Convenience forwarding to
-    /// [`AvifImage::decode_primary_rgba16`](crate::AvifImage::decode_primary_rgba16).
-    ///
-    /// # Errors
-    ///
-    /// As [`AvifImage::decode_primary_rgba16`](crate::AvifImage::decode_primary_rgba16).
-    pub fn decode_primary_rgba16(
-        &self,
-        decoder: &mut dyn crate::Av1StillDecoder,
-    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba16>> {
-        self.image.decode_primary_rgba16(decoder)
     }
 }

@@ -19,19 +19,21 @@ workspace = true
 # Exposes the `invariants` module to the out-of-tree fuzz driver. `doc(hidden)`, no SemVer
 # guarantee, and never enabled by the `gamut` umbrella; the crate's own tests get it via `cfg(test)`.
 test-support = []
-# Typed metadata wiring: `AvifImage`'s `TypedMetadata` impl (`blocks` / `metadata`) and
-# `AvifEncoder`'s `MetadataSink` impl (`with_metadata` / `with_encoded_metadata`) over the
-# `gamut-metadata` facade.
+# Typed metadata wiring over the `gamut-metadata` facade: `AvifEncoder`'s `MetadataSink` impl
+# (`with_metadata` / `with_encoded_metadata`) and the re-exported `TypedMetadata`, which parses
+# the `RawMetadata` `AvifDecoder::metadata` returns (that method itself is always available).
 metadata = ["dep:gamut-metadata"]
 
 [dependencies]
 gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-av1.workspace = true
-gamut-codec-abi.workspace = true
-# libavif's bilinear chroma upsampling kernel (`upsample::libavif`) for the RGB presentation path.
-gamut-dsp.workspace = true
+# The shared backend `Registry` (behind its `std` feature) both seams run through.
+gamut-codec-abi = { workspace = true, features = ["std"] }
 gamut-isobmff.workspace = true
+# The shared HEIF/MIAF layer: the item model, the derivation walk, the decode limits, the RGBA
+# presentation and the C2PA summary, which this crate binds AV1 into (issue #1085).
+gamut-heif.workspace = true
 # Typed metadata (issue #510): the unified `Metadata` model over the `Exif` / XMP items and `colr`
 # ICC profile this crate locates and writes. Optional and off by default, and a *normal*
 # dependency (never dev-only), so release ordering follows it (`mise run check-release-deps`).
@@ -45,7 +47,7 @@ gamut-metadata = { workspace = true, optional = true }
 # `mise run fetch-av1-oracles` (issue #378).
 libavif-oracle = { path = "../../tooling/libavif-oracle" }
 # dav1d directly (raw OBU stream in, planes out) implements the conformance suite's
-# Av1StillDecoder bridge — the exact seam a platform decoder plugs into.
+# Av1CodestreamDecoder bridge — the exact seam a platform decoder plugs into.
 dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
 # exiv2 as the container-level metadata oracle (FFI to a vendored, statically-linked exiv2 with
 # its BMFF reader, built from the `third_party/exiv2` + `third_party/expat` submodules): it reads

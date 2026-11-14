@@ -75,8 +75,9 @@ impl BitDepth {
 /// `#[repr(u8)]` with explicit, permanent discriminants: this is plain configuration data that
 /// must stay mechanically portable to C (see the workspace charter). The values are append-only —
 /// a new layout takes the next free discriminant and never renumbers an existing one. They are
-/// gamut's own ordering, deliberately *not* a codec field: AVIF's `av1C` mirror
-/// (`gamut_avif::ChromaFormat`) carries its own FFI-stable numbering and converts explicitly.
+/// gamut's own ordering, deliberately *not* a codec field: AVIF's `av1C` record carries its
+/// own `monochrome`/`chroma_subsampling_x`/`_y` fields, which
+/// `gamut_avif::Av1Config::chroma_subsampling` converts explicitly.
 #[repr(u8)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

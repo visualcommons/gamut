@@ -2,7 +2,7 @@
 //! every item on the planar, RGBA8 and RGBA16 surfaces with a stub AV1 decoder.
 //!
 //! This is the *same* function `gamut_avif::invariants` exposes to the pinned-seed `proptest`
-//! property in `crates/gamut-avif/src/decode.rs`, `decoding_stays_within_limits`. The property
+//! property in `crates/gamut-avif/src/decoder.rs`, `decoding_stays_within_limits`. The property
 //! samples well-formed coded/`grid`/`iovl` files; this tier searches the whole byte space, where
 //! the interesting cases — nested derivations, a grid whose tiles overhang its output, an overlay
 //! input offset off the canvas, an `ispe` that disagrees with the frame — are sparse.
