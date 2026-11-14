@@ -346,9 +346,20 @@ impl std::fmt::Debug for AvifEncoder {
 }
 
 impl Default for AvifEncoder {
-    /// The default encoder is **lossless** — defined as [`AvifEncoder::lossless`].
+    /// The default encoder: [`AvifConfig::default`] — **lossless** — with no byte payload and no
+    /// backend. [`AvifEncoder::new`] and [`AvifEncoder::lossless`] are this encoder.
+    ///
+    /// Built here rather than through another constructor, so no constructor's mutated body can
+    /// call back into itself through `Default` and hang the suite.
     fn default() -> Self {
-        Self::lossless()
+        Self {
+            config: AvifConfig::default(),
+            icc: None,
+            exif: None,
+            xmp: None,
+            c2pa: None,
+            backends: EncoderRegistry::new(),
+        }
     }
 }
 
@@ -365,11 +376,11 @@ impl AvifEncoder {
     /// explicit at the call site.
     #[must_use]
     pub fn lossless() -> Self {
-        // `AvifConfig::default()` outright, with no `mode:` override: lossless *is* the default
-        // mode, so writing it again changed nothing and the field could be deleted with the suite
-        // green (#110). `lossless_is_the_default_mode` below pins the coupling this relies on, so
-        // a change to the default fails there rather than silently making `lossless()` lossy.
-        Self::from_config(AvifConfig::default())
+        // The default encoder outright, with no `mode:` override: lossless *is* the default mode,
+        // so writing it again changed nothing and the field could be deleted with the suite green
+        // (#110). `lossless_is_the_default_mode` below pins the coupling this relies on, so a
+        // change to the default fails there rather than silently making `lossless()` lossy.
+        Self::default()
     }
 
     /// Creates an encoder that produces a **lossy** still image at the given `quality` (`0..=100`,
@@ -398,11 +409,7 @@ impl AvifEncoder {
     pub fn from_config(config: AvifConfig) -> Self {
         Self {
             config,
-            icc: None,
-            exif: None,
-            xmp: None,
-            c2pa: None,
-            backends: EncoderRegistry::new(),
+            ..Self::default()
         }
     }
 
