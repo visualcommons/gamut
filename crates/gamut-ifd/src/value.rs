@@ -604,8 +604,6 @@ impl Value {
                         order.u32([c[0], c[1], c[2], c[3]]),
                         order.u32([c[4], c[5], c[6], c[7]]),
                     );
-                    // Summed rather than OR'd: the halves occupy disjoint bits, so `|` would have
-                    // an equivalent `^` twin no test can tell apart, while each `+` has none.
                     let bits = match order {
                         ByteOrder::LittleEndian => u64::from(a) + (u64::from(b) << 32),
                         ByteOrder::BigEndian => u64::from(b) + (u64::from(a) << 32),
