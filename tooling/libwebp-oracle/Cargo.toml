@@ -1,0 +1,27 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under `[workspace].exclude` in the
+# root manifest, pulled in only as a path `dev-dependency`). It wraps libwebp — statically built
+# from the sources `libwebp-sys2` bundles — behind a small safe API, so gamut-webp's differential
+# suite can call it from the crate's own `#[cfg(test)]` modules without lifting gamut-webp's
+# `#![forbid(unsafe_code)]`: every `unsafe` FFI call lives here (issue #1163).
+[package]
+name = "libwebp-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: encodes, decodes and muxes WebP with a statically-linked libwebp for gamut-webp's differential cross-checks."
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+# Keep the version in step with the root manifest's `[workspace.dependencies]` entry (gamut-riff
+# dev-depends on that one); an excluded crate cannot inherit it. `static` builds the bundled
+# libwebp rather than probing for a system one (no system-installed codecs), and `mux` adds
+# libwebpmux, the reference muxer the metadata differential reads and writes through.
+libwebp-sys2 = { version = "0.2", features = ["mux", "static"] }
+
+# Its own workspace root, so cargo never walks further up looking for one: a checkout nested
+# inside another gamut checkout (a worktree under `.claude/worktrees/`) would otherwise find the
+# outer manifest, which does not exclude this path.
+[workspace]

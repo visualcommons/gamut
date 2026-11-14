@@ -1052,7 +1052,7 @@ dependencies = [
  "gamut-dsp",
  "gamut-metadata",
  "gamut-riff",
- "libwebp-sys2 0.2.0",
+ "libwebp-oracle",
 ]
 
 [[package]]
@@ -1367,6 +1367,13 @@ dependencies = [
  "bindgen 0.71.1",
  "build-env",
  "tempfile",
+]
+
+[[package]]
+name = "libwebp-oracle"
+version = "0.0.0"
+dependencies = [
+ "libwebp-sys2 0.2.0",
 ]
 
 [[package]]

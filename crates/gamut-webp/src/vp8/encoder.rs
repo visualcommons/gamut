@@ -593,17 +593,19 @@ fn encode_chroma_tokens(
 
 /// Encodes 4:2:0 [`Planar8`] planes as a VP8 key-frame bitstream (the `VP8 ` chunk payload), returning the
 /// bitstream and the encoder's reconstruction (the tier-2 oracle: it must equal any decoder's output).
-/// Uses the normal loop filter.
+/// Uses the normal loop filter. Test-only: the crate's own encoder always passes explicit
+/// [`EncodeOptions`] to [`encode_frame_filtered`].
 ///
 /// # Errors
 ///
 /// As [`encode_frame_filtered`].
+#[cfg(test)]
 pub fn encode_frame(yuv: &Planar8, quant_index: u8) -> Result<(Vec<u8>, FrameBuffers)> {
     encode_frame_filtered(yuv, quant_index, EncodeOptions::default())
 }
 
 /// Encodes a frame with explicit [`EncodeOptions`] — the loop-filter type and whether to emit
-/// quantizer segments. [`encode_frame`] uses the defaults (normal filter, unsegmented). This lets the
+/// quantizer segments. `encode_frame` uses the defaults (normal filter, unsegmented). This lets the
 /// differential oracle drive the alternative encoder paths.
 ///
 /// # Errors

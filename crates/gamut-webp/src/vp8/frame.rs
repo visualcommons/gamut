@@ -11,24 +11,28 @@
 //! by macroblock row, and all-zero macroblocks are coded as skipped. Per-macroblock loop-filter
 //! adjustments (RFC 6386 §9.4) shift each macroblock's filter level. STATUS.md section L.
 //!
-//! The pipeline is split by direction: `encoder` decides and writes a frame ([`encode_frame`],
-//! [`encode_frame_filtered`]), `decoder` reads one ([`decode_frame`]), and `reconstruct` owns the
-//! [`FrameBuffers`] reconstruction both of them drive. This module is the entry point that
-//! re-exports them, plus the macroblock syntax both directions thread identically: the segment-id
-//! tree, the non-zero coefficient contexts, and the `B_PRED` submode contexts.
+//! The pipeline is split by direction: `encoder` decides and writes a frame
+//! ([`encode_frame_filtered`]), `decoder` reads one ([`decode_frame`]), and `reconstruct` owns the
+//! `FrameBuffers` reconstruction both of them drive. This module is the crate-internal entry point
+//! that re-exports them, plus the macroblock syntax both directions thread identically: the
+//! segment-id tree, the non-zero coefficient contexts, and the `B_PRED` submode contexts.
+//!
+//! Its test modules include the libwebp differential suite at the YUV-plane level
+//! (`oracle_tests`) and the frame decoder's robustness corpus (`robustness_tests`): both drive the
+//! frame coder directly, which nothing outside the crate can reach.
 
 // The macroblock/block math indexes several fixed-size arrays in lock-step (and over partial ranges
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
 #![allow(clippy::needless_range_loop)]
 
-pub use super::decoder::decode_frame;
-pub use super::encoder::{
-    EncodeOptions, MAX_TOKEN_PARTITION_SIZE, encode_frame, encode_frame_filtered,
-};
-/// Re-exported so the low-level frame API carries the loop-filter delta type next to [`EncodeOptions`].
-pub use super::header::LoopFilterDeltas;
+pub(crate) use super::decoder::decode_frame;
+#[cfg(test)]
+pub(crate) use super::encoder::encode_frame;
+pub(crate) use super::encoder::{EncodeOptions, encode_frame_filtered};
+/// Re-exported so the frame tests carry the loop-filter delta type next to [`EncodeOptions`].
+#[cfg(test)]
+pub(crate) use super::header::LoopFilterDeltas;
 use super::prediction;
-pub use super::reconstruct::FrameBuffers;
 
 /// Segment-id coding tree (RFC 6386 §10 `mb_segment_tree`): four leaves over two boolean decisions.
 pub(super) const MB_SEGMENT_TREE: &[i8] = &[2, 4, 0, -1, -2, -3];
@@ -233,6 +237,66 @@ pub(super) mod fixtures {
             .collect();
         let u = (0..cw * ch).map(|i| ((i * 3) & 0xff) as u8).collect();
         let v = (0..cw * ch).map(|i| ((i * 9 + 70) & 0xff) as u8).collect();
+        yuv420(width, height, y, u, v)
+    }
+
+    /// A structured ramp with real residuals in every plane, to exercise the transforms and tokens.
+    pub(in crate::vp8) fn synthetic(width: u32, height: u32) -> Planar8 {
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = chroma_dims(width, height);
+        let y = (0..w * h)
+            .map(|i| ((i * 9 + (i / w) * 5) & 0xff) as u8)
+            .collect();
+        let u = (0..cw * ch).map(|i| ((i * 3 + 80) & 0xff) as u8).collect();
+        let v = (0..cw * ch).map(|i| ((i * 7 + 150) & 0xff) as u8).collect();
+        yuv420(width, height, y, u, v)
+    }
+
+    /// A frame with **photographic-like statistics** built directly in the YUV domain, so the
+    /// bit-exact YUV conformance gate stays independent of the RGB↔YCbCr layer: a smooth luma
+    /// gradient plus low-amplitude detail and hard region edges, with gently varying chroma.
+    /// RNG-free and `seed`-parameterised, like `libwebp_oracle::fixtures::photo_like_rgba`.
+    pub(in crate::vp8) fn photo_like(width: u32, height: u32, seed: u32) -> Planar8 {
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = chroma_dims(width, height);
+        let hash = |x: i64, y: i64, k: i64| -> i64 {
+            let mut v = x.wrapping_mul(374_761_393)
+                ^ y.wrapping_mul(668_265_263)
+                ^ k.wrapping_mul(2_654_435_761)
+                ^ i64::from(seed).wrapping_mul(2_246_822_519);
+            v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+            (v ^ (v >> 16)) & 0xff
+        };
+        let clamp = |v: i64| v.clamp(0, 255) as u8;
+        let (wi, hi) = (w.max(1) as i64, h.max(1) as i64);
+        let y = (0..w * h)
+            .map(|i| {
+                let (x, yy) = ((i % w) as i64, (i / w) as i64);
+                // Smooth diagonal base + small detail + sharp 8-region steps (B_PRED / loop-filter
+                // bait).
+                let base = x * 170 / wi + yy * 60 / hi;
+                let detail = (hash(x, yy, 0) - 128) / 10;
+                let edge = if (x * 4 / wi + yy * 4 / hi) % 2 == 0 {
+                    28
+                } else {
+                    0
+                };
+                clamp(base + detail + edge)
+            })
+            .collect();
+        let (cwi, chi) = (cw.max(1) as i64, ch.max(1) as i64);
+        let u = (0..cw * ch)
+            .map(|i| {
+                let (x, yy) = ((i % cw) as i64, (i / cw) as i64);
+                clamp(100 + x * 70 / cwi + (hash(x, yy, 1) - 128) / 16)
+            })
+            .collect();
+        let v = (0..cw * ch)
+            .map(|i| {
+                let (x, yy) = ((i % cw) as i64, (i / cw) as i64);
+                clamp(140 + yy * 60 / chi + (hash(x, yy, 2) - 128) / 16)
+            })
+            .collect();
         yuv420(width, height, y, u, v)
     }
 }
@@ -544,7 +608,7 @@ mod tests {
         // header and applies them to its own reconstruction, so the native decoder must reproduce the
         // same deblocked planes. detailed() forces B_PRED macroblocks, so the mode[0] (B_PRED) delta
         // is genuinely exercised, not just ref_frame[0]. (The cross-check that this matches libwebp's
-        // own delta handling is the tier-3 oracle in tests/oracle.rs.)
+        // own delta handling is the tier-3 oracle in `oracle_tests` below.)
         for ref_d in [-16i8, 0, 12] {
             for mode_d in [-8i8, 0, 10] {
                 for &q in &[20u8, 60] {
@@ -580,3 +644,9 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod oracle_tests;
+
+#[cfg(test)]
+mod robustness_tests;

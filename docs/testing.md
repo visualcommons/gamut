@@ -31,10 +31,13 @@ Placement is mechanical. Two questions, in order:
    - the assertion needs `unsafe` and the crate is `#![forbid(unsafe_code)]` — which is 22 of the
      33 crates, so this is the common case: `gamut-heic`'s `tests/backend.rs` and
      `tests/abi_borrowed_backend.rs`, `gamut-webp`'s `tests/backends.rs`, `gamut-avif`'s
-     `tests/backend.rs`, and the FFI wrappers in `gamut-riff`/`gamut-webp`'s
-     `tests/common/mod.rs`. The six hot-path crates (`gamut-png`, `gamut-deflate`, `gamut-dsp`,
-     `gamut-color`, `gamut-cmm`, `gamut-jpeg`) are `deny`, not `forbid`, so this reason no longer
-     *forces* them up — an `unsafe` assertion there can carry
+     `tests/backend.rs`, and the FFI wrappers in `gamut-riff`'s `tests/common/mod.rs`. Moving
+     such wrappers into a dev-only `tooling/` oracle crate lifts the reason: the `unsafe` then
+     lives in that crate, and the tests can sit inline — `gamut-webp`'s now live in
+     `tooling/libwebp-oracle`, and its VP8 frame tests sit in `src/vp8/frame/`. The six
+     hot-path crates (`gamut-png`, `gamut-deflate`, `gamut-dsp`, `gamut-color`, `gamut-cmm`,
+     `gamut-jpeg`) are `deny`, not `forbid`, so this reason no longer *forces* them up — an
+     `unsafe` assertion there can carry
      `#[expect(unsafe_code, reason = "…")]` and sit inline. Their existing suites stay where they
      are: rule 3 makes either legal, and the rule above never authorises a bulk relocation.
      `gamut-png`/`gamut-jpeg`'s `tests/backends.rs` are exactly that case;

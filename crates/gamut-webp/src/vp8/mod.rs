@@ -9,11 +9,11 @@
 //!
 //! The component breakdown lives in `../STATUS.md` (sections G-N).
 
-// Most users want [`WebpEncoder`](crate::WebpEncoder)/[`WebpDecoder`](crate::WebpDecoder); [`frame`]
-// is the documented low-level entry point (encode/decode a VP8 key frame directly), re-exporting
-// the `encoder`, `decoder` and `reconstruct` halves it is split into. Those and the remaining
-// spec-section modules that `frame` is assembled from are crate-internal.
-pub mod frame;
+// The whole module is crate-private (issue #1163); callers reach VP8 through `WebpEncoder` /
+// `WebpDecoder` or a `WebpCodestream` backend. `frame` is the internal entry point (encode/decode a
+// VP8 key frame directly) the crate's encoder and decoder call, re-exporting the `encoder`,
+// `decoder` and `reconstruct` halves it is split into.
+pub(crate) mod frame;
 
 pub(crate) mod bool_coder;
 pub(crate) mod cost;
