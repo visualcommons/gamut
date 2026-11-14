@@ -39,6 +39,13 @@ local check_citations = new Step {
     )
     check = "mise run check-citations"
 }
+local check_file_length = new Step {
+    // Static and sub-second (issue #1096): counts lines of tracked crates/ .rs/.toml files against
+    // the shrink-only baseline, builds nothing. Checked, never fixed: the fix is a split by concern,
+    // and a fixer that listed the file would grow the baseline the check exists to shrink.
+    glob = List("crates/**/*.rs", "crates/**/*.toml", "tooling/check-file-length/**")
+    check = "mise run check-file-length"
+}
 local clippy = new Step {
     glob = List("**/*.rs")
     // Fast, default-feature clippy — does not build the C-oracle dev-deps. CI runs
@@ -78,6 +85,7 @@ hooks {
             ["clippy"] = clippy
             ["check-tests"] = check_tests
             ["check-citations"] = check_citations
+            ["check-file-length"] = check_file_length
         }
     }
 }

@@ -94,6 +94,14 @@ jobs:
         # argues about. The mutation job itself runs only after merge, so an anchor that drifted
         # would otherwise surface as a red or silently-weakened gate at an unrelated commit.
         run: mise run check-mutants-anchors
+      - name: File length (1011 lines, shrink-only baseline)
+        # Static: line counts of the tracked crates/ .rs/.toml files against
+        # tooling/check-file-length/baseline.txt, builds nothing. The base ref is the PR's target
+        # branch (master on a push), so a pull request that adds a path to the baseline fails here;
+        # fetch-depth 0 above provides it.
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'master' }}
+        run: mise run check-file-length "$BASE_REF"
       - name: Fuzz target lists in step
         # Three hand-maintained lists describe the same set of fuzz targets: the files under
         # tooling/gamut-fuzz/fuzz_targets, the [[bin]] entries in that crate's Cargo.toml, and the
