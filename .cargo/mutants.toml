@@ -252,19 +252,6 @@ exclude_re = [
     # `x <= 1/32` choose between two identical values there — unobservable. (`1.0/32.0 → 1.0%32.0`
     # *is* observable and is killed by a test at x = 0.5.)
     '^crates/gamut-color/src/transfer\.rs:112:10: replace < with <= in prophoto_rgb_eotf_standard$',
-    # gamut-iptc `IimBlock::parse`: every `|` assembles a big-endian length from disjoint octet
-    # positions — `(hi << 8) | lo` (standard length), `(k_hi << 8) | k_lo` (extended descriptor
-    # width), and `(len << 8) | byte` (extended length accumulator). In each the left operand's low
-    # 8 bits are zero before the OR, so the operands never share a bit and `|` is identical to `^`.
-    # All three `| -> ^` mutations are therefore equivalent. (The `<<`, `>`, and `==`/`>=` mutations
-    # in this function are observable and killed by the extended-descriptor tests.)
-    '^crates/gamut-iptc/src/iim\.rs:(260:52|264:69|276:38): replace \| with \^ in IimBlock::parse$',
-    # gamut-icc ProfileHeader::{is_embedded,is_transparency} test bit 0 of their field via
-    # `flags & (1 << 0)`: a zero-distance shift is the identity in both directions
-    # (`1 << 0` == `1 >> 0` == 1), so the mutation is provably equivalent. (The bit-1/2/3
-    # accessors' shifts ARE killed by `decodes_flag_and_attribute_bits`.)
-    '^crates/gamut-icc/src/header\.rs:169:25: replace << with >> in ProfileHeader::is_embedded$',
-    '^crates/gamut-icc/src/header\.rs:183:30: replace << with >> in ProfileHeader::is_transparency$',
     # gamut-avif `AvifEncoder::lossless` is again `Self::default()` (#1085): the default
     # configuration *is* lossless, and `Default::default` builds the encoder itself. While
     # `lossless` built the struct and `Default` called it, the replacement recursed; once the
@@ -740,15 +727,6 @@ exclude_re = [
     '^crates/gamut-cmm/src/bpc\.rs:240:10: replace > with >= in clip_probe_l$',
     '^crates/gamut-cmm/src/bpc\.rs:240:22: replace < with <= in clip_probe_l$',
     '^crates/gamut-cmm/src/bpc\.rs:240:22: replace < with == in clip_probe_l$',
-    # gamut-cmm gamut_check.rs — the one boundary twin of the transcribed GamutSampler decision
-    # table (#330). ratio_excess isolates the table's ratio arm precisely so this can be
-    # excluded without shadowing the killable threshold mutants in GamutCheck::excess (all
-    # killed by decision_table_arms_are_transcribed_verbatim's exact-threshold pins): at
-    # `ratio == threshold` exactly, the taken branch returns `ratio - threshold == 0.0` and
-    # the untaken one returns 0.0 — bitwise the same output, so `>` vs `>=` cannot change
-    # observable behaviour. Every other mutant in ratio_excess (the dE2 == 0 guard, the
-    # division, the subtraction, the branch bodies) IS killed by the same test's exact pins.
-    '^crates/gamut-cmm/src/gamut_check\.rs:193:14: replace > with >= in ratio_excess$',
     # gamut-webp VP8 sign reconstruction (tokens.rs / quant.rs) — two `x < 0` sign tests whose
     # `<=` twin differs only at zero, which neither can reach. `walk_block`'s sign bit is written
     # inside `if token != DCT_0`, and `token_for_abs` returns `DCT_0` exactly when the level is

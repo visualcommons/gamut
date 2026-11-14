@@ -257,11 +257,11 @@ impl IimBlock {
 
             let (value_start, value_len): (usize, u64) = if len_hi & EXTENDED_FLAG == 0 {
                 // Standard form: octets 4–5 are the value length (≤ 32767).
-                (pos + 5, (u64::from(len_hi) << 8) | u64::from(len_lo))
+                (pos + 5, u64::from(u16::from_be_bytes([len_hi, len_lo])))
             } else {
                 // Extended form: the low 15 bits of octets 4–5 give the width `k` of the
                 // big-endian value-length field that follows.
-                let k = (usize::from(len_hi & !EXTENDED_FLAG) << 8) | usize::from(len_lo);
+                let k = usize::from(u16::from_be_bytes([len_hi & !EXTENDED_FLAG, len_lo]));
                 if k == 0 || k > 8 {
                     return Err(IptcError::Unsupported(
                         "IPTC IIM: unsupported extended length descriptor size",
@@ -273,7 +273,7 @@ impl IimBlock {
                     .ok_or(IptcError::Malformed("IPTC IIM: truncated extended length"))?;
                 let mut len = 0u64;
                 for &b in count {
-                    len = (len << 8) | u64::from(b);
+                    len = (len << 8) + u64::from(b);
                 }
                 (count_end, len)
             };

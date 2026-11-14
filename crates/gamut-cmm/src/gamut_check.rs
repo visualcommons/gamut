@@ -186,15 +186,12 @@ impl GamutCheck {
 /// threshold hit) failed outright, so the *ratio* `dE1/dE2` decides — a first trip much
 /// worse than the second means the colour itself (not the profile's round-trip quality) is
 /// the problem. `dE2 == 0` degrades to `dE1` alone (lcms2's guard, reachable only at
-/// `dE1 == T` exactly). Isolated so its one boundary-equivalent mutant (`>` vs `>=`: at
-/// `ratio == T` both branches return exactly 0) can be excluded narrowly.
+/// `dE1 == T` exactly). The excess is clamped at zero rather than branched on `ratio > T`:
+/// the two branches agree at `ratio == T` (both 0), so the comparison only ever carried an
+/// equivalent `>=` twin, and `max` also yields 0 for the NaN the comparison sent to `else`.
 fn ratio_excess(de1: f64, de2: f64, threshold: f64) -> f64 {
     let ratio = if de2 == 0.0 { de1 } else { de1 / de2 };
-    if ratio > threshold {
-        ratio - threshold
-    } else {
-        0.0
-    }
+    (ratio - threshold).max(0.0)
 }
 
 impl Transform for GamutCheck {
