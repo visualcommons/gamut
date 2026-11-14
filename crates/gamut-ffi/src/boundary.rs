@@ -104,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn bytes_out_round_trips_through_gamut_bytes_free() {
+    fn bytes_out_round_trips_through_gamut_bytes_free() {
         let (data, len) = bytes_out(vec![7; 5]);
         assert_eq!(unsafe { core::slice::from_raw_parts(data, len) }, [7; 5]);
         unsafe { gamut_bytes_free(data, len) };
