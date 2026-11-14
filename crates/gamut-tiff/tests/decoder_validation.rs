@@ -6,9 +6,10 @@
 //! flips the colours — all distinguishable from the correct clean rejection.
 
 use gamut_core::{Bilevel, DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_tiff::{
-    ByteOrder, Compression, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags, write_image,
-};
+use gamut_tiff::{ByteOrder, Compression, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags};
+
+mod common;
+use common::write_image;
 
 fn valid_rgb(w: u32, h: u32) -> Vec<u8> {
     let rgb: Vec<u8> = (0..w * h * 3).map(|i| (i * 7) as u8).collect();

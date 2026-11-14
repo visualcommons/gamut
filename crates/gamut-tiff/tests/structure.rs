@@ -1,6 +1,7 @@
 //! Structural round-trip and robustness tests for the TIFF container layer (P2).
 
-use gamut_tiff::{ByteOrder, Ifd, TiffFile, Value, Variant, read, tags, write};
+use gamut_ifd::{TiffFile, read, write};
+use gamut_tiff::{ByteOrder, Ifd, Value, Variant, tags};
 
 #[test]
 fn public_api_roundtrips_a_directory() {

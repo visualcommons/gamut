@@ -28,11 +28,11 @@
 //! the per-format [`gamut_core::EncodeImage`] impls, and decoding returns a
 //! [`gamut_core::ImageBuf`] via [`gamut_core::DecodeImage`]. Both the classic 32-bit container
 //! and **BigTIFF** (magic `43`, 64-bit offsets, for files past 4 GiB) are written and read: opt
-//! into BigTIFF with [`TiffEncoder::with_big_tiff`]; the decoder detects the variant from the
+//! into BigTIFF with [`TiffEncoder::with_variant`]; the decoder detects the variant from the
 //! header. [`TiffDecoder::info`] reports a page's declared depth, sample format and layout from
 //! tags alone, so a caller can pick a pixel type before paying for a decode — including for pages
 //! this crate declines to decode. Sample depths are 1, 8 and 16 bits; the typed impls widen 8-bit
-//! samples to 16-bit exactly (`×257`) and, once [`TiffDecoder::convert_policy`] permits the loss,
+//! samples to 16-bit exactly (`×257`) and, once [`TiffDecoder::with_convert_policy`] permits the loss,
 //! narrow 16-bit to 8-bit by the shared engine's rescaling, while signed,
 //! IEEE-float and 32-bit samples are refused by name rather than reinterpreted (§19 float support
 //! and its Predictor 3 remain deferred). The strict [`deconstruct`] walk additionally accounts
@@ -40,14 +40,16 @@
 //! directions against libtiff; the deferred colour modes and compression schemes (YCbCr,
 //! CIE L\*a\*b\*, JPEG-in-TIFF, …) land additively — see `STATUS.md` for the scope ledger.
 //!
-//! Embedded metadata — Exif (the 0th-IFD fields of [`IFD0_EXIF_TAGS`] in IFD 0 itself, plus the
-//! `ExifIFD` and `GPSInfo` sub-IFDs) plus XMP / IPTC-IIM / ICC / C2PA payloads — is
-//! [`TiffMetadata`], written by [`TiffEncoder::with_tiff_metadata`] and read by
+//! Embedded metadata — the [`Exif`] model (its 0th-IFD fields of [`IFD0_EXIF_TAGS`] in IFD 0
+//! itself, plus the `ExifIFD` and `GPSInfo` sub-IFDs) plus XMP / IPTC-IIM / ICC payloads and the
+//! C2PA store a file carries — is [`TiffMetadata`], written by [`TiffEncoder::with_tiff_metadata`] and read by
 //! [`TiffDecoder::metadata`]. With the optional **`metadata`** Cargo feature it is also wired to
 //! the `gamut-metadata` facade's typed models: [`TiffMetadata`] implements the facade's
-//! `TypedMetadata` trait, and `TiffEncoder::with_metadata` / `with_encoded_metadata` embed a
-//! unified `Metadata` (the whole EXIF model but its thumbnail, which has no carrier here and is
-//! refused, as is a 0th-IFD field IFD 0 holds as the encoder's own).
+//! `TypedMetadata` trait, and [`TiffEncoder`] is the facade's `MetadataSink`, whose
+//! `with_metadata` / `with_encoded_metadata` embed a unified `Metadata` through the raw setters
+//! ([`TiffEncoder::with_exif`] and its siblings). What of the EXIF model a TIFF cannot hold — its
+//! thumbnail, a 0th-IFD field IFD 0 holds as the encoder's own — is left behind and named by
+//! [`TiffEncoder::metadata_notices`] rather than refused.
 //!
 //! TIFF codestreams are permanently backend-less: unlike the other format crates, this crate
 //! adds **no** pluggable codestream backend (the IoC seam of #241), because TIFF's compression
@@ -93,41 +95,50 @@ mod ifd;
 mod info;
 mod metadata;
 mod palette;
+#[cfg(feature = "metadata")]
+mod typed;
 mod writer;
 
 pub use decoder::TiffDecoder;
 pub use deconstruct::deconstruct;
 pub use encoder::{TiffEncodeReport, TiffEncoder};
+// The core types this crate's own signatures take (`TiffDecoder::with_limits`,
+// `TiffDecoder::with_convert_policy`, `TiffEncoder::encode_indexed8`), so a caller needs no direct
+// gamut-core dependency.
+pub use gamut_core::{DecodeLimits, Palette, convert::ConvertPolicy};
+// `TiffMetadata::exif` is gamut-exif's model, as `gamut-dng`'s is; re-exported with the tag
+// vocabulary its accessors take so a caller needs no direct gamut-exif dependency.
+pub use gamut_exif::{Exif, ExifTag};
 // The tag-value codes are gamut-ifd's, shared with gamut-dng; they are reachable from
 // `TiffEncoder` and `TiffInfo`, so they are re-exported for the same reason as the IFD types below.
 // Which codes a TIFF page may carry is this crate's own (`ifd`, `compression`).
 pub use gamut_ifd::tags::{Compression, PhotometricInterpretation, Predictor, SampleFormat};
-// The structural IFD core lives in gamut-ifd; re-export the types a gamut-tiff user can touch —
-// the read/write spine plus every type reachable from this crate's own public items
-// (`DeconstructReport` exposes `SegmentReport`, which exposes `Segment`/`SpanKind`/`DataLabel`/
-// `Conflict`/`SharedSpan`, its ranges being `core::ops::Range<u64>`; `Value::Unknown` carries
-// `UnknownValue`; and `Ifd`'s accessors return `SubIfd`) — so no direct gamut-ifd dependency is
-// ever needed to name them. The deconstruct report itself (`DeconstructReport` and its
-// `Anomaly`/`Severity`/`UnknownTag`/`UnknownFieldType` findings) is gamut-ifd's too, shared with
-// gamut-dng.
+// The structural IFD core lives in gamut-ifd; re-export every type reachable from this crate's
+// own public items — the byte order and container variant the encoder takes, the directory model
+// the Exif carriers hold (`Ifd`, whose accessors return `Field`/`SubIfd`, `Value` and the
+// `UnknownValue`/`FieldType` it carries), and `DeconstructReport`'s `SegmentReport`, which exposes
+// `Segment`/`SpanKind`/`DataLabel`/`Conflict`/`SharedSpan`, its ranges being
+// `core::ops::Range<u64>` — so no direct gamut-ifd dependency is ever needed to name them. The
+// deconstruct report itself (`DeconstructReport` and its `Anomaly`/`Severity`/`UnknownTag`/
+// `UnknownFieldType` findings) is gamut-ifd's too, shared with gamut-dng. The container's own
+// read/write spine is not re-exported: it is gamut-ifd's to expose, and a caller that walks a TIFF
+// structurally names that crate.
 pub use gamut_ifd::{
     Anomaly, ByteOrder, Conflict, DataLabel, DeconstructReport, Field, FieldType, Ifd, Segment,
-    SegmentReport, Severity, SharedSpan, SpanKind, SubIfd, TiffFile, UnknownFieldType, UnknownTag,
-    UnknownValue, Value, Variant, read, write,
+    SegmentReport, Severity, SharedSpan, SpanKind, SubIfd, UnknownFieldType, UnknownTag,
+    UnknownValue, Value, Variant,
 };
-// The C2PA exclusion set is gamut-ifd's — §A.3.6 and §18.5.5 are stated once, for this crate
-// and `gamut-dng` alike — but it is reachable from `TiffEncodeReport` and [`c2pa_exclusions`], so
-// it is re-exported here too and needs no direct gamut-ifd dependency. The non-validating report
-// [`c2pa_summary`] returns is gamut-ifd's too, re-exported whole for the same reason (issue #530).
+// The C2PA surface is gamut-ifd's — §A.3.6 and §18.5.5 are stated once, for this crate and
+// `gamut-dng` alike — re-exported under the same names `gamut-dng` uses: the locator
+// `c2pa_exclusions` (whose ranges `TiffEncodeReport` also carries) and the non-validating
+// `c2pa_summary` report (issue #530), with the types both return.
 pub use gamut_ifd::{
     C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary, C2paUnreadEntry,
-    C2paUnreadReason,
+    C2paUnreadReason, c2pa_exclusions, c2pa_summary,
 };
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `TiffMetadata::metadata` / `TiffEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataSink, TypedMetadata};
 pub use info::TiffInfo;
-pub use metadata::{IFD0_EXIF_TAGS, TiffMetadata, c2pa_exclusions, c2pa_summary};
-pub use palette::Palette8;
-pub use writer::{write_image, write_image_tiled, write_multipage};
+pub use metadata::{IFD0_EXIF_TAGS, MetadataNotice, TiffMetadata};

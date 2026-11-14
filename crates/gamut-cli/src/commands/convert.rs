@@ -17,9 +17,9 @@ use gamut::jxl::{
     Container as JxlContainer, Distance as JxlDistance, Effort as JxlEffort, JxlEncoder,
     ModularMode as JxlModularMode, Orientation as JxlOrientation,
 };
-use gamut::metadata::{Carrier, EncodedMetadata};
+use gamut::metadata::{Carrier, EncodedMetadata, MetadataSink};
 use gamut::png::{Effort as PngEffort, PngEncoder, PngMetadata};
-use gamut::tiff::{Compression as TiffCompression, IFD0_EXIF_TAGS, TiffEncoder};
+use gamut::tiff::{Compression as TiffCompression, MetadataNotice as TiffNotice, TiffEncoder};
 use gamut::webp::{Effort as WebpEffort, NearLossless as WebpNearLossless, WebpEncoder};
 
 use crate::error::CliError;
@@ -788,13 +788,17 @@ fn encode(
             blocks.iptc_iim = carried.iptc_iim;
             let attached = blocks != EncodedMetadata::default();
             let image = ImageRef::<Rgb8>::new(&rgb, dims)?;
-            // The encoder checks the Exif directory it is handed, at the builder and again at the
-            // encode. Metadata failing must not fail a conversion whose pixels are fine, as on the
-            // JPEG path: say so, and encode without it.
+            // What a TIFF cannot hold of the Exif — a thumbnail, a 0th-IFD field its IFD 0 holds as
+            // the encoder's own — the encoder leaves behind and names; what it still refuses (a
+            // sub-IFD its own reader could not hand back) must not fail a conversion whose pixels
+            // are fine, as on the JPEG path: say so, and encode without it.
             let encoded = bare
                 .clone()
                 .with_encoded_metadata(&blocks)
-                .and_then(|encoder| encoder.encode_image(image, &mut out));
+                .and_then(|encoder| {
+                    report_tiff_notices(&encoder.metadata_notices());
+                    encoder.encode_image(image, &mut out)
+                });
             if let Err(err) = encoded {
                 if !attached {
                     return Err(err.into());
@@ -1192,9 +1196,6 @@ fn carry(
         not_held("Exif payload");
         return carried;
     }
-    if format == OutputFormat::Tiff {
-        exif = tiff_carried(&exif);
-    }
     // `ExifWriter` re-embeds a thumbnail's JPEG bytes and its uncompressed strips, but a thumbnail
     // whose image bytes did not read holds neither. The reader has already removed its
     // `JPEGInterchangeFormat`/`StripOffsets` (#548, #868), so nothing would dangle; the 1st IFD
@@ -1223,42 +1224,36 @@ fn carry(
     carried
 }
 
-/// The part of `exif` a TIFF output holds — everything but the thumbnail and the 0th-IFD fields
-/// the TIFF encoder writes itself — reporting the rest as left behind.
+/// Reports what a TIFF encoder left behind of the input's metadata.
 ///
 /// A TIFF has no Exif 0th IFD of its own: that directory's tags are TIFF 6.0 tags of the page's
-/// own IFD 0. `gamut-tiff` carries the descriptive ones (`Make`, `Model`, `Orientation`, …,
-/// `gamut::tiff::IFD0_EXIF_TAGS`) into it beside the `GPSInfo` and `ExifIFD` sub-IFDs, but writes
-/// the layout ones (`XResolution`, `YCbCrPositioning`, …) from the pixels it lays out, and a
-/// thumbnail would be a page of its own. It refuses an Exif model holding either rather than
-/// dropping it — so the drop happens here, where it is reported.
-fn tiff_carried(exif: &Exif) -> Exif {
-    let mut kept = exif.clone();
-    let mut left = Vec::new();
-    for field in exif.image().fields() {
-        if !IFD0_EXIF_TAGS.contains(&field.tag) {
-            kept.image_mut().remove(field.tag);
-            left.push(
-                ExifTag::from_id(IfdKind::Image, field.tag)
-                    .map_or_else(|| format!("tag {}", field.tag), |tag| tag.name().to_owned()),
-            );
+/// own IFD 0. `gamut-tiff` carries the descriptive ones (`Make`, `Model`, `Orientation`, …) into it
+/// beside the `GPSInfo` and `ExifIFD` sub-IFDs, writes the layout ones (`XResolution`,
+/// `YCbCrPositioning`, …) from the pixels it lays out, and would hold a thumbnail as a page of its
+/// own — so it leaves those behind and names each with a notice, which this renders, the 0th-IFD
+/// fields together by name.
+fn report_tiff_notices(notices: &[TiffNotice]) {
+    let mut fields = Vec::new();
+    for notice in notices {
+        match *notice {
+            TiffNotice::ExifImageField { tag } | TiffNotice::ExifImageGroup { tag } => fields.push(
+                ExifTag::from_id(IfdKind::Image, tag)
+                    .map_or_else(|| format!("tag {tag}"), |tag| tag.name().to_owned()),
+            ),
+            TiffNotice::ExifThumbnail => tracing::warn!(
+                "input metadata not carried — the Exif thumbnail, which a TIFF would hold as a \
+                 page of its own"
+            ),
+            other => tracing::warn!("input metadata not carried — {other}"),
         }
     }
-    if !left.is_empty() {
+    if !fields.is_empty() {
         tracing::warn!(
             "input metadata not carried — the Exif 0th-IFD field(s) {}, which a TIFF's IFD 0 \
              holds as the TIFF encoder's own",
-            left.join(", ")
+            fields.join(", ")
         );
     }
-    if exif.thumbnail().is_some() {
-        kept.clear_thumbnail();
-        tracing::warn!(
-            "input metadata not carried — the Exif thumbnail, which a TIFF would hold as a page \
-             of its own"
-        );
-    }
-    kept
 }
 
 /// Rewrites the Exif claims a conversion can make false, each only where the input makes it — a

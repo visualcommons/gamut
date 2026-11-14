@@ -49,7 +49,7 @@ fn rgba_roundtrips_in_gamut() {
 
             // With the loss opted into, the samples pass through unchanged.
             let rgb: ImageBuf<Rgb8> = TiffDecoder::new()
-                .convert_policy(ConvertPolicy::lossless().with_alpha(AlphaPolicy::Drop))
+                .with_convert_policy(ConvertPolicy::lossless().with_alpha(AlphaPolicy::Drop))
                 .decode_image(&tiff)
                 .expect("rgb");
             let expect_rgb: Vec<u8> = src

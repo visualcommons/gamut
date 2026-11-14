@@ -1,9 +1,10 @@
 //! fuzz · robustness — `gamut_tiff::TiffDecoder`, the entry point a TIFF from the network hits.
 //!
 //! `docs/testing.md`'s per-crate table names `TiffDecoder` as this crate's untrusted-input
-//! surface. The decoder is `#![forbid(unsafe_code)]` and carries an explicit `MAX_IMAGE_BYTES`
-//! cap, so a hostile file must end in a typed error rather than a panic, a hang or a runaway
-//! allocation — the three things libFuzzer itself detects.
+//! surface. The decoder is `#![forbid(unsafe_code)]` and refuses any page or tile past its
+//! default `DecodeLimits` byte budget (`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`, 64 MiB) before
+//! allocating for it, so a hostile file must end in a typed error rather than a panic, a hang or a
+//! runaway allocation — the three things libFuzzer itself detects.
 //!
 //! ## The check beyond the crash oracle
 //!
@@ -91,7 +92,7 @@ use libfuzzer_sys::fuzz_target;
 const MAX_PAGES: usize = 4;
 
 fuzz_target!(|data: &[u8]| {
-    let decoder = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    let decoder = TiffDecoder::new().with_convert_policy(ConvertPolicy::permissive());
 
     // A file whose chain does not parse is simply refused. The other entry points are not driven
     // for it: `page_count` is `read(data)?.ifds.len()`, and `info`/`decode_page` both begin with

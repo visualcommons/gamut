@@ -1,7 +1,10 @@
 //! End-to-end pixel round-trips for the uncompressed baseline path (P3, the keystone).
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_tiff::{ByteOrder, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags, write_image};
+use gamut_tiff::{ByteOrder, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags};
+
+mod common;
+use common::write_image;
 
 const SIZES: &[(u32, u32)] = &[
     (1, 1),
@@ -92,7 +95,7 @@ fn multi_strip_image_is_split_and_reassembled() {
             &mut tiff,
         )
         .expect("encode");
-    let parsed = gamut_tiff::read(&tiff).expect("parse");
+    let parsed = gamut_ifd::read(&tiff).expect("parse");
     let offs = parsed.ifds[0]
         .get_u32_vec(tags::STRIP_OFFSETS)
         .expect("offsets");

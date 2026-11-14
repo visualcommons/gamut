@@ -1,7 +1,7 @@
 //! Palette-colour images: tier-1 round-trips and libtiff cross-checks (P6).
 
 use gamut_core::{DecodeImage, Dimensions, ImageBuf, ImageRef, Indexed8, Rgb8};
-use gamut_tiff::{Compression, Palette8, TiffDecoder, TiffEncoder};
+use gamut_tiff::{Compression, Palette, TiffDecoder, TiffEncoder};
 
 const SIZES: &[(u32, u32)] = &[(1, 1), (5, 4), (17, 13), (64, 40)];
 
@@ -44,9 +44,9 @@ fn palette_roundtrips_in_gamut() {
             let mut tiff = Vec::new();
             TiffEncoder::new()
                 .with_compression(comp)
-                .encode_palette8(
+                .encode_indexed8(
                     ImageRef::<Indexed8>::new(&idx, Dimensions::new(w, h).unwrap()).unwrap(),
-                    &Palette8::from_rgb_triples(&pal).unwrap(),
+                    &Palette::new(pal.as_chunks::<3>().0).unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
@@ -71,9 +71,9 @@ fn gamut_palette_is_resolved_by_libtiff() {
         let idx = indices(w, h);
         let mut tiff = Vec::new();
         TiffEncoder::new()
-            .encode_palette8(
+            .encode_indexed8(
                 ImageRef::<Indexed8>::new(&idx, Dimensions::new(w, h).unwrap()).unwrap(),
-                &Palette8::from_rgb_triples(&pal).unwrap(),
+                &Palette::new(pal.as_chunks::<3>().0).unwrap(),
                 &mut tiff,
             )
             .expect("encode");

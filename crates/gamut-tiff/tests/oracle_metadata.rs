@@ -25,7 +25,7 @@ fn metadata() -> TiffMetadata {
         .with_xmp(b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>".to_vec())
         .with_iptc(vec![0x1c, 0x02, 0x05, 0x00, 0x04, b't', b'e', b's', b't'])
         .with_icc(vec![0, 0, 0, 12, b'a', b'c', b's', b'p', 1, 2, 3, 4])
-        .with_exif(exif)
+        .with_exif(common::exif_model(None, Some(exif), None))
 }
 
 #[test]
@@ -52,7 +52,8 @@ fn libtiff_decodes_a_gamut_image_carrying_a_c2pa_manifest_store() {
     for &(w, h) in SIZES {
         let src = rgb_pattern(w, h);
         let tiff = TiffEncoder::new()
-            .with_tiff_metadata(metadata().with_c2pa(store.clone()))
+            .with_tiff_metadata(metadata())
+            .with_c2pa(&store)
             .encode_to_vec(
                 ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).expect("image"),
             )
