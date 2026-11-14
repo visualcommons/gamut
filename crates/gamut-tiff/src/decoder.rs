@@ -1016,4 +1016,35 @@ mod tests {
         let got = decode_tiles(&ifd, &[0; 6], &gray_layout(), false);
         assert_invalid_input(got, "image data out of bounds");
     }
+
+    /// `StripOffsets` and `StripByteCounts` must each hold one entry per strip; either one
+    /// alone disagreeing is a strip-count mismatch. Each side is asserted separately: when only
+    /// one array is off, the arrays also differ from each other, and `extent_slices` would refuse
+    /// them under its own message if `decode_strips`' check required both to be wrong.
+    #[test]
+    fn decode_strips_refuses_either_array_off_the_strip_count() {
+        // gray_layout is 3 rows tall; RowsPerStrip absent makes it one strip.
+        for (offsets, counts) in [(vec![0, 0], vec![6]), (vec![0], vec![6, 6])] {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::STRIP_OFFSETS, Value::Long(offsets));
+            ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(counts));
+            let got = decode_strips(&ifd, &[0; 6], &gray_layout());
+            assert_invalid_input(got, "TIFF: strip count mismatch");
+        }
+    }
+
+    /// The tile twin of [`decode_strips_refuses_either_array_off_the_strip_count`]: a 2×3 page
+    /// in 2×3 tiles is one tile, and either array alone holding two entries is a mismatch.
+    #[test]
+    fn decode_tiles_refuses_either_array_off_the_tile_count() {
+        for (offsets, counts) in [(vec![0, 0], vec![6]), (vec![0], vec![6, 6])] {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::TILE_WIDTH, Value::Long(vec![2]));
+            ifd.set(tags::TILE_LENGTH, Value::Long(vec![3]));
+            ifd.set(tags::TILE_OFFSETS, Value::Long(offsets));
+            ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(counts));
+            let got = decode_tiles(&ifd, &[0; 6], &gray_layout(), false);
+            assert_invalid_input(got, "TIFF: tile count mismatch");
+        }
+    }
 }
