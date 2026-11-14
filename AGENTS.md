@@ -51,10 +51,10 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   between `gamut-color`'s transfer functions and the SDR re-encode. ← core.
 - **gamut-codec-abi** — shared codestream-backend seam: `repr(C)` vtables
   (`DecoderVTable`/`EncoderVTable` + `StreamConfig`/`EncodeConfig`/`ImageDesc`) and their
-  object-safe Rust twin traits, plus the registry fallback contract by which a foreign
-  (C/FFI) or alternate codestream backend plugs into a format crate. `#![no_std]` and
-  **dependency-free** (not even on `gamut-core`); `unsafe` confined to its `bridge` module.
-  ← nothing.
+  object-safe Rust twin traits, plus the one `Registry<T>` (behind its `std` feature) that
+  implements the fallback contract by which a foreign (C/FFI) or alternate codestream backend
+  plugs into a format crate. `#![no_std]` + `alloc` by default and **dependency-free** (not even
+  on `gamut-core`); `unsafe` confined to its `bridge` module. ← nothing.
 - **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core.
 - **gamut-av1** — AV1 codec. ← core, color, dsp, bitstream.
 - **gamut-av2** / **gamut-vvc** — placeholder codecs: module docs only, no items. ← nothing.
@@ -100,7 +100,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   `DecodeOptions`, planar-to-RGBA presentation (with `iovl`, alpha and `clap`/`irot`/`imir`) and
   the C2PA locator and summary, generic over a per-codec `Codestream` binding whose backends sit in
   a `gamut-codec-abi` `Registry`. ← core, codec-abi, color, dsp (libavif's bilinear chroma
-  upsampling), isobmff. The codec crates move onto it in their own issues.
+  upsampling), isobmff. `gamut-avif` binds onto it with `Av1` (#1085), `gamut-heic` with `Hevc`
+  (#1086).
 - **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png,
   gamut-tiff and gamut-dng, and their one shared bounded inflate (`inflate_zlib`, behind the
   optional `inflate` feature, over `miniz_oxide`; no in-house decoder by design). ← core
@@ -341,18 +342,29 @@ repo — nothing here sets file modes — so do not work around it by editing bu
   strictly mirrors `gamut`'s (`mise run check-ffi-features`, enforced in CI).
 - Exposing the codestream: a format crate that lets callers swap in a foreign or alternate
   codestream backend does so through **one** seam, `gamut-codec-abi`, never a bespoke one.
-  Pattern: a **typed trait per format** (the `gamut_heic::HevcCodestreamDecoder` shape — object-safe,
-  borrowed bytes in, owned plain data out, named for the codestream it decodes) plus a thin
-  **codec-abi adapter** bridging that typed trait to the shared `Decoder`/`Encoder` twins and
-  their `repr(C)` vtables, so a C/`-sys` backend and a pure-Rust one enter by the same door.
-  The host keeps a **registry** of backends tried in **push order**; a crate's own software
-  implementation, when it ships one, is the implicit tail tried last. `supports()` returning
-  `false` (C `Status::UNSUPPORTED`) is the **only** fall-through signal — a backend that
-  accepts a job and *then* fails returns a terminal non-OK `Status` propagated to the caller
-  unchanged, so a partially-produced result is never silently masked by a retry. `Send` is
-  **not** a supertrait of `Decoder`/`Encoder`; a host bounds `Send` at the point it inserts a
-  backend, keeping single-threaded backends usable. Stub codecs `gamut-av2`/`gamut-vvc`
-  adopt this convention when implemented.
+  Pattern: a **typed trait per format and direction**, named for the codestream it carries —
+  `<Codec>CodestreamDecoder` / `<Codec>CodestreamEncoder` (`HevcCodestreamDecoder`,
+  `Av1CodestreamEncoder`, `JpegCodestreamDecoder`, …; gamut-png's zlib seam is
+  `ZlibInflater`/`ZlibDeflater`) in the `gamut_heic::HevcCodestreamDecoder` shape (object-safe,
+  borrowed bytes in, owned plain data out) — plus a thin **codec-abi adapter**,
+  `Abi<Codec>Decoder` / `Abi<Codec>Encoder` (`AbiHevcDecoder`, `AbiJpegEncoder`,
+  `AbiZlibInflater`; gamut-avif's is `AbiAv1CodestreamEncoder`), bridging that typed trait to the
+  shared `Decoder`/`Encoder` twins and their `repr(C)` vtables, so a C/`-sys` backend and a
+  pure-Rust one enter by the same door. The host holds its backends in a
+  `gamut_codec_abi::Registry` (that crate's `std` feature), never a registry of its own, and its
+  builder adds one with `with_backend(self, backend) -> Self` (gamut-png's accumulating
+  `push_backend(&mut self, backend) -> &mut Self`); the C entry point is
+  `gamut_<format>_<direction>_push_backend`. The registry tries backends in **push order**; a
+  crate's own software implementation, when it ships one, is the implicit tail tried last
+  (`Registry::run_or`). `supports()` returning `false` (C `Status::UNSUPPORTED`) is the **only**
+  fall-through signal — a backend that accepts a job and *then* fails returns a terminal non-OK
+  `Status`, which reaches the caller unchanged (`RegistryError::Backend`), so a
+  partially-produced result is never silently masked by a retry; a backend lock a panic poisoned
+  is an error, never recovered. `Send` is **not** a supertrait of `Decoder`/`Encoder` or of the
+  typed traits, and `Registry` does not demand it: a host bounds `Send` at the point it inserts a
+  backend — its registry holds `dyn <Trait> + Send` and `with_backend` takes
+  `impl <Trait> + Send + 'static` — keeping single-threaded backends usable. Stub codecs
+  `gamut-av2`/`gamut-vvc` adopt this convention when implemented.
 
 ## Issue triage and ordering
 
