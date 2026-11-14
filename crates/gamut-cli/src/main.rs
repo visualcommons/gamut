@@ -10,6 +10,7 @@
 mod commands;
 mod error;
 mod input;
+mod sniff;
 
 use std::process::ExitCode;
 use std::sync::LazyLock;

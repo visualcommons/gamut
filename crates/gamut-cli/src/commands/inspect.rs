@@ -115,6 +115,7 @@ use clap::{Args, ValueEnum};
 use gamut::ifd::SegmentReport;
 
 use crate::error::CliError;
+use crate::sniff::Container;
 
 /// The most list entries to print per category before truncating.
 const MAX_LIST: usize = 20;
@@ -188,7 +189,7 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
         path: args.input.clone(),
         source,
     })?;
-    let format = args.format.unwrap_or_else(|| sniff(&data));
+    let format = args.format.unwrap_or_else(|| detect(&data));
 
     // PNG's report is a different shape -- it has no IFD tree and no tag vocabulary, but it does
     // carry compression figures the others have no equivalent for -- so it prints on its own path
@@ -273,28 +274,22 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
     }
 }
 
-/// The 8-byte PNG file signature (§5.2).
-const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-
-/// Detects PNG by signature, then WebP by its RIFF header, then an ISOBMFF file by its `ftyp` box,
-/// then DNG vs TIFF: a DNG is a TIFF whose IFD 0 carries the mandatory `DNGVersion` tag.
+/// The format [`crate::sniff`] routes `data` to: PNG and WebP by their signatures, an ISOBMFF file
+/// by its `ftyp` box, and anything else — JPEG and JPEG XL included, which this command has no
+/// report for — as DNG or TIFF: a DNG is a TIFF whose IFD 0 carries the mandatory `DNGVersion`
+/// tag.
 ///
 /// The `ftyp` test is a **route**, not a verdict: it says the file is ISOBMFF, not which still
 /// image it is. It returns [`Format::Heic`], and `inspect_isobmff` confirms the container with
 /// `gamut-heic`'s and then `gamut-avif`'s own predicates after parsing (see the module docs for why
 /// the brand rule is not restated here), so an ISOBMFF file that is neither is reported as an
 /// unsupported container rather than blamed on TIFF for having no byte-order mark.
-fn sniff(data: &[u8]) -> Format {
-    if data.starts_with(&PNG_SIGNATURE) {
-        return Format::Png;
-    }
-    // RFC 9649 §2.4: `RIFF`, a 4-byte file size, then the `WEBP` form type.
-    if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
-        return Format::Webp;
-    }
-    // §4.3: `ftyp` is the first box of the file, so its type sits at offset 4.
-    if data.get(4..8) == Some(b"ftyp") {
-        return Format::Heic;
+fn detect(data: &[u8]) -> Format {
+    match crate::sniff::sniff(data) {
+        Some(Container::Png) => return Format::Png,
+        Some(Container::Webp) => return Format::Webp,
+        Some(Container::Isobmff) => return Format::Heic,
+        Some(Container::Jpeg | Container::Jxl) | None => {}
     }
     if let Ok(file) = gamut::ifd::read(data)
         && file

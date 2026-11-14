@@ -24,7 +24,8 @@ use gamut::webp::{Effort as WebpEffort, NearLossless as WebpNearLossless, WebpEn
 
 use crate::error::CliError;
 use crate::input::{
-    InputMetadata, NativeImage, STDIO, decode_bytes, decode_native, read_input, read_metadata,
+    InputMetadata, Interleaved, NativeImage, STDIO, decode_bytes, decode_native, read_input,
+    read_metadata,
 };
 
 /// Arguments for `gamut convert`.
@@ -724,7 +725,7 @@ fn encode(
         }
         OutputFormat::Webp => {
             // RGBA so transparency survives; `encode_rgba8` emits a simple file when fully opaque.
-            let (rgba, dims) = decode_bytes(input, bytes, true)?;
+            let (rgba, dims) = decode_bytes(input, bytes, Interleaved::Rgba8)?;
             tracing::info!(
                 width = dims.width(),
                 height = dims.height(),
@@ -764,7 +765,7 @@ fn encode(
             (rgba.len(), dims)
         }
         OutputFormat::Tiff => {
-            let (rgb, dims) = decode_bytes(input, bytes, false)?;
+            let (rgb, dims) = decode_bytes(input, bytes, Interleaved::Rgb8)?;
             tracing::info!(
                 width = dims.width(),
                 height = dims.height(),
@@ -811,7 +812,7 @@ fn encode(
         OutputFormat::Png => {
             // RGBA so transparency survives; auto-reduce drops it (and chooses grey/palette) when
             // that is lossless.
-            let (rgba, dims) = decode_bytes(input, bytes, true)?;
+            let (rgba, dims) = decode_bytes(input, bytes, Interleaved::Rgba8)?;
             tracing::info!(
                 width = dims.width(),
                 height = dims.height(),
@@ -875,7 +876,7 @@ fn encode(
         }
         OutputFormat::Jxl => {
             // RGBA so transparency survives, matching the PNG/WebP paths.
-            let (rgba, dims) = decode_bytes(input, bytes, true)?;
+            let (rgba, dims) = decode_bytes(input, bytes, Interleaved::Rgba8)?;
             tracing::info!(
                 width = dims.width(),
                 height = dims.height(),
@@ -954,7 +955,7 @@ fn encode(
         OutputFormat::Jpeg => {
             // JPEG has no alpha channel, so decode to RGB like the AVIF/TIFF paths; the input
             // pipeline does not distinguish grayscale, so colour is always encoded as YCbCr.
-            let (rgb, dims) = decode_bytes(input, bytes, false)?;
+            let (rgb, dims) = decode_bytes(input, bytes, Interleaved::Rgb8)?;
             tracing::info!(
                 width = dims.width(),
                 height = dims.height(),
