@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use gamut_codec_abi::Registry;
 use gamut_color::ChromaUpsampling;
-use gamut_core::{Cicp, DecodeImage, Error, ImageBuf, RawMetadata, Result, Rgba8, Rgba16};
+use gamut_core::{Cicp, DecodeImage, ImageBuf, RawMetadata, Result, Rgba8, Rgba16};
 use gamut_heif::{AlphaChroma, Codestream, DecodeLimits, DecodeOptions, DecodedFrame, HeifImage};
 use gamut_isobmff::IsoBmffImage;
 
@@ -245,34 +245,17 @@ impl HeifDecoder {
     /// and the primary item's ICC `colr` profile, each present only when the file carries it.
     /// HEIF has no IPTC-IIM item type, and its C2PA store is a top-level box
     /// ([`HeifContainer::c2pa`]), not an item, so neither is among them. No backend is involved.
+    /// This is [`HeifImage::primary_metadata`] over the parsed file.
     ///
     /// # Errors
     ///
-    /// Any error [`HeifContainer::parse`] would return for `data`; an
+    /// Any error [`HeifContainer::parse`] would return for `data`, and any
+    /// [`HeifImage::primary_metadata`] returns: an
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the `Exif`
-    /// item's offset field is short or points past the payload; and an
-    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the XMP item
-    /// declares a `content_encoding` (ISO/IEC 14496-12 §8.11.6) — its payload is then not the raw
-    /// packet, and this crate decodes no content codings. Any declared coding is refused,
-    /// `identity` included, which RFC 9110 §8.4.1 reserves for `Accept-Encoding`.
+    /// item's offset field is short or points past the payload, and
+    /// [`gamut_heif::ENCODED_XMP`] when the XMP item declares a `content_encoding`.
     pub fn metadata(&self, data: &[u8]) -> Result<RawMetadata> {
-        let image = Self::parse(data)?;
-        let mut metadata = RawMetadata::default();
-        if let Some(exif) = image.exif() {
-            metadata.exif = Some(exif.exif_tiff_stream()?.to_vec());
-        }
-        if let Some(xmp) = image.xmp() {
-            let item = xmp.as_isobmff_item();
-            if item.content_encoding.is_some() {
-                return Err(Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "HEIF: content-encoded XMP item is not supported",
-                ));
-            }
-            metadata.xmp = Some(item.payload.clone());
-        }
-        metadata.icc = image.primary_item().icc_profile().map(<[u8]>::to_vec);
-        Ok(metadata)
+        Self::parse(data)?.primary_metadata::<Hevc>()
     }
 
     /// The semantic view of `data` — the parse [`HeifContainer::parse`] starts with, without its
@@ -302,7 +285,7 @@ impl DecodeImage<Rgba16> for HeifDecoder {
 mod tests {
     use gamut_color::ChromaSubsampling;
     use gamut_core::{Dimensions, ErrorKind};
-    use gamut_isobmff::{Item, ItemReference, Property, PropertyKind};
+    use gamut_isobmff::{Item, Property, PropertyKind};
 
     use super::*;
 
@@ -475,71 +458,5 @@ mod tests {
             accept: true,
         });
         assert!(format!("{decoder:?}").contains("backends: 1"));
-    }
-
-    /// `metadata` over a file whose primary item 1 is described by `metadata`.
-    mod raw_metadata {
-        use super::*;
-
-        /// An item of `item_type` carrying `payload`, describing item 1 through `cdsc`.
-        fn item(id: u32, item_type: [u8; 4], payload: &[u8]) -> Item {
-            Item::new(id, item_type)
-                .with_references(vec![ItemReference::new(*b"cdsc", vec![1])])
-                .with_payload(payload.to_vec())
-        }
-
-        fn read(metadata: Vec<Item>) -> Result<RawMetadata> {
-            let mut items = vec![coded(1, 8)];
-            items.extend(metadata);
-            HeifDecoder::new().metadata(&file_of(items))
-        }
-
-        #[test]
-        fn metadata_hands_over_the_tiff_stream_the_packet_and_the_profile() {
-            let mut xmp = item(3, *b"mime", b"<x:xmpmeta/>");
-            xmp.content_type = Some("application/rdf+xml".to_owned());
-            let raw = read(vec![item(2, *b"Exif", b"\0\0\0\0MM\0*"), xmp]).unwrap();
-            assert_eq!(raw.exif.as_deref(), Some(&b"MM\0*"[..]));
-            assert_eq!(raw.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
-            assert_eq!(raw.icc, None);
-            assert_eq!(read(Vec::new()).unwrap(), RawMetadata::default());
-
-            let icc = coded(1, 8).with_properties(vec![
-                Property::new(
-                    true,
-                    PropertyKind::CodecConfiguration {
-                        kind: *b"hvcC",
-                        data: hvcc(8),
-                    },
-                ),
-                Property::new(
-                    false,
-                    PropertyKind::Colour(gamut_isobmff::ColourInformation::UnrestrictedIcc(
-                        b"profile".to_vec(),
-                    )),
-                ),
-            ]);
-            let raw = HeifDecoder::new().metadata(&file_of(vec![icc])).unwrap();
-            assert_eq!(raw.icc.as_deref(), Some(&b"profile"[..]));
-        }
-
-        #[test]
-        fn an_unlocatable_exif_stream_is_a_container_error() {
-            let err = read(vec![item(2, *b"Exif", b"\0\0\0\x09MM\0*")]).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::InvalidInput);
-        }
-
-        #[test]
-        fn a_content_encoded_xmp_item_is_unsupported() {
-            let mut xmp = item(2, *b"mime", b"compressed");
-            xmp.content_type = Some("application/rdf+xml".to_owned());
-            xmp.content_encoding = Some("deflate".to_owned());
-            let err = read(vec![xmp]).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Unsupported);
-            assert_eq!(
-                err.static_message(),
-                Some("HEIF: content-encoded XMP item is not supported")
-            );
-        }
     }
 }
