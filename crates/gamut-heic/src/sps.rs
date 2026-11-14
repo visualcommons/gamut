@@ -64,10 +64,13 @@ fn parse(nal: &[u8]) -> Result<Dimensions> {
     // sps_seq_parameter_set_id ue(v).
     r.uvlc()?;
     let chroma_format_idc = r.uvlc()?;
-    // A separately coded 4:4:4 picture is cropped in luma units (ChromaArrayType 0, §6.2).
-    let separate_planes = chroma_format_idc == 3 && r.flag()?;
+    if chroma_format_idc == 3 {
+        // separate_colour_plane_flag u(1). Either way 4:4:4 crops in luma units (SubWidthC and
+        // SubHeightC are 1, Table 6-1), so its value is not needed.
+        r.skip_bits(1)?;
+    }
     let (sub_width, sub_height) = match chroma_format_idc {
-        1 if !separate_planes => (2, 2),
+        1 => (2, 2),
         2 => (2, 1),
         _ => (1, 1),
     };
