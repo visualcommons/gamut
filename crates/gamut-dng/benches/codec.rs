@@ -143,9 +143,8 @@ use std::sync::LazyLock;
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
 use gamut_core::Dimensions;
-use gamut_dng::raw::cfa_color;
 use gamut_dng::{
-    CalibrationIlluminant, CameraProfile, Compression, DngDecoder, DngEncoder, RawImage,
+    CalibrationIlluminant, CameraProfile, Compression, DngDecoder, DngEncoder, RawImage, cfa_color,
 };
 
 fn main() {

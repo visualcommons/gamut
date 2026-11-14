@@ -1015,10 +1015,11 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-deflate",
+ "gamut-exif",
  "gamut-ifd",
  "gamut-jpeg",
  "gamut-jxl",
- "gamut-metadata",
+ "md-5",
 ]
 
 [[package]]

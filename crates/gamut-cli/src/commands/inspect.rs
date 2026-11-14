@@ -119,9 +119,6 @@ use crate::error::CliError;
 /// The most list entries to print per category before truncating.
 const MAX_LIST: usize = 20;
 
-/// The `DNGVersion` tag (50706) — present in every DNG, absent in plain TIFF; the format sniff.
-const DNG_VERSION_TAG: u16 = 50706;
-
 /// Arguments for `gamut inspect`.
 #[derive(Args)]
 pub(crate) struct InspectArgs {
@@ -303,7 +300,8 @@ fn sniff(data: &[u8]) -> Format {
         && file
             .ifds
             .first()
-            .is_some_and(|ifd0| ifd0.get(DNG_VERSION_TAG).is_some())
+            // `DNGVersion` (50706): present in every DNG, absent in plain TIFF.
+            .is_some_and(|ifd0| ifd0.get(gamut::dng::tags::DNG_VERSION).is_some())
     {
         return Format::Dng;
     }

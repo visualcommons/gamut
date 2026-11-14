@@ -100,6 +100,7 @@ metadata = [
     "gamut-jxl?/metadata",
     "gamut-heic?/metadata",
     "gamut-tiff?/metadata",
+    "gamut-dng?/metadata",
 ]
 # `metadata` plus gamut-exif's `describe` module (the enumerated tags' meanings), forwarded through
 # the gamut-metadata facade rather than straight to gamut-exif.

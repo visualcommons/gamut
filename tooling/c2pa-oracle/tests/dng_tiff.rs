@@ -140,7 +140,7 @@ fn encode_dng(reserve: Option<usize>) -> Result<Encoded> {
     };
     let mut dng = Vec::new();
     let report = encoder
-        .encode_with_report(&raw, &profile, &mut dng)
+        .encode(&raw, &profile, &mut dng)
         .map_err(asset_error)?;
     Ok((dng, report.c2pa))
 }
@@ -161,7 +161,7 @@ fn reserve_and_fill(container: &Container) -> Vec<u8> {
         |len| {
             let (asset, exclusions) = (container.encode)(Some(len))?;
             let exclusions = exclusions.ok_or_else(|| {
-                OracleError::Asset("encode_with_report reported no C2PA exclusions".into())
+                OracleError::Asset("the encoder reported no C2PA exclusions".into())
             })?;
             Ok((asset, ranges(&exclusions), range(exclusions.store())))
         },
@@ -188,7 +188,7 @@ fn a_store_signed_around_both_reported_ranges_validates_once_copied_in() {
             read(container.mime, &reserve_and_fill(container)).ok(),
             Some(ValidationState::Valid),
             "{}: c2pa-rs must accept a store whose data hash excludes exactly the store and \
-             `count`-field ranges `encode_with_report` reported, once copied into the store range",
+             `count`-field ranges the encoder reported, once copied into the store range",
             container.mime
         );
     }

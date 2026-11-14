@@ -2,8 +2,7 @@
 #![allow(dead_code)] // not every test binary uses every fixture
 
 use gamut_core::Dimensions;
-use gamut_dng::raw::cfa_color;
-use gamut_dng::{CalibrationIlluminant, CameraProfile, ProfileEmbedPolicy, RawImage};
+use gamut_dng::{CalibrationIlluminant, CameraProfile, ProfileEmbedPolicy, RawImage, cfa_color};
 
 /// A synthetic RGGB Bayer raw image of the given size and bit depth, with a deterministic,
 /// spatially-varying mosaic and a full active area.

@@ -234,11 +234,8 @@ fn every_exif_field_the_encoder_accepts_under_a_pointer_tag_reopens_as_that_fiel
                 exif.exif_ifd_mut().set(tag, value.clone());
                 let mut dng = Vec::new();
                 let encoded = DngEncoder::new()
-                    .with_big_tiff(big_tiff)
-                    .with_metadata(DngMetadata {
-                        exif: Some(exif),
-                        ..Default::default()
-                    })
+                    .with_variant(variant)
+                    .with_dng_metadata(DngMetadata::new().with_exif(exif))
                     .encode(&raw, &common::sample_profile(), &mut dng);
                 let context = format!("code {code} under {tag}, BigTIFF {big_tiff}");
                 if matches!(code, 4 | 13 | 16 | 18) {

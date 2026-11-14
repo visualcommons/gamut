@@ -3,7 +3,7 @@
 
 mod common;
 
-use gamut_dng::{ByteOrder, DngDecoder, DngEncoder, RawImage, TypedMetadata};
+use gamut_dng::{ByteOrder, DngDecoder, DngEncoder, RawImage, Variant};
 
 fn encode_cfa(order: ByteOrder, w: u32, h: u32, bits: u16) -> (Vec<u8>, RawImage) {
     let raw = common::sample_raw(w, h, bits);
@@ -291,8 +291,8 @@ fn lossy_jxl_validates_and_decoders_agree() {
     let mut dng = Vec::new();
     DngEncoder::new()
         .with_compression(Compression::JpegXl)
-        .with_jxl_distance(1.0)
-        .with_jxl_effort(5)
+        .with_jxl_distance(gamut_dng::Distance::new(1.0).expect("a valid distance"))
+        .with_jxl_effort(gamut_dng::Effort::Hare)
         .with_dng_version([1, 7, 0, 0])
         .with_backward_version([1, 7, 0, 0])
         .with_tiling(32, 32)
@@ -423,7 +423,7 @@ fn tiled_bigtiff_roundtrips_and_validates() {
     let raw = common::sample_raw(48, 32, 12);
     let mut dng = Vec::new();
     DngEncoder::new()
-        .with_big_tiff(true)
+        .with_variant(Variant::Big)
         .with_dng_version([1, 7, 0, 0])
         .with_backward_version([1, 7, 0, 0])
         .with_tiling(16, 16)
@@ -441,7 +441,7 @@ fn bigtiff_roundtrips_and_validates() {
     let raw = common::sample_raw(48, 32, 16);
     let mut dng = Vec::new();
     DngEncoder::new()
-        .with_big_tiff(true)
+        .with_variant(Variant::Big)
         .with_dng_version([1, 7, 0, 0])
         .with_backward_version([1, 7, 0, 0])
         .encode(&raw, &common::sample_profile(), &mut dng)
@@ -518,7 +518,7 @@ fn lossless_jpeg_roundtrips_and_validates() {
 
 #[test]
 fn metadata_embeds_and_roundtrips() {
-    use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, Rational, Value};
+    use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, Value};
     let raw = common::sample_raw(32, 24, 16);
     let mut exif = Exif::new(ByteOrder::LittleEndian);
     exif.set_tag(ExifTag::ExposureTime, Value::Rational(vec![(1, 250)]));
@@ -532,16 +532,14 @@ fn metadata_embeds_and_roundtrips() {
     // An entry the crate models no field for: it rides along in the same directory, so the
     // decoder needs no separate verbatim escape hatch to return it.
     exif.set_tag(ExifTag::LensModel, Value::Ascii("gamut 50mm".to_owned()));
-    let meta = DngMetadata {
-        exif: Some(exif),
-        xmp: Some(br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>"#.to_vec()),
-        iptc: Some(vec![0x1c, 0x02, 0x05, 0x00, 0x03, b'a', b'b', b'c']),
-        icc: Some(vec![0u8; 16]),
-        c2pa: None,
-    };
+    let meta = DngMetadata::new()
+        .with_exif(exif)
+        .with_xmp(br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>"#.to_vec())
+        .with_iptc(vec![0x1c, 0x02, 0x05, 0x00, 0x03, b'a', b'b', b'c'])
+        .with_icc(vec![0u8; 16]);
     let mut dng = Vec::new();
     DngEncoder::new()
-        .with_metadata(meta.clone())
+        .with_dng_metadata(meta.clone())
         .encode(&raw, &common::sample_profile(), &mut dng)
         .expect("encode");
 
@@ -551,33 +549,31 @@ fn metadata_embeds_and_roundtrips() {
     // gamut reconstructs every block.
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
     let got = &decoded.metadata;
-    let got_exif = got.exif.as_ref().expect("EXIF sub-IFD");
-    assert_eq!(
-        got_exif.exposure_time(),
-        Some(Rational { num: 1, den: 250 })
-    );
-    assert_eq!(got_exif.f_number(), Some(Rational { num: 28, den: 10 }));
-    assert_eq!(
-        got_exif.get_tag(ExifTag::PhotographicSensitivity),
-        Some(&Value::Short(vec![400]))
-    );
-    assert_eq!(
-        got_exif.get_tag(ExifTag::DateTimeOriginal),
-        Some(&Value::Ascii("2026:06:13 12:00:00".to_owned()))
-    );
-    assert_eq!(got_exif.focal_length(), Some(Rational { num: 50, den: 1 }));
-    assert_eq!(
-        got_exif.get_tag(ExifTag::LensModel),
-        Some(&Value::Ascii("gamut 50mm".to_owned()))
-    );
+    let got_exif = got.exif.as_ref().expect("EXIF model");
+    for (tag, value) in [
+        (ExifTag::ExposureTime, Value::Rational(vec![(1, 250)])),
+        (ExifTag::FNumber, Value::Rational(vec![(28, 10)])),
+        (ExifTag::PhotographicSensitivity, Value::Short(vec![400])),
+        (
+            ExifTag::DateTimeOriginal,
+            Value::Ascii("2026:06:13 12:00:00".to_owned()),
+        ),
+        (ExifTag::FocalLength, Value::Rational(vec![(50, 1)])),
+        (ExifTag::LensModel, Value::Ascii("gamut 50mm".to_owned())),
+    ] {
+        assert_eq!(got_exif.get_tag(tag), Some(&value), "{tag:?}");
+    }
     // The mandatory `ExifVersion` the encoder supplies is the only entry beyond what was set.
     assert_eq!(got_exif.exif_ifd().expect("sub-IFD").fields().len(), 7);
+    // The model is in the file's byte order.
+    assert_eq!(got_exif.byte_order(), ByteOrder::LittleEndian);
     assert_eq!(got.xmp, meta.xmp);
     assert_eq!(got.iptc, meta.iptc);
     assert_eq!(got.icc, meta.icc);
     // The byte carriers hand over to the unified facade model unchanged.
+    #[cfg(feature = "metadata")]
     assert_eq!(
-        got.blocks().expect("blocks"),
+        gamut_dng::TypedMetadata::blocks(got).expect("blocks"),
         vec![
             gamut_dng::MetadataBlock::Xmp(meta.xmp.as_deref().expect("xmp")),
             gamut_dng::MetadataBlock::IptcIim(meta.iptc.as_deref().expect("iptc")),
@@ -593,8 +589,7 @@ fn metadata_embeds_and_roundtrips() {
 /// and reproduces the directory.
 #[test]
 fn exif_interoperability_ifd_survives_decode_then_reencode() {
-    use gamut_dng::{DngMetadata, Exif, ExifTag, Value};
-    use gamut_ifd::Ifd;
+    use gamut_dng::{DngMetadata, Exif, ExifTag, Ifd, Value};
     use gamut_ifd::tags::INTEROPERABILITY_IFD;
 
     let raw = common::sample_raw(32, 24, 16);
@@ -602,37 +597,27 @@ fn exif_interoperability_ifd_survives_decode_then_reencode() {
     interop.set(1, Value::Ascii("R98".to_owned())); // InteroperabilityIndex
     let mut exif = Exif::new(ByteOrder::LittleEndian);
     exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
-    exif.exif_ifd_mut()
-        .set_sub_ifd(INTEROPERABILITY_IFD, vec![interop.clone()]);
-    let meta = DngMetadata {
-        exif: Some(exif),
-        ..DngMetadata::default()
-    };
+    exif.set_interop_ifd(interop.clone());
+    let meta = DngMetadata::new().with_exif(exif);
     let encode = |meta: DngMetadata| {
         let mut dng = Vec::new();
         DngEncoder::new()
-            .with_metadata(meta)
+            .with_dng_metadata(meta)
             .encode(&raw, &common::sample_profile(), &mut dng)
             .expect("encode");
         dng
     };
     let decoded = DngDecoder::new().decode(&encode(meta)).expect("decode");
-    let exif_dir = |meta: &DngMetadata| {
-        meta.exif
-            .as_ref()
-            .and_then(Exif::exif_ifd)
-            .expect("EXIF sub-IFD")
-            .clone()
-    };
-    let first = exif_dir(&decoded.metadata);
-    assert_eq!(first.get(INTEROPERABILITY_IFD), None);
-    assert_eq!(first.sub_ifds().len(), 1);
-    assert_eq!(first.sub_ifds()[0].ifds, [interop]);
+    let first = decoded.metadata.exif.clone().expect("EXIF model");
+    let directory = first.exif_ifd().expect("Exif sub-IFD");
+    assert_eq!(directory.get(INTEROPERABILITY_IFD), None);
+    assert!(directory.sub_ifds().is_empty());
+    assert_eq!(first.interop_ifd(), Some(&interop));
 
     let again = DngDecoder::new()
         .decode(&encode(decoded.metadata))
         .expect("decode the re-encoded file");
-    assert_eq!(exif_dir(&again.metadata), first);
+    assert_eq!(again.metadata.exif, Some(first));
 }
 
 #[test]
@@ -765,7 +750,7 @@ fn non_optional_opcodes_raise_the_backward_version() {
     use gamut_dng::{Opcode, OpcodeList};
     let mut list2 = OpcodeList::new();
     list2.push(Opcode {
-        id: gamut_dng::opcode::opcode_id::WARP_RECTILINEAR_2,
+        id: gamut_dng::opcode_id::WARP_RECTILINEAR_2,
         spec_version: [1, 6, 0, 0],
         flags: 0, // non-optional: a reader must execute it, so it needs DNG >= 1.6
         parameters: vec![],
@@ -786,7 +771,7 @@ fn non_optional_opcodes_raise_the_backward_version() {
     // An optional opcode of the same version must NOT raise it.
     let mut optional = OpcodeList::new();
     optional.push(Opcode {
-        id: gamut_dng::opcode::opcode_id::WARP_RECTILINEAR_2,
+        id: gamut_dng::opcode_id::WARP_RECTILINEAR_2,
         spec_version: [1, 6, 0, 0],
         flags: Opcode::FLAG_OPTIONAL,
         parameters: vec![],

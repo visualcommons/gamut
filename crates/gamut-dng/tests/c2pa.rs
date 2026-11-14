@@ -9,8 +9,8 @@ mod common;
 use core::ops::Range;
 
 use gamut_dng::{
-    ByteOrder, C2PA_MANIFEST_STORE, DngDecoder, DngEncodeReport, DngEncoder, DngMetadata,
-    MIN_STORE_LEN, RawTag, TypedMetadata, Value,
+    ByteOrder, C2PA_MANIFEST_STORE, DngDecoder, DngEncodeReport, DngEncoder, MIN_STORE_LEN, RawTag,
+    Value, Variant,
 };
 use gamut_ifd::{align_word, read_header};
 
@@ -21,19 +21,14 @@ fn store(len: usize) -> Vec<u8> {
 }
 
 fn with_store(order: ByteOrder, bytes: Vec<u8>) -> DngEncoder {
-    DngEncoder::new()
-        .with_byte_order(order)
-        .with_metadata(DngMetadata {
-            c2pa: Some(bytes),
-            ..Default::default()
-        })
+    DngEncoder::new().with_byte_order(order).with_c2pa(&bytes)
 }
 
 fn encode(encoder: &DngEncoder) -> (Vec<u8>, DngEncodeReport) {
     let raw = common::sample_raw(32, 24, 16);
     let mut dng = Vec::new();
     let report = encoder
-        .encode_with_report(&raw, &common::sample_profile(), &mut dng)
+        .encode(&raw, &common::sample_profile(), &mut dng)
         .expect("encode");
     assert_eq!(report.len, dng.len());
     (dng, report)
@@ -85,12 +80,8 @@ fn store_is_written_last_verbatim_and_both_ranges_are_reported() {
         );
 
         let decoded = DngDecoder::new().decode(&dng).expect("decode");
-        assert_eq!(decoded.metadata.c2pa, Some(bytes.clone()), "{order:?}");
+        assert_eq!(decoded.c2pa, Some(bytes.clone()), "{order:?}");
         assert_eq!(decoded.c2pa_exclusions, Some(excl), "{order:?}");
-        assert_eq!(
-            decoded.metadata.blocks().expect("blocks"),
-            vec![gamut_dng::MetadataBlock::C2pa(&bytes)]
-        );
         assert!(
             !decoded
                 .ifd0_extra
@@ -161,7 +152,7 @@ fn a_store_of_a_different_size_moves_no_other_offset() {
 fn bigtiff_count_field_is_eight_bytes_wide() {
     let bytes = store(48);
     let (dng, report) =
-        encode(&with_store(ByteOrder::BigEndian, bytes.clone()).with_big_tiff(true));
+        encode(&with_store(ByteOrder::BigEndian, bytes.clone()).with_variant(Variant::Big));
     let excl = report.c2pa.expect("ranges");
     assert_eq!(width(&excl.count_field()), 8);
     let count =
@@ -169,7 +160,7 @@ fn bigtiff_count_field_is_eight_bytes_wide() {
     assert_eq!(count, width(&excl.store()));
     assert_eq!(excl.store().end, dng.len() as u64);
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    assert_eq!(decoded.metadata.c2pa, Some(bytes));
+    assert_eq!(decoded.c2pa, Some(bytes));
     assert_eq!(decoded.c2pa_exclusions, Some(excl));
     gamut_dng_oracle::validate_dng(&dng)
         .expect("Adobe DNG SDK must accept a BigTIFF DNG carrying a C2PA manifest store");
@@ -183,13 +174,14 @@ fn without_a_store_the_report_has_no_ranges() {
     let mut plain = Vec::new();
     let n = DngEncoder::new()
         .encode(&raw, &common::sample_profile(), &mut plain)
-        .expect("encode");
+        .expect("encode")
+        .len;
     let (dng, report) = encode(&DngEncoder::new());
     assert_eq!(report.c2pa, None);
     assert_eq!(report.len, n);
     assert_eq!(dng, plain);
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    assert_eq!(decoded.metadata.c2pa, None);
+    assert_eq!(decoded.c2pa, None);
     assert_eq!(decoded.c2pa_exclusions, None);
 }
 
@@ -241,7 +233,7 @@ fn a_mistyped_c2pa_tag_is_an_extra_not_a_store() {
     dng[type_at..type_at + 2].copy_from_slice(&[1, 0]);
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    assert_eq!(decoded.metadata.c2pa, None);
+    assert_eq!(decoded.c2pa, None);
     assert_eq!(decoded.c2pa_exclusions, None);
     assert!(decoded.ifd0_extra.contains(&RawTag {
         tag: C2PA_MANIFEST_STORE,
@@ -297,7 +289,7 @@ fn a_store_in_a_trailing_ifd_is_found_there() {
     dng.extend_from_slice(&bytes);
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    assert_eq!(decoded.metadata.c2pa, Some(bytes.clone()));
+    assert_eq!(decoded.c2pa, Some(bytes.clone()));
     // `C2paExclusions` is `#[non_exhaustive]`, so the two ranges are compared accessor by accessor
     // rather than against a literal.
     let excl = decoded.c2pa_exclusions.expect("ranges");
@@ -320,7 +312,7 @@ fn a_store_entry_before_the_last_main_ifd_is_not_the_store() {
     append_trailing_ifd(&mut dng, &[(305, 2, 2, u32::from_le_bytes(*b"x\0\0\0"))]);
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    assert_eq!(decoded.metadata.c2pa, None);
+    assert_eq!(decoded.c2pa, None);
     assert_eq!(decoded.c2pa_exclusions, None);
     assert!(decoded.ifd0_extra.contains(&RawTag {
         tag: C2PA_MANIFEST_STORE,
@@ -347,7 +339,7 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
     assert_eq!(slice(&dng, excl.store()), smallest.as_slice());
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
     assert_eq!(
-        decoded.metadata.c2pa,
+        decoded.c2pa,
         Some(smallest.clone()),
         "the entry must read back as the store, not as an offset"
     );
@@ -355,9 +347,9 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
 
     // BigTIFF, same length: refused, and refused before any pixel work.
     for encoder in [
-        with_store(ByteOrder::LittleEndian, smallest.clone()).with_big_tiff(true),
+        with_store(ByteOrder::LittleEndian, smallest.clone()).with_variant(Variant::Big),
         DngEncoder::new()
-            .with_big_tiff(true)
+            .with_variant(Variant::Big)
             .with_c2pa_reserved(MIN_STORE_LEN),
     ] {
         let error = encoder
@@ -372,15 +364,11 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
     // Nine bytes clear the threshold: the store lands last and reads back whole.
     let nine = store(MIN_STORE_LEN + 1);
     let (dng, report) =
-        encode(&with_store(ByteOrder::LittleEndian, nine.clone()).with_big_tiff(true));
+        encode(&with_store(ByteOrder::LittleEndian, nine.clone()).with_variant(Variant::Big));
     let excl = report.c2pa.expect("nine bytes are writable in BigTIFF");
     assert_eq!(excl.store().end, dng.len() as u64);
     assert_eq!(
-        DngDecoder::new()
-            .decode(&dng)
-            .expect("decode")
-            .metadata
-            .c2pa,
+        DngDecoder::new().decode(&dng).expect("decode").c2pa,
         Some(nine)
     );
 }
@@ -389,9 +377,9 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
 /// admissible store — and both decode surfaces must say so *together*.
 ///
 /// Reading the bytes and the ranges through different paths is what made them disagree: the
-/// eager `Ifd` keeps the last duplicate, so `metadata.c2pa` reported that entry's bytes while
-/// `c2pa_exclusions` reported nothing. Re-encoding such a `DngMetadata` silently produced a
-/// one-entry file carrying only the last duplicate.
+/// eager `Ifd` keeps the last duplicate, so the decoded store reported that entry's bytes while
+/// `c2pa_exclusions` reported nothing. Re-encoding that store silently produced a one-entry file
+/// carrying only the last duplicate.
 #[test]
 fn a_duplicated_store_entry_is_absent_from_both_decode_surfaces() {
     let first = store(40);
@@ -421,7 +409,7 @@ fn a_duplicated_store_entry_is_absent_from_both_decode_surfaces() {
         "two entries name no single store"
     );
     assert_eq!(
-        decoded.metadata.c2pa, None,
+        decoded.c2pa, None,
         "the bytes surface must agree with the ranges, not report the last duplicate"
     );
     // Preservation, stated exactly: the eager `Ifd` the typed channels are built on keeps the
@@ -451,8 +439,8 @@ fn a_duplicated_store_entry_is_absent_from_both_decode_surfaces() {
     // And re-encoding cannot smuggle one of the two duplicates back out as "the" store.
     let mut re = Vec::new();
     let report = DngEncoder::new()
-        .with_metadata(decoded.metadata.clone())
-        .encode_with_report(&decoded.raw, &common::sample_profile(), &mut re)
+        .with_dng_metadata(decoded.metadata.clone())
+        .encode(&decoded.raw, &common::sample_profile(), &mut re)
         .expect("re-encode");
     assert_eq!(report.c2pa, None);
 }
@@ -473,7 +461,7 @@ fn a_declined_store_in_a_trailing_ifd_is_still_surfaced() {
     dng.extend_from_slice(&short);
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    assert_eq!(decoded.metadata.c2pa, None, "7 bytes cannot be a JUMBF box");
+    assert_eq!(decoded.c2pa, None, "7 bytes cannot be a JUMBF box");
     assert_eq!(decoded.c2pa_exclusions, None);
     assert!(
         decoded.trailing_extra.contains(&RawTag {
@@ -561,7 +549,7 @@ fn an_accepted_store_is_not_also_a_trailing_extra() {
     dng.extend_from_slice(&bytes);
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    assert_eq!(decoded.metadata.c2pa, Some(bytes));
+    assert_eq!(decoded.c2pa, Some(bytes));
     assert!(decoded.c2pa_exclusions.is_some());
     assert!(
         !decoded
@@ -574,9 +562,9 @@ fn an_accepted_store_is_not_also_a_trailing_extra() {
 }
 
 /// A foreign file whose tag-52545 value is too short to hold a JUMBF box header carries no
-/// manifest store (`references/c2pa/README.md`): it decodes to `None`, and the decoded
-/// `DngMetadata` therefore re-encodes — which it could not if the decoder had handed back a
-/// store its own encoder refuses.
+/// manifest store (`references/c2pa/README.md`): it decodes to `None`, so the decoded file
+/// re-encodes — which it could not if the decoder had handed back a store its own encoder
+/// refuses.
 #[test]
 fn a_too_short_store_decodes_as_absent_and_still_re_encodes() {
     let short = store(MIN_STORE_LEN - 1);
@@ -595,14 +583,14 @@ fn a_too_short_store_decodes_as_absent_and_still_re_encodes() {
     dng.extend_from_slice(&short);
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    assert_eq!(decoded.metadata.c2pa, None, "7 bytes cannot be a JUMBF box");
+    assert_eq!(decoded.c2pa, None, "7 bytes cannot be a JUMBF box");
     assert_eq!(decoded.c2pa_exclusions, None);
 
     // Decode -> encode: the metadata the decoder produced is accepted as encoder input.
     let mut re = Vec::new();
     let report = DngEncoder::new()
-        .with_metadata(decoded.metadata.clone())
-        .encode_with_report(&decoded.raw, &common::sample_profile(), &mut re)
+        .with_dng_metadata(decoded.metadata.clone())
+        .encode(&decoded.raw, &common::sample_profile(), &mut re)
         .expect("a decoded file's metadata must re-encode");
     assert_eq!(report.c2pa, None);
 }

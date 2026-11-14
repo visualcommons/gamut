@@ -7,12 +7,13 @@ use gamut_core::{Error, Result};
 use gamut_ifd::{
     ByteOrder, C2paExclusions, Ifd, Value, Variant, append_c2pa_store, reserve_c2pa_entry,
 };
+use gamut_jxl::{Distance, Effort};
 
 use crate::gain_map::ProfileGainTableMap;
 use crate::metadata::DngMetadata;
 use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
-use crate::values::{Compression, PhotometricInterpretation};
+use crate::values::{CalibrationIlluminant, Compression, PhotometricInterpretation};
 use crate::writer::{ImageBlocks, write_cfa_dng};
 use crate::{bitpack, compression, preview, tags};
 
@@ -27,18 +28,20 @@ pub struct DngEncoder {
     order: ByteOrder,
     dng_version: Option<[u8; 4]>,
     backward_version: [u8; 4],
-    big_tiff: bool,
+    variant: Variant,
     compression: Compression,
     tiling: Option<(u32, u32)>,
-    jxl_distance: f32,
-    jxl_effort: u8,
+    /// `None` is lossless, the default; `Some` is lossy at that Butteraugli distance.
+    jxl_distance: Option<Distance>,
+    jxl_effort: Effort,
     gain_table_map: Option<ProfileGainTableMap>,
     gain_table_map2: Option<ProfileGainTableMap>,
     metadata: DngMetadata,
+    c2pa: Option<Vec<u8>>,
     c2pa_reserve: Option<usize>,
 }
 
-/// What [`DngEncoder::encode_with_report`] produced: the byte count, and — when the file
+/// What [`DngEncoder::encode`] produced: the byte count, and — when the file
 /// carries a C2PA manifest store or a reservation for one — the two byte ranges an external
 /// signer excludes from its `c2pa.hash.data` binding (C2PA 2.4 §18.5.5).
 ///
@@ -67,15 +70,16 @@ impl Default for DngEncoder {
             // compatibility rules.
             dng_version: None,
             backward_version: [1, 1, 0, 0],
-            big_tiff: false,
+            variant: Variant::Classic,
             compression: Compression::None,
             tiling: None,
-            // JPEG XL defaults: lossless (distance 0.0) at libjxl's default effort (7, squirrel).
-            jxl_distance: 0.0,
-            jxl_effort: 7,
+            // JPEG XL defaults: lossless at libjxl's default effort (7, squirrel).
+            jxl_distance: None,
+            jxl_effort: Effort::Squirrel,
             gain_table_map: None,
             gain_table_map2: None,
             metadata: DngMetadata::default(),
+            c2pa: None,
             c2pa_reserve: None,
         }
     }
@@ -118,15 +122,16 @@ impl DngEncoder {
         self
     }
 
-    /// Returns a copy of this encoder that writes **BigTIFF** (64-bit offsets) instead of classic
-    /// TIFF, letting a DNG exceed the 4 GiB classic limit (a DNG 1.7 feature).
+    /// Returns a copy of this encoder that writes the given container variant: classic TIFF
+    /// ([`Variant::Classic`], the default) or **BigTIFF** ([`Variant::Big`], 64-bit offsets),
+    /// letting a DNG exceed the 4 GiB classic limit (a DNG 1.7 feature).
     ///
     /// BigTIFF only widens the container's structural fields; every photometry, bit depth, and
     /// profile applies unchanged. A reader detects the variant from the header, so the decoder needs
     /// no flag. Callers should also declare a `DNGVersion`/`DNGBackwardVersion` of at least 1.7.0.0.
     #[must_use]
-    pub fn with_big_tiff(mut self, big_tiff: bool) -> Self {
-        self.big_tiff = big_tiff;
+    pub fn with_variant(mut self, variant: Variant) -> Self {
+        self.variant = variant;
         self
     }
 
@@ -143,21 +148,21 @@ impl DngEncoder {
         self
     }
 
-    /// Returns a copy of this encoder that encodes JPEG XL at the given Butteraugli `distance` —
-    /// `0.0` (the default) is lossless; larger values are lossy (1.0 ≈ visually lossless). The
-    /// written raw IFD records it in the `JXLDistance` tag. Only meaningful with
-    /// [`Compression::JpegXl`].
+    /// Returns a copy of this encoder that encodes JPEG XL **lossy** at the given Butteraugli
+    /// `distance` (1.0 ≈ visually lossless). Without it JPEG XL is lossless, the default. The
+    /// written raw IFD records the distance in the `JXLDistance` tag — `0.0` for lossless. Only
+    /// meaningful with [`Compression::JpegXl`].
     #[must_use]
-    pub fn with_jxl_distance(mut self, distance: f32) -> Self {
-        self.jxl_distance = distance;
+    pub fn with_jxl_distance(mut self, distance: Distance) -> Self {
+        self.jxl_distance = Some(distance);
         self
     }
 
-    /// Returns a copy of this encoder that encodes JPEG XL at the given libjxl effort level
-    /// (`1..=10`; default 7). The written raw IFD records it in the `JXLEffort` tag. Only
-    /// meaningful with [`Compression::JpegXl`].
+    /// Returns a copy of this encoder that encodes JPEG XL at the given libjxl effort (default
+    /// [`Effort::Squirrel`], level 7). The written raw IFD records its level in the `JXLEffort`
+    /// tag. Only meaningful with [`Compression::JpegXl`].
     #[must_use]
-    pub fn with_jxl_effort(mut self, effort: u8) -> Self {
+    pub fn with_jxl_effort(mut self, effort: Effort) -> Self {
         self.jxl_effort = effort;
         self
     }
@@ -194,11 +199,29 @@ impl DngEncoder {
         self
     }
 
-    /// Returns a copy of this encoder that embeds `metadata` (EXIF sub-IFD + XMP/IPTC/ICC
-    /// blocks, and a caller-computed C2PA manifest store — see [`DngMetadata::c2pa`]).
+    /// Returns a copy of this encoder that embeds `metadata`: the EXIF sub-IFD and the XMP /
+    /// IPTC-IIM / ICC blocks, replacing any set before. With the `metadata` feature the facade's
+    /// `MetadataSink` setters write into the same carriers.
     #[must_use]
-    pub fn with_metadata(mut self, metadata: DngMetadata) -> Self {
+    pub fn with_dng_metadata(mut self, metadata: DngMetadata) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    /// Returns a copy of this encoder that embeds `store` as the file's C2PA manifest store, in
+    /// the `C2PA` tag ([`gamut_ifd::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`), verbatim.
+    ///
+    /// **Opaque, and bound to one exact file.** A manifest store is a signed hash over the bytes
+    /// *around* it (C2PA 2.4 §18.5), so the only store valid here is one an external signer
+    /// computed over this encoder's own output — through
+    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) and the exclusion ranges
+    /// [`encode`](Self::encode) reports. A store copied out of another file
+    /// ([`DecodedDng::c2pa`](crate::DecodedDng::c2pa)) is invalid by construction. The bytes
+    /// are written exactly as given: the TIFF byte order does not govern them (§A.3.6). The
+    /// length rules are [`with_c2pa_reserved`](Self::with_c2pa_reserved)'s.
+    #[must_use]
+    pub fn with_c2pa(mut self, store: &[u8]) -> Self {
+        self.c2pa = Some(store.to_vec());
         self
     }
 
@@ -206,15 +229,14 @@ impl DngEncoder {
     /// an external signer will fill in afterwards.
     ///
     /// The reservation is written exactly where a store goes — the `C2PA` tag (52545) of IFD 0,
-    /// its value last in the file (C2PA 2.4 §A.3.6) — and
-    /// [`encode_with_report`](Self::encode_with_report) reports its two exclusion ranges
-    /// (§18.5.5). A signer hashes the file around those ranges and overwrites the reservation in
-    /// place; nothing else in the file moves. `len` must be at least
+    /// its value last in the file (C2PA 2.4 §A.3.6) — and [`encode`](Self::encode) reports its
+    /// two exclusion ranges (§18.5.5). A signer hashes the file around those ranges and
+    /// overwrites the reservation in place; nothing else in the file moves. `len` must be at least
     /// [`gamut_core::c2pa::MIN_STORE_LEN`] (a JUMBF box header) — and, with
-    /// [`with_big_tiff`](Self::with_big_tiff), strictly more, since BigTIFF packs an 8-byte
+    /// [`Variant::Big`], strictly more, since BigTIFF packs an 8-byte
     /// value inline — and at most what classic TIFF's 32-bit count describes (without BigTIFF)
     /// and what a buffer can hold; a reservation cannot be combined with a store supplied
-    /// through [`with_metadata`](Self::with_metadata). Each is a typed error at encode time,
+    /// through [`with_c2pa`](Self::with_c2pa). Each is a typed error at encode time,
     /// raised before the reservation is allocated.
     #[must_use]
     pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
@@ -236,7 +258,7 @@ impl DngEncoder {
     fn c2pa_store(&self) -> Result<Option<Cow<'_, [u8]>>> {
         // The *length* is settled before a reservation is materialised, so an unusable one costs
         // neither the allocation nor the panic `vec![0; len]` raises past `isize::MAX`.
-        let len = match (&self.metadata.c2pa, self.c2pa_reserve) {
+        let len = match (&self.c2pa, self.c2pa_reserve) {
             (Some(_), Some(_)) => {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
@@ -273,53 +295,24 @@ impl DngEncoder {
                  TIFF's 32-bit LONG (BigTIFF's count is 64-bit)",
             ));
         }
-        Ok(Some(match &self.metadata.c2pa {
+        Ok(Some(match &self.c2pa {
             Some(store) => Cow::Borrowed(store.as_slice()),
             None => Cow::Owned(zeroed(len)?),
         }))
     }
 
-    /// The container variant this encoder writes (BigTIFF when [`Self::with_big_tiff`] is set).
+    /// The container variant this encoder writes ([`Self::with_variant`]).
     fn variant(&self) -> Variant {
-        if self.big_tiff {
-            Variant::Big
-        } else {
-            Variant::Classic
-        }
+        self.variant
     }
 
     /// Encodes a raw image — a CFA mosaic or a demosaiced `LinearRaw` — as a DNG, appending the
-    /// bytes to `out` and returning the number written.
+    /// bytes to `out` and reporting what was written: the byte count, and where the C2PA manifest
+    /// store (or its reservation, [`with_c2pa_reserved`](Self::with_c2pa_reserved)) landed.
     ///
     /// `raw` supplies the sensor samples plus the photometry and levels; `profile` supplies the
     /// colour calibration and as-shot white balance. The output is an IFD 0 holding an RGB preview
     /// plus the DNG/profile tags, with the full-resolution image in a `SubIFDs` sub-IFD.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the raw
-    /// is not 3-colour (the profile is a `3 × 3` matrix).
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error — before
-    /// any pixel work — if the
-    /// [`DngMetadata::exif`] sub-IFD, or a directory nested in it, carries a field under a
-    /// standard pointer tag (`SubIFDs`, `ExifIFD`, `GPSInfo`, `InteroperabilityIFD`) whose on-disk
-    /// type is a pointer's own (`LONG`, `IFD`, `LONG8`, `IFD8`, judged by [`Value::type_code`],
-    /// the code the reader classifies by), or stores one tag twice (a field and
-    /// a sub-IFD group, or two groups): either would be written into a file
-    /// [`DngRewrite::open`](crate::DngRewrite::open) refuses or reads back changed.
-    /// Propagates buffer/validation errors.
-    pub fn encode(
-        &self,
-        raw: &RawImage,
-        profile: &CameraProfile,
-        out: &mut Vec<u8>,
-    ) -> Result<usize> {
-        self.encode_with_report(raw, profile, out)
-            .map(|report| report.len)
-    }
-
-    /// [`encode`](Self::encode), also reporting where the C2PA manifest store (or its
-    /// reservation, [`with_c2pa_reserved`](Self::with_c2pa_reserved)) landed.
     ///
     /// The store is written last in the file and its entry lives in IFD 0 — the last (and only)
     /// IFD of this encoder's main chain — as C2PA 2.4 §A.3.6 requires. The report's ranges are
@@ -328,15 +321,24 @@ impl DngEncoder {
     ///
     /// # Errors
     ///
-    /// As [`encode`](Self::encode); additionally an
-    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if both a store and a
-    /// reservation were configured; if the store (or reservation) is shorter than
-    /// [`gamut_core::c2pa::MIN_STORE_LEN`]; or if, with [`with_big_tiff`](Self::with_big_tiff),
-    /// it is exactly `MIN_STORE_LEN` (8) bytes — BigTIFF packs a value that short inline in its
-    /// entry, so it could not be the out-of-line run at the end of the file §A.3.6 wants; or if,
-    /// without BigTIFF, it is longer than a 32-bit `LONG` count describes, or a reservation is
-    /// longer than a buffer can hold.
-    pub fn encode_with_report(
+    /// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error if the raw
+    /// is not 3-colour (the profile is a `3 × 3` matrix).
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error — before
+    /// any pixel work — if the
+    /// Exif sub-IFD written for [`DngMetadata::exif`], or a directory nested in it, carries a field under a
+    /// standard pointer tag (`SubIFDs`, `ExifIFD`, `GPSInfo`, `InteroperabilityIFD`) whose on-disk
+    /// type is a pointer's own (`LONG`, `IFD`, `LONG8`, `IFD8`, judged by [`Value::type_code`],
+    /// the code the reader classifies by), or stores one tag twice (a field and
+    /// a sub-IFD group, or two groups): either would be written into a file
+    /// [`DngRewrite::open`](crate::DngRewrite::open) refuses or reads back changed.
+    /// Also an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if both a
+    /// C2PA store and a reservation were configured; if the store (or reservation) is shorter
+    /// than [`gamut_core::c2pa::MIN_STORE_LEN`]; or if, with [`Variant::Big`], it is exactly
+    /// `MIN_STORE_LEN` (8) bytes — BigTIFF packs a value that short inline in its entry, so it
+    /// could not be the out-of-line run at the end of the file §A.3.6 wants; or if, without
+    /// BigTIFF, it is longer than a 32-bit `LONG` count describes, or a reservation is longer
+    /// than a buffer can hold. Propagates buffer/validation errors.
+    pub fn encode(
         &self,
         raw: &RawImage,
         profile: &CameraProfile,
@@ -532,7 +534,7 @@ impl DngEncoder {
         );
         ifd.set(
             tags::CALIBRATION_ILLUMINANT1,
-            Value::Short(vec![profile.calibration_illuminant1().code()]),
+            Value::Short(vec![u16::from(profile.calibration_illuminant1())]),
         );
         // The two as-shot white-balance tags are mutually exclusive: a profile that records a
         // chromaticity writes `AsShotWhiteXY` and leaves `AsShotNeutral` out, even though the
@@ -560,7 +562,7 @@ impl DngEncoder {
             ifd.set(tags::COLOR_MATRIX2, srational_matrix(matrix2));
             ifd.set(
                 tags::CALIBRATION_ILLUMINANT2,
-                Value::Short(vec![illuminant2.code()]),
+                Value::Short(vec![u16::from(*illuminant2)]),
             );
         }
         let (cc1, cc2) = profile.camera_calibration();
@@ -593,7 +595,10 @@ impl DngEncoder {
             ifd.set(tags::PROFILE_NAME, Value::Ascii(name.to_owned()));
         }
         if let Some(policy) = profile.profile_embed_policy() {
-            ifd.set(tags::PROFILE_EMBED_POLICY, Value::Long(vec![policy.code()]));
+            ifd.set(
+                tags::PROFILE_EMBED_POLICY,
+                Value::Long(vec![u32::from(policy)]),
+            );
         }
         // The extended gain-table map lives in IFD 0 (its v1 sibling lives in the raw IFD).
         if let Some(map) = &self.gain_table_map2 {
@@ -603,6 +608,42 @@ impl DngEncoder {
             );
         }
         Ok(ifd)
+    }
+}
+
+/// The facade's encoder sink (the `metadata` feature): EXIF, XMP, ICC and IPTC-IIM blocks land
+/// in the same [`DngMetadata`] carriers [`with_dng_metadata`](DngEncoder::with_dng_metadata)
+/// sets, each replacing what was there. An EXIF stream is parsed into the [`DngMetadata::exif`]
+/// model, of which only the Exif sub-IFD (with its Interoperability sub-IFD) is written — see
+/// there. A C2PA store is refused,
+/// as by every sink; set one with [`with_c2pa`](DngEncoder::with_c2pa).
+#[cfg(feature = "metadata")]
+impl gamut_metadata::MetadataSink for DngEncoder {
+    const CARRIERS: &'static [gamut_metadata::Carrier] = &[
+        gamut_metadata::Carrier::Exif,
+        gamut_metadata::Carrier::Xmp,
+        gamut_metadata::Carrier::Icc,
+        gamut_metadata::Carrier::IptcIim,
+    ];
+
+    fn write_exif(mut self, tiff: &[u8]) -> Result<Self> {
+        self.metadata.exif = Some(gamut_exif::Exif::parse(tiff)?);
+        Ok(self)
+    }
+
+    fn write_xmp(mut self, packet: &[u8]) -> Result<Self> {
+        self.metadata.xmp = Some(packet.to_vec());
+        Ok(self)
+    }
+
+    fn write_icc(mut self, profile: &[u8]) -> Result<Self> {
+        self.metadata.icc = Some(profile.to_vec());
+        Ok(self)
+    }
+
+    fn write_iptc_iim(mut self, datasets: &[u8]) -> Result<Self> {
+        self.metadata.iptc = Some(datasets.to_vec());
+        Ok(self)
     }
 }
 
@@ -672,10 +713,10 @@ fn required_dng_version(encoder: &DngEncoder, raw: &RawImage, profile: &CameraPr
 
 /// Whether the profile uses the spectral-data illuminant (`CalibrationIlluminant` 255, DNG 1.6).
 fn uses_spectral_illuminant(profile: &CameraProfile) -> bool {
-    profile.calibration_illuminant1().code() == 255
+    profile.calibration_illuminant1() == CalibrationIlluminant::Other
         || profile
             .second_illuminant()
-            .is_some_and(|(_, illuminant)| illuminant.code() == 255)
+            .is_some_and(|(_, illuminant)| *illuminant == CalibrationIlluminant::Other)
 }
 
 impl DngEncoder {
@@ -846,10 +887,12 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
     }
     // JPEG XL records its encode parameters (optional tags; DNG 1.7.1 pp. 97-98).
     if compression == Compression::JpegXl {
-        ifd.set(tags::JXL_DISTANCE, Value::Float(vec![encoder.jxl_distance]));
+        // Lossless is recorded as distance 0.0, libjxl's own lossless sentinel.
+        let distance = encoder.jxl_distance.map_or(0.0, Distance::get);
+        ifd.set(tags::JXL_DISTANCE, Value::Float(vec![distance]));
         ifd.set(
             tags::JXL_EFFORT,
-            Value::Long(vec![u32::from(encoder.jxl_effort)]),
+            Value::Long(vec![u32::from(encoder.jxl_effort.level())]),
         );
     }
     // The v1 gain-table map lives in the raw IFD (its v2 sibling lives in IFD 0).
@@ -883,7 +926,7 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
             );
             ifd.set(tags::CFA_PATTERN, Value::Byte(pattern.clone()));
             ifd.set(tags::CFA_PLANE_COLOR, Value::Byte(plane_color.clone()));
-            ifd.set(tags::CFA_LAYOUT, Value::Short(vec![layout.code()]));
+            ifd.set(tags::CFA_LAYOUT, Value::Short(vec![u16::from(*layout)]));
         }
         RawPhotometry::LinearRaw { .. } => {
             ifd.set(
@@ -1215,11 +1258,12 @@ mod tests {
         let raw = sample_raw(8, 6, bits);
         let profile = sample_profile();
         let mut out = Vec::new();
-        let n = DngEncoder::new()
+        let report = DngEncoder::new()
             .with_byte_order(order)
             .encode(&raw, &profile, &mut out)
             .expect("encode");
-        assert_eq!(n, out.len());
+        assert_eq!(report.len, out.len());
+        assert_eq!(report.c2pa, None);
 
         // The container parses as a TIFF, IFD 0 is the preview + DNG/profile tags.
         let file = gamut_ifd::read(&out).expect("parse DNG");
@@ -1604,11 +1648,64 @@ mod tests {
     #[test]
     fn with_compression_preserves_other_builder_state() {
         let enc = DngEncoder::new()
-            .with_big_tiff(true)
+            .with_variant(Variant::Big)
             .with_compression(crate::values::Compression::Deflate);
         assert!(enc.compression == crate::values::Compression::Deflate);
-        // A reset to `Default::default()` would clear big_tiff; the real setter must not.
-        assert!(enc.big_tiff, "with_compression must keep earlier settings");
+        // A reset to `Default::default()` would clear the variant; the real setter must not.
+        assert_eq!(
+            enc.variant(),
+            Variant::Big,
+            "with_compression must keep earlier settings"
+        );
+    }
+
+    /// The sink names the four carriers `DngMetadata` holds, and never the C2PA store, which
+    /// only [`DngEncoder::with_c2pa`] writes.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn the_metadata_sink_names_the_four_dng_metadata_carriers() {
+        use gamut_metadata::{Carrier, MetadataSink};
+        assert_eq!(
+            <DngEncoder as MetadataSink>::CARRIERS,
+            [Carrier::Exif, Carrier::Xmp, Carrier::Icc, Carrier::IptcIim]
+        );
+    }
+
+    /// Each sink setter writes its own `DngMetadata` carrier and leaves the others alone.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn each_metadata_sink_setter_writes_its_own_carrier() {
+        use gamut_metadata::MetadataSink;
+
+        let mut exif = gamut_exif::Exif::new(ByteOrder::LittleEndian);
+        exif.exif_ifd_mut()
+            .set(tags::ISO_SPEED_RATINGS, Value::Short(vec![200]));
+        let enc = DngEncoder::new()
+            .write_exif(&exif.to_bytes().unwrap())
+            .unwrap()
+            .write_xmp(b"<x:xmpmeta/>")
+            .unwrap()
+            .write_icc(&[1, 2])
+            .unwrap()
+            .write_iptc_iim(&[0x1c, 0x02])
+            .unwrap();
+        assert_eq!(
+            enc.metadata,
+            DngMetadata::new()
+                .with_exif(exif)
+                .with_xmp(b"<x:xmpmeta/>".to_vec())
+                .with_icc(vec![1, 2])
+                .with_iptc(vec![0x1c, 0x02])
+        );
+        assert_eq!(enc.c2pa, None);
+    }
+
+    /// An EXIF payload that is not a TIFF stream is refused by the sink, not stored.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn the_metadata_sink_refuses_an_exif_payload_that_is_not_tiff() {
+        use gamut_metadata::MetadataSink;
+        assert!(DngEncoder::new().write_exif(b"not a TIFF stream").is_err());
     }
 
     /// A C2PA reservation's length is a caller's number that `with_c2pa_reserved` cannot refuse,
@@ -1618,7 +1715,7 @@ mod tests {
     #[test]
     fn a_reservation_no_buffer_could_hold_is_refused_instead_of_panicking() {
         let err = DngEncoder::new()
-            .with_big_tiff(true)
+            .with_variant(Variant::Big)
             .with_c2pa_reserved(usize::MAX)
             .c2pa_store()
             .expect_err("no buffer holds usize::MAX bytes");

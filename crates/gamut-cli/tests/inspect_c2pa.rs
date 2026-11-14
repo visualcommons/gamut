@@ -731,7 +731,7 @@ fn a_dng_reports_its_reserved_store_beside_the_accounting() {
     let mut file = Vec::new();
     let report = DngEncoder::new()
         .with_c2pa_reserved(64)
-        .encode_with_report(&raw, &profile, &mut file)
+        .encode(&raw, &profile, &mut file)
         .expect("encode");
     let store = report.c2pa.expect("a reservation was written").store();
     let out = run_inspect("signed.dng", &file, None);
