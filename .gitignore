@@ -54,6 +54,9 @@ tooling/gamut-fuzz/corpus/**
 !tooling/gamut-fuzz/corpus/avif_parse_decode/grid-2x2-limits-6.avif
 !tooling/gamut-fuzz/corpus/avif_parse_decode/overlay-two-inputs-limits-100px.avif
 !tooling/gamut-fuzz/corpus/av1_inspect/identity-444-5x3.obu
+!tooling/gamut-fuzz/corpus/deflate_inflate_zlib/noise-stored.bin
+!tooling/gamut-fuzz/corpus/deflate_inflate_zlib/short-fixed.bin
+!tooling/gamut-fuzz/corpus/deflate_inflate_zlib/text-dynamic.bin
 !tooling/gamut-fuzz/corpus/dng_decode/cfa-12bit.dng
 !tooling/gamut-fuzz/corpus/exif_parse/golden_bare_le.bin
 !tooling/gamut-fuzz/corpus/exif_parse/golden_marker_le.bin

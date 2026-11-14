@@ -141,6 +141,9 @@ jobs:
           - color_gray8_view
           - avif_parse_decode
           - heif_decode_limits
+          # gamut-deflate's bounded inflate (#1144): a law target that is also the crate's
+          # untrusted-input entry point, `inflate_zlib`.
+          - deflate_inflate_zlib
           # The parser entry points (#264): the untrusted-input surface `docs/testing.md`'s
           # per-crate table names, one target per entry point rather than per crate, because
           # gamut-heic's container walk and its `hvcC`/NAL layer are two independent surfaces.
