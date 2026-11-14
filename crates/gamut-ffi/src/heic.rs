@@ -4,7 +4,9 @@
 //! backend is wrapped in an `AbiHevcDecoder` and added to the handle's `HeifDecoder`, tried in
 //! push order; gamut ships **no** software HEVC tail (issue #18), so an empty registry decodes
 //! nothing. The adapter sizes each picture from the codestream's SPS per decode call, so one
-//! adapter serves every item a file holds.
+//! adapter serves every item a file holds. A backend receives both the `extradata` (the `hvcC`
+//! parameter sets) and the codestream (the item payload) as Annex-B, every NAL unit after a
+//! `00 00 00 01` start code, so it never needs the file's NAL length-prefix width.
 
 use core::ffi::c_void;
 

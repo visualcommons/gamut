@@ -316,7 +316,8 @@ impl HevcConfig {
     /// ([`nal_length_size`](Self::nal_length_size) bytes) replaced by a four-byte start code
     /// (`00 00 00 01`). No parameter set from the record is emitted — this is the sample data an API
     /// that was configured separately expects (Android MediaCodec, after `csd-0` from
-    /// [`annex_b_parameter_sets`](Self::annex_b_parameter_sets)).
+    /// [`annex_b_parameter_sets`](Self::annex_b_parameter_sets)), and the codestream
+    /// [`AbiHevcDecoder`](crate::AbiHevcDecoder) hands a `gamut-codec-abi` backend.
     ///
     /// Payload NAL units are passed through as they appear, with no de-duplication against the
     /// record: an `hev1` payload may carry inband parameter sets, which are emitted here as well.
