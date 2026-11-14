@@ -123,7 +123,8 @@ pub use gamut_core::c2pa::MIN_STORE_LEN;
 // re-exported with the tag vocabulary its accessors take so a caller needs no direct gamut-exif
 // dependency.
 pub use gamut_exif::{Exif, ExifTag};
-// The structural IFD core is gamut-ifd's; the same subset gamut-tiff re-exports, so no direct
+// The structural IFD core is gamut-ifd's; the core gamut-tiff also re-exports, plus the
+// `TiffFile` `DngRewrite` edits and the `C2PA_MANIFEST_STORE` tag, so no direct
 // gamut-ifd dependency is needed to name any type this crate's own items reach. `Value` (with
 // `UnknownValue`) is the decode surface `RawTag` carries unmodelled fields as; `Ifd` (with
 // `Field`/`FieldType`/`SubIfd`) is the directory type of the `Exif` model's sub-IFDs and what

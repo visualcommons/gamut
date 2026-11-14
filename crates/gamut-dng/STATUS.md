@@ -131,7 +131,9 @@ One path per item, ahead of the API freeze. Every change below is breaking:
 
 - **Flat crate root.** Every module is private except `tags`, the low-level tag-code table, and
   each public item is re-exported once at the root. `Error`/`Result` are no longer re-exported:
-  they are `gamut_core`'s. The root carries the same `gamut-ifd` subset `gamut-tiff` does, plus
+  they are `gamut_core`'s. The root carries the `gamut-ifd` structural and C2PA-summary core
+  `gamut-tiff` does — without its tag-value codes or `c2pa_exclusions`, with `TiffFile` and
+  `C2PA_MANIFEST_STORE` added — plus
   `gamut_jxl::{Distance, Effort}` and, as `gamut-tiff` does, `gamut_exif::{Exif, ExifTag}`. It
   no longer re-exports `Rational`.
 - **`metadata` is an optional feature, off by default.** It is the same as every other codec's

@@ -30,9 +30,13 @@ documents link here rather than restating it.
 Each container primitive (`ifd`, `riff`, `isobmff`, `heif`) is re-exported as `gamut::<name>`
 under the feature of its own name and under no other: a format feature compiles the container
 its crate builds on without exposing it. The container types a format crate's own signatures
-reach are re-exported from that format's module instead — `gamut::tiff` and `gamut::dng` carry
-the same `gamut-ifd` subset (`Ifd`, `Value`, `ByteOrder`, …) as `gamut::ifd`, so naming them needs
-no `ifd` feature.
+reach are re-exported from that format's module instead, so naming them needs no `ifd` feature.
+`gamut::tiff` and `gamut::dng` share `gamut-ifd`'s structural core (`Ifd`, `Field`, `Value`,
+`ByteOrder`, `Variant`, the `DeconstructReport` family) and its C2PA summary surface
+(`c2pa_summary`, `C2paExclusions`, …); beyond that core each carries what only its own
+signatures reach — `gamut::tiff` the tag-value codes (`Compression`, `Predictor`, …) and the
+`c2pa_exclusions` locator, `gamut::dng` the `TiffFile` that `DngRewrite` edits and the
+`C2PA_MANIFEST_STORE` tag.
 
 | Feature      | Enables                                                                  |
 | ------------ | ------------------------------------------------------------------------ |
