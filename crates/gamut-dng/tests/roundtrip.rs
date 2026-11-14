@@ -620,6 +620,28 @@ fn exif_interoperability_ifd_survives_decode_then_reencode() {
     assert_eq!(again.metadata.exif, Some(first));
 }
 
+/// Issue #1171: an EXIF model whose only Exif content is its Interoperability sub-IFD still
+/// writes an `ExifIFD` (the group is content), so the interop directory decodes back rather than
+/// vanishing on encode.
+#[test]
+fn an_interop_only_exif_model_survives_encode() {
+    use gamut_dng::{DngMetadata, Exif, Ifd, Value};
+
+    let raw = common::sample_raw(32, 24, 16);
+    let mut interop = Ifd::new();
+    interop.set(1, Value::Ascii("R98".to_owned())); // InteroperabilityIndex
+    let mut exif = Exif::new(ByteOrder::LittleEndian);
+    exif.set_interop_ifd(interop.clone());
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_dng_metadata(DngMetadata::new().with_exif(exif))
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    let got = decoded.metadata.exif.expect("EXIF model");
+    assert_eq!(got.interop_ifd(), Some(&interop));
+}
+
 #[test]
 fn level_family_roundtrips_and_validates() {
     use gamut_dng::RawLevels;

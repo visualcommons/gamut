@@ -115,18 +115,20 @@ impl DngMetadata {
     }
 
     /// The `ExifIFD` directory to write — the model's Exif sub-IFD with its Interoperability
-    /// sub-IFD attached as an `InteroperabilityIFD` group — or `None` when the Exif sub-IFD holds
-    /// no field worth a directory.
+    /// sub-IFD attached as an `InteroperabilityIFD` group — or `None` when that directory holds
+    /// neither a field nor a sub-IFD group.
+    ///
+    /// A sub-IFD group is content, as `gamut-tiff`'s `with_content` and `gamut-exif`'s writer
+    /// both count it: an `ExifIFD` holding nothing but its `InteroperabilityIFD` pointer — the
+    /// shape [`exif_model`] returns for such a directory read from a file — is written, not
+    /// dropped. The Interoperability group is therefore attached **before** the emptiness test.
     fn exif_ifd(&self) -> Option<Ifd> {
         let exif = self.exif.as_ref()?;
-        let mut directory = exif
-            .exif_ifd()
-            .filter(|ifd| !ifd.fields().is_empty())?
-            .clone();
+        let mut directory = exif.exif_ifd().cloned().unwrap_or_default();
         if let Some(interop) = exif.interop_ifd() {
             directory.set_sub_ifd(INTEROPERABILITY_IFD, vec![interop.clone()]);
         }
-        Some(directory)
+        (!directory.fields().is_empty() || !directory.sub_ifds().is_empty()).then_some(directory)
     }
 
     /// Whether there is nothing to embed.
@@ -444,14 +446,11 @@ mod tests {
     }
 
     #[test]
-    fn an_exif_directory_with_no_fields_is_empty() {
-        // An `ExifIFD` holding no field is not worth a directory, so it is not written — not
-        // even when the model has an Interoperability sub-IFD to attach to it, or carries
-        // directories (0th IFD, GPS) a DNG does not take from it.
-        let mut interop = Ifd::new();
-        interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+    fn an_exif_directory_with_no_field_and_no_group_is_empty() {
+        // An `ExifIFD` holding neither a field nor a sub-IFD group is not worth a directory, so
+        // it is not written — not even when the model carries directories (0th IFD, GPS) a DNG
+        // does not take from it.
         let mut exif = model(Ifd::new());
-        exif.set_interop_ifd(interop);
         exif.image_mut().set(271, Value::Ascii("gamut".into())); // Make
         exif.gps_ifd_mut().set(0, Value::Byte(vec![2, 3, 0, 0])); // GPSVersionID
         for exif in [Exif::new(ByteOrder::LittleEndian), exif] {
@@ -459,6 +458,44 @@ mod tests {
             assert!(meta.is_empty());
             assert!(meta.apply(&mut Ifd::new()).is_none());
         }
+    }
+
+    #[test]
+    fn an_exif_directory_holding_only_the_interop_group_is_written() {
+        // The model's Interoperability sub-IFD is the directory's only content: it is attached
+        // before the emptiness test, so the `ExifIFD` is kept — with or without an (empty) Exif
+        // sub-IFD in the model, as `gamut-exif`'s own writer keeps it.
+        let mut interop = Ifd::new();
+        interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+        let mut empty_sub_ifd = model(Ifd::new());
+        empty_sub_ifd.set_interop_ifd(interop.clone());
+        let mut no_sub_ifd = Exif::new(ByteOrder::LittleEndian);
+        no_sub_ifd.set_interop_ifd(interop.clone());
+        for exif in [empty_sub_ifd, no_sub_ifd] {
+            let meta = DngMetadata::new().with_exif(exif);
+            assert!(!meta.is_empty());
+            let written = meta.apply(&mut Ifd::new()).expect("exif IFD");
+            let groups = written.sub_ifds();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].tag, INTEROPERABILITY_IFD);
+            assert_eq!(groups[0].ifds, vec![interop.clone()]);
+        }
+    }
+
+    #[test]
+    fn an_exif_directory_holding_only_a_vendor_group_is_written() {
+        // Any sub-IFD group counts as content, not only the Interoperability one.
+        let mut vendor = Ifd::new();
+        vendor.set(7, Value::Short(vec![7]));
+        let mut directory = Ifd::new();
+        directory.set_sub_ifd(0xC000, vec![vendor.clone()]);
+        let written = DngMetadata::new()
+            .with_exif(model(directory))
+            .apply(&mut Ifd::new())
+            .expect("exif IFD");
+        assert_eq!(written.sub_ifds().len(), 1);
+        assert_eq!(written.sub_ifds()[0].tag, 0xC000);
+        assert_eq!(written.sub_ifds()[0].ifds, vec![vendor]);
     }
 
     #[test]
