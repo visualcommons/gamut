@@ -156,6 +156,12 @@ mod tests {
         w.put_bits(coded as u32, bits);
     }
 
+    /// The `profile_tier_level()` field widths (§7.3.3) the fixture writes, spelled out
+    /// independently of the walk's constants so a defect in those cannot shift writer and reader
+    /// together: 2 + 1 + 5 + 32 + 4 + 43 + 1 bits of profile, then 8 of `general_level_idc`.
+    const GENERAL_BITS: usize = 96;
+    const SUB_LAYER_PROFILE_BITS_SPEC: usize = 88;
+
     impl Sps {
         fn new(width: u32, height: u32) -> Self {
             Self {
@@ -174,7 +180,7 @@ mod tests {
             w.put_bits(self.sub_layers.len() as u32, 3);
             w.put_bit(1);
             // The general profile, filled with ones so a misplaced skip reads them as a field.
-            for _ in 0..GENERAL_PROFILE_TIER_LEVEL_BITS {
+            for _ in 0..GENERAL_BITS {
                 w.put_bit(1);
             }
             for &(profile, level) in &self.sub_layers {
@@ -186,7 +192,7 @@ mod tests {
             }
             for &(profile, level) in &self.sub_layers {
                 if profile {
-                    for _ in 0..SUB_LAYER_PROFILE_BITS {
+                    for _ in 0..SUB_LAYER_PROFILE_BITS_SPEC {
                         w.put_bit(1);
                     }
                 }
