@@ -43,7 +43,7 @@ use gamut_color::{
 
 use crate::boundary::{bytes_in, bytes_out, status_of};
 use crate::guard;
-use crate::seam::seam_handle;
+use crate::seam::{configure, seam_handle, try_configure};
 use crate::status::{
     GAMUT_OK, GAMUT_STATUS_INVALID_INPUT, GAMUT_STATUS_NULL_ARGUMENT, GAMUT_STATUS_UNSUPPORTED,
     GamutStatus,
@@ -120,64 +120,6 @@ seam_handle! {
 }
 
 impl GamutAvifEncoder {
-    /// Applies one `with_*` builder to the handle's encoder.
-    ///
-    /// `value` is the C argument already mapped onto its Rust type; `None` means the mapping
-    /// rejected it, reported as `rejected`. A null handle is reported first, whatever `value`.
-    ///
-    /// # Safety
-    ///
-    /// `encoder` is `NULL` or a live pointer from a `gamut_avif_encoder_new*` constructor.
-    unsafe fn configure<T>(
-        encoder: *mut Self,
-        value: Option<T>,
-        rejected: GamutStatus,
-        apply: impl FnOnce(AvifEncoder, T) -> AvifEncoder,
-    ) -> GamutStatus {
-        guard::status(|| {
-            // SAFETY: null is rejected here; a non-null handle is live per contract.
-            let Some(this) = (unsafe { encoder.as_mut() }) else {
-                return GAMUT_STATUS_NULL_ARGUMENT;
-            };
-            let Some(value) = value else {
-                return rejected;
-            };
-            // The Rust builders consume and return the encoder (backends included), so the
-            // value is moved out and back; the `Default` left behind for that instant is never
-            // observed, because no `with_*` builder can panic.
-            this.inner = apply(core::mem::take(&mut this.inner), value);
-            GAMUT_OK
-        })
-    }
-
-    /// [`configure`](Self::configure) for a fallible builder: on its refusal the handle keeps
-    /// the encoder it had and the refusal's status is returned.
-    ///
-    /// # Safety
-    ///
-    /// As [`configure`](Self::configure).
-    unsafe fn try_configure<T>(
-        encoder: *mut Self,
-        value: T,
-        apply: impl FnOnce(AvifEncoder, T) -> gamut::core::Result<AvifEncoder>,
-    ) -> GamutStatus {
-        guard::status(|| {
-            // SAFETY: null is rejected here; a non-null handle is live per contract.
-            let Some(this) = (unsafe { encoder.as_mut() }) else {
-                return GAMUT_STATUS_NULL_ARGUMENT;
-            };
-            // A clone shares the backends, so the handle's own encoder is untouched unless the
-            // builder accepts.
-            match apply(this.inner.clone(), value) {
-                Ok(configured) => {
-                    this.inner = configured;
-                    GAMUT_OK
-                }
-                Err(error) => status_of(&error),
-            }
-        })
-    }
-
     /// Encodes `width × height` samples of layout `P` into a fresh Rust-owned buffer.
     ///
     /// # Safety
@@ -337,7 +279,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_matrix(
 ) -> GamutStatus {
     let value = MatrixCoefficients::from_code_point(code_point);
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, m| {
+        configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, m| {
             e.with_matrix(m)
         })
     }
@@ -359,7 +301,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_primaries(
 ) -> GamutStatus {
     let value = ColorPrimaries::from_code_point(code_point);
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, p| {
+        configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, p| {
             e.with_primaries(p)
         })
     }
@@ -381,7 +323,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_transfer(
 ) -> GamutStatus {
     let value = TransferCharacteristics::from_code_point(code_point);
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, t| {
+        configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, t| {
             e.with_transfer(t)
         })
     }
@@ -403,7 +345,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_color_range(
 ) -> GamutStatus {
     let value = ColorRange::from_flag(full_range);
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, r| {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, r| {
             e.with_color_range(r)
         })
     }
@@ -432,7 +374,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_chroma(
         _ => None,
     };
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, c| {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, c| {
             e.with_chroma(c)
         })
     }
@@ -455,7 +397,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_bit_depth(
 ) -> GamutStatus {
     let value = BitDepth::from_bits(bits);
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, d| {
+        configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, d| {
             e.with_bit_depth(d)
         })
     }
@@ -478,7 +420,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_alpha_quality(
     quality: u8,
 ) -> GamutStatus {
     unsafe {
-        GamutAvifEncoder::configure(encoder, Some(quality), GAMUT_OK, |e, q| {
+        configure(encoder, Some(quality), GAMUT_OK, |e, q| {
             e.with_alpha_quality(q)
         })
     }
@@ -508,7 +450,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_alpha_mode(
         _ => None,
     };
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, m| {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, m| {
             e.with_alpha_mode(m)
         })
     }
@@ -538,7 +480,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_opaque_alpha(
         _ => None,
     };
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, o| {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, o| {
             e.with_opaque_alpha(o)
         })
     }
@@ -561,7 +503,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_orientation(
 ) -> GamutStatus {
     let value = Orientation::from_exif_value(exif_orientation);
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, o| {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, o| {
             e.with_orientation(o)
         })
     }
@@ -586,7 +528,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_icc_profile(
     // SAFETY: per this fn's contract.
     let value = unsafe { bytes_in(data, len) };
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
+        configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
             e.with_icc_profile(b)
         })
     }
@@ -613,7 +555,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_exif(
     // SAFETY: per this fn's contract.
     let value = unsafe { bytes_in(data, len) };
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
+        configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
             e.with_exif(b)
         })
     }
@@ -638,7 +580,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_xmp(
     // SAFETY: per this fn's contract.
     let value = unsafe { bytes_in(data, len) };
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
+        configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
             e.with_xmp(b)
         })
     }
@@ -664,7 +606,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_c2pa_reserved(
     encoder: *mut GamutAvifEncoder,
     len: usize,
 ) -> GamutStatus {
-    unsafe { GamutAvifEncoder::try_configure(encoder, len, AvifEncoder::with_c2pa_reserved) }
+    unsafe { try_configure(encoder, len, AvifEncoder::with_c2pa_reserved) }
 }
 
 /// Writes `store` — a C2PA manifest store already computed over this exact output — into the
@@ -689,7 +631,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_c2pa(
     // SAFETY: per this fn's contract.
     let value = unsafe { bytes_in(store, len) };
     unsafe {
-        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
+        configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
             e.with_c2pa(b)
         })
     }

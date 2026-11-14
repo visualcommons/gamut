@@ -13,6 +13,110 @@
 //! forward declaration) and holds its host in a field named `inner`. A handle that carries
 //! per-handle state beside its host names each extra field's initial value in an optional
 //! `fields = { name: value, … }` entry, which `_new` fills in alongside `inner`.
+//!
+//! The macro also implements [`Handle`] for the struct, which is what the one configure path —
+//! [`configure`] and [`try_configure`], behind every `gamut_<fmt>_<dir>_set_*` setter — reaches
+//! the host through.
+
+use crate::guard;
+use crate::status::{GAMUT_OK, GAMUT_STATUS_NULL_ARGUMENT, GamutStatus};
+
+/// A seam handle: the opaque struct `seam_handle!` stamps, holding its format host in `inner`.
+#[cfg_attr(
+    not(feature = "avif"),
+    expect(
+        dead_code,
+        reason = "only the AVIF encoder has config setters yet (issue #242)"
+    )
+)]
+pub(crate) trait Handle {
+    /// The format crate's host (`AvifEncoder`, `PngDecoder`, …) the handle wraps.
+    type Host;
+
+    /// The handle's host.
+    fn host_mut(&mut self) -> &mut Self::Host;
+}
+
+/// Applies one consuming `with_*` builder to the host behind `handle`.
+///
+/// `value` is the C argument already mapped onto its Rust type; `None` means the mapping
+/// rejected it, reported as `rejected` with the host unchanged. A null handle is reported first,
+/// whatever `value`.
+///
+/// # Safety
+///
+/// `handle` is `NULL` or a live pointer from the handle's constructor that has not been freed.
+#[cfg_attr(
+    not(feature = "avif"),
+    expect(
+        dead_code,
+        reason = "only the AVIF encoder has config setters yet (issue #242)"
+    )
+)]
+pub(crate) unsafe fn configure<H: Handle, T>(
+    handle: *mut H,
+    value: Option<T>,
+    rejected: GamutStatus,
+    apply: impl FnOnce(H::Host, T) -> H::Host,
+) -> GamutStatus
+where
+    H::Host: Default,
+{
+    guard::status(|| {
+        // SAFETY: null is rejected here; a non-null handle is live per contract.
+        let Some(this) = (unsafe { handle.as_mut() }) else {
+            return GAMUT_STATUS_NULL_ARGUMENT;
+        };
+        let Some(value) = value else {
+            return rejected;
+        };
+        // The Rust builders consume and return the host (backends included), so it is moved out
+        // and back; the `Default` left behind for that instant is never observed, because no
+        // `with_*` builder can panic.
+        let host = this.host_mut();
+        *host = apply(core::mem::take(host), value);
+        GAMUT_OK
+    })
+}
+
+/// [`configure`] for a fallible builder: on its refusal the handle keeps the host it had and the
+/// refusal's status is returned.
+///
+/// # Safety
+///
+/// As [`configure`].
+#[cfg_attr(
+    not(feature = "avif"),
+    expect(
+        dead_code,
+        reason = "only the AVIF encoder has config setters yet (issue #242)"
+    )
+)]
+pub(crate) unsafe fn try_configure<H: Handle, T>(
+    handle: *mut H,
+    value: T,
+    apply: impl FnOnce(H::Host, T) -> gamut::core::Result<H::Host>,
+) -> GamutStatus
+where
+    H::Host: Clone,
+{
+    guard::status(|| {
+        // SAFETY: null is rejected here; a non-null handle is live per contract.
+        let Some(this) = (unsafe { handle.as_mut() }) else {
+            return GAMUT_STATUS_NULL_ARGUMENT;
+        };
+        let host = this.host_mut();
+        // A clone shares the backends, so the handle's own host is untouched unless the builder
+        // accepts.
+        match apply(host.clone(), value) {
+            Ok(configured) => {
+                *host = configured;
+                GAMUT_OK
+            }
+            Err(error) => crate::boundary::status_of(&error),
+        }
+    })
+}
 
 macro_rules! seam_handle {
     (
@@ -62,6 +166,14 @@ macro_rules! seam_handle {
         ($new_fn:ident, $free_fn:ident, $push_fn:ident),
         $tests:ident
     ) => {
+        impl crate::seam::Handle for $Handle {
+            type Host = $Host;
+
+            fn host_mut(&mut self) -> &mut $Host {
+                &mut self.inner
+            }
+        }
+
         impl $Handle {
             fn ffi_new() -> *mut Self {
                 crate::guard::ptr(|| {
