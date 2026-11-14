@@ -71,8 +71,14 @@ pub struct Obu<'a> {
     pub spatial_id: u8,
     /// Whether an extension header was present.
     pub has_extension: bool,
+    /// `obu_has_size_field` (§5.3.2): whether the OBU carried its own `obu_size`. Only the final
+    /// OBU of the walked input may lack one, and then its payload runs to the end of the input.
+    pub has_size_field: bool,
     /// The OBU payload, excluding the header and any size field.
     pub payload: &'a [u8],
+    /// The whole OBU as coded: its header, any extension header, any `obu_size` field, and its
+    /// payload — the span a container copies to re-frame it.
+    pub raw: &'a [u8],
 }
 
 impl Obu<'_> {
@@ -190,14 +196,16 @@ impl<'a> ObuIter<'a> {
                 "AV1 OBU: size field runs past the end of the temporal unit",
             ));
         }
-        let payload = &self.rest[start..end];
-        self.rest = &self.rest[end..];
+        let (raw, rest) = self.rest.split_at(end);
+        self.rest = rest;
         Ok(Obu {
             obu_type,
             temporal_id,
             spatial_id,
             has_extension,
-            payload,
+            has_size_field,
+            payload: &raw[start..],
+            raw,
         })
     }
 }
@@ -947,6 +955,12 @@ mod tests {
         assert!(!obus[0].has_extension);
         assert_eq!(obus[1].obu_type, Obu::FRAME);
         assert_eq!(obus[1].payload, &frame[..]);
+        // Both OBUs are sized, and their raw spans tile the unit: header byte, one-byte
+        // `obu_size`, payload.
+        assert!(obus.iter().all(|obu| obu.has_size_field));
+        let split = 2 + seq.len();
+        assert_eq!(obus[0].raw, &unit[..split]);
+        assert_eq!(obus[1].raw, &unit[split..]);
     }
 
     #[test]
@@ -961,15 +975,23 @@ mod tests {
         assert_eq!(obus[0].temporal_id, 3);
         assert_eq!(obus[0].spatial_id, 2);
         assert_eq!(obus[0].payload, &[0xde, 0xad]);
+        // The raw span starts at the OBU header, ahead of the extension byte and the size field.
+        assert!(obus[0].has_size_field);
+        assert_eq!(obus[0].raw, &unit[..]);
     }
 
     #[test]
     fn final_obu_may_omit_its_size_field() {
-        // has_size_field = 0: the payload runs to the end of the input.
-        let unit = [0b0011_0000u8, 0x01, 0x02, 0x03];
+        // A sized OBU_PADDING (type 15) carrying one byte, then a final OBU_FRAME with
+        // has_size_field = 0, whose payload runs to the end of the input.
+        let unit = [0b0111_1010u8, 0x01, 0xee, 0b0011_0000, 0x01, 0x02, 0x03];
         let obus: Vec<_> = ObuIter::new(&unit).collect::<Result<Vec<_>>>().unwrap();
-        assert_eq!(obus.len(), 1);
-        assert_eq!(obus[0].payload, &[0x01, 0x02, 0x03]);
+        assert_eq!(obus.len(), 2);
+        assert!(obus[0].has_size_field);
+        assert_eq!(obus[0].raw, &unit[..3]);
+        assert!(!obus[1].has_size_field);
+        assert_eq!(obus[1].payload, &[0x01, 0x02, 0x03]);
+        assert_eq!(obus[1].raw, &unit[3..]);
     }
 
     #[test]
