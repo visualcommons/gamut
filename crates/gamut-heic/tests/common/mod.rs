@@ -3,7 +3,154 @@
 //! normalising writer cannot express.
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
+use std::sync::{Arc, Mutex};
+
+use gamut_codec_abi::Registry;
+use gamut_core::{Dimensions, ImageBuf, Result, Rgba8, Rgba16};
+use gamut_heic::{
+    ChromaSubsampling, ChromaUpsampling, DecodeLimits, DecodeOptions, DecodedFrame, HeifContainer,
+    HeifImage, Hevc, HevcCodestreamDecoder,
+};
 use gamut_isobmff::{IsoBmffImage, Item, ItemReference, Property, PropertyKind};
+
+// ---- decoding through the shared pipeline --------------------------------------------------
+
+/// A [`DecodedFrame`] from a width and height rather than a [`Dimensions`], the shape this suite's
+/// stub decoders were written in.
+pub fn frame(
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    chroma: ChromaSubsampling,
+    y: Vec<u16>,
+    cb: Vec<u16>,
+    cr: Vec<u16>,
+) -> Result<DecodedFrame> {
+    DecodedFrame::new(
+        Dimensions::new(width, height)?,
+        bit_depth,
+        chroma,
+        y,
+        cb,
+        cr,
+    )
+}
+
+/// The options [`gamut_heic::HeifDecoder::new`] decodes under: the default limits and
+/// nearest-neighbour chroma upsampling.
+pub fn heic_options() -> DecodeOptions {
+    DecodeOptions::default().with_chroma_upsampling(ChromaUpsampling::Nearest)
+}
+
+/// Runs `decode` with `decoder` as the one backend of an [`Hevc`] registry, handing the decoder
+/// back afterwards — so a test can inspect what a stateful decoder recorded, as it could when the
+/// pipeline borrowed it.
+pub fn with_backend<D, R>(
+    decoder: &mut D,
+    decode: impl FnOnce(&Registry<dyn HevcCodestreamDecoder + Send>) -> R,
+) -> R
+where
+    D: HevcCodestreamDecoder + Send + Default + 'static,
+{
+    let shared = Arc::new(Mutex::new(std::mem::take(decoder)));
+    let mut backends: Registry<dyn HevcCodestreamDecoder + Send> = Registry::new();
+    backends.push(shared.clone());
+    let out = decode(&backends);
+    drop(backends);
+    *decoder = Arc::try_unwrap(shared)
+        .ok()
+        .expect("the registry was dropped")
+        .into_inner()
+        .expect("the decoder did not panic");
+    out
+}
+
+/// The `gamut-heif` decode surfaces bound to [`Hevc`] and one test decoder, under
+/// [`heic_options`] unless a test passes its own: an item (or the primary one), a decoder, and
+/// optionally limits or options.
+pub trait Decode {
+    /// The semantic view decoded from.
+    fn heif(&self) -> &HeifImage;
+
+    fn planar<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+    ) -> Result<DecodedFrame> {
+        self.planar_with_limits(id, d, DecodeLimits::default())
+    }
+
+    fn planar_with_limits<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        limits: DecodeLimits,
+    ) -> Result<DecodedFrame> {
+        with_backend(d, |b| self.heif().decode_item_planar::<Hevc>(id, b, limits))
+    }
+
+    fn rgba8<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.rgba8_with_options(id, d, heic_options())
+    }
+
+    fn rgba8_with_options<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba8>> {
+        with_backend(d, |b| self.heif().decode_item_rgba8::<Hevc>(id, b, options))
+    }
+
+    fn rgba16<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.rgba16_with_options(id, d, heic_options())
+    }
+
+    fn rgba16_with_options<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        id: u32,
+        d: &mut D,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba16>> {
+        with_backend(d, |b| {
+            self.heif().decode_item_rgba16::<Hevc>(id, b, options)
+        })
+    }
+
+    fn primary_rgba8<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.rgba8(self.heif().primary_item().id(), d)
+    }
+
+    fn primary_rgba16<D: HevcCodestreamDecoder + Send + Default + 'static>(
+        &self,
+        d: &mut D,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.rgba16(self.heif().primary_item().id(), d)
+    }
+}
+
+impl Decode for HeifImage {
+    fn heif(&self) -> &HeifImage {
+        self
+    }
+}
+
+impl Decode for HeifContainer<'_> {
+    fn heif(&self) -> &HeifImage {
+        self.image()
+    }
+}
 
 // ---- model builders (write-based fixtures) -------------------------------------------------
 
