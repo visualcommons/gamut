@@ -2816,6 +2816,61 @@ mod tests {
     }
 
     #[test]
+    fn from_config_takes_every_knob_and_config_reads_it_back() {
+        // Every field off its default, so a constructor that dropped one — or ignored `config`
+        // altogether — fails here.
+        let config = AvifConfig {
+            mode: AvifMode::Lossy,
+            quality: 33,
+            alpha_quality: Some(12),
+            matrix: MatrixCoefficients::Bt601,
+            range: ColorRange::Limited,
+            chroma: ChromaSubsampling::Cs422,
+            primaries: ColorPrimaries::Bt2020,
+            transfer: TransferCharacteristics::Pq,
+            bit_depth: Some(BitDepth::Ten),
+            alpha_mode: AlphaMode::CleanOnEncode,
+            opaque_alpha: OpaqueAlpha::Keep,
+            orientation: Orientation::Rotate90Cw,
+            content_light_level: Some(ContentLightLevel {
+                max_content_light_level: 1000,
+                max_pic_average_light_level: 400,
+            }),
+            mastering_display: None,
+            effort: Effort::Fastest,
+            threads: NonZeroUsize::new(3),
+        };
+        assert_ne!(config, AvifConfig::default());
+        assert_eq!(AvifEncoder::from_config(config).config(), config);
+        // The presets are this constructor over their configurations.
+        assert_eq!(
+            AvifEncoder::new().config(),
+            AvifEncoder::from_config(AvifConfig::default()).config()
+        );
+    }
+
+    #[test]
+    fn encode_with_report_appends_and_counts_from_the_files_first_byte() {
+        // A caller's buffer already holding bytes: the AVIF is appended after them, `len` is what
+        // was appended, and the slot range indexes the appended file, not `out`.
+        let rgb = [0x40u8; 8 * 8 * 3];
+        let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap();
+        let encoder = AvifEncoder::new().with_c2pa_reserved(16).unwrap();
+        let alone = encoder.encode_to_vec(image).unwrap();
+        let mut out = vec![0xEE; 5];
+        let report = encoder.encode_with_report(image, &mut out).unwrap();
+        assert_eq!(&out[..5], &[0xEE; 5]);
+        assert_eq!(&out[5..], &alone[..]);
+        assert_eq!(report.len, alone.len());
+        let slot = report.c2pa.expect("a slot was reserved");
+        assert_eq!(
+            alone.get(slot.start as usize..slot.end as usize),
+            Some(&[0u8; 16][..])
+        );
+        assert!(report.color_bytes + report.alpha_bytes < report.len);
+    }
+
+    #[test]
     fn an_unconfigured_encoder_adds_no_items_or_properties() {
         // The guard behind the crate's byte-identity promise: every knob added here is inert until
         // it is set, so the default file keeps its item count *and* its `ipco`/`ipma` indices.

@@ -14,9 +14,11 @@ use std::sync::{Arc, Mutex};
 use gamut_color::ChromaUpsampling;
 use gamut_core::{Cicp, DecodeImage, Error, ImageBuf, RawMetadata, Result, Rgba8, Rgba16};
 use gamut_heif::{AlphaChroma, Codestream, DecodeLimits, DecodeOptions, DecodedFrame, HeifImage};
+use gamut_isobmff::IsoBmffImage;
 
 use crate::av1c::Av1Config;
 use crate::backend::{Av1CodestreamDecoder, DecoderRegistry};
+#[cfg(doc)]
 use crate::container::AvifContainer;
 
 /// AVIF's binding into the shared HEIF decode pipeline: the `av01` coded item, its `av1C`
@@ -197,7 +199,7 @@ impl AvifDecoder {
     ///
     /// # Errors
     ///
-    /// Any [`AvifContainer::parse`] error; [`gamut_heif::NO_BACKEND`] when no backend accepts a
+    /// Any error [`AvifContainer::parse`] would return for `data`; [`gamut_heif::NO_BACKEND`] when no backend accepts a
     /// coded item; an accepting backend's error unchanged; and the pipeline's refusals —
     /// derivation cycles, a limit from [`with_limits`](Self::with_limits), a malformed `av1C` or
     /// a payload outside the AVIF still-image constraints.
@@ -219,7 +221,7 @@ impl AvifDecoder {
     ///
     /// # Errors
     ///
-    /// Any [`AvifContainer::parse`] error; an
+    /// Any error [`AvifContainer::parse`] would return for `data`; an
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the `Exif`
     /// item's offset field is short or points past the payload; and an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the XMP item
@@ -245,9 +247,10 @@ impl AvifDecoder {
         Ok(metadata)
     }
 
-    /// The semantic view of `data`, through the same parse as [`AvifContainer::parse`].
+    /// The semantic view of `data` — the parse [`AvifContainer::parse`] starts with, without its
+    /// byte-accounting walk, which no decode reads.
     fn parse(data: &[u8]) -> Result<HeifImage> {
-        AvifContainer::parse(data).map(AvifContainer::into_image)
+        HeifImage::new(IsoBmffImage::parse(data)?)
     }
 }
 
@@ -273,7 +276,7 @@ mod tests {
     use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8, Rgba8};
 
     use super::*;
-    use crate::AvifEncoder;
+    use crate::{AvifContainer, AvifEncoder};
 
     /// A backend returning a flat frame of the configured layout at `level`, and counting calls.
     struct Flat {

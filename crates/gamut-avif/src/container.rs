@@ -161,12 +161,6 @@ impl<'a> AvifContainer<'a> {
         &self.image
     }
 
-    /// Consumes the container, keeping only its semantic view.
-    #[must_use]
-    pub fn into_image(self) -> HeifImage {
-        self.image
-    }
-
     /// Whether this file is an AV1 still image.
     ///
     /// True when the major brand or any compatible brand is `avif` or `avio` (AVIF v1.2.0 §8.3),
