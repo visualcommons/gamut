@@ -892,18 +892,15 @@ fn t7_registry_drives_the_reference_backend() {
 // ============================================================================================
 
 /// A `gamut-codec-abi` [`Decoder`] over libde265 — the shape a C backend has: it receives the
-/// `hvcC` parameter sets as Annex-B `extradata`, the item payload as the codestream, and planes
-/// the adapter sized, and writes the decoded picture into them.
+/// `hvcC` parameter sets as Annex-B `extradata`, the item payload as an Annex-B codestream, and
+/// planes the adapter sized, and writes the decoded picture into them.
 ///
-/// The seam's `StreamConfig` does not carry the NAL length-prefix width, so the backend is told it
-/// at construction (a real C backend would read it from the `hvcC` it was handed out of band).
-struct De265Abi {
-    nal_length_size: usize,
-}
+/// It knows nothing of the file: the seam's `StreamConfig` carries no NAL length-prefix width, and
+/// the backend needs none, since both buffers are start-coded (issue #1179).
+struct De265Abi;
 
-/// The backend could not split the payload, libde265 failed, or the planes the adapter sized do
-/// not fit the decoded picture — distinct statuses, so a failure names its cause.
-const SPLIT_FAILED: Status = Status(2);
+/// libde265 failed, or the planes the adapter sized do not fit the decoded picture — distinct
+/// statuses, so a failure names its cause.
 const DECODE_FAILED: Status = Status(3);
 const SIZE_MISMATCH: Status = Status(4);
 
@@ -915,12 +912,10 @@ impl Decoder for De265Abi {
     fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
         // SAFETY: the adapter keeps `extradata` alive for the duration of the call.
         let extradata = unsafe { cfg.extradata() };
-        // Every parameter set is prefixed with a four-byte start code; a NAL unit cannot contain
-        // one (emulation prevention), so splitting on it recovers the units.
+        // Every NAL unit of both buffers is prefixed with a four-byte start code; a NAL unit
+        // cannot contain one (emulation prevention), so splitting on it recovers the units.
         let config_nals = split_annex_b(extradata);
-        let Ok(pics) = picture_nals(codestream, self.nal_length_size) else {
-            return SPLIT_FAILED;
-        };
+        let pics = split_annex_b(codestream);
         let Ok(yuv) = libheif_oracle::decode_hevc_intra(&config_nals, &pics) else {
             return DECODE_FAILED;
         };
@@ -958,7 +953,7 @@ fn split_annex_b(stream: &[u8]) -> Vec<&[u8]> {
         units.push(&after[..end]);
         rest = &after[end..];
     }
-    assert!(rest.is_empty(), "extradata is not start-code framed");
+    assert!(rest.is_empty(), "stream is not start-code framed");
     units
 }
 
@@ -993,15 +988,12 @@ fn t8_the_abi_adapter_sizes_planes_as_the_reference_decoder_does() {
     for heic in [full_fixture(), orientation_fixture(), odd_size_fixture()] {
         let container = HeifContainer::parse(heic).expect("parse");
         let primary_id = container.image().primary_item().id();
-        let config = container.hevc_config(primary_id).expect("hvcC");
 
         let direct = container
             .planar(primary_id, &mut De265Decoder)
             .expect("direct planar decode");
         let via_abi = HeifDecoder::new()
-            .with_backend(AbiHevcDecoder::new(De265Abi {
-                nal_length_size: config.nal_length_size(),
-            }))
+            .with_backend(AbiHevcDecoder::new(De265Abi))
             .decode_planar(heic)
             .expect("planar decode through the codec-abi adapter");
         assert_eq!(

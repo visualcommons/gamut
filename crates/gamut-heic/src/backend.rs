@@ -86,7 +86,11 @@ pub trait HevcCodestreamDecoder {
 /// - **Down**: [`HevcConfig`] becomes a [`StreamConfig`] with [`codec_id`](StreamConfig::codec_id)
 ///   [`HEVC_CODEC_ID`], the picture size, the record's luma bit depth, and the `hvcC` parameter
 ///   sets as Annex-B `extradata` (exactly what [`HevcConfig::annex_b_parameter_sets`] emits). The
-///   item payload is passed through as the codestream, still length-prefixed.
+///   item payload becomes the codestream in the same framing: its `hvcC` length prefixes (1, 2 or
+///   4 bytes, ISO/IEC 14496-15 §8.3.3.1) replaced by four-byte start codes, exactly what
+///   [`HevcConfig::annex_b_payload`] emits. `StreamConfig` carries no prefix width, so the
+///   backend never needs one: every NAL unit it is handed, extradata or codestream, follows a
+///   `00 00 00 01` start code.
 /// - **Up**: the adapter allocates the `u16` planes itself, hands their pointers to the backend in
 ///   an [`ImageDesc`] (one plane for monochrome, otherwise Y/Cb/Cr; strides are `plane_width * 2`
 ///   bytes; the [`pixel_format`](ImageDesc::pixel_format) is the classic FourCC of the chroma
@@ -227,19 +231,24 @@ impl<D: Decoder> HevcCodestreamDecoder for AbiHevcDecoder<D> {
             .supports(&Self::stream_config(config, size, &extradata))
     }
 
-    /// Runs the wrapped backend into planes sized by the codestream's SPS, and maps them back
-    /// through [`DecodedFrame::new`].
+    /// Runs the wrapped backend on the payload converted to Annex-B, into planes sized by the
+    /// codestream's SPS, and maps them back through [`DecodedFrame::new`].
     ///
     /// # Errors
     ///
     /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when no SPS
-    /// states the picture size or the SPS is malformed, when the picture's size overflows `usize`,
+    /// states the picture size or the SPS is malformed, when the payload does not split into its
+    /// length-prefixed NAL units, when the picture's size overflows `usize`,
     /// or from [`DecodedFrame::new`]'s validation; an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the picture is
     /// past the adapter's [`DecodeLimits`] or a plane cannot be allocated, both before the backend
     /// runs; and the backend's non-OK status, as the [type docs](Self#status-mapping) map it.
     fn decode_still(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame> {
         let size = sps::output_size(config, payload)?;
+        // The backend gets one framing: the payload goes down start-coded, like the extradata, so
+        // the `hvcC` prefix width — which `StreamConfig` does not carry — is consumed here.
+        let mut codestream = Vec::new();
+        config.annex_b_payload(payload, &mut codestream)?;
         let (width, height) = (size.width(), size.height());
         // The SPS is the file's claim, sized up to `2^32 - 1` a side: hold it to the limits before
         // a single plane exists.
@@ -289,7 +298,7 @@ impl<D: Decoder> HevcCodestreamDecoder for AbiHevcDecoder<D> {
 
         let extradata = extradata(config);
         let cfg = Self::stream_config(config, (width, height), &extradata);
-        let status = self.backend.decode(&cfg, payload, &out);
+        let status = self.backend.decode(&cfg, &codestream, &out);
         if !status.is_ok() {
             let error = if status.is_unsupported() {
                 Error::unsupported(env!("CARGO_PKG_NAME"), LATE_DECLINE)

@@ -29,6 +29,9 @@ const SPS: u8 = 33;
 /// A one-NAL IDR_W_RADL payload (type 19: header byte 0x26) with a 4-byte length prefix.
 const IDR_PAYLOAD: [u8; 7] = [0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xDD];
 
+/// [`IDR_PAYLOAD`] as the Annex-B codestream [`AbiHevcDecoder`] hands its backend.
+const ANNEX_B_IDR: [u8; 7] = [0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xDD];
+
 /// A parsed config whose record carries an SPS for a `width` × `height` picture: monochrome, 8-bit.
 fn config_sized(width: u32, height: u32) -> HevcConfig {
     HevcConfig::parse(&hvcc_bytes(&[(SPS, &sps_nal(0, (width, height), None))]))
@@ -438,7 +441,9 @@ fn abi_adapter_lowers_config_and_maps_planes() {
         probe.seen_cfg.clone().expect("cfg seen"),
         (HEVC_CODEC_ID, 5, 3, 10, expected_extradata)
     );
-    assert_eq!(probe.seen_codestream, IDR_PAYLOAD);
+    // The codestream is the payload in the extradata's framing: its 4-byte length prefix replaced
+    // by a start code.
+    assert_eq!(probe.seen_codestream, ANNEX_B_IDR);
     assert_eq!(
         probe.seen_out.expect("out seen"),
         (I420, 5, 3, 10, 3, [10, 6, 6, 0])
@@ -487,7 +492,36 @@ fn abi_adapter_reads_an_hev1_payloads_inband_sps_when_the_record_has_none() {
     let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(9)));
     let decoded = adapter.decode_still(&cfg, &payload).expect("decodes");
     assert_eq!((decoded.width(), decoded.height()), (6, 4));
-    assert_eq!(adapter.get_ref().seen_codestream, payload);
+    // The inband SPS goes down too, start-coded like the picture.
+    let mut annex_b = vec![0x00, 0x00, 0x00, 0x01];
+    annex_b.extend_from_slice(&sps);
+    annex_b.extend_from_slice(&ANNEX_B_IDR);
+    assert_eq!(adapter.get_ref().seen_codestream, annex_b);
+}
+
+#[test]
+fn abi_adapter_start_codes_a_payload_of_any_prefix_width() {
+    // A one-byte prefix (`lengthSizeMinusOne = 0`): the backend, which is never told the width,
+    // still receives the same start-coded stream a four-byte prefix gives.
+    let mut cfg = config_sized(2, 2);
+    cfg.length_size_minus_one = 0;
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)));
+    adapter
+        .decode_still(&cfg, &[0x03, 0x26, 0x01, 0xDD])
+        .expect("decodes");
+    assert_eq!(adapter.get_ref().seen_codestream, ANNEX_B_IDR);
+}
+
+#[test]
+fn abi_adapter_refuses_a_payload_that_does_not_split() {
+    // A prefix announcing nine bytes over a two-byte body: the record's SPS sizes the picture, but
+    // the payload has no NAL units to hand down.
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)));
+    let err = adapter
+        .decode_still(&config_sized(2, 2), &[0x00, 0x00, 0x00, 0x09, 0x26, 0x01])
+        .expect_err("truncated NAL unit");
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(adapter.get_ref().decode_calls, 0);
 }
 
 #[test]
