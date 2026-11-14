@@ -1,32 +1,23 @@
 //! Pins the composition the C seam (issue #280 → #242) depends on: one long-lived
-//! [`ForeignDecoder`] — pushed once, `destroy` deferred to its drop — lent to a fresh
-//! per-item [`AbiHevcDecoder`] for each picture size, via `gamut-codec-abi`'s
-//! `&mut D: Decoder` blanket impl.
+//! [`ForeignDecoder`] — pushed once, `destroy` deferred to its drop — lent to an
+//! [`AbiHevcDecoder`] via `gamut-codec-abi`'s `&mut D: Decoder` blanket impl. The adapter sizes
+//! each picture from its own SPS (issue #1086), so one adapter serves pictures of any size.
+
+mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use common::{hvcc_bytes, sps_nal};
 use gamut_codec_abi::bridge::ForeignDecoder;
 use gamut_codec_abi::{ABI_VERSION, DecoderVTable, ImageDesc, Status, StreamConfig};
-use gamut_core::Dimensions;
-use gamut_heic::{AbiHevcDecoder, HEVC_CODEC_ID, HevcConfig, HevcDecoder};
+use gamut_heic::{AbiHevcDecoder, HEVC_CODEC_ID, HevcCodestreamDecoder, HevcConfig};
 
-/// A minimal `hvcC` record: Main profile, monochrome, 8-bit, 4-byte NAL length prefixes,
-/// zero parameter-set arrays.
-const HVCC_MONO_8BIT: [u8; 23] = [
-    0x01, // configurationVersion
-    0x01, // profile_space 0 | tier 0 | profile_idc 1 (Main)
-    0x00, 0x00, 0x00, 0x00, // general_profile_compatibility_flags
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // general_constraint_indicator_flags
-    0x00, // general_level_idc
-    0x00, 0x00, // min_spatial_segmentation_idc
-    0x00, // parallelismType
-    0x00, // chroma_format_idc 0 = monochrome
-    0x00, // bit_depth_luma_minus8
-    0x00, // bit_depth_chroma_minus8
-    0x00, 0x00, // avgFrameRate
-    0x0B, // constantFrameRate 0 | numTemporalLayers 1 | temporalIdNested 0 | lengthSizeMinusOne 3
-    0x00, // numOfArrays
-];
+/// A monochrome 8-bit `hvcC` whose one SPS (NAL unit type 33) states a `width` × `height`
+/// picture.
+fn hvcc_mono_8bit(width: u32, height: u32) -> HevcConfig {
+    HevcConfig::parse(&hvcc_bytes(&[(33, &sps_nal(0, (width, height), None))]))
+        .expect("minimal hvcC parses")
+}
 
 unsafe extern "C" fn supports_shim(
     _ctx: *mut core::ffi::c_void,
@@ -40,8 +31,8 @@ unsafe extern "C" fn supports_shim(
     }
 }
 
-/// Writes the stream's width into the first luma sample, proving the backend saw the
-/// per-adapter dimensions.
+/// Writes the stream's width into the first luma sample, proving the backend saw the picture's
+/// own dimensions.
 unsafe extern "C" fn decode_shim(
     _ctx: *mut core::ffi::c_void,
     cfg: *const StreamConfig,
@@ -70,47 +61,48 @@ const VTABLE: DecoderVTable = DecoderVTable {
 };
 
 #[test]
-fn each_item_gets_a_borrowing_adapter_that_sees_its_own_dimensions() {
+fn one_borrowing_adapter_sees_each_pictures_own_dimensions() {
     let destroyed = AtomicUsize::new(0);
     let ctx = std::ptr::from_ref(&destroyed).cast_mut().cast();
 
     // SAFETY: VTABLE is valid for the program lifetime and ctx outlives the backend.
     let mut foreign = unsafe { ForeignDecoder::new(&VTABLE, ctx) }.expect("current ABI_VERSION");
-    let config = HevcConfig::parse(&HVCC_MONO_8BIT).expect("minimal hvcC parses");
+    let mut adapter = AbiHevcDecoder::new(&mut foreign);
 
-    // Two items with different `ispe` dimensions share the one stored backend. Each adapter must
-    // carry its own item's size through to the backend, or a file whose items differ in size
-    // would decode every item at the first one's dimensions.
+    // Two pictures of different sizes go through the one adapter. Each must carry its own SPS
+    // size through to the backend, or a file whose items differ in size would decode every item
+    // at the first one's dimensions.
     for (width, height) in [(4u32, 2u32), (8, 3)] {
-        let dims = Dimensions::new(width, height).expect("non-zero");
-        let mut adapter = AbiHevcDecoder::new(&mut foreign, dims);
-
+        let config = hvcc_mono_8bit(width, height);
         assert!(adapter.supports(&config));
-        let frame = adapter.decode_intra(&config, &[]).expect("stub decodes");
-        assert_eq!(frame.width(), width);
+        let frame = adapter.decode_still(&config, &[]).expect("stub decodes");
+        assert_eq!((frame.width(), frame.height()), (width, height));
         assert_eq!(frame.y().len(), (width * height) as usize);
-        assert_eq!(frame.y()[0], width as u16, "backend saw this item's width");
+        assert_eq!(
+            frame.y()[0],
+            width as u16,
+            "backend saw this picture's width"
+        );
     }
 }
 
 #[test]
-fn per_item_adapters_borrow_the_backend_rather_than_owning_it() {
+fn the_adapter_borrows_the_backend_rather_than_owning_it() {
     let destroyed = AtomicUsize::new(0);
     let ctx = std::ptr::from_ref(&destroyed).cast_mut().cast();
 
     // SAFETY: VTABLE is valid for the program lifetime and ctx outlives the backend.
     let mut foreign = unsafe { ForeignDecoder::new(&VTABLE, ctx) }.expect("current ABI_VERSION");
-    let config = HevcConfig::parse(&HVCC_MONO_8BIT).expect("minimal hvcC parses");
 
     for (width, height) in [(4u32, 2u32), (8, 3)] {
-        let dims = Dimensions::new(width, height).expect("non-zero");
-        let mut adapter = AbiHevcDecoder::new(&mut foreign, dims);
-        adapter.decode_intra(&config, &[]).expect("stub decodes");
+        let mut adapter = AbiHevcDecoder::new(&mut foreign);
+        adapter
+            .decode_still(&hvcc_mono_8bit(width, height), &[])
+            .expect("stub decodes");
     }
 
-    // Independent of whether the dimensions crossed correctly: an adapter that took ownership
-    // would tear the shared backend down after the first item, and the second item would be
-    // decoding through a destroyed context.
+    // An adapter that took ownership would tear the shared backend down when the first was
+    // dropped, and the second would be decoding through a destroyed context.
     assert_eq!(
         destroyed.load(Ordering::SeqCst),
         0,

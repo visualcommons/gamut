@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use gamut_bitstream::BitWriter;
 use gamut_codec_abi::Registry;
 use gamut_core::{Dimensions, ImageBuf, Result, Rgba8, Rgba16};
 use gamut_heic::{
@@ -12,6 +13,77 @@ use gamut_heic::{
     HeifImage, Hevc, HevcCodestreamDecoder,
 };
 use gamut_isobmff::{IsoBmffImage, Item, ItemReference, Property, PropertyKind};
+
+// ---- HEVC parameter sets -------------------------------------------------------------------
+
+/// Writes `value` as `ue(v)` (ITU-T H.265 §9.2).
+fn ue(w: &mut BitWriter, value: u32) {
+    let coded = u64::from(value) + 1;
+    let bits = 64 - coded.leading_zeros();
+    w.put_bits(0, bits - 1);
+    w.put_bits(coded as u32, bits);
+}
+
+/// A minimal SPS NAL unit (header included, emulation prevention applied) stating a
+/// `width` × `height` picture of `chroma_format_idc`, cropped by the conformance window `window`
+/// (left, right, top, bottom, in chroma units) when given. Only the prefix
+/// `AbiHevcDecoder` reads is meaningful; no sub-layers.
+pub fn sps_nal(
+    chroma_format_idc: u32,
+    (width, height): (u32, u32),
+    window: Option<[u32; 4]>,
+) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    w.put_bits(0, 4); // sps_video_parameter_set_id
+    w.put_bits(0, 3); // sps_max_sub_layers_minus1
+    w.put_bit(1); // sps_temporal_id_nesting_flag
+    // The 96-bit general profile_tier_level(): profile_idc 1 (Main), the rest zero.
+    w.put_bits(0b0000_0001, 8);
+    w.put_bits(0, 32);
+    w.put_bits(0, 32);
+    w.put_bits(0, 16);
+    w.put_bits(90, 8); // general_level_idc
+    ue(&mut w, 0); // sps_seq_parameter_set_id
+    ue(&mut w, chroma_format_idc);
+    if chroma_format_idc == 3 {
+        w.put_bit(0); // separate_colour_plane_flag
+    }
+    ue(&mut w, width);
+    ue(&mut w, height);
+    w.put_bit(u8::from(window.is_some()));
+    for offset in window.iter().flatten() {
+        ue(&mut w, *offset);
+    }
+    w.put_bit(1); // rbsp_stop_one_bit
+    w.align();
+    let mut nal = vec![0x42, 0x01]; // nal_unit_type 33 (SPS)
+    let mut zeros = 0;
+    for byte in w.into_bytes() {
+        if zeros == 2 && byte <= 3 {
+            nal.push(3);
+            zeros = 0;
+        }
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+        nal.push(byte);
+    }
+    nal
+}
+
+/// An `hvcC` record: the 23-byte header with `lengthSizeMinusOne = 3` (monochrome, 8-bit), then
+/// one single-NAL array per `(NAL_unit_type, nal)` entry.
+pub fn hvcc_bytes(arrays: &[(u8, &[u8])]) -> Vec<u8> {
+    let mut v = vec![0u8; 23];
+    v[0] = 1; // configurationVersion
+    v[21] = 0b0000_0011; // ... | lengthSizeMinusOne = 3
+    v[22] = arrays.len() as u8; // numOfArrays
+    for &(ty, nal) in arrays {
+        v.push(0x80 | ty); // array_completeness | NAL_unit_type
+        v.extend_from_slice(&1u16.to_be_bytes()); // numNalus
+        v.extend_from_slice(&(nal.len() as u16).to_be_bytes()); // nalUnitLength
+        v.extend_from_slice(nal);
+    }
+    v
+}
 
 // ---- decoding through the shared pipeline --------------------------------------------------
 
