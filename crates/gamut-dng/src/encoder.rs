@@ -1677,7 +1677,7 @@ mod tests {
     fn each_metadata_sink_setter_writes_its_own_carrier() {
         use gamut_metadata::MetadataSink;
 
-        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        let mut exif = gamut_exif::Exif::new(ByteOrder::LittleEndian);
         exif.exif_ifd_mut()
             .set(tags::ISO_SPEED_RATINGS, Value::Short(vec![200]));
         let enc = DngEncoder::new()
@@ -1698,6 +1698,14 @@ mod tests {
                 .with_iptc(vec![0x1c, 0x02])
         );
         assert_eq!(enc.c2pa, None);
+    }
+
+    /// An EXIF payload that is not a TIFF stream is refused by the sink, not stored.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn the_metadata_sink_refuses_an_exif_payload_that_is_not_tiff() {
+        use gamut_metadata::MetadataSink;
+        assert!(DngEncoder::new().write_exif(b"not a TIFF stream").is_err());
     }
 
     /// A C2PA reservation's length is a caller's number that `with_c2pa_reserved` cannot refuse,
