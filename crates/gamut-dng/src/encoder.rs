@@ -1700,6 +1700,28 @@ mod tests {
         assert_eq!(enc.c2pa, None);
     }
 
+    /// An EXIF payload whose Exif sub-IFD holds only its Interoperability pointer reaches the
+    /// written `ExifIFD` as that group, rather than being dropped as an empty directory.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn the_metadata_sink_keeps_an_interop_only_exif_payload() {
+        use gamut_ifd::tags::INTEROPERABILITY_IFD;
+        use gamut_metadata::MetadataSink;
+
+        let mut exif = gamut_exif::Exif::new(ByteOrder::LittleEndian);
+        exif.interop_ifd_mut().set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+        let enc = DngEncoder::new()
+            .write_exif(&exif.to_bytes().unwrap())
+            .unwrap();
+        let written = enc.metadata.apply(&mut Ifd::new()).expect("exif IFD");
+        assert_eq!(written.sub_ifds().len(), 1);
+        assert_eq!(written.sub_ifds()[0].tag, INTEROPERABILITY_IFD);
+        assert_eq!(
+            written.sub_ifds()[0].ifds,
+            vec![exif.interop_ifd().unwrap().clone()]
+        );
+    }
+
     /// An EXIF payload that is not a TIFF stream is refused by the sink, not stored.
     #[cfg(feature = "metadata")]
     #[test]
