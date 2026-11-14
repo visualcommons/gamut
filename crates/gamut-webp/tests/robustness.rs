@@ -5,7 +5,7 @@
 //!
 //! This file holds the container-level half, through `WebpDecoder`. The VP8 frame-level half
 //! (malformed headers, truncation, bit flips) drives the crate-private frame decoder and lives in
-//! `src/vp8/frame.rs`; the VP8L half is `tests/robustness_vp8l.rs`.
+//! `src/vp8/frame/robustness_tests.rs`; the VP8L half is `tests/robustness_vp8l.rs`.
 
 use gamut_core::{DecodeImage, ImageBuf, Rgb8};
 use gamut_webp::WebpDecoder;
