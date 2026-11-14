@@ -605,8 +605,8 @@ impl Value {
                         order.u32([c[4], c[5], c[6], c[7]]),
                     );
                     let bits = match order {
-                        ByteOrder::LittleEndian => u64::from(a) | (u64::from(b) << 32),
-                        ByteOrder::BigEndian => u64::from(b) | (u64::from(a) << 32),
+                        ByteOrder::LittleEndian => u64::from(a) + (u64::from(b) << 32),
+                        ByteOrder::BigEndian => u64::from(b) + (u64::from(a) << 32),
                     };
                     v.push(f64::from_bits(bits));
                 }

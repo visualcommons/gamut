@@ -243,23 +243,6 @@ exclude_re = [
     # the `n` it shifts is only consumed on an iteration that never executes, so `n >>= 8` is dead.
     # `>>= → <<=` is unobservable. (The loop-bound and `e`/`n` init mutants stay live and are caught.)
     '^crates/gamut-bitstream/src/symbol\.rs:190:19: replace >>= with <<= in SymbolEncoder::finish$',
-    # gamut-riff `Vp8xHeader::to_bytes`: the feature-flag byte ORs five single bits each shifted to
-    # a distinct position (`icc<<5 | alpha<<4 | ...`), so the operands are disjoint and `|` == `^`.
-    # gamut-riff `Vp8xHeader::parse`: the `le24` closure ORs three bytes at offsets 0/8/16
-    # (`b[0] | (b[1]<<8) | (b[2]<<16)`), again disjoint. Both functions' `| -> ^` are equivalent.
-    # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    '^crates/gamut-riff/src/vp8x\.rs:(62:13|63:13|64:13|65:13): replace \| with \^ in Vp8xHeader::to_bytes$',
-    '^crates/gamut-riff/src/vp8x\.rs:(122:47|122:72): replace \| with \^ in Vp8xHeader::parse$',
-    # gamut-ifd `Value::decode`: the DOUBLE assembly OR's a 32-bit low half with a 32-bit high half
-    # shifted up by 32 (`u64::from(a) | (u64::from(b) << 32)`). The operands occupy disjoint bits, so
-    # `|` is identical to `^`; both `| -> ^` mutations are equivalent.
-    # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    '^crates/gamut-ifd/src/value\.rs:(608:65|609:62): replace \| with \^ in Value::decode$',
-    # gamut-dsp `adst_output_permute`: the index is `(d << 3) | (c << 2) | (b << 1) | a`, where each
-    # of a/b/c/d is a single bit (0 or 1) shifted to a distinct position, so the OR'd operands never
-    # share bits and `|` is identical to `^`. The three `| -> ^` mutations are therefore equivalent.
-    # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
-    '^crates/gamut-dsp/src/av1/adst\.rs:(165:29|165:40|165:51): replace \| with \^ in adst_output_permute$',
     # gamut-color `vp8_clip8`: the `else if v < 0` branch is reached only when `v` is out of range
     # (`v == 0` takes the `v & !MASK2 == 0` fast path), so `v != 0` always holds there and `v < 0`
     # is equivalent to `v <= 0`. (`v < 0 → v == 0` *is* observable and is killed by a test.)
