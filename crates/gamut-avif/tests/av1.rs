@@ -214,10 +214,10 @@ fn full_stream_normalizes_a_sizeless_obu_with_a_single_payload_byte() {
 /// A payload long enough to need a two-byte leb128 size, which is the only way to observe the
 /// continuation bit.
 ///
-/// `write_leb128` sets it with `byte | 0x80`. Every OBU in the suite was short enough to encode
-/// its size in one byte, so the loop never took a second pass and the continuation bit was never
-/// written -- mutating that `|` to `&`, which would clear the byte entirely, changed nothing
-/// observable (#110).
+/// Every other OBU in the suite is short enough to encode its size in one byte, so without this
+/// one the continuation bit is never written (#110). The writer is `gamut_bitstream::write_leb128`
+/// since #1176, whose own mutants that crate's tests kill; this pins that `full_stream` writes
+/// the whole multi-byte size it returns.
 #[test]
 fn full_stream_writes_a_multi_byte_leb128_size() {
     let c = Av1Config::parse(&[0x81, 1 << 5, 0x00, 0x00]).unwrap();
