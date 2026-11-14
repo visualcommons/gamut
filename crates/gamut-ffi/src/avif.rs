@@ -1114,8 +1114,9 @@ pub unsafe extern "C" fn gamut_avif_image_av1c(
 }
 
 /// The Exif payload describing the primary item, borrowed from `image` — **raw**, including
-/// HEIF's 4-byte big-endian `exif_tiff_header_offset` prefix (as `AvifImage::exif` exposes it
-/// and libheif returns it); the TIFF stream starts that many bytes after the prefix.
+/// HEIF's 4-byte big-endian `exif_tiff_header_offset` prefix (as the payload of the
+/// `HeifImage::exif` item carries it and libheif returns it); the TIFF stream starts that many
+/// bytes after the prefix.
 ///
 /// `GAMUT_OK` with `*data == NULL`, `*len == 0` when there is none;
 /// `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
@@ -1180,7 +1181,7 @@ pub unsafe extern "C" fn gamut_avif_image_icc_profile(
 }
 
 /// Writes whether the primary item's colour values are premultiplied by its alpha auxiliary
-/// (a `prem` reference; `AvifImage::is_premultiplied`) to `*premultiplied`.
+/// (a `prem` reference; `HeifImage::is_premultiplied`) to `*premultiplied`.
 ///
 /// Returns `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
 ///

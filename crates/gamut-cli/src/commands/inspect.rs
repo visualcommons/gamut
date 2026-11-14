@@ -1118,7 +1118,7 @@ fn route_label(name: &str, route: Route) -> String {
 /// container.
 ///
 /// The confirmations are the format crates' own predicates — `HeifImage::is_hevc_still` and
-/// `AvifImage::is_av1_still`, each including the `mif1` case the major brand alone cannot settle —
+/// `AvifContainer::is_av1_still`, each including the `mif1` case the major brand alone cannot settle —
 /// so no brand list lives here. HEIC is tried first, which is the order this command always had;
 /// an AVIF is parsed only once the HEIC confirmation declines. A file neither crate confirms keeps
 /// the HEIC arm's outcome: its parse error (a top-level `moov`, say), or the unsupported-brand

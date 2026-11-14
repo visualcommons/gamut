@@ -35,7 +35,7 @@ a readable TIFF whose IFD 0 carries `DNGVersion` (50706) is a DNG, else TIFF.
 The `ftyp` test is a **route, not a verdict**. It says the file is ISOBMFF, not which still image it
 is, so the command parses the container and *confirms* it before printing anything: first with
 `gamut-heic`'s own `HeifImage::is_hevc_still`, which sends it to the HEIC arm, and — when that
-declines — with `gamut-avif`'s own `AvifImage::is_av1_still`, which sends it to the AVIF arm
+declines — with `gamut-avif`'s own `AvifContainer::is_av1_still`, which sends it to the AVIF arm
 (`references/heif` §7 for both). A file neither confirms exits `1` with `<path>: unsupported
 container brand '<brand>' — …` and prints no report. The HEIC confirmation runs only once
 `gamut-heic`'s parse has succeeded, and a file neither crate confirms keeps that parse's outcome,

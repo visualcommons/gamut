@@ -19,9 +19,9 @@ workspace = true
 # Exposes the `invariants` module to the out-of-tree fuzz driver. `doc(hidden)`, no SemVer
 # guarantee, and never enabled by the `gamut` umbrella; the crate's own tests get it via `cfg(test)`.
 test-support = []
-# Typed metadata wiring: `AvifImage`'s `TypedMetadata` impl (`blocks` / `metadata`) and
-# `AvifEncoder`'s `MetadataSink` impl (`with_metadata` / `with_encoded_metadata`) over the
-# `gamut-metadata` facade.
+# Typed metadata wiring over the `gamut-metadata` facade: `AvifEncoder`'s `MetadataSink` impl
+# (`with_metadata` / `with_encoded_metadata`) and the re-exported `TypedMetadata`, which parses
+# the `RawMetadata` `AvifDecoder::metadata` returns (that method itself is always available).
 metadata = ["dep:gamut-metadata"]
 
 [dependencies]
@@ -47,7 +47,7 @@ gamut-metadata = { workspace = true, optional = true }
 # `mise run fetch-av1-oracles` (issue #378).
 libavif-oracle = { path = "../../tooling/libavif-oracle" }
 # dav1d directly (raw OBU stream in, planes out) implements the conformance suite's
-# Av1StillDecoder bridge — the exact seam a platform decoder plugs into.
+# Av1CodestreamDecoder bridge — the exact seam a platform decoder plugs into.
 dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
 # exiv2 as the container-level metadata oracle (FFI to a vendored, statically-linked exiv2 with
 # its BMFF reader, built from the `third_party/exiv2` + `third_party/expat` submodules): it reads

@@ -205,11 +205,11 @@ void gamut_avif_image_free(GamutAvifImage *image);
   misaligned `const uint16_t *` is `GAMUT_STATUS_INVALID_INPUT`, never dereferenced.
 - **Byte inputs**: `NULL` with `len == 0` is the empty slice; `NULL` with a non-zero `len` is
   `GAMUT_STATUS_NULL_ARGUMENT`.
-- **Parse** runs `AvifContainer::parse` and keeps (a clone of) its owned `AvifImage`, so the
+- **Parse** runs `AvifContainer::parse` and keeps (a clone of) its owned `HeifImage`, so the
   handle never borrows the caller's input. Accessors write borrowed `(const uint8_t *, size_t)`
   pairs valid until `gamut_avif_image_free`: `primary_codestream`, `alpha_codestream`, `av1c`
   (the `av1C` record body), `exif` (raw, including HEIF's 4-byte `exif_tiff_header_offset`, as
-  the Rust `AvifImage::exif` exposes it), `xmp`, `icc_profile`; plus `is_premultiplied` and
+  the payload of the Rust `HeifImage::exif` item carries it), `xmp`, `icc_profile`; plus `is_premultiplied` and
   `dimensions` (the primary item's `ispe`). An absent payload is `GAMUT_OK` with `NULL`/`0`; a
   primary or alpha item that is derived (`grid`/`iden`/`iovl`) or not AV1 has no single
   codestream and is `GAMUT_STATUS_UNSUPPORTED`.
