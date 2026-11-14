@@ -13,7 +13,7 @@ use common::{hvcc_bytes, sps_nal};
 use gamut_codec_abi::{Decoder, ImageDesc, Status, StreamConfig};
 use gamut_core::{Dimensions, Error, ErrorKind};
 use gamut_heic::{
-    AbiHevcDecoder, ChromaSubsampling, DecodedFrame, HEVC_CODEC_ID, HeifDecoder,
+    AbiHevcDecoder, ChromaSubsampling, DecodeLimits, DecodedFrame, HEVC_CODEC_ID, HeifDecoder,
     HevcCodestreamDecoder, HevcConfig,
 };
 use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind};
@@ -504,6 +504,43 @@ fn abi_adapter_refuses_a_picture_no_sps_sizes() {
     );
     // The backend was never handed planes it could not be told the size of.
     assert_eq!(adapter.get_ref().decode_calls, 0);
+}
+
+#[test]
+fn abi_adapter_refuses_an_sps_past_the_default_limits_before_allocating() {
+    // A 2^31 × 2^31 SPS: its u16 luma plane alone is 2^63 bytes, a capacity overflow were it
+    // allocated.
+    let mut adapter = AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)));
+    let err = adapter
+        .decode_still(&config_sized(1 << 31, 1 << 31), &IDR_PAYLOAD)
+        .expect_err("past DecodeLimits::default");
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(err.static_message(), Some(gamut_heif::DIMENSION_LIMIT));
+    assert_eq!(adapter.get_ref().decode_calls, 0);
+}
+
+#[test]
+fn abi_adapter_holds_the_sps_to_the_limits_it_is_given() {
+    let decode = |limits| {
+        AbiHevcDecoder::new(AbiProbe::new(true, AbiOutcome::Fill(1)))
+            .with_limits(limits)
+            .decode_still(&config_sized(4, 2), &IDR_PAYLOAD)
+    };
+    let refusal = |limits| {
+        decode(limits)
+            .expect_err("past the limits")
+            .static_message()
+    };
+    assert_eq!(
+        refusal(DecodeLimits::new(3, 100)),
+        Some(gamut_heif::DIMENSION_LIMIT)
+    );
+    assert_eq!(
+        refusal(DecodeLimits::new(4, 7)),
+        Some(gamut_heif::PIXEL_LIMIT)
+    );
+    let decoded = decode(DecodeLimits::new(4, 8)).expect("exactly at the limits");
+    assert_eq!((decoded.width(), decoded.height()), (4, 2));
 }
 
 #[test]

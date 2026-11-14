@@ -202,7 +202,11 @@ impl HeifDecoder {
         self
     }
 
-    /// Replaces the size and work caps every decode runs under.
+    /// Replaces the size and work caps every decode runs under. An [`AbiHevcDecoder`] backend
+    /// checks the codestream's own picture size against limits of its own before it allocates
+    /// (see its [Resource limits](crate::AbiHevcDecoder#resource-limits)); raise those to match.
+    ///
+    /// [`AbiHevcDecoder`]: crate::AbiHevcDecoder
     #[must_use]
     pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
         self.options = self.options.with_limits(limits);

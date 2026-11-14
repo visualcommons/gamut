@@ -19,7 +19,7 @@
 use gamut_codec_abi::{Decoder, ImageDesc, MAX_PLANES, StreamConfig, codec_id, pixel_format};
 use gamut_color::ChromaSubsampling;
 use gamut_core::{Error, Result};
-use gamut_heif::DecodedFrame;
+use gamut_heif::{DecodeLimits, DecodedFrame};
 
 use crate::hvcc::HevcConfig;
 use crate::sps;
@@ -36,6 +36,9 @@ pub const HEVC_CODEC_ID: u32 = codec_id(*b"hvc1");
 /// [`decode`](gamut_codec_abi::Decoder::decode), after its `supports` accepted the job.
 pub(crate) const LATE_DECLINE: &str =
     "HEIC: HEVC backend declined the codestream after accepting it";
+
+/// The message of the error [`AbiHevcDecoder`] returns when the system refuses a plane.
+pub(crate) const PLANE_ALLOCATION: &str = "HEIC: out of memory allocating a decode plane";
 
 /// The message of the terminal error [`AbiHevcDecoder`] returns for any other non-OK status.
 pub(crate) const BACKEND_FAILED: &str = "HEIC: HEVC backend returned a failure status";
@@ -101,6 +104,19 @@ pub trait HevcCodestreamDecoder {
 /// [`HeifDecoder`](crate::HeifDecoder) like any other backend. [`supports`](Decoder::supports) is
 /// asked with the same size.
 ///
+/// # Resource limits
+///
+/// The SPS is as untrusted as the rest of the file — `pic_width_in_luma_samples` is a `ue(v)`
+/// reaching `2^32 - 1` — and the adapter allocates its planes before the backend runs, so it
+/// checks the SPS size against its own [`DecodeLimits`] ([`with_limits`](Self::with_limits);
+/// [`DecodeLimits::default`] unless set) first, and reserves the planes fallibly. A picture past
+/// the limits is refused with [`DecodeLimits::check`]'s
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, and an allocation the
+/// system refuses is an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error too,
+/// never an abort; the backend is not called in either case. A [`HeifDecoder`](crate::HeifDecoder)
+/// cannot reach into its backends, so a caller who raises its limits raises the adapter's to
+/// match.
+///
 /// # Status mapping
 ///
 /// [`Status::OK`](gamut_codec_abi::Status::OK) ⇒ a validated [`DecodedFrame`]. Any other status
@@ -112,6 +128,8 @@ pub trait HevcCodestreamDecoder {
 #[derive(Debug, Clone, Copy)]
 pub struct AbiHevcDecoder<D> {
     backend: D,
+    /// The caps the SPS picture size is checked against before the planes are allocated.
+    limits: DecodeLimits,
 }
 
 /// The [`ImageDesc::pixel_format`] tag for planar samples of `chroma`: the classic FourCC of the
@@ -126,10 +144,21 @@ fn planar_pixel_format(chroma: ChromaSubsampling) -> u32 {
 }
 
 impl<D: Decoder> AbiHevcDecoder<D> {
-    /// Wraps `backend`.
+    /// Wraps `backend`, under [`DecodeLimits::default`].
     #[must_use]
     pub fn new(backend: D) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            limits: DecodeLimits::default(),
+        }
+    }
+
+    /// Replaces the caps the codestream's picture size is checked against before any plane is
+    /// allocated (see [Resource limits](Self#resource-limits)).
+    #[must_use]
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Borrows the wrapped backend.
@@ -169,6 +198,17 @@ impl<D: Decoder> AbiHevcDecoder<D> {
     }
 }
 
+/// A zeroed plane of `len` samples, reserved fallibly: a reservation the system refuses is an
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error rather than an abort.
+fn zeroed_plane(len: usize) -> Result<Vec<u16>> {
+    let mut plane = Vec::new();
+    plane
+        .try_reserve_exact(len)
+        .map_err(|_| Error::unsupported(env!("CARGO_PKG_NAME"), PLANE_ALLOCATION))?;
+    plane.resize(len, 0);
+    Ok(plane)
+}
+
 /// The `hvcC` parameter sets as an Annex-B `extradata` blob.
 fn extradata(config: &HevcConfig) -> Vec<u8> {
     let mut out = Vec::new();
@@ -194,11 +234,16 @@ impl<D: Decoder> HevcCodestreamDecoder for AbiHevcDecoder<D> {
     ///
     /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when no SPS
     /// states the picture size or the SPS is malformed, when the picture's size overflows `usize`,
-    /// or from [`DecodedFrame::new`]'s validation; and the backend's non-OK status, as the
-    /// [type docs](Self#status-mapping) map it.
+    /// or from [`DecodedFrame::new`]'s validation; an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error when the picture is
+    /// past the adapter's [`DecodeLimits`] or a plane cannot be allocated, both before the backend
+    /// runs; and the backend's non-OK status, as the [type docs](Self#status-mapping) map it.
     fn decode_still(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame> {
         let size = sps::output_size(config, payload)?;
         let (width, height) = (size.width(), size.height());
+        // The SPS is the file's claim, sized up to `2^32 - 1` a side: hold it to the limits before
+        // a single plane exists.
+        self.limits.check(width, height, env!("CARGO_PKG_NAME"))?;
         let chroma = config.chroma_subsampling();
         let bit_depth = config.bit_depth_luma();
         let luma_len = size.num_pixels().ok_or_else(|| {
@@ -212,11 +257,11 @@ impl<D: Decoder> HevcCodestreamDecoder for AbiHevcDecoder<D> {
         let chroma_len = chroma_w as usize * chroma_h as usize;
         let monochrome = chroma == ChromaSubsampling::Cs400;
 
-        let mut y = vec![0u16; luma_len];
+        let mut y = zeroed_plane(luma_len)?;
         let (mut cb, mut cr) = if monochrome {
             (Vec::new(), Vec::new())
         } else {
-            (vec![0u16; chroma_len], vec![0u16; chroma_len])
+            (zeroed_plane(chroma_len)?, zeroed_plane(chroma_len)?)
         };
 
         let mut planes: [*mut u8; MAX_PLANES] = [core::ptr::null_mut(); MAX_PLANES];
@@ -260,6 +305,15 @@ impl<D: Decoder> HevcCodestreamDecoder for AbiHevcDecoder<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zeroed_plane_refuses_an_impossible_allocation_instead_of_aborting() {
+        assert_eq!(zeroed_plane(3).unwrap(), vec![0, 0, 0]);
+        // usize::MAX u16s is past isize::MAX bytes, so the reservation fails without allocating.
+        let error = zeroed_plane(usize::MAX).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(error.static_message(), Some(PLANE_ALLOCATION));
+    }
 
     #[test]
     fn planar_pixel_formats_are_the_classic_fourccs() {
