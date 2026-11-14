@@ -87,9 +87,8 @@ fn relationship_lenses_resolve_exact_items() {
     assert_eq!(img.xmp().map(|i| i.id()), Some(6));
     assert_eq!(ids(img.derivation_sources(7)), vec![8, 9, 10, 11]);
 
-    // The Exif metadata item is not a coded image (pins `ItemKind::is_coded_image` against `-> true`).
-    assert!(matches!(img.item(5).unwrap().kind(), ItemKind::Exif));
-    assert!(!img.item(5).unwrap().kind().is_coded_image());
+    // The Exif metadata item is classified as Exif, not as a coded image.
+    assert_eq!(img.item(5).unwrap().kind(), ItemKind::Exif);
 }
 
 #[test]
@@ -218,7 +217,7 @@ fn overlay_lens_parses_payload_with_dimg_count() {
 fn brand_predicate_distinguishes_hevc_and_non_hevc() {
     // `heic` major brand → HEVC still.
     let data = rich_file();
-    assert!(HeifContainer::parse(&data).unwrap().image().is_hevc_still());
+    assert!(HeifContainer::parse(&data).unwrap().is_hevc_still());
 
     // A generic `mif1` file whose primary carries `av01`/`av1C` (an AVIF-shaped file) is not an
     // HEVC still, even though `read` accepts the container.
@@ -231,11 +230,11 @@ fn brand_predicate_distinguishes_hevc_and_non_hevc() {
     )]);
     let mut model = gamut_isobmff::IsoBmffImage::new(*b"mif1", vec![*b"mif1"], 1, vec![av1_item]);
     let data = model.to_bytes().unwrap();
-    assert!(!HeifContainer::parse(&data).unwrap().image().is_hevc_still());
+    assert!(!HeifContainer::parse(&data).unwrap().is_hevc_still());
 
     // The same generic `mif1` container, but the primary is an `hvc1` item carrying `hvcC` → HEVC
     // still by the mif1 + hvcC fallback.
     model.items = vec![hvc1_item(1, vec![1, 2, 3, 4])];
     let data = model.to_bytes().unwrap();
-    assert!(HeifContainer::parse(&data).unwrap().image().is_hevc_still());
+    assert!(HeifContainer::parse(&data).unwrap().is_hevc_still());
 }

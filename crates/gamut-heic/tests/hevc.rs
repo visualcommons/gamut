@@ -7,7 +7,9 @@ mod common;
 
 use common::{clean_file, item};
 use gamut_core::ErrorKind;
-use gamut_heic::{ChromaFormat, HeifContainer, HevcConfig, NalHeader, NalUnitType, iter_nal_units};
+use gamut_heic::{
+    ChromaSubsampling, HeifContainer, HevcConfig, NalHeader, NalUnitType, iter_nal_units,
+};
 use gamut_isobmff::{Property, PropertyKind};
 
 // ---- byte-builders ---------------------------------------------------------------------------
@@ -80,7 +82,7 @@ fn golden_main_still_every_field() {
     assert_eq!(cfg.min_spatial_segmentation_idc, 0);
     assert_eq!(cfg.parallelism_type, 0);
     assert_eq!(cfg.chroma_format_idc, 1);
-    assert_eq!(cfg.chroma_format(), ChromaFormat::Yuv420);
+    assert_eq!(cfg.chroma_subsampling(), ChromaSubsampling::Cs420);
     assert_eq!(cfg.bit_depth_luma_minus8, 0);
     assert_eq!(cfg.bit_depth_chroma_minus8, 0);
     assert_eq!(cfg.bit_depth_luma(), 8);
@@ -151,7 +153,7 @@ fn golden2_extended_every_field() {
     assert_eq!(cfg.min_spatial_segmentation_idc, 15);
     assert_eq!(cfg.parallelism_type, 2);
     assert_eq!(cfg.chroma_format_idc, 2);
-    assert_eq!(cfg.chroma_format(), ChromaFormat::Yuv422);
+    assert_eq!(cfg.chroma_subsampling(), ChromaSubsampling::Cs422);
     assert_eq!(cfg.bit_depth_luma(), 10);
     assert_eq!(cfg.bit_depth_chroma(), 10);
     assert_eq!(cfg.constant_frame_rate, 1);
@@ -179,12 +181,15 @@ fn golden2_extended_every_field() {
 #[test]
 fn full_chroma_and_444_mapping() {
     // Exercise the chroma-format arm the goldens do not: monochrome (0) and 4:4:4 (3).
-    for (idc, expected) in [(0u8, ChromaFormat::Monochrome), (3u8, ChromaFormat::Yuv444)] {
+    for (idc, expected) in [
+        (0u8, ChromaSubsampling::Cs400),
+        (3u8, ChromaSubsampling::Cs444),
+    ] {
         let mut bytes = hvcc_header(3, 0);
         bytes[16] = 0xFC | idc; // reserved | chroma_format_idc
         let cfg = HevcConfig::parse(&bytes).expect("valid hvcC");
         assert_eq!(cfg.chroma_format_idc, idc);
-        assert_eq!(cfg.chroma_format(), expected);
+        assert_eq!(cfg.chroma_subsampling(), expected);
     }
 }
 
@@ -508,7 +513,7 @@ fn validate_still_payload_rejects_trailing_picture() {
     ));
 }
 
-// ---- container wiring: HeifItem::hevc_config -------------------------------------------------
+// ---- container wiring: HeifContainer::hevc_config -------------------------------------------------
 
 /// A single-`hvc1`-item HEIF file whose primary carries `hvcc_data` as its `hvcC` property.
 fn file_with_hvcc(hvcc_data: Vec<u8>) -> Vec<u8> {
@@ -526,18 +531,14 @@ fn file_with_hvcc(hvcc_data: Vec<u8>) -> Vec<u8> {
 fn hevc_config_present_parses() {
     let bytes = file_with_hvcc(main_still_hvcc());
     let container = HeifContainer::parse(&bytes).expect("parse");
-    let cfg = container
-        .image()
-        .primary_item()
-        .hevc_config()
-        .expect("hvcC present")
-        .expect("hvcC valid");
+    let cfg = container.hevc_config(1).expect("hvcC present and valid");
     assert_eq!(cfg.nal_length_size(), 4);
 }
 
 #[test]
 fn hevc_config_absent_for_av1c_item() {
-    // An av01 item with an av1C configuration (no hvcC) → None (absent, not malformed).
+    // An av01 item with an av1C configuration (no hvcC) is refused as having no hvcC — absent,
+    // not malformed.
     let it = item(1, *b"av01", vec![0xAA]).with_properties(vec![Property::new(
         true,
         PropertyKind::CodecConfiguration {
@@ -547,16 +548,29 @@ fn hevc_config_absent_for_av1c_item() {
     )]);
     let bytes = clean_file(1, vec![it]);
     let container = HeifContainer::parse(&bytes).expect("parse");
-    assert!(container.image().primary_item().hevc_config().is_none());
+    let err = container.hevc_config(1).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        err.static_message(),
+        Some("HEIC: item has no hvcC configuration")
+    );
+    // An id naming no item is its own refusal.
+    assert_eq!(
+        container.hevc_config(2).unwrap_err().static_message(),
+        Some("HEIC: item id names no item")
+    );
 }
 
 #[test]
-fn hevc_config_malformed_is_some_err() {
-    // hvcC present but configurationVersion = 2 → Some(Err), distinct from absent.
+fn hevc_config_malformed_is_the_parse_error() {
+    // hvcC present but configurationVersion = 2 → `HevcConfig::parse`'s own refusal, distinct
+    // from absent.
     let bytes = file_with_hvcc(vec![0x02]);
     let container = HeifContainer::parse(&bytes).expect("parse");
-    assert!(matches!(
-        container.image().primary_item().hevc_config(),
-        Some(Err(_))
-    ));
+    let err = container.hevc_config(1).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        err.static_message(),
+        Some("HEIC: hvcC configurationVersion must be 1")
+    );
 }

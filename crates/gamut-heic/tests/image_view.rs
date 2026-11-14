@@ -60,20 +60,19 @@ fn item_kind_and_hevc_parameter_set_semantics() {
     // hvc1: HEVC, parameter sets confined to hvcC (no inband).
     let hvc1 = img.item(1).unwrap();
     assert_eq!(hvc1.kind(), ItemKind::CodedImage { codec: *b"hvc1" });
-    assert!(hvc1.kind().is_hevc());
-    assert_eq!(hvc1.hevc_inband_parameter_sets_allowed(), Some(false));
+    assert_eq!(c.hevc_inband_parameter_sets_allowed(1), Some(false));
 
     // hev1: HEVC, inband parameter sets allowed.
     let hev1 = img.item(2).unwrap();
-    assert!(hev1.kind().is_hevc());
-    assert_eq!(hev1.hevc_inband_parameter_sets_allowed(), Some(true));
+    assert_eq!(hev1.kind(), ItemKind::CodedImage { codec: *b"hev1" });
+    assert_eq!(c.hevc_inband_parameter_sets_allowed(2), Some(true));
 
     // av01: a coded image, but not HEVC.
     let av01 = img.item(3).unwrap();
     assert_eq!(av01.kind(), ItemKind::CodedImage { codec: *b"av01" });
-    assert!(av01.kind().is_coded_image());
-    assert!(!av01.kind().is_hevc());
-    assert_eq!(av01.hevc_inband_parameter_sets_allowed(), None);
+    assert_eq!(c.hevc_inband_parameter_sets_allowed(3), None);
+    // An id naming no item is not an HEVC item either.
+    assert_eq!(c.hevc_inband_parameter_sets_allowed(99), None);
 }
 
 #[test]
@@ -265,11 +264,10 @@ fn ispe_essential() -> Property {
 }
 
 #[test]
-fn rotation_and_mirror_accessors_pin_exact_values() {
+fn rotation_and_mirror_values_are_read_exactly() {
     // Item 1 carries irot=3 and imir=1; item 2 carries imir=0; item 3 carries neither. The exact
-    // values (not `is_some`) pin the accessors against the `None`/`Some(0)`/`Some(1)` and
-    // match-arm-deletion mutants: irot(3) differs from every replacement, and the two mirror axes
-    // together rule out both `Some(0)` and `Some(1)`.
+    // values pin the `irot`/`imir` reads: irot(3) differs from every other turn count, and the
+    // two mirror axes together rule out reading either as the other.
     let with_both = item(1, *b"hvc1", vec![1]).with_properties(vec![
         hvcc(vec![1]),
         prop(true, PropertyKind::Rotation(3)),
@@ -285,19 +283,23 @@ fn rotation_and_mirror_accessors_pin_exact_values() {
     let c = HeifContainer::parse(&data).unwrap();
     let img = c.image();
 
-    assert_eq!(img.item(1).unwrap().rotation(), Some(3));
-    assert_eq!(img.item(1).unwrap().mirror(), Some(1));
-    assert_eq!(img.item(2).unwrap().mirror(), Some(0));
-    assert_eq!(img.item(2).unwrap().rotation(), None);
-    assert_eq!(img.item(3).unwrap().rotation(), None);
-    assert_eq!(img.item(3).unwrap().mirror(), None);
+    assert_eq!(
+        img.item(1).unwrap().transformative_properties(),
+        [
+            TransformativeProperty::Rotation(3),
+            TransformativeProperty::Mirror(1)
+        ]
+    );
+    assert_eq!(
+        img.item(2).unwrap().transformative_properties(),
+        [TransformativeProperty::Mirror(0)]
+    );
+    assert_eq!(img.item(3).unwrap().transformative_properties(), []);
 }
 
 #[test]
 fn unknown_item_type_is_not_classified_as_coded() {
-    // An unrecognised four-cc must classify as `Unknown`, not `CodedImage`. This pins the `kind`
-    // match guard (`is_coded_image_type(ty)`) and the `is_coded_image_type` helper against their
-    // `-> true` replacements, which would misclassify it as a coded image.
+    // An unrecognised four-cc must classify as `Unknown`, not `CodedImage`.
     let unknown = item(2, *b"zzzz", vec![9])
         .with_hidden(true)
         .with_properties(vec![hvcc(vec![1])]);
@@ -305,7 +307,9 @@ fn unknown_item_type_is_not_classified_as_coded() {
     let c = HeifContainer::parse(&data).unwrap();
     let it = c.image().item(2).unwrap();
     assert_eq!(it.kind(), ItemKind::Unknown(*b"zzzz"));
-    assert!(!it.kind().is_coded_image());
-    // The coded classifier remains true for a real coded item (the positive direction).
-    assert!(c.image().item(1).unwrap().kind().is_coded_image());
+    // The coded classification remains for a real coded item (the positive direction).
+    assert_eq!(
+        c.image().item(1).unwrap().kind(),
+        ItemKind::CodedImage { codec: *b"hvc1" }
+    );
 }

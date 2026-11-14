@@ -1,6 +1,7 @@
-//! The `metadata` feature over a HEIF fixture: `HeifImage`'s `TypedMetadata` impl hands the Exif
-//! item (offset applied), the XMP `mime` item and the `colr` ICC profile to the facade, and the
-//! typed model equals the one the payloads were built from. Decode-only (the crate has no
+//! The `metadata` feature over a HEIF fixture: `HeifDecoder::metadata` hands the Exif item (offset
+//! applied), the XMP `mime` item and the `colr` ICC profile over as a `RawMetadata`, whose
+//! re-exported `TypedMetadata` impl feeds the facade, and the typed model equals the one the
+//! payloads were built from. Decode-only (the crate has no
 //! encoder), so the fixture is authored through `IsoBmffImage::to_bytes`.
 #![cfg(feature = "metadata")]
 
@@ -8,21 +9,12 @@ mod common;
 
 use common::{clean_file, hvc1_item, iref, item};
 use gamut_core::ErrorKind;
-use gamut_heic::{HeifContainer, Metadata, MetadataBlock, TypedMetadata};
+use gamut_heic::{HeifDecoder, Metadata, MetadataBlock, TypedMetadata};
 use gamut_isobmff::{ColourInformation, Property, PropertyKind};
 use gamut_metadata::MetadataError;
 use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
 use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
-
-/// The format crate's own error behind a [`MetadataError::Core`], which is how both accessors
-/// report a payload they cannot locate.
-fn container_error(err: MetadataError) -> gamut_core::Error {
-    match err {
-        MetadataError::Core(inner) => inner,
-        other => panic!("expected a container error, got {other:?}"),
-    }
-}
 
 /// The three carrier payloads as the leaf crates serialize them: an `Exif\0\0`-prefixed EXIF
 /// blob, an XMP packet and an ICC profile.
@@ -84,10 +76,9 @@ fn typed_metadata_is_extracted_from_the_items_and_the_colr() {
     let tiff = exif.strip_prefix(b"Exif\0\0").unwrap();
     for exif_payload in [exif_data_block(0, tiff), exif_data_block(6, &exif)] {
         let data = fixture(exif_payload, xmp.clone(), icc.clone());
-        let container = HeifContainer::parse(&data).unwrap();
-        let image = container.image();
+        let raw = HeifDecoder::new().metadata(&data).unwrap();
 
-        let blocks = image.blocks().unwrap();
+        let blocks = raw.blocks().unwrap();
         assert_eq!(
             blocks,
             vec![
@@ -96,39 +87,33 @@ fn typed_metadata_is_extracted_from_the_items_and_the_colr() {
                 MetadataBlock::Icc(&icc),
             ]
         );
-        assert_eq!(image.metadata().unwrap(), expected);
+        assert_eq!(raw.metadata().unwrap(), expected);
     }
 }
 
 #[test]
 fn a_file_without_metadata_yields_an_empty_model() {
     let data = clean_file(1, vec![hvc1_item(1, vec![1, 2, 3, 4])]);
-    let container = HeifContainer::parse(&data).unwrap();
-    assert!(container.image().blocks().unwrap().is_empty());
-    assert_eq!(container.image().metadata().unwrap(), Metadata::default());
+    let raw = HeifDecoder::new().metadata(&data).unwrap();
+    assert!(raw.blocks().unwrap().is_empty());
+    assert_eq!(raw.metadata().unwrap(), Metadata::default());
 }
 
 #[test]
-fn a_malformed_exif_item_is_invalid_input_from_both_accessors() {
+fn a_malformed_exif_item_is_invalid_input() {
     let (_, xmp, icc) = payloads();
     // Three bytes: shorter than the offset field itself.
     let data = fixture(vec![0, 0, 0], xmp, icc);
-    let container = HeifContainer::parse(&data).unwrap();
-    for err in [
-        container.image().blocks().unwrap_err(),
-        container.image().metadata().unwrap_err(),
-    ] {
-        let err = container_error(err);
-        assert_eq!(err.kind(), ErrorKind::InvalidInput);
-        assert_eq!(
-            err.static_message(),
-            Some("ISOBMFF: Exif item payload is shorter than its tiff-header offset field")
-        );
-    }
+    let err = HeifDecoder::new().metadata(&data).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        err.static_message(),
+        Some("ISOBMFF: Exif item payload is shorter than its tiff-header offset field")
+    );
 }
 
 #[test]
-fn a_content_encoded_xmp_item_is_unsupported_from_both_accessors() {
+fn a_content_encoded_xmp_item_is_unsupported() {
     // A `deflate`-coded XMP item: its payload is not the packet, so it must not be labelled
     // `MetadataBlock::Xmp` and fail as unparsable — it is refused as a coding this crate lacks.
     let primary = hvc1_item(1, vec![1, 2, 3, 4]);
@@ -137,18 +122,12 @@ fn a_content_encoded_xmp_item_is_unsupported_from_both_accessors() {
         .with_content_encoding("deflate")
         .with_references(vec![iref(b"cdsc", &[1])]);
     let data = clean_file(1, vec![primary, xmp]);
-    let container = HeifContainer::parse(&data).unwrap();
-    for err in [
-        container.image().blocks().unwrap_err(),
-        container.image().metadata().unwrap_err(),
-    ] {
-        let err = container_error(err);
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert_eq!(
-            err.static_message(),
-            Some("HEIF: content-encoded XMP item is not supported")
-        );
-    }
+    let err = HeifDecoder::new().metadata(&data).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        err.static_message(),
+        Some("HEIF: content-encoded XMP item is not supported")
+    );
 }
 
 #[test]
@@ -161,9 +140,9 @@ fn an_unparsable_payload_is_the_facade_error_naming_the_carrier() {
         xmp,
         b"not an icc profile".to_vec(),
     );
-    let container = HeifContainer::parse(&data).unwrap();
-    assert_eq!(container.image().blocks().unwrap().len(), 3);
+    let raw = HeifDecoder::new().metadata(&data).unwrap();
+    assert_eq!(raw.blocks().unwrap().len(), 3);
     // Located fine, so not a container error: the facade's own, naming the carrier.
-    let err = container.image().metadata().unwrap_err();
+    let err = raw.metadata().unwrap_err();
     assert!(matches!(err, MetadataError::Icc(_)), "{err:?}");
 }

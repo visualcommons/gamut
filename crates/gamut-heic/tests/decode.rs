@@ -1,4 +1,5 @@
-//! S3 (issue #238): the pluggable [`HevcDecoder`] hook and the decode pipeline.
+//! S3 (issue #238): the pluggable [`HevcCodestreamDecoder`] hook and the shared `gamut-heif`
+//! decode pipeline, driven through the [`Hevc`](gamut_heic::Hevc) binding.
 //!
 //! A `Mock` decoder derives a **deterministic position-dependent gradient** frame from the coded
 //! payload (the payload encodes `(base, width, height)`, the config the chroma/bit-depth), so every
@@ -7,10 +8,15 @@
 //! reference transforms.
 
 use gamut_color::{ColorRange, bt601_ycbcr_to_rgb};
-use gamut_core::{Cicp, Error, ErrorKind, Result};
+use gamut_core::{Cicp, DecodeImage, Error, ErrorKind, ImageBuf, Result, Rgba16};
 use gamut_heic::{
-    ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder, iter_nal_units,
+    ChromaSubsampling, DecodedFrame, HeifContainer, HeifDecoder, HevcCodestreamDecoder, HevcConfig,
+    iter_nal_units,
 };
+
+mod common;
+
+use common::{Decode, frame};
 use gamut_isobmff::{
     CleanAperture, ColourInformation, ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference,
     OverlayOffset, Property, PropertyKind,
@@ -34,12 +40,18 @@ fn mask_for(bd: u8) -> u16 {
     if bd >= 16 { 0xFFFF } else { (1u16 << bd) - 1 }
 }
 
-fn build_frame(base: u8, w: u32, h: u32, chroma: ChromaFormat, bd: u8) -> Result<DecodedFrame> {
+fn build_frame(
+    base: u8,
+    w: u32,
+    h: u32,
+    chroma: ChromaSubsampling,
+    bd: u8,
+) -> Result<DecodedFrame> {
     let (wu, hu) = (w as usize, h as usize);
     let y: Vec<u16> = (0..wu * hu)
         .map(|i| ey(base, (i % wu) as u32, (i / wu) as u32, bd))
         .collect();
-    let (cb, cr) = if chroma == ChromaFormat::Monochrome {
+    let (cb, cr) = if chroma == ChromaSubsampling::Cs400 {
         (Vec::new(), Vec::new())
     } else {
         let (cw, ch) = chroma.chroma_dimensions(w, h);
@@ -52,14 +64,14 @@ fn build_frame(base: u8, w: u32, h: u32, chroma: ChromaFormat, bd: u8) -> Result
             .collect();
         (cb, cr)
     };
-    DecodedFrame::new(w, h, bd, chroma, y, cb, cr)
+    frame(w, h, bd, chroma, y, cb, cr)
 }
 
-/// A recorded `decode_intra` invocation, for asserting the pipeline hands the hook the right inputs.
+/// A recorded `decode_still` invocation, for asserting the pipeline hands the hook the right inputs.
 struct Call {
     nal_length_size: usize,
     payload: Vec<u8>,
-    chroma: ChromaFormat,
+    chroma: ChromaSubsampling,
     bit_depth: u8,
 }
 
@@ -68,8 +80,12 @@ struct Mock {
     calls: Vec<Call>,
 }
 
-impl HevcDecoder for Mock {
-    fn decode_intra(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame> {
+impl HevcCodestreamDecoder for Mock {
+    fn supports(&mut self, _config: &HevcConfig) -> bool {
+        true
+    }
+
+    fn decode_still(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame> {
         let nal = iter_nal_units(payload, config.nal_length_size())
             .next()
             .transpose()?
@@ -79,17 +95,27 @@ impl HevcDecoder for Mock {
         self.calls.push(Call {
             nal_length_size: config.nal_length_size(),
             payload: payload.to_vec(),
-            chroma: config.chroma_format(),
+            chroma: config.chroma_subsampling(),
             bit_depth: config.bit_depth_luma(),
         });
-        build_frame(base, w, h, config.chroma_format(), config.bit_depth_luma())
+        build_frame(
+            base,
+            w,
+            h,
+            config.chroma_subsampling(),
+            config.bit_depth_luma(),
+        )
     }
 }
 
 /// A mock that panics if invoked — proves the pipeline rejects a payload before the codec hook.
+#[derive(Default)]
 struct NeverCalled;
-impl HevcDecoder for NeverCalled {
-    fn decode_intra(&mut self, _c: &HevcConfig, _p: &[u8]) -> Result<DecodedFrame> {
+impl HevcCodestreamDecoder for NeverCalled {
+    fn supports(&mut self, _config: &HevcConfig) -> bool {
+        true
+    }
+    fn decode_still(&mut self, _c: &HevcConfig, _p: &[u8]) -> Result<DecodedFrame> {
         panic!("decoder must not be invoked");
     }
 }
@@ -218,18 +244,18 @@ fn coded_planar_passes_exact_config_and_payload_and_gradient() {
     let container = HeifContainer::parse(&bytes).unwrap();
 
     let mut mock = Mock::default();
-    let frame = container.image().decode_item_planar(1, &mut mock).unwrap();
+    let frame = container.image().planar(1, &mut mock).unwrap();
 
     // The hook saw the item's exact payload and the config-derived NAL length / chroma / bit depth.
     assert_eq!(mock.calls.len(), 1);
     assert_eq!(mock.calls[0].nal_length_size, 4);
     assert_eq!(mock.calls[0].payload, payload);
-    assert_eq!(mock.calls[0].chroma, ChromaFormat::Yuv420);
+    assert_eq!(mock.calls[0].chroma, ChromaSubsampling::Cs420);
     assert_eq!(mock.calls[0].bit_depth, 8);
 
     // The returned frame is the deterministic gradient, exact.
     assert_eq!((frame.width(), frame.height()), (4, 4));
-    assert_eq!(frame.chroma(), ChromaFormat::Yuv420);
+    assert_eq!(frame.chroma(), ChromaSubsampling::Cs420);
     assert_eq!(frame.chroma_dimensions(), (2, 2));
     for y in 0..4 {
         for x in 0..4 {
@@ -258,7 +284,7 @@ fn non_irap_payload_never_reaches_the_decoder() {
     let container = HeifContainer::parse(&bytes).unwrap();
     // `NeverCalled` panics if invoked; the error proves it was not.
     assert!(matches!(
-        container.image().decode_item_planar(1, &mut NeverCalled),
+        container.image().planar(1, &mut NeverCalled),
         Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
@@ -278,12 +304,12 @@ fn essential_unknown_property_is_refused() {
     assert!(matches!(
         container
             .image()
-            .decode_item_planar(1, &mut Mock::default()),
+            .planar(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
     // The RGBA surface refuses it too.
     assert!(matches!(
-        container.image().decode_item_rgba8(1, &mut Mock::default()),
+        container.image().rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
@@ -304,7 +330,7 @@ fn non_hevc_coded_item_is_unsupported() {
     assert!(matches!(
         container
             .image()
-            .decode_item_planar(1, &mut Mock::default()),
+            .planar(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
@@ -315,11 +341,11 @@ fn non_hevc_coded_item_is_unsupported() {
 fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
     // 4:4:4 — chroma == luma.
     assert!(
-        DecodedFrame::new(
+        frame(
             2,
             2,
             8,
-            ChromaFormat::Yuv444,
+            ChromaSubsampling::Cs444,
             vec![0; 4],
             vec![0; 4],
             vec![0; 4]
@@ -328,11 +354,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
     );
     // 4:2:2 — chroma ceil(w/2) x h = 1 x 2.
     assert!(
-        DecodedFrame::new(
+        frame(
             2,
             2,
             8,
-            ChromaFormat::Yuv422,
+            ChromaSubsampling::Cs422,
             vec![0; 4],
             vec![0; 2],
             vec![0; 2]
@@ -341,11 +367,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
     );
     // 4:2:0 even — 2 x 2 chroma.
     assert!(
-        DecodedFrame::new(
+        frame(
             4,
             4,
             8,
-            ChromaFormat::Yuv420,
+            ChromaSubsampling::Cs420,
             vec![0; 16],
             vec![0; 4],
             vec![0; 4]
@@ -354,11 +380,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
     );
     // 4:2:0 ODD dims — ceiling division: 5x3 luma ⇒ 3x2 chroma = 6.
     assert!(
-        DecodedFrame::new(
+        frame(
             5,
             3,
             8,
-            ChromaFormat::Yuv420,
+            ChromaSubsampling::Cs420,
             vec![0; 15],
             vec![0; 6],
             vec![0; 6]
@@ -366,11 +392,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
         .is_ok()
     );
     assert!(
-        DecodedFrame::new(
+        frame(
             5,
             3,
             8,
-            ChromaFormat::Yuv420,
+            ChromaSubsampling::Cs420,
             vec![0; 15],
             vec![0; 4],
             vec![0; 4]
@@ -379,11 +405,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
     );
     // Monochrome — chroma must be empty.
     assert!(
-        DecodedFrame::new(
+        frame(
             2,
             2,
             8,
-            ChromaFormat::Monochrome,
+            ChromaSubsampling::Cs400,
             vec![0; 4],
             vec![],
             vec![]
@@ -391,11 +417,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
         .is_ok()
     );
     assert!(
-        DecodedFrame::new(
+        frame(
             2,
             2,
             8,
-            ChromaFormat::Monochrome,
+            ChromaSubsampling::Cs400,
             vec![0; 4],
             vec![0],
             vec![]
@@ -404,11 +430,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
     );
     // Wrong luma length.
     assert!(
-        DecodedFrame::new(
+        frame(
             2,
             2,
             8,
-            ChromaFormat::Yuv444,
+            ChromaSubsampling::Cs444,
             vec![0; 3],
             vec![0; 4],
             vec![0; 4]
@@ -417,11 +443,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
     );
     // Bit-depth bounds: 8 and 16 ok; 7 and 17 rejected.
     assert!(
-        DecodedFrame::new(
+        frame(
             1,
             1,
             16,
-            ChromaFormat::Monochrome,
+            ChromaSubsampling::Cs400,
             vec![0; 1],
             vec![],
             vec![]
@@ -429,11 +455,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
         .is_ok()
     );
     assert!(
-        DecodedFrame::new(
+        frame(
             1,
             1,
             7,
-            ChromaFormat::Monochrome,
+            ChromaSubsampling::Cs400,
             vec![0; 1],
             vec![],
             vec![]
@@ -441,11 +467,11 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
         .is_err()
     );
     assert!(
-        DecodedFrame::new(
+        frame(
             1,
             1,
             17,
-            ChromaFormat::Monochrome,
+            ChromaSubsampling::Cs400,
             vec![0; 1],
             vec![],
             vec![]
@@ -453,7 +479,7 @@ fn decoded_frame_new_validates_plane_lengths_and_bit_depth() {
         .is_err()
     );
     // Zero dimensions rejected.
-    assert!(DecodedFrame::new(0, 2, 8, ChromaFormat::Monochrome, vec![], vec![], vec![]).is_err());
+    assert!(frame(0, 2, 8, ChromaSubsampling::Cs400, vec![], vec![], vec![]).is_err());
 }
 
 // ---- grid ------------------------------------------------------------------------------------
@@ -501,12 +527,9 @@ fn grid_assembles_row_major_tiles_and_crops() {
     );
     let container = HeifContainer::parse(&bytes).unwrap();
 
-    let frame = container
-        .image()
-        .decode_item_planar(1, &mut Mock::default())
-        .unwrap();
+    let frame = container.image().planar(1, &mut Mock::default()).unwrap();
     assert_eq!((frame.width(), frame.height()), (3, 3));
-    assert_eq!(frame.chroma(), ChromaFormat::Monochrome);
+    assert_eq!(frame.chroma(), ChromaSubsampling::Cs400);
     // Independent reference: each output pixel comes from its covering tile's own gradient.
     for oy in 0..3u32 {
         for ox in 0..3u32 {
@@ -543,14 +566,8 @@ fn grid_planar_and_rgba_agree() {
     );
     let container = HeifContainer::parse(&bytes).unwrap();
 
-    let planar = container
-        .image()
-        .decode_item_planar(1, &mut Mock::default())
-        .unwrap();
-    let rgba = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let planar = container.image().planar(1, &mut Mock::default()).unwrap();
+    let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
     assert_eq!((rgba.width(), rgba.height()), (3, 3));
     // Grid has no colr ⇒ default BT.601 limited ⇒ monochrome luma is range-expanded to gray.
     for i in 0..9usize {
@@ -576,7 +593,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     let bytes = file(1, vec![g, mono_tile(2, 10), big]);
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
-        c.image().decode_item_planar(1, &mut Mock::default()),
+        c.image().planar(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
@@ -586,7 +603,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     let bytes = file(1, vec![g, mono_tile(2, 10), chroma_tile]);
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
-        c.image().decode_item_planar(1, &mut Mock::default()),
+        c.image().planar(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
@@ -596,7 +613,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     let bytes = file(1, vec![g, mono_tile(2, 10), deep]);
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
-        c.image().decode_item_planar(1, &mut Mock::default()),
+        c.image().planar(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
@@ -615,23 +632,14 @@ fn iden_passes_through_and_applies_its_own_transforms() {
     let container = HeifContainer::parse(&bytes).unwrap();
 
     // Planar passthrough: iden frame == source frame.
-    let via_iden = container
-        .image()
-        .decode_item_planar(1, &mut Mock::default())
-        .unwrap();
-    let via_source = container
-        .image()
-        .decode_item_planar(2, &mut Mock::default())
-        .unwrap();
+    let via_iden = container.image().planar(1, &mut Mock::default()).unwrap();
+    let via_source = container.image().planar(2, &mut Mock::default()).unwrap();
     assert_eq!(via_iden, via_source);
 
     // RGBA: identity base rotated once CCW.
     let base = identity_base_rgba(30, 4, 2);
     let (want, ww, wh) = ref_rotate_ccw(&base, 4, 2);
-    let got = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let got = container.image().rgba8(1, &mut Mock::default()).unwrap();
     assert_eq!((got.width(), got.height()), (ww, wh));
     assert_eq!(got.as_samples(), &want[..]);
 }
@@ -704,10 +712,7 @@ fn decode_rgba_with_props(base: u8, w: u32, h: u32, props: Vec<Property>) -> (Ve
     let item = coded_item(1, 3, 8, base, w, h, properties); // identity 4:4:4
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let buf = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let buf = container.image().rgba8(1, &mut Mock::default()).unwrap();
     (buf.as_samples().to_vec(), buf.width(), buf.height())
 }
 
@@ -779,7 +784,7 @@ fn clap_non_integer_and_out_of_bounds_are_invalid() {
     let bytes = file(1, vec![item]);
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
-        c.image().decode_item_rgba8(1, &mut Mock::default()),
+        c.image().rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 
@@ -796,7 +801,7 @@ fn clap_non_integer_and_out_of_bounds_are_invalid() {
     let bytes = file(1, vec![item]);
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
-        c.image().decode_item_rgba8(1, &mut Mock::default()),
+        c.image().rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 
@@ -813,7 +818,7 @@ fn clap_non_integer_and_out_of_bounds_are_invalid() {
     let bytes = file(1, vec![item]);
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
-        c.image().decode_item_rgba8(1, &mut Mock::default()),
+        c.image().rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
@@ -858,10 +863,7 @@ fn bt601_limited_and_full_range_are_golden() {
         let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(6, full)]);
         let bytes = file(1, vec![item]);
         let container = HeifContainer::parse(&bytes).unwrap();
-        let rgba = container
-            .image()
-            .decode_item_rgba8(1, &mut Mock::default())
-            .unwrap();
+        let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
         for y in 0..4u32 {
             for x in 0..4u32 {
                 let (cx, cy) = (x / 2, y / 2);
@@ -884,7 +886,7 @@ fn bt601_limited_and_full_range_are_golden() {
         let b = file(1, vec![item]);
         let c = HeifContainer::parse(&b).unwrap();
         c.image()
-            .decode_item_rgba8(1, &mut Mock::default())
+            .rgba8(1, &mut Mock::default())
             .unwrap()
             .into_samples()
     };
@@ -893,7 +895,7 @@ fn bt601_limited_and_full_range_are_golden() {
         let b = file(1, vec![item]);
         let c = HeifContainer::parse(&b).unwrap();
         c.image()
-            .decode_item_rgba8(1, &mut Mock::default())
+            .rgba8(1, &mut Mock::default())
             .unwrap()
             .into_samples()
     };
@@ -905,10 +907,7 @@ fn identity_matrix_maps_gbr_directly() {
     let item = coded_item(1, 3, 8, 33, 3, 2, vec![colr(0, true)]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let rgba = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
     assert_eq!(rgba.as_samples(), &identity_base_rgba(33, 3, 2)[..]);
 }
 
@@ -920,7 +919,7 @@ fn rgba_presentation_prefers_nclx_over_icc_in_either_order() {
         HeifContainer::parse(&bytes)
             .unwrap()
             .image()
-            .decode_item_rgba8(1, &mut Mock::default())
+            .rgba8(1, &mut Mock::default())
             .unwrap()
             .into_samples()
     };
@@ -932,10 +931,7 @@ fn rgba_presentation_prefers_nclx_over_icc_in_either_order() {
         let item = coded_item(1, 3, 8, 33, 3, 2, properties);
         let bytes = file(1, vec![item]);
         let container = HeifContainer::parse(&bytes).unwrap();
-        let got = container
-            .image()
-            .decode_item_rgba8(1, &mut Mock::default())
-            .unwrap();
+        let got = container.image().rgba8(1, &mut Mock::default()).unwrap();
         assert_eq!(got.as_samples(), nclx_only.as_slice());
     }
 }
@@ -953,14 +949,9 @@ fn first_colour_accessor_and_icc_only_fallback_are_unchanged() {
     let icc_only = coded_item(1, 3, 8, 33, 3, 2, vec![icc(b"only")]);
     let bytes = file(1, vec![icc_only]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    assert!(
-        container
-            .image()
-            .decode_item_planar(1, &mut Mock::default())
-            .is_ok()
-    );
+    assert!(container.image().planar(1, &mut Mock::default()).is_ok());
     assert!(matches!(
-        container.image().decode_item_rgba8(1, &mut Mock::default()),
+        container.image().rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
@@ -971,10 +962,7 @@ fn monochrome_limited_expansion_is_golden() {
     let item = coded_item(1, 0, 8, 125, 3, 2, vec![]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let rgba = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
     for y in 0..2u32 {
         for x in 0..3u32 {
             let g = expand_limited(ey(125, x, y, 8));
@@ -992,18 +980,13 @@ fn unsupported_colour_falls_back_to_planar_only() {
     let item = coded_item(1, 1, 8, 10, 4, 4, vec![colr(8, false)]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    assert!(
-        container
-            .image()
-            .decode_item_planar(1, &mut Mock::default())
-            .is_ok()
-    );
+    assert!(container.image().planar(1, &mut Mock::default()).is_ok());
     assert!(matches!(
-        container.image().decode_item_rgba8(1, &mut Mock::default()),
+        container.image().rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
     assert!(matches!(
-        container.image().decode_item_rgba16(1, &mut Mock::default()),
+        container.image().rgba16(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
@@ -1013,21 +996,15 @@ fn ten_bit_frame_is_rejected_by_the_eight_bit_surface() {
     let item = coded_item(1, 1, 10, 200, 4, 4, vec![colr(6, false)]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let frame = container
-        .image()
-        .decode_item_planar(1, &mut Mock::default())
-        .unwrap();
+    let frame = container.image().planar(1, &mut Mock::default()).unwrap();
     assert_eq!(frame.bit_depth(), 10);
     // Narrowing to 8 bits would be silent quality loss, so the narrow surface still declines...
     assert!(matches!(
-        container.image().decode_item_rgba8(1, &mut Mock::default()),
+        container.image().rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
     // ...while the wide surface presents it.
-    let rgba = container
-        .image()
-        .decode_item_rgba16(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba16(1, &mut Mock::default()).unwrap();
     assert_eq!((rgba.width(), rgba.height()), (4, 4));
     assert_eq!(rgba.as_samples().len(), 4 * 4 * 4);
 }
@@ -1042,25 +1019,20 @@ fn unmodeled_bit_depth_is_matrixed_only_by_refusal() {
     assert_eq!(
         container
             .image()
-            .decode_item_planar(1, &mut Mock::default())
+            .planar(1, &mut Mock::default())
             .unwrap()
             .bit_depth(),
         9
     );
     assert!(matches!(
-        container.image().decode_item_rgba16(1, &mut Mock::default()),
+        container.image().rgba16(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
     // Monochrome never consults a matrix, so it presents at any depth the frame can carry.
     let mono = coded_item(1, 0, 9, 200, 4, 4, vec![colr(6, false)]);
     let bytes = file(1, vec![mono]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    assert!(
-        container
-            .image()
-            .decode_item_rgba16(1, &mut Mock::default())
-            .is_ok()
-    );
+    assert!(container.image().rgba16(1, &mut Mock::default()).is_ok());
 }
 
 // ---- high-bit-depth presentation (issue #303) ------------------------------------------------
@@ -1128,7 +1100,7 @@ fn decode_rgba16(
     let container = HeifContainer::parse(&bytes).unwrap();
     container
         .image()
-        .decode_item_rgba16(1, &mut Mock::default())
+        .rgba16(1, &mut Mock::default())
         .unwrap()
         .into_samples()
 }
@@ -1206,7 +1178,7 @@ fn eight_bit_widens_exactly_by_257() {
             let container = HeifContainer::parse(&bytes).unwrap();
             let narrow = container
                 .image()
-                .decode_item_rgba8(1, &mut Mock::default())
+                .rgba8(1, &mut Mock::default())
                 .unwrap()
                 .into_samples();
             let wide = decode_rgba16(chroma_idc, 8, 33, 4, 4, props);
@@ -1236,10 +1208,7 @@ fn bt601_at_eight_bit_still_uses_the_libwebp_inverse() {
         let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(6, full)]);
         let bytes = file(1, vec![item]);
         let container = HeifContainer::parse(&bytes).unwrap();
-        let rgba = container
-            .image()
-            .decode_item_rgba8(1, &mut Mock::default())
-            .unwrap();
+        let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
         for y in 0..4u32 {
             for x in 0..4u32 {
                 let (cx, cy) = (x / 2, y / 2);
@@ -1305,7 +1274,7 @@ fn identity_matrix_maps_gbr_directly_at_ten_bit() {
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
-        container.image().decode_item_rgba16(1, &mut Mock::default()),
+        container.image().rgba16(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
@@ -1328,10 +1297,7 @@ fn grid_and_irot_on_a_ten_bit_item() {
         ],
     );
     let container = HeifContainer::parse(&bytes).unwrap();
-    let rgba = container
-        .image()
-        .decode_item_rgba16(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba16(1, &mut Mock::default()).unwrap();
 
     // Independent reference: assemble the 3x3 monochrome canvas, expand, then rotate.
     let mut flat = vec![0u16; 3 * 3 * 4];
@@ -1356,10 +1322,7 @@ fn imir_and_clap_on_a_ten_bit_item() {
     let item = coded_item(1, 3, 10, 200, 4, 4, props);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let rgba = container
-        .image()
-        .decode_item_rgba16(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba16(1, &mut Mock::default()).unwrap();
 
     let scale = |s: u16| ((u64::from(s) * 65535 + 511) / 1023) as u16;
     let mut flat = vec![0u16; 4 * 4 * 4];
@@ -1389,31 +1352,27 @@ fn absent_alpha_is_opaque_at_sixteen_bit() {
 }
 
 #[test]
-fn decode_primary_rgba16_and_container_forwarders_agree() {
+fn heif_decoder_presents_the_primary_as_the_item_surface_does() {
+    // The container's decode forwarders are gone (#1086); `HeifDecoder` is the primary-item
+    // entry point, and it must present exactly what the item surface presents for that item.
     let item = coded_item(7, 1, 10, 200, 4, 4, vec![colr(9, false)]);
     let bytes = file(7, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
     let by_id = container
         .image()
-        .decode_item_rgba16(7, &mut Mock::default())
+        .rgba16(7, &mut Mock::default())
         .unwrap()
         .into_samples();
     let primary = container
-        .image()
-        .decode_primary_rgba16(&mut Mock::default())
+        .primary_rgba16(&mut Mock::default())
         .unwrap()
         .into_samples();
-    let fwd_item = container
-        .decode_item_rgba16(7, &mut Mock::default())
-        .unwrap()
-        .into_samples();
-    let fwd_primary = container
-        .decode_primary_rgba16(&mut Mock::default())
-        .unwrap()
-        .into_samples();
+    let decoded: ImageBuf<Rgba16> = HeifDecoder::new()
+        .with_backend(Mock::default())
+        .decode_image(&bytes)
+        .unwrap();
     assert_eq!(by_id, primary);
-    assert_eq!(by_id, fwd_item);
-    assert_eq!(by_id, fwd_primary);
+    assert_eq!(by_id, decoded.into_samples());
 }
 
 #[test]
@@ -1427,7 +1386,7 @@ fn alpha_auxiliary_at_ten_bit_merges_onto_the_wide_surface() {
         let container = HeifContainer::parse(&bytes).unwrap();
         let got = container
             .image()
-            .decode_item_rgba16(1, &mut Mock::default())
+            .rgba16(1, &mut Mock::default())
             .unwrap()
             .into_samples();
         let max = u64::from((1u32 << alpha_bd) - 1);
@@ -1466,10 +1425,7 @@ fn overlay_blend_rounding_is_observable_on_a_translucent_canvas() {
         );
     let bytes = file(1, vec![ov, src, src_alpha]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let got = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let got = container.image().rgba8(1, &mut Mock::default()).unwrap();
 
     // Independent integer reference of ISO/IEC 23008-12 §6.6.2.4 source-over, round-half-up.
     let (da, fill) = (1u32, [2u32, 1, 0]);
@@ -1521,10 +1477,7 @@ fn overlay_composites_at_sixteen_bit_across_mixed_depths() {
         );
     let bytes = file(1, vec![ov, a, b]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let got = container
-        .image()
-        .decode_item_rgba16(1, &mut Mock::default())
-        .unwrap();
+    let got = container.image().rgba16(1, &mut Mock::default()).unwrap();
     assert_eq!((got.width(), got.height()), (4, 4));
 
     // Both sub-items are opaque, so each simply overwrites where it lands; everywhere else keeps
@@ -1590,7 +1543,7 @@ fn alpha_dimension_mismatch_one_axis_at_a_time() {
         let bytes = file(1, vec![master(), bad]);
         let container = HeifContainer::parse(&bytes).unwrap();
         assert!(matches!(
-            container.image().decode_item_rgba8(1, &mut Mock::default()),
+            container.image().rgba8(1, &mut Mock::default()),
             Err(error) if error.kind() == ErrorKind::InvalidInput
         ));
     }
@@ -1609,10 +1562,7 @@ fn alpha_nine_bit_rescale_is_golden() {
     let alpha = alpha_aux_bd(2, 1, 255, 2, 2, 9);
     let bytes = file(1, vec![master, alpha]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let rgba = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
     let base = identity_base_rgba(33, 2, 2);
     // Expected 8-bit alpha = (s*255 + 255) / 511 for s = ey(255, x, y, 9) = [255, 258, 272, 275].
     let want_alpha = [127u8, 129, 136, 137];
@@ -1630,10 +1580,7 @@ fn alpha_auxiliary_merges_as_gradient() {
     let master = coded_item(1, 3, 8, 33, 2, 2, vec![colr(0, true)]);
     let bytes = file(1, vec![master, alpha_aux(2, 1, 77, 2, 2)]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let rgba = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
     let base = identity_base_rgba(33, 2, 2);
     for y in 0..2u32 {
         for x in 0..2u32 {
@@ -1653,7 +1600,7 @@ fn alpha_dimension_mismatch_is_invalid() {
     let bytes = file(1, vec![master, alpha_aux(2, 1, 77, 3, 3)]); // 3x3 alpha for a 2x2 master
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
-        container.image().decode_item_rgba8(1, &mut Mock::default()),
+        container.image().rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
@@ -1663,10 +1610,7 @@ fn absent_alpha_is_opaque() {
     let item = coded_item(1, 3, 8, 33, 2, 2, vec![colr(0, true)]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let rgba = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
     assert!(
         rgba.as_samples()
             .as_chunks::<4>()
@@ -1684,10 +1628,7 @@ fn premultiplied_flag_is_queryable() {
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(container.image().is_premultiplied(1));
     // Decoding still succeeds and does not silently un-premultiply (alpha still the gradient).
-    let rgba = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
     assert_eq!(rgba.as_samples()[3], ey(77, 0, 0, 8) as u8);
 }
 
@@ -1713,7 +1654,7 @@ fn overlay_via_planar_is_unsupported() {
     assert!(matches!(
         container
             .image()
-            .decode_item_planar(1, &mut Mock::default()),
+            .planar(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
@@ -1740,10 +1681,7 @@ fn overlay_composites_with_fill_clipping_and_alpha() {
         );
     let bytes = file(1, vec![ov, a, b, b_alpha]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let got = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let got = container.image().rgba8(1, &mut Mock::default()).unwrap();
     assert_eq!((got.width(), got.height()), (4, 4));
 
     // Independent float reference: fill, then A over, then B over (source-over, unassociated alpha).
@@ -1805,7 +1743,7 @@ fn mutual_dimg_cycle_errors_without_overflow() {
     assert!(matches!(
         container
             .image()
-            .decode_item_planar(1, &mut Mock::default()),
+            .planar(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
@@ -1827,7 +1765,7 @@ fn derivation_depth_is_bounded() {
     assert!(matches!(
         container
             .image()
-            .decode_item_planar(1, &mut Mock::default()),
+            .planar(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
@@ -1839,12 +1777,7 @@ fn derivation_depth_is_bounded() {
     let leaf = coded_item(3, 0, 8, 5, 2, 2, vec![]).with_hidden(true);
     let bytes = file(1, vec![i1, i2, leaf]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    assert!(
-        container
-            .image()
-            .decode_item_planar(1, &mut Mock::default())
-            .is_ok()
-    );
+    assert!(container.image().planar(1, &mut Mock::default()).is_ok());
 }
 
 // ---- grid: output-dimension guard & the monochrome/colour split ------------------------------
@@ -1864,13 +1797,10 @@ fn grid_exact_fit_colour_assembles_all_planes() {
     let grid = grid_item(1, 1, 2, 4, 2, &[2, 3]);
     let bytes = file(1, vec![grid, color_tile(2, 10), color_tile(3, 40)]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let frame = container
-        .image()
-        .decode_item_planar(1, &mut Mock::default())
-        .unwrap();
+    let frame = container.image().planar(1, &mut Mock::default()).unwrap();
 
     assert_eq!((frame.width(), frame.height()), (4, 2));
-    assert_eq!(frame.chroma(), ChromaFormat::Yuv444);
+    assert_eq!(frame.chroma(), ChromaSubsampling::Cs444);
     for oy in 0..2u32 {
         for ox in 0..4u32 {
             let base = if ox < 2 { 10 } else { 40 };
@@ -1896,7 +1826,7 @@ fn grid_output_dimension_guard_rejects_each_violation_individually() {
         let container = HeifContainer::parse(&bytes).unwrap();
         let err = container
             .image()
-            .decode_item_planar(1, &mut Mock::default())
+            .planar(1, &mut Mock::default())
             .unwrap_err();
         assert!(
             err.to_string().contains("output dimensions exceed"),
@@ -1929,7 +1859,7 @@ fn overlay_zero_height_canvas_is_rejected_by_its_own_guard() {
     let container = HeifContainer::parse(&bytes).unwrap();
     let err = container
         .image()
-        .decode_item_rgba8(1, &mut Mock::default())
+        .rgba8(1, &mut Mock::default())
         .unwrap_err();
     assert!(
         err.to_string().contains("overlay canvas is empty"),
@@ -1947,10 +1877,7 @@ fn bt601_444_uses_full_chroma_resolution() {
     let item = coded_item(1, 3, 8, 15, 3, 2, vec![colr(6, false)]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let rgba = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let rgba = container.image().rgba8(1, &mut Mock::default()).unwrap();
     for y in 0..2u32 {
         for x in 0..3u32 {
             let yv = ey(15, x, y, 8) as u8;
@@ -1974,47 +1901,37 @@ fn bt601_444_uses_full_chroma_resolution() {
 fn rgba8_of(item: Item) -> Result<Vec<u8>> {
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes)?;
-    let rgba = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())?;
+    let rgba = container.image().rgba8(1, &mut Mock::default())?;
     Ok(rgba.into_samples())
 }
 
 #[test]
-fn colr_matrix_2_is_refused_on_both_rgba_surfaces() {
-    // Matrix 2 (unspecified) is not mapped to BT.601 here, unlike gamut-avif, which presents it as
-    // BT.601. `MatrixCoefficients::Unspecified` has no de-matrixing, so the RGBA16 surface refuses
-    // it at 8 and 10 bits alike and the RGBA8 surface refuses it at 8 bits, while the planar
-    // surface still delivers the frame. The RGBA8 check runs only at 8 bits: that surface refuses
-    // every frame deeper than 8 bits whatever its matrix, so a 10-bit refusal there would pin
-    // nothing about matrix 2.
+fn colr_matrix_2_presents_as_bt601_on_both_rgba_surfaces() {
+    // Flipped by the shared HEIF layer (#1086): matrix 2 (unspecified) was refused here while
+    // gamut-avif presented it as BT.601; gamut-heif reconciles the two on BT.601, so matrix 2
+    // now presents exactly as matrix 6 on the RGBA8 surface (8 bits) and the RGBA16 surface (8
+    // and 10 bits), and the planar surface still delivers the frame untouched.
     for bd in [8u8, 10] {
-        let item = coded_item(1, 1, bd, 15, 4, 4, vec![colr(2, true)]);
-        let bytes = file(1, vec![item]);
-        let container = HeifContainer::parse(&bytes).unwrap();
-        assert!(
-            container
+        let of = |matrix| -> (Option<Vec<u8>>, Vec<u16>, Vec<u16>) {
+            let item = coded_item(1, 1, bd, 15, 4, 4, vec![colr(matrix, true)]);
+            let bytes = file(1, vec![item]);
+            let container = HeifContainer::parse(&bytes).unwrap();
+            let planar = container.image().planar(1, &mut Mock::default()).unwrap();
+            let rgba8 = (bd == 8).then(|| {
+                container
+                    .image()
+                    .rgba8(1, &mut Mock::default())
+                    .unwrap()
+                    .into_samples()
+            });
+            let rgba16 = container
                 .image()
-                .decode_item_planar(1, &mut Mock::default())
-                .is_ok(),
-            "bd={bd} planar"
-        );
-        if bd == 8 {
-            assert!(
-                matches!(
-                    container.image().decode_item_rgba8(1, &mut Mock::default()),
-                    Err(error) if error.kind() == ErrorKind::Unsupported
-                ),
-                "bd={bd} rgba8"
-            );
-        }
-        assert!(
-            matches!(
-                container.image().decode_item_rgba16(1, &mut Mock::default()),
-                Err(error) if error.kind() == ErrorKind::Unsupported
-            ),
-            "bd={bd} rgba16"
-        );
+                .rgba16(1, &mut Mock::default())
+                .unwrap()
+                .into_samples();
+            (rgba8, rgba16, planar.y().to_vec())
+        };
+        assert_eq!(of(2), of(6), "bd={bd}");
     }
 }
 
@@ -2084,7 +2001,7 @@ fn clap_error(clap_prop: Property) -> Error {
     let container = HeifContainer::parse(&bytes).unwrap();
     container
         .image()
-        .decode_item_rgba8(1, &mut Mock::default())
+        .rgba8(1, &mut Mock::default())
         .unwrap_err()
 }
 
@@ -2179,10 +2096,7 @@ fn composite_over_fully_transparent_pixel_clears_in_place() {
         );
     let bytes = file(1, vec![ov, src, src_alpha]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let got = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let got = container.image().rgba8(1, &mut Mock::default()).unwrap();
     // Canvas pixel (1,0) is the transparent source pixel over the transparent fill ⇒ cleared.
     assert_eq!(&got.as_samples()[4..8], &[0, 0, 0, 0]);
 }
@@ -2209,9 +2123,6 @@ fn composite_over_source_over_rounding_is_golden() {
         );
     let bytes = file(1, vec![ov, src, src_alpha]);
     let container = HeifContainer::parse(&bytes).unwrap();
-    let got = container
-        .image()
-        .decode_item_rgba8(1, &mut Mock::default())
-        .unwrap();
+    let got = container.image().rgba8(1, &mut Mock::default()).unwrap();
     assert_eq!(got.as_samples(), &[1, 84, 104, 255]);
 }
