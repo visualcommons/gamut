@@ -221,8 +221,9 @@ void gamut_avif_image_free(GamutAvifImage *image);
   codestream and is `GAMUT_STATUS_UNSUPPORTED`.
 - **Not yet exposed**: the encoder knobs the Rust API has shipped since this slice —
   `AvifEncoder::with_effort` and `with_threads` (issues #654, #655) — have no C setter yet; they
-  join with the rest of the consumer boundary (issue #242). AVIF decode waits for the decoder
-  registry (above). Error messages: these entry points
+  join with the rest of the consumer boundary (issue #242). AVIF decode waits for a codec-abi
+  adapter for `Av1CodestreamDecoder` (above); the Rust registry, `AvifDecoder::with_backend`,
+  already exists. Error messages: these entry points
   return only the `gamut_status_t` code (`status_of` maps `Error::kind()`), so neither the
   borrowed `const char*` message nor the thread-local last-error string promised under Errors is
   reachable from C yet; both arrive with the rest of the consumer boundary (issue #242).
