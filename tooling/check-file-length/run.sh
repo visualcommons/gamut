@@ -64,9 +64,11 @@ fi
 lengths=$(git ls-files -z -- 'crates/**.rs' 'crates/**.toml' \
     | xargs -0 awk '{ n[FILENAME]++ } END { for (f in n) printf "%d\t%s\n", n[f], f }')
 
-# Rules 1 and 2, one pass: the baseline file first, then the lengths.
+# Rules 1 and 2, one pass: the baseline file first, then the lengths. The baseline is recognised
+# by name, not by `FNR == NR`: an empty baseline has no records, so `FNR == NR` would hold for
+# every length record and turn rule 1 off.
 report=$(printf '%s\n' "$lengths" | awk -F '\t' -v limit="$threshold" -v list="$baseline" '
-    FNR == NR { if ($0 !~ /^[[:space:]]*(#|$)/) listed[$0] = 1; next }
+    FILENAME == list { if ($0 !~ /^[[:space:]]*(#|$)/) listed[$0] = 1; next }
     {
         len[$2] = $1
         if ($1 > limit && !($2 in listed))
