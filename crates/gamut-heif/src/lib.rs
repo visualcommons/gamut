@@ -112,7 +112,7 @@ pub use frame::DecodedFrame;
 // The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s.
 pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paUnreadReason};
 pub use image::{
-    CleanAperture, ContentLightLevel, HeifImage, HeifItem, ItemKind, MasteringDisplay,
+    CleanAperture, ContentLightLevel, ENCODED_XMP, HeifImage, HeifItem, ItemKind, MasteringDisplay,
     PixelAspectRatio, TransformativeProperty,
 };
 pub use limits::{

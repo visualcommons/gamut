@@ -8,13 +8,19 @@
 //! ISO/IEC 23000-22; see `references/heif`). Nothing here reads a codec configuration record or a
 //! coded payload: that is the codec binding's ([`Codestream`](crate::Codestream)).
 
-use gamut_core::{Dimensions, Error, Orientation, Result};
+use gamut_core::{Dimensions, Error, Orientation, RawMetadata, Result};
 /// The typed `clap`/`pasp`/`clli`/`mdcv` property values are the container crate's own,
 /// re-exported so the accessors here and the [`PropertyKind`] variants share one type (#743).
 pub use gamut_isobmff::{CleanAperture, ContentLightLevel, MasteringDisplay, PixelAspectRatio};
 use gamut_isobmff::{
     ColourInformation, EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, PropertyKind,
 };
+
+use crate::Codestream;
+
+/// The [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) message
+/// [`HeifImage::primary_metadata`] raises for an XMP item that declares a `content_encoding`.
+pub const ENCODED_XMP: &str = "HEIF: content-encoded XMP item is not supported";
 
 /// The `aux_type` URNs that mark an auxiliary image as an **alpha** plane: the MIAF/CICP URN
 /// (ISO/IEC 23000-22 §7.3.5) and the HEVC one (ISO/IEC 23008-12 §6.5.8). See `references/heif` §6.
@@ -202,6 +208,38 @@ impl HeifImage {
             .find(|item| {
                 item.as_isobmff_item().content_type.as_deref() == Some("application/rdf+xml")
             })
+    }
+
+    /// The EXIF, XMP and ICC payloads the file carries for its primary item, verbatim: the `Exif`
+    /// item's TIFF stream (its `exif_tiff_header_offset` applied), the XMP `mime` item's packet
+    /// and the primary item's ICC `colr` profile, each present only when the file carries it.
+    /// HEIF has no IPTC-IIM item type, and its C2PA store is a top-level box, not an item, so
+    /// neither is among them. Refusals are raised under `C`'s [`ORIGIN`](Codestream::ORIGIN),
+    /// as the decode surfaces' are; no codestream is read.
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the `Exif`
+    /// item's offset field is short or points past the payload
+    /// ([`HeifItem::exif_tiff_stream`]); and an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, [`ENCODED_XMP`],
+    /// when the XMP item declares a `content_encoding` (ISO/IEC 14496-12 §8.11.6) — its payload
+    /// is then not the raw packet, and this crate decodes no content codings. Any declared coding
+    /// is refused, `identity` included, which RFC 9110 §8.4.1 reserves for `Accept-Encoding`.
+    pub fn primary_metadata<C: Codestream>(&self) -> Result<RawMetadata> {
+        let mut metadata = RawMetadata::default();
+        if let Some(exif) = self.exif() {
+            metadata.exif = Some(exif.exif_tiff_stream()?.to_vec());
+        }
+        if let Some(xmp) = self.xmp() {
+            let item = xmp.as_isobmff_item();
+            if item.content_encoding.is_some() {
+                return Err(Error::unsupported(C::ORIGIN, ENCODED_XMP));
+            }
+            metadata.xmp = Some(item.payload.clone());
+        }
+        metadata.icc = self.primary_item().icc_profile().map(<[u8]>::to_vec);
+        Ok(metadata)
     }
 
     /// The derivation sources of `item_id`: the items its `dimg` reference lists, in order (the
@@ -669,10 +707,11 @@ impl Dihedral {
 
 #[cfg(test)]
 mod tests {
-    use gamut_core::Cicp;
+    use gamut_core::{Cicp, ErrorKind};
     use gamut_isobmff::{ItemReference, Property};
 
     use super::*;
+    use crate::invariants::{STUB_ORIGIN, StubCodec};
 
     /// A one-item file whose primary is `item`.
     fn image_of(item: Item) -> HeifImage {
@@ -905,6 +944,59 @@ mod tests {
             image_of(item).primary_item().exif_tiff_stream().unwrap(),
             b"MM\0*"
         );
+    }
+
+    /// `primary_metadata` of a file whose primary item 1 is described by `metadata`.
+    fn primary_metadata(metadata: Vec<Item>) -> Result<RawMetadata> {
+        let mut items = vec![coded(1, Vec::new())];
+        items.extend(
+            metadata
+                .into_iter()
+                .map(|item| references(item, *b"cdsc", vec![1])),
+        );
+        image_with(items).primary_metadata::<StubCodec>()
+    }
+
+    #[test]
+    fn primary_metadata_hands_over_the_tiff_stream_the_packet_and_the_profile() {
+        let exif = Item::new(2, *b"Exif").with_payload(b"\0\0\0\0MM\0*".to_vec());
+        let mut xmp = Item::new(3, *b"mime").with_payload(b"<x:xmpmeta/>".to_vec());
+        xmp.content_type = Some("application/rdf+xml".to_owned());
+        let raw = primary_metadata(vec![exif, xmp]).unwrap();
+        assert_eq!(raw.exif.as_deref(), Some(&b"MM\0*"[..]));
+        assert_eq!(raw.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
+        assert_eq!(raw.icc, None);
+        assert_eq!(
+            primary_metadata(Vec::new()).unwrap(),
+            RawMetadata::default()
+        );
+
+        let icc = coded(
+            1,
+            vec![property(PropertyKind::Colour(
+                ColourInformation::UnrestrictedIcc(b"profile".to_vec()),
+            ))],
+        );
+        let raw = image_of(icc).primary_metadata::<StubCodec>().unwrap();
+        assert_eq!(raw.icc.as_deref(), Some(&b"profile"[..]));
+    }
+
+    #[test]
+    fn primary_metadata_propagates_an_unlocatable_exif_stream() {
+        let exif = Item::new(2, *b"Exif").with_payload(b"\0\0\0\x09MM\0*".to_vec());
+        let err = primary_metadata(vec![exif]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn primary_metadata_refuses_a_content_encoded_xmp_item_under_the_bindings_origin() {
+        let mut xmp = Item::new(2, *b"mime").with_payload(b"compressed".to_vec());
+        xmp.content_type = Some("application/rdf+xml".to_owned());
+        xmp.content_encoding = Some("deflate".to_owned());
+        let err = primary_metadata(vec![xmp]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(err.static_message(), Some(ENCODED_XMP));
+        assert_eq!(err.origin(), Some(STUB_ORIGIN));
     }
 
     #[test]
