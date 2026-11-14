@@ -431,9 +431,9 @@ mod tests {
         // static — and a decoder desync the moment they adapt. Pin that the contexts are distinct
         // storage, not aliases.
         let mut c = CdfContext::new(0);
-        for sqr in 0..2 {
-            for dir in 0..13 {
-                assert_eq!(c.intra_tx_type_set2[sqr][dir].probs(), INTRA_TX_TYPE_SET2);
+        for row in &c.intra_tx_type_set2[..2] {
+            for cdf in row {
+                assert_eq!(cdf.probs(), INTRA_TX_TYPE_SET2);
             }
         }
         for (dir, want) in INTRA_TX_TYPE_SET2_16X16.iter().enumerate() {
