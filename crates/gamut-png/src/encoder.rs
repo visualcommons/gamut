@@ -1067,8 +1067,13 @@ impl PngEncoder {
         let row_bytes = (width as usize * bits_per_pixel).div_ceil(8);
         // Reject a C2PA store the §5.3 length field cannot carry before any byte is written,
         // rather than emit a caBX no reader accepts (and a report of `c2pa: None` for a file that
-        // was told to carry one).
-        if let Some(store) = &self.ancillary.c2pa {
+        // was told to carry one). Only a finished store is checked here: a reservation was
+        // checked by `with_c2pa_reserved`, the one place that builds one, so re-checking it
+        // could not fail. (That re-check went through a `C2paStore::len` whose `0`/`1` body
+        // mutants no test could kill — telling them apart needs a 2 GiB store — so the rewrite
+        // removed those two mutants; this guard itself generates none, and stays unpinned by
+        // the mutation gate for the same 2 GiB reason.)
+        if let Some(C2paStore::Store(store)) = &self.ancillary.c2pa {
             chunk::check_data_len(store.len())?;
         }
 

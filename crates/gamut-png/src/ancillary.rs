@@ -522,16 +522,6 @@ pub(crate) enum C2paStore {
     Reserved(usize),
 }
 
-impl C2paStore {
-    /// The payload length the chunk will carry.
-    pub(crate) fn len(&self) -> usize {
-        match self {
-            Self::Store(store) => store.len(),
-            Self::Reserved(len) => *len,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
