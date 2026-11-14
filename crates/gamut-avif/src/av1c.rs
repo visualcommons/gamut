@@ -8,11 +8,10 @@
 //! AVIF v1.2.0 §2.1 (`references/avif`). All `reserved` fields are **ignored** on read; they are
 //! masked away and never validated.
 
-use gamut_av1::{Av1StillConfig, SequenceHeader};
+use gamut_av1::{Av1StillConfig, Obu, ObuIter, SequenceHeader};
+use gamut_bitstream::write_leb128;
 use gamut_color::ChromaSubsampling;
 use gamut_core::{Error, Result};
-
-use crate::obu::{ObuType, iter_obus, write_leb128};
 
 /// A parsed `av1C` AV1CodecConfigurationRecord (AV1-ISOBMFF v1.3.0 §2.3.3).
 ///
@@ -142,8 +141,8 @@ impl Av1Config {
         // reserved(3) | initial_presentation_delay_present(1) | delay_minus_one(4) or reserved(4)
         let initial_presentation_delay_minus_one = (b3 & 0x10 != 0).then_some(b3 & 0x0f);
         // configOBUs SHALL each carry a size field (§2.3.4); the split also bounds-checks them.
-        for obu in iter_obus(config_obus) {
-            if !obu?.header.has_size_field {
+        for obu in ObuIter::new(config_obus) {
+            if !obu?.has_size_field {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
                     "AVIF: av1C configOBUs must carry size fields",
@@ -241,9 +240,9 @@ impl Av1Config {
         // OBU_TEMPORAL_DELIMITER with a size field and an empty payload: header 0x12, size 0.
         out.extend_from_slice(&[0x12, 0x00]);
         out.extend_from_slice(&self.config_obus);
-        for obu in iter_obus(payload) {
+        for obu in ObuIter::new(payload) {
             let obu = obu?;
-            if obu.header.has_size_field {
+            if obu.has_size_field {
                 out.extend_from_slice(obu.raw);
             } else {
                 // Re-emit with obu_has_size_field set: header byte(s) verbatim except the size
@@ -253,7 +252,7 @@ impl Av1Config {
                 // false, and 0x02 is that very bit, so it is known clear and `|`/`^` agree (#110).
                 out.push(obu.raw[0] + 0x02);
                 out.extend_from_slice(&obu.raw[1..header_len]);
-                write_leb128(obu.payload.len() as u64, out);
+                write_leb128(out, obu.payload.len() as u64);
                 out.extend_from_slice(obu.payload);
             }
         }
@@ -289,16 +288,16 @@ impl Av1Config {
         let mut sequence_headers = 0usize;
         let mut reduced_still_picture = false;
         let mut first_frame_checked = false;
-        for obu in iter_obus(payload) {
+        for obu in ObuIter::new(payload) {
             let obu = obu?;
-            match obu.header.obu_type {
-                ObuType::TileList => {
+            match obu.obu_type {
+                Obu::TILE_LIST => {
                     return Err(Error::invalid_input(
                         env!("CARGO_PKG_NAME"),
                         "AVIF: item payload must not contain a tile list OBU",
                     ));
                 }
-                ObuType::SequenceHeader => {
+                Obu::SEQUENCE_HEADER => {
                     sequence_headers += 1;
                     // seq_profile(3) | still_picture(1) | reduced_still_picture_header(1) | …
                     let &[b0, ..] = obu.payload else {
@@ -309,7 +308,7 @@ impl Av1Config {
                     };
                     reduced_still_picture = b0 & 0x08 != 0;
                 }
-                ty if ty.is_frame_bearing() && !first_frame_checked => {
+                ty if is_frame_bearing(ty) && !first_frame_checked => {
                     if sequence_headers == 0 {
                         return Err(Error::invalid_input(
                             env!("CARGO_PKG_NAME"),
@@ -318,7 +317,7 @@ impl Av1Config {
                     }
                     // A tile group before any frame header is malformed whatever the sequence
                     // header says.
-                    if ty == ObuType::TileGroup {
+                    if ty == Obu::TILE_GROUP {
                         return Err(Error::invalid_input(
                             env!("CARGO_PKG_NAME"),
                             "AVIF: tile group OBU precedes the first frame header",
@@ -374,12 +373,19 @@ impl Av1Config {
     }
 }
 
+/// Whether an `obu_type` carries (part of) a coded frame — `OBU_FRAME_HEADER`, `OBU_TILE_GROUP`,
+/// or `OBU_FRAME`. The AVIF sync-sample constraint is stated relative to the first such OBU
+/// (AV1-ISOBMFF §2.4: the sequence header must precede the first frame header).
+fn is_frame_bearing(obu_type: u8) -> bool {
+    matches!(obu_type, Obu::FRAME_HEADER | Obu::TILE_GROUP | Obu::FRAME)
+}
+
 /// The payload of the first sequence header OBU in a low-overhead OBU `stream`, or `None` when it
 /// has none. Stops at the first sequence header, so a split error *after* it is not reported.
 pub(crate) fn first_sequence_header(stream: &[u8]) -> Result<Option<&[u8]>> {
-    for obu in iter_obus(stream) {
+    for obu in ObuIter::new(stream) {
         let obu = obu?;
-        if obu.header.obu_type == ObuType::SequenceHeader {
+        if obu.obu_type == Obu::SEQUENCE_HEADER {
             return Ok(Some(obu.payload));
         }
     }
@@ -417,6 +423,19 @@ mod tests {
         );
     }
     use crate::encoder::av1c_record;
+
+    #[test]
+    fn is_frame_bearing_names_exactly_the_three_frame_types() {
+        // Each or-pattern alternative asserted on its own: the gate deletes only whole arms.
+        assert!(is_frame_bearing(Obu::FRAME_HEADER));
+        assert!(is_frame_bearing(Obu::TILE_GROUP));
+        assert!(is_frame_bearing(Obu::FRAME));
+        for other in
+            (0..=15u8).filter(|&t| ![Obu::FRAME_HEADER, Obu::TILE_GROUP, Obu::FRAME].contains(&t))
+        {
+            assert!(!is_frame_bearing(other), "obu_type {other}");
+        }
+    }
 
     #[test]
     fn parse_round_trips_the_encoders_record() {

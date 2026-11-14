@@ -219,7 +219,6 @@ mod encoder;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod invariants;
-mod obu;
 
 pub use av1c::Av1Config;
 pub use backend::{

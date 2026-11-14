@@ -81,7 +81,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   ← core, bitstream (the T.81 Annex K.2 optimal-table builder and Annex C canonical codes),
   codec-abi, color, dsp, cmm (optional, `cmm` feature: `decode_srgb` applies the embedded ICC
   profile), icc (optional, `cmm` feature), metadata (optional, `metadata` feature).
-- **gamut-avif** — the AV1 binding over gamut-heif. ← av1, isobmff, core, color, codec-abi
+- **gamut-avif** — the AV1 binding over gamut-heif. ← av1, bitstream (the `leb128()` writer
+  `full_stream` re-frames a sizeless OBU with), isobmff, core, color, codec-abi
   (the `Av1CodestreamEncoder`/`Av1CodestreamDecoder` seams; `gamut-av1` is the implicit
   software encode tail), heif (the shared item model, derivation walk and RGBA presentation),
   metadata (optional, `metadata` feature).
