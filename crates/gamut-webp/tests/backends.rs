@@ -948,10 +948,10 @@ impl abi::Decoder for AbiFakeDecoder {
             _ if i == 0 => w * h,
             _ => w.div_ceil(2) * h.div_ceil(2),
         };
-        for i in 0..out.plane_count as usize {
+        for (i, &ptr) in out.planes.iter().enumerate().take(out.plane_count as usize) {
             // SAFETY: the adapter guarantees each of the first `plane_count` pointers is valid for
             // the plane length implied by the descriptor's format and dimensions.
-            let plane = unsafe { std::slice::from_raw_parts_mut(out.planes[i], plane_len(i)) };
+            let plane = unsafe { std::slice::from_raw_parts_mut(ptr, plane_len(i)) };
             plane.fill(self.fill.wrapping_add(i as u8));
         }
         abi::Status::OK
