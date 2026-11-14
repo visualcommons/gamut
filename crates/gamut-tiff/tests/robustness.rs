@@ -18,8 +18,9 @@ use gamut_tiff::{Compression, Ifd, Predictor, TiffDecoder, TiffEncoder, TiffMeta
 
 mod common;
 
-/// The largest single allocation this binary grants: four times the decoder's 64 MiB
-/// `MAX_IMAGE_BYTES`, so no decode that limit admits (nor its widening to RGB output) is refused,
+/// The largest single allocation this binary grants: four times the decoder's default byte budget,
+/// `DecodeLimits::DEFAULT_MAX_IMAGE_BYTES` (64 MiB, which `TiffDecoder::with_limits` overrides), so
+/// no decode that budget admits (nor its widening to RGB output) is refused,
 /// and far below the gibibyte-scale requests a declared count or geometry produces.
 const CAP: usize = 256 << 20;
 

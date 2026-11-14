@@ -481,8 +481,9 @@ fn exif_model(carriers: ExifCarriers, order: ByteOrder) -> Option<Exif> {
 /// Testing only [`fields`](Ifd::fields) dropped a directory whose sole content was a group — an
 /// `ExifIFD` holding nothing but its `InteroperabilityIFD` pointer, which [`read_metadata`]
 /// returns in exactly that shape — silently, into a file with no Exif directory at all and no
-/// error to say so. For the 0th-IFD fields a group is not writable, and keeping one here is what
-/// lets [`TiffMetadata::check`] refuse it rather than drop it.
+/// error to say so. Both callers build the 0th-IFD directory from fields alone, so the group arm
+/// never decides that one: a 0th-IFD group never reaches a carrier and is named instead by
+/// [`MetadataNotice::ExifImageGroup`].
 fn with_content(directory: Option<&Ifd>) -> Option<&Ifd> {
     directory.filter(|ifd| !ifd.fields().is_empty() || !ifd.sub_ifds().is_empty())
 }
