@@ -351,6 +351,26 @@ pub(crate) mod typed {
             }
             assert_eq!(DngMetadata::new().metadata().unwrap().exif, None);
         }
+
+        #[test]
+        fn metadata_keeps_the_parsed_byte_carriers_beside_the_assigned_exif() {
+            let packet: &[u8] = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+                <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                <rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" \
+                xmp:CreatorTool=\"gamut\"/></rdf:RDF></x:xmpmeta>";
+            let parsed = Metadata::parse_blocks(&[MetadataBlock::Xmp(packet)]).unwrap();
+            assert!(parsed.xmp.is_some());
+            let unified = DngMetadata::new()
+                .with_exif(iso(100))
+                .with_xmp(packet.to_vec())
+                .metadata()
+                .unwrap();
+            assert_eq!(unified.xmp, parsed.xmp);
+            assert_eq!(
+                unified.exif.expect("an EXIF model").exif_ifd(),
+                Some(&iso(100))
+            );
+        }
     }
 }
 
