@@ -482,6 +482,15 @@ run = "./tooling/check-tests/run.sh"
 description = "Verify every .cargo/mutants.toml exclusion is crate-qualified and its LINE:COLUMN still carries the operator it names, inside the function it names"
 run = "./tooling/check-mutants-anchors/run.sh"
 
+# No bound on file length existed (de-slop finding D33: p90 1011 lines, max 7265). This fails any
+# tracked crates/ .rs/.toml file over 1011 lines that is not on tooling/check-file-length/
+# baseline.txt, a list of paths that may only shrink. Pure text, no cargo; the rules, and why the
+# threshold is p90 rather than lower, are in the script header (issue #1096). The optional
+# argument is the ref whose baseline the shrink-only rule compares against.
+[tasks.check-file-length]
+description = "Verify no tracked crates/ .rs/.toml file exceeds 1011 lines unless listed on the shrink-only baseline, and that the baseline lists only files still over it and gained no path"
+run = "./tooling/check-file-length/run.sh"
+
 # Nothing read the README crates table, so it drifted: fixing issue #425 meant correcting
 # twenty-three of its twenty-eight rows and adding four crates that had no row at all. `versions`
 # only lists `name version` and asserts nothing, and `check-msrv` greps the README for one number,
