@@ -1,0 +1,1735 @@
+//! The AVIF encoder handle [`GamutAvifEncoder`]: its backend seam, its config setters (through the
+//! shared [`configure`] path) and the per-layout encode entry points.
+
+use core::cell::Cell;
+use core::ffi::c_void;
+use core::ptr;
+
+use gamut::avif::{AlphaMode, AvifEncoder, OpaqueAlpha};
+use gamut::core::{
+    Dimensions, EncodeImage, Gray8, ImageRef, Orientation, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
+};
+use gamut_codec_abi::EncoderVTable;
+use gamut_color::{
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
+    TransferCharacteristics,
+};
+
+use crate::boundary::{bytes_in, bytes_out, status_of};
+use crate::guard;
+use crate::seam::{configure, seam_handle, try_configure};
+use crate::status::{
+    GAMUT_OK, GAMUT_STATUS_INVALID_INPUT, GAMUT_STATUS_NULL_ARGUMENT, GAMUT_STATUS_UNSUPPORTED,
+    GamutStatus,
+};
+
+/// `gamut_avif_encoder_set_chroma` value: 4:4:4, full-resolution chroma.
+pub const GAMUT_CHROMA_SUBSAMPLING_444: u8 = 0;
+/// `gamut_avif_encoder_set_chroma` value: 4:2:2, horizontally halved chroma.
+pub const GAMUT_CHROMA_SUBSAMPLING_422: u8 = 1;
+/// `gamut_avif_encoder_set_chroma` value: 4:2:0, chroma halved in both directions.
+pub const GAMUT_CHROMA_SUBSAMPLING_420: u8 = 2;
+/// `gamut_avif_encoder_set_chroma` value: 4:0:0, monochrome (no chroma planes).
+pub const GAMUT_CHROMA_SUBSAMPLING_400: u8 = 3;
+
+/// `gamut_avif_encoder_set_alpha_mode` value: the colour is unassociated and coded as given
+/// (`AlphaMode::Unassociated`, the default).
+pub const GAMUT_AVIF_ALPHA_UNASSOCIATED: u8 = 0;
+/// `gamut_avif_encoder_set_alpha_mode` value: the colour is already premultiplied and declared
+/// with `prem` (`AlphaMode::Premultiplied`).
+pub const GAMUT_AVIF_ALPHA_PREMULTIPLIED: u8 = 1;
+/// `gamut_avif_encoder_set_alpha_mode` value: the encoder premultiplies unassociated colour and
+/// declares it with `prem` (`AlphaMode::PremultiplyOnEncode`).
+pub const GAMUT_AVIF_ALPHA_PREMULTIPLY_ON_ENCODE: u8 = 2;
+/// `gamut_avif_encoder_set_alpha_mode` value: the encoder cleans the colour hidden under
+/// transparency before a lossy encode (`AlphaMode::CleanOnEncode`).
+pub const GAMUT_AVIF_ALPHA_CLEAN_ON_ENCODE: u8 = 3;
+
+/// `gamut_avif_encoder_set_opaque_alpha` value: a fully opaque RGBA input drops its alpha
+/// auxiliary (`OpaqueAlpha::Drop`, the default).
+pub const GAMUT_AVIF_OPAQUE_ALPHA_DROP: u8 = 0;
+/// `gamut_avif_encoder_set_opaque_alpha` value: a fully opaque RGBA input keeps its alpha
+/// auxiliary (`OpaqueAlpha::Keep`).
+pub const GAMUT_AVIF_OPAQUE_ALPHA_KEEP: u8 = 1;
+
+// The chroma constants are `ChromaSubsampling`'s own discriminants, so a C value and the Rust
+// variant can never be renumbered apart: a change on either side fails this build.
+const _: () = {
+    assert!(ChromaSubsampling::Cs444 as u8 == GAMUT_CHROMA_SUBSAMPLING_444);
+    assert!(ChromaSubsampling::Cs422 as u8 == GAMUT_CHROMA_SUBSAMPLING_422);
+    assert!(ChromaSubsampling::Cs420 as u8 == GAMUT_CHROMA_SUBSAMPLING_420);
+    assert!(ChromaSubsampling::Cs400 as u8 == GAMUT_CHROMA_SUBSAMPLING_400);
+    assert!(AlphaMode::Unassociated as u8 == GAMUT_AVIF_ALPHA_UNASSOCIATED);
+    assert!(AlphaMode::Premultiplied as u8 == GAMUT_AVIF_ALPHA_PREMULTIPLIED);
+    assert!(AlphaMode::PremultiplyOnEncode as u8 == GAMUT_AVIF_ALPHA_PREMULTIPLY_ON_ENCODE);
+    assert!(AlphaMode::CleanOnEncode as u8 == GAMUT_AVIF_ALPHA_CLEAN_ON_ENCODE);
+    assert!(OpaqueAlpha::Drop as u8 == GAMUT_AVIF_OPAQUE_ALPHA_DROP);
+    assert!(OpaqueAlpha::Keep as u8 == GAMUT_AVIF_OPAQUE_ALPHA_KEEP);
+};
+
+/// Opaque handle over a `gamut::avif::AvifEncoder` and its backend registry.
+pub struct GamutAvifEncoder {
+    inner: AvifEncoder,
+    /// The C2PA slot range of the most recent encode through this handle
+    /// (`AvifEncodeReport::c2pa`), read back by `gamut_avif_encoder_c2pa_slot`. `None` before
+    /// the first encode, after a failed one, and when no slot was configured.
+    ///
+    /// A `Cell` because the encode entry points take a `const` handle (an encode never changes
+    /// the configuration); handles are single-threaded, so the interior mutability is unshared.
+    /// Held as the C out-params' `(offset, len)` pair: the report's `Range<u64>` is not `Copy`.
+    c2pa: Cell<Option<(usize, usize)>>,
+}
+
+seam_handle! {
+    handle = GamutAvifEncoder,
+    host = gamut::avif::AvifEncoder,
+    new = gamut::avif::AvifEncoder::new(),
+    fields = { c2pa: Cell::new(None) },
+    seam = encoder,
+    push = |host, backend| {
+        *host = core::mem::take(host).with_backend(gamut::avif::AbiAv1CodestreamEncoder::new(backend));
+    },
+    fns = (gamut_avif_encoder_new, gamut_avif_encoder_free, gamut_avif_encoder_push_backend),
+    tests = avif_encoder_tests,
+}
+
+impl GamutAvifEncoder {
+    /// Encodes `width × height` samples of layout `P` into a fresh Rust-owned buffer.
+    ///
+    /// # Safety
+    ///
+    /// As each `gamut_avif_encoder_encode_*` wrapper: `encoder` is `NULL` or live; a non-null
+    /// `samples` points to `samples_len` readable samples; `out`/`out_len` are `NULL` or
+    /// writable.
+    unsafe fn encode<P: Pixel>(
+        encoder: *const Self,
+        samples: *const P::Sample,
+        samples_len: usize,
+        width: u32,
+        height: u32,
+        out: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> GamutStatus
+    where
+        AvifEncoder: EncodeImage<P>,
+    {
+        guard::status(|| {
+            // SAFETY: a non-null handle is live per contract. The previous encode's report is
+            // dropped before anything can fail, so a non-OK status never leaves one standing.
+            if let Some(this) = unsafe { encoder.as_ref() } {
+                this.c2pa.take();
+            }
+            if out.is_null() || out_len.is_null() {
+                return GAMUT_STATUS_NULL_ARGUMENT;
+            }
+            // SAFETY: both out-params are non-null and writable per contract. Cleared first so
+            // a failed call never leaves the caller a stale pointer it might free twice.
+            unsafe {
+                out.write(ptr::null_mut());
+                out_len.write(0);
+            }
+            // SAFETY: null is rejected here; a non-null handle is live per contract.
+            let Some(this) = (unsafe { encoder.as_ref() }) else {
+                return GAMUT_STATUS_NULL_ARGUMENT;
+            };
+            if samples.is_null() {
+                return GAMUT_STATUS_NULL_ARGUMENT;
+            }
+            // A misaligned `uint16_t *` is a caller bug C compilers do not catch; refusing it is
+            // what keeps the slice below sound.
+            if !samples.is_aligned() {
+                return GAMUT_STATUS_INVALID_INPUT;
+            }
+            // SAFETY: non-null and aligned (checked above), `samples_len` readable samples per
+            // contract, and only read for the duration of this call.
+            let samples = unsafe { core::slice::from_raw_parts(samples, samples_len) };
+            // `ImageRef::new` is the boundary validation DESIGN.md names: the length must be
+            // exactly `width * height * channels` and the dimensions non-empty.
+            let image = match Dimensions::new(width, height)
+                .and_then(|dims| ImageRef::<P>::new(samples, dims))
+            {
+                Ok(image) => image,
+                Err(error) => return status_of(&error),
+            };
+            // `encode_with_report` is `encode_image` with the report alongside — the same bytes
+            // — so every encode keeps the slot range `gamut_avif_encoder_c2pa_slot` reads.
+            let mut bytes = Vec::new();
+            match this.inner.encode_with_report(image, &mut bytes) {
+                Ok(report) => {
+                    // The slot lies inside the in-memory file just returned, so both offsets fit
+                    // `usize`.
+                    this.c2pa.set(
+                        report
+                            .c2pa
+                            .map(|slot| (slot.start as usize, (slot.end - slot.start) as usize)),
+                    );
+                    let (data, len) = bytes_out(bytes);
+                    // SAFETY: as the clearing writes above.
+                    unsafe {
+                        out.write(data);
+                        out_len.write(len);
+                    }
+                    GAMUT_OK
+                }
+                Err(error) => status_of(&error),
+            }
+        })
+    }
+}
+
+/// Creates an AVIF encoder with default (lossless) settings and an empty backend registry.
+///
+/// Returns `NULL` only if construction panics. Free with `gamut_avif_encoder_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gamut_avif_encoder_new() -> *mut GamutAvifEncoder {
+    GamutAvifEncoder::ffi_new()
+}
+
+/// Creates a **lossy** AVIF encoder at `quality` (`0..=100`, higher = larger and closer to the
+/// source; values above `100` are clamped), with an empty backend registry.
+///
+/// Lossy stills default to BT.709 YCbCr at 4:2:0; override with `gamut_avif_encoder_set_matrix`
+/// and `gamut_avif_encoder_set_chroma`. Mode and quality are fixed for the handle's lifetime,
+/// as they are for the Rust `AvifEncoder::lossy` it wraps. Returns `NULL` only if construction
+/// panics. Free with `gamut_avif_encoder_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gamut_avif_encoder_new_lossy(quality: u8) -> *mut GamutAvifEncoder {
+    guard::ptr(|| {
+        Box::into_raw(Box::new(GamutAvifEncoder {
+            inner: AvifEncoder::lossy(quality),
+            c2pa: Cell::new(None),
+        }))
+    })
+}
+
+/// Frees an encoder created by `gamut_avif_encoder_new` or `gamut_avif_encoder_new_lossy`,
+/// running each adopted backend's `destroy` exactly once. No-op on `NULL`.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a pointer returned by `gamut_avif_encoder_new` or
+/// `gamut_avif_encoder_new_lossy` that has not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_free(encoder: *mut GamutAvifEncoder) {
+    unsafe { GamutAvifEncoder::ffi_free(encoder) }
+}
+
+/// Pushes an AV1 still-picture encode backend; backends are tried in push order, before the
+/// built-in `gamut-av1` encoder.
+///
+/// Returns `GAMUT_OK` when the handle adopts `ctx` (its `destroy` then runs exactly once, at
+/// free), `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder or vtable, or
+/// `GAMUT_STATUS_ABI_MISMATCH` when `vtable->abi_version != GAMUT_CODEC_ABI_VERSION`; on any
+/// non-OK status the caller keeps ownership of `ctx` and no callback has run.
+///
+/// # Safety
+///
+/// `encoder` as in `gamut_avif_encoder_free`; a non-`NULL` `vtable` points to a table that
+/// stays valid for the encoder's lifetime. Calling this asserts the `(vtable, ctx)` backend
+/// may be used from any thread (the registry requires `Send`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_push_backend(
+    encoder: *mut GamutAvifEncoder,
+    vtable: *const EncoderVTable,
+    ctx: *mut c_void,
+) -> GamutStatus {
+    unsafe { GamutAvifEncoder::ffi_push_backend(encoder, vtable, ctx) }
+}
+
+/// Selects the CICP (ITU-T H.273) matrix the samples are coded through (`AvifEncoder::with_matrix`).
+///
+/// Identity (`0`), BT.709 (`1`), BT.601 (`6`) and BT.2020 NCL (`9`) encode; another code point
+/// gamut models is accepted here and rejected at encode time. Ignored by a lossless encoder,
+/// which always codes the identity matrix. Returns `GAMUT_STATUS_UNSUPPORTED` for a code point
+/// gamut does not model, `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_matrix(
+    encoder: *mut GamutAvifEncoder,
+    code_point: u16,
+) -> GamutStatus {
+    let value = MatrixCoefficients::from_code_point(code_point);
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, m| {
+            e.with_matrix(m)
+        })
+    }
+}
+
+/// Tags the image with CICP colour primaries (`AvifEncoder::with_primaries`) — a tag, not a
+/// conversion; honoured in lossless and lossy mode alike.
+///
+/// Returns `GAMUT_STATUS_UNSUPPORTED` for a code point gamut does not model,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_primaries(
+    encoder: *mut GamutAvifEncoder,
+    code_point: u16,
+) -> GamutStatus {
+    let value = ColorPrimaries::from_code_point(code_point);
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, p| {
+            e.with_primaries(p)
+        })
+    }
+}
+
+/// Tags the image with CICP transfer characteristics (`AvifEncoder::with_transfer`) — a tag,
+/// not a conversion; honoured in lossless and lossy mode alike.
+///
+/// Returns `GAMUT_STATUS_UNSUPPORTED` for a code point gamut does not model,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_transfer(
+    encoder: *mut GamutAvifEncoder,
+    code_point: u16,
+) -> GamutStatus {
+    let value = TransferCharacteristics::from_code_point(code_point);
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, t| {
+            e.with_transfer(t)
+        })
+    }
+}
+
+/// Selects the signal range by its H.273 `full_range` flag (`0` limited, `1` full;
+/// `AvifEncoder::with_color_range`). Ignored by a lossless encoder.
+///
+/// Returns `GAMUT_STATUS_INVALID_INPUT` for any other flag value,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_color_range(
+    encoder: *mut GamutAvifEncoder,
+    full_range: u8,
+) -> GamutStatus {
+    let value = ColorRange::from_flag(full_range);
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, r| {
+            e.with_color_range(r)
+        })
+    }
+}
+
+/// Selects the chroma subsampling, one of the `GAMUT_CHROMA_SUBSAMPLING_*` constants
+/// (`AvifEncoder::with_chroma`). Ignored by a lossless encoder and by the identity matrix,
+/// which always keep 4:4:4.
+///
+/// Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_chroma(
+    encoder: *mut GamutAvifEncoder,
+    chroma: u8,
+) -> GamutStatus {
+    let value = match chroma {
+        GAMUT_CHROMA_SUBSAMPLING_444 => Some(ChromaSubsampling::Cs444),
+        GAMUT_CHROMA_SUBSAMPLING_422 => Some(ChromaSubsampling::Cs422),
+        GAMUT_CHROMA_SUBSAMPLING_420 => Some(ChromaSubsampling::Cs420),
+        GAMUT_CHROMA_SUBSAMPLING_400 => Some(ChromaSubsampling::Cs400),
+        _ => None,
+    };
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, c| {
+            e.with_chroma(c)
+        })
+    }
+}
+
+/// Selects the depth 16-bit inputs are coded at, in bits (`AvifEncoder::with_bit_depth`):
+/// `10` or `12` (the default) encode; `8` and `16` are accepted here and rejected by a 16-bit
+/// encode. Ignored by the 8-bit inputs, which always code 8-bit.
+///
+/// Returns `GAMUT_STATUS_UNSUPPORTED` for a depth gamut does not model,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_bit_depth(
+    encoder: *mut GamutAvifEncoder,
+    bits: u32,
+) -> GamutStatus {
+    let value = BitDepth::from_bits(bits);
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_UNSUPPORTED, |e, d| {
+            e.with_bit_depth(d)
+        })
+    }
+}
+
+/// Codes an RGBA input's alpha auxiliary at its own lossy `quality` (`0..=100`, higher = larger
+/// and closer to the source; values above `100` are clamped), independent of the colour quality
+/// fixed at construction (`AvifEncoder::with_alpha_quality`). Without this call alpha follows
+/// the colour quality. Ignored by a lossless encoder, which codes alpha bit-exactly, and by
+/// inputs without alpha.
+///
+/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_alpha_quality(
+    encoder: *mut GamutAvifEncoder,
+    quality: u8,
+) -> GamutStatus {
+    unsafe {
+        configure(encoder, Some(quality), GAMUT_OK, |e, q| {
+            e.with_alpha_quality(q)
+        })
+    }
+}
+
+/// Selects how an RGBA input's colour relates to its alpha, one of the `GAMUT_AVIF_ALPHA_*`
+/// constants (`AvifEncoder::with_alpha_mode`): unassociated, already premultiplied (declared with
+/// `prem`), premultiplied by the encoder, or cleaned under transparency before a lossy encode.
+/// Ignored by inputs without alpha.
+///
+/// Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_alpha_mode(
+    encoder: *mut GamutAvifEncoder,
+    mode: u8,
+) -> GamutStatus {
+    let value = match mode {
+        GAMUT_AVIF_ALPHA_UNASSOCIATED => Some(AlphaMode::Unassociated),
+        GAMUT_AVIF_ALPHA_PREMULTIPLIED => Some(AlphaMode::Premultiplied),
+        GAMUT_AVIF_ALPHA_PREMULTIPLY_ON_ENCODE => Some(AlphaMode::PremultiplyOnEncode),
+        GAMUT_AVIF_ALPHA_CLEAN_ON_ENCODE => Some(AlphaMode::CleanOnEncode),
+        _ => None,
+    };
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, m| {
+            e.with_alpha_mode(m)
+        })
+    }
+}
+
+/// Selects whether an RGBA input whose every alpha sample is fully opaque (255, or 65535) keeps
+/// its alpha auxiliary, one of the `GAMUT_AVIF_OPAQUE_ALPHA_*` constants
+/// (`AvifEncoder::with_opaque_alpha`). By default such an input drops its alpha and encodes as
+/// the file `gamut_avif_encoder_encode_rgb8` / `gamut_avif_encoder_encode_rgb16` writes for its
+/// colour. Ignored by inputs without alpha and by inputs with any non-opaque alpha sample, which
+/// always keep it.
+///
+/// Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_opaque_alpha(
+    encoder: *mut GamutAvifEncoder,
+    opaque_alpha: u8,
+) -> GamutStatus {
+    let value = match opaque_alpha {
+        GAMUT_AVIF_OPAQUE_ALPHA_DROP => Some(OpaqueAlpha::Drop),
+        GAMUT_AVIF_OPAQUE_ALPHA_KEEP => Some(OpaqueAlpha::Keep),
+        _ => None,
+    };
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, o| {
+            e.with_opaque_alpha(o)
+        })
+    }
+}
+
+/// Records the display orientation a reader applies, by its EXIF `Orientation` value (`1..=8`;
+/// `1` writes neither `irot` nor `imir`), as `irot`/`imir` item properties — the stored pixels
+/// are unchanged (`AvifEncoder::with_orientation`). A later call replaces it.
+///
+/// Returns `GAMUT_STATUS_INVALID_INPUT` for a value outside `1..=8`,
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_orientation(
+    encoder: *mut GamutAvifEncoder,
+    exif_orientation: u8,
+) -> GamutStatus {
+    let value = Orientation::from_exif_value(exif_orientation);
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, o| {
+            e.with_orientation(o)
+        })
+    }
+}
+
+/// Embeds an ICC profile, carried verbatim as a `colr` `prof` box
+/// (`AvifEncoder::with_icc_profile`). The bytes are copied; a later call replaces them.
+///
+/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder, or a `NULL` `data` with a
+/// non-zero `len`.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle; a non-`NULL` `data` points to `len` readable
+/// bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_icc_profile(
+    encoder: *mut GamutAvifEncoder,
+    data: *const u8,
+    len: usize,
+) -> GamutStatus {
+    // SAFETY: per this fn's contract.
+    let value = unsafe { bytes_in(data, len) };
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
+            e.with_icc_profile(b)
+        })
+    }
+}
+
+/// Attaches Exif metadata (`AvifEncoder::with_exif`): a **bare TIFF stream** (byte-order mark,
+/// `42`, first-IFD offset — not the `Exif\0\0`-prefixed form). The encoder adds HEIF's 4-byte
+/// `exif_tiff_header_offset` prefix. The bytes are copied verbatim, unvalidated; a later call
+/// replaces them.
+///
+/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder, or a `NULL` `data` with a
+/// non-zero `len`.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle; a non-`NULL` `data` points to `len` readable
+/// bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_exif(
+    encoder: *mut GamutAvifEncoder,
+    data: *const u8,
+    len: usize,
+) -> GamutStatus {
+    // SAFETY: per this fn's contract.
+    let value = unsafe { bytes_in(data, len) };
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
+            e.with_exif(b)
+        })
+    }
+}
+
+/// Attaches an XMP packet, carried verbatim as an `application/rdf+xml` `mime` item
+/// (`AvifEncoder::with_xmp`). The bytes are copied; a later call replaces them.
+///
+/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder, or a `NULL` `data` with a
+/// non-zero `len`.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle; a non-`NULL` `data` points to `len` readable
+/// bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_xmp(
+    encoder: *mut GamutAvifEncoder,
+    data: *const u8,
+    len: usize,
+) -> GamutStatus {
+    // SAFETY: per this fn's contract.
+    let value = unsafe { bytes_in(data, len) };
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
+            e.with_xmp(b)
+        })
+    }
+}
+
+/// Reserves a `len`-byte slot of zeros for a C2PA manifest store, framed as a top-level
+/// `ContentProvenanceBox` (`box_purpose` `manifest`) after `ftyp`, for an external signer to
+/// fill in after encoding (`AvifEncoder::with_c2pa_reserved`). After an encode,
+/// `gamut_avif_encoder_c2pa_slot` reports where the slot landed; the signer writes a store of at
+/// most `len` bytes there, and nothing else in the file moves.
+///
+/// As in Rust, an unusable length is refused here, leaving the encoder as it was:
+/// `GAMUT_STATUS_INVALID_INPUT` below 8 bytes or for one too large to frame, and
+/// `GAMUT_STATUS_UNSUPPORTED` for a box at or beyond 4 GiB. This call, or
+/// `gamut_avif_encoder_set_c2pa`, replaces any earlier one. Returns
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_c2pa_reserved(
+    encoder: *mut GamutAvifEncoder,
+    len: usize,
+) -> GamutStatus {
+    unsafe { try_configure(encoder, len, AvifEncoder::with_c2pa_reserved) }
+}
+
+/// Writes `store` — a C2PA manifest store already computed over this exact output — into the
+/// `ContentProvenanceBox` slot (`AvifEncoder::with_c2pa`): the re-encode half of the
+/// reserve-then-fill flow, framed exactly as `gamut_avif_encoder_set_c2pa_reserved` with the
+/// store in place of the zeros. The bytes are copied verbatim and unchecked, with no minimum
+/// length. This call, or `gamut_avif_encoder_set_c2pa_reserved`, replaces any earlier one.
+///
+/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder, or a `NULL` `store` with a non-zero
+/// `len`.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle; a non-`NULL` `store` points to `len` readable
+/// bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_c2pa(
+    encoder: *mut GamutAvifEncoder,
+    store: *const u8,
+    len: usize,
+) -> GamutStatus {
+    // SAFETY: per this fn's contract.
+    let value = unsafe { bytes_in(store, len) };
+    unsafe {
+        configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
+            e.with_c2pa(b)
+        })
+    }
+}
+
+/// Reports where the most recent encode through `encoder` placed the C2PA manifest-store slot
+/// (`AvifEncodeReport::c2pa`, the range `AvifEncoder::encode_with_report` returns): on
+/// `GAMUT_OK`, `*present` says whether there is one, and `*offset`/`*len` are its byte range
+/// within that encode's output (`0`/`0` when absent). The slot is absent before the first
+/// encode, after an encode that did not return `GAMUT_OK`, and when neither
+/// `gamut_avif_encoder_set_c2pa_reserved` nor `gamut_avif_encoder_set_c2pa` was set; a
+/// zero-length slot (`gamut_avif_encoder_set_c2pa` with an empty store) is present.
+///
+/// The range is the one a signer patches at — not a hash exclusion range, which C2PA's BMFF
+/// binding expresses by box path. Changing a setting does not change the report; the next
+/// encode does. Returns `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument, writing
+/// `false`/`0`/`0` through the out-params when all three are non-`NULL`.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle; `present`, `offset` and `len` are `NULL` or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_c2pa_slot(
+    encoder: *const GamutAvifEncoder,
+    present: *mut bool,
+    offset: *mut usize,
+    len: *mut usize,
+) -> GamutStatus {
+    guard::status(|| {
+        if present.is_null() || offset.is_null() || len.is_null() {
+            return GAMUT_STATUS_NULL_ARGUMENT;
+        }
+        // SAFETY: the three out-params are non-null and writable per contract.
+        let write = |slot: Option<(usize, usize)>| unsafe {
+            present.write(slot.is_some());
+            offset.write(slot.map_or(0, |(start, _)| start));
+            len.write(slot.map_or(0, |(_, len)| len));
+        };
+        // SAFETY: null is rejected here; a non-null handle is live per contract.
+        let Some(this) = (unsafe { encoder.as_ref() }) else {
+            write(None);
+            return GAMUT_STATUS_NULL_ARGUMENT;
+        };
+        write(this.c2pa.get());
+        GAMUT_OK
+    })
+}
+
+/// Encodes interleaved 8-bit RGB samples to an AVIF file.
+///
+/// `samples_len` counts samples (`width * height * 3`). On `GAMUT_OK`, `*out`/`*out_len` hold a
+/// Rust-owned buffer to release with `gamut_bytes_free(*out, *out_len)`; on any other status they
+/// are `NULL`/`0` (whenever they are non-`NULL`). Returns `GAMUT_STATUS_NULL_ARGUMENT` for a
+/// `NULL` encoder, `samples`, `out` or `out_len`, `GAMUT_STATUS_INVALID_INPUT` when
+/// `samples_len` does not match the dimensions or a dimension is zero, and otherwise the
+/// encoder's own error status.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle; a non-`NULL` `samples` points to `samples_len`
+/// readable samples; `out` and `out_len` are `NULL` or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_encode_rgb8(
+    encoder: *const GamutAvifEncoder,
+    samples: *const u8,
+    samples_len: usize,
+    width: u32,
+    height: u32,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> GamutStatus {
+    unsafe {
+        GamutAvifEncoder::encode::<Rgb8>(encoder, samples, samples_len, width, height, out, out_len)
+    }
+}
+
+/// Encodes interleaved 8-bit RGBA samples (unassociated alpha unless
+/// `gamut_avif_encoder_set_alpha_mode` says otherwise) to an AVIF file with an alpha
+/// auxiliary. An input whose every alpha sample is 255 is fully opaque: its alpha is dropped
+/// and the file is the one `gamut_avif_encoder_encode_rgb8` writes for its colour, with no
+/// alpha auxiliary, unless `gamut_avif_encoder_set_opaque_alpha` keeps it. `samples_len`
+/// counts samples (`width * height * 4`); otherwise as `gamut_avif_encoder_encode_rgb8`.
+///
+/// # Safety
+///
+/// As `gamut_avif_encoder_encode_rgb8`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_encode_rgba8(
+    encoder: *const GamutAvifEncoder,
+    samples: *const u8,
+    samples_len: usize,
+    width: u32,
+    height: u32,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> GamutStatus {
+    unsafe {
+        GamutAvifEncoder::encode::<Rgba8>(
+            encoder,
+            samples,
+            samples_len,
+            width,
+            height,
+            out,
+            out_len,
+        )
+    }
+}
+
+/// Encodes 8-bit greyscale samples to a monochrome AVIF file. `samples_len` counts samples
+/// (`width * height`); otherwise as `gamut_avif_encoder_encode_rgb8`.
+///
+/// # Safety
+///
+/// As `gamut_avif_encoder_encode_rgb8`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_encode_gray8(
+    encoder: *const GamutAvifEncoder,
+    samples: *const u8,
+    samples_len: usize,
+    width: u32,
+    height: u32,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> GamutStatus {
+    unsafe {
+        GamutAvifEncoder::encode::<Gray8>(
+            encoder,
+            samples,
+            samples_len,
+            width,
+            height,
+            out,
+            out_len,
+        )
+    }
+}
+
+/// Encodes interleaved 16-bit RGB samples (full 16-bit scale), coded at the depth
+/// `gamut_avif_encoder_set_bit_depth` selects. `samples_len` counts samples
+/// (`width * height * 3`), and `samples` must be aligned for `uint16_t`
+/// (`GAMUT_STATUS_INVALID_INPUT` otherwise); otherwise as `gamut_avif_encoder_encode_rgb8`.
+///
+/// # Safety
+///
+/// As `gamut_avif_encoder_encode_rgb8`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_encode_rgb16(
+    encoder: *const GamutAvifEncoder,
+    samples: *const u16,
+    samples_len: usize,
+    width: u32,
+    height: u32,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> GamutStatus {
+    unsafe {
+        GamutAvifEncoder::encode::<Rgb16>(
+            encoder,
+            samples,
+            samples_len,
+            width,
+            height,
+            out,
+            out_len,
+        )
+    }
+}
+
+/// Encodes interleaved 16-bit RGBA samples (full 16-bit scale) with an alpha auxiliary. An
+/// input whose every alpha sample is 65535 is fully opaque: its alpha is dropped and the file is
+/// the one `gamut_avif_encoder_encode_rgb16` writes for its colour, with no alpha auxiliary,
+/// unless `gamut_avif_encoder_set_opaque_alpha` keeps it. Opacity is judged on the input
+/// samples, so an alpha of 65534 keeps the auxiliary even where it truncates to the coded
+/// maximum. `samples_len` counts samples (`width * height * 4`); otherwise as
+/// `gamut_avif_encoder_encode_rgb16`.
+///
+/// # Safety
+///
+/// As `gamut_avif_encoder_encode_rgb8`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_encode_rgba16(
+    encoder: *const GamutAvifEncoder,
+    samples: *const u16,
+    samples_len: usize,
+    width: u32,
+    height: u32,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> GamutStatus {
+    unsafe {
+        GamutAvifEncoder::encode::<Rgba16>(
+            encoder,
+            samples,
+            samples_len,
+            width,
+            height,
+            out,
+            out_len,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The entry points are called exactly as C calls them. The oracle is the Rust API each shim
+    //! wraps (same configuration ⇒ same bytes); where a setting shows only in the file's
+    //! structure, `AvifContainer` reads it.
+
+    use gamut::avif::AvifContainer;
+
+    use super::*;
+    use crate::gamut_bytes_free;
+
+    /// One `gamut_avif_encoder_encode_*` entry point, generic over its sample type.
+    type EncodeFn<S> = unsafe extern "C" fn(
+        *const GamutAvifEncoder,
+        *const S,
+        usize,
+        u32,
+        u32,
+        *mut *mut u8,
+        *mut usize,
+    ) -> GamutStatus;
+
+    /// Runs one C encode, copying the output out and releasing it through `gamut_bytes_free`.
+    fn c_encode<S>(
+        encoder: *const GamutAvifEncoder,
+        encode: EncodeFn<S>,
+        samples: &[S],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, GamutStatus> {
+        let mut out = ptr::null_mut();
+        let mut out_len = 0;
+        let status = unsafe {
+            encode(
+                encoder,
+                samples.as_ptr(),
+                samples.len(),
+                width,
+                height,
+                &mut out,
+                &mut out_len,
+            )
+        };
+        if status != GAMUT_OK {
+            assert!(
+                out.is_null() && out_len == 0,
+                "a failed encode returns no buffer"
+            );
+            return Err(status);
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(out, out_len) }.to_vec();
+        unsafe { gamut_bytes_free(out, out_len) };
+        Ok(bytes)
+    }
+
+    /// The same encode through the Rust API, statuses mapped as the boundary maps them.
+    fn rust_encode<P: Pixel>(
+        encoder: &AvifEncoder,
+        samples: &[P::Sample],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, GamutStatus>
+    where
+        AvifEncoder: EncodeImage<P>,
+    {
+        let image = Dimensions::new(width, height)
+            .and_then(|dims| ImageRef::<P>::new(samples, dims))
+            .map_err(|e| status_of(&e))?;
+        encoder.encode_to_vec(image).map_err(|e| status_of(&e))
+    }
+
+    /// A 4×4 gradient with `channels` interleaved channels and a varying last channel.
+    fn ramp8(channels: usize) -> Vec<u8> {
+        (0..16 * channels).map(|i| (i * 13 % 256) as u8).collect()
+    }
+
+    fn ramp16(channels: usize) -> Vec<u16> {
+        (0..16 * channels)
+            .map(|i| (i * 3331 % 65536) as u16)
+            .collect()
+    }
+
+    /// Encodes `samples` through the C handle `configure` builds and through the Rust encoder
+    /// `rust` describes, asserting the two agree byte for byte (or on the same error status).
+    fn assert_shim<P: Pixel>(
+        new: extern "C" fn() -> *mut GamutAvifEncoder,
+        configure: impl FnOnce(*mut GamutAvifEncoder),
+        rust: AvifEncoder,
+        encode: EncodeFn<P::Sample>,
+        samples: &[P::Sample],
+    ) -> Result<Vec<u8>, GamutStatus>
+    where
+        AvifEncoder: EncodeImage<P>,
+    {
+        let encoder = new();
+        configure(encoder);
+        let c = c_encode(encoder, encode, samples, 4, 4);
+        unsafe { gamut_avif_encoder_free(encoder) };
+        assert_eq!(c, rust_encode::<P>(&rust, samples, 4, 4));
+        c
+    }
+
+    extern "C" fn new_lossy_50() -> *mut GamutAvifEncoder {
+        gamut_avif_encoder_new_lossy(50)
+    }
+
+    #[test]
+    fn each_encode_entry_point_matches_its_rust_layout() {
+        let keep = |_| {};
+        let lossless = || AvifEncoder::new();
+        assert_shim::<Rgb8>(
+            gamut_avif_encoder_new,
+            keep,
+            lossless(),
+            gamut_avif_encoder_encode_rgb8,
+            &ramp8(3),
+        )
+        .unwrap();
+        assert_shim::<Rgba8>(
+            gamut_avif_encoder_new,
+            keep,
+            lossless(),
+            gamut_avif_encoder_encode_rgba8,
+            &ramp8(4),
+        )
+        .unwrap();
+        assert_shim::<Gray8>(
+            gamut_avif_encoder_new,
+            keep,
+            lossless(),
+            gamut_avif_encoder_encode_gray8,
+            &ramp8(1),
+        )
+        .unwrap();
+        assert_shim::<Rgb16>(
+            gamut_avif_encoder_new,
+            keep,
+            lossless(),
+            gamut_avif_encoder_encode_rgb16,
+            &ramp16(3),
+        )
+        .unwrap();
+        assert_shim::<Rgba16>(
+            gamut_avif_encoder_new,
+            keep,
+            lossless(),
+            gamut_avif_encoder_encode_rgba16,
+            &ramp16(4),
+        )
+        .unwrap();
+        let lossy = assert_shim::<Rgb8>(
+            new_lossy_50,
+            keep,
+            AvifEncoder::lossy(50),
+            gamut_avif_encoder_encode_rgb8,
+            &ramp8(3),
+        );
+        let lossless = assert_shim::<Rgb8>(
+            gamut_avif_encoder_new,
+            keep,
+            lossless(),
+            gamut_avif_encoder_encode_rgb8,
+            &ramp8(3),
+        );
+        assert_ne!(
+            lossy, lossless,
+            "the lossy constructor is not the lossless one"
+        );
+    }
+
+    /// The Rust `with_*` call a C setter value must be equivalent to.
+    type Builder = fn(AvifEncoder) -> AvifEncoder;
+
+    /// The input a setter test encodes: the one whose path the setting reaches.
+    #[derive(Clone, Copy)]
+    enum Layout {
+        Rgb8,
+        Rgba8,
+        Rgba16,
+    }
+
+    /// Asserts each `(C value, Rust builder)` pair produces the Rust encoder's bytes, and that
+    /// the values are not all one encode (so each setter is observable in the output).
+    fn assert_setter<T: Copy>(
+        set: unsafe extern "C" fn(*mut GamutAvifEncoder, T) -> GamutStatus,
+        cases: &[(T, Builder)],
+        layout: Layout,
+    ) {
+        let mut outputs = Vec::new();
+        for &(value, with) in cases {
+            let configure = |encoder| assert_eq!(unsafe { set(encoder, value) }, GAMUT_OK);
+            let rust = with(AvifEncoder::lossy(50));
+            outputs.push(match layout {
+                Layout::Rgb8 => assert_shim::<Rgb8>(
+                    new_lossy_50,
+                    configure,
+                    rust,
+                    gamut_avif_encoder_encode_rgb8,
+                    &ramp8(3),
+                ),
+                Layout::Rgba8 => assert_shim::<Rgba8>(
+                    new_lossy_50,
+                    configure,
+                    rust,
+                    gamut_avif_encoder_encode_rgba8,
+                    &ramp8(4),
+                ),
+                Layout::Rgba16 => assert_shim::<Rgba16>(
+                    new_lossy_50,
+                    configure,
+                    rust,
+                    gamut_avif_encoder_encode_rgba16,
+                    &ramp16(4),
+                ),
+            });
+        }
+        outputs.dedup();
+        assert_eq!(
+            outputs.len(),
+            cases.len(),
+            "every value encodes differently"
+        );
+    }
+
+    #[test]
+    fn matrix_setter_maps_h273_code_points() {
+        assert_setter(
+            gamut_avif_encoder_set_matrix,
+            &[
+                (0, |e| e.with_matrix(MatrixCoefficients::Identity)),
+                (1, |e| e.with_matrix(MatrixCoefficients::Bt709)),
+                (6, |e| e.with_matrix(MatrixCoefficients::Bt601)),
+                (9, |e| e.with_matrix(MatrixCoefficients::Bt2020Ncl)),
+            ],
+            Layout::Rgba8,
+        );
+    }
+
+    #[test]
+    fn primaries_setter_maps_h273_code_points() {
+        assert_setter(
+            gamut_avif_encoder_set_primaries,
+            &[
+                (1, |e| e.with_primaries(ColorPrimaries::Bt709)),
+                (9, |e| e.with_primaries(ColorPrimaries::Bt2020)),
+                (12, |e| e.with_primaries(ColorPrimaries::DisplayP3)),
+            ],
+            Layout::Rgba8,
+        );
+    }
+
+    #[test]
+    fn transfer_setter_maps_h273_code_points() {
+        assert_setter(
+            gamut_avif_encoder_set_transfer,
+            &[
+                (13, |e| e.with_transfer(TransferCharacteristics::Srgb)),
+                (16, |e| e.with_transfer(TransferCharacteristics::Pq)),
+                (18, |e| e.with_transfer(TransferCharacteristics::Hlg)),
+            ],
+            Layout::Rgba8,
+        );
+    }
+
+    #[test]
+    fn color_range_setter_maps_the_full_range_flag() {
+        assert_setter(
+            gamut_avif_encoder_set_color_range,
+            &[
+                (0, |e| e.with_color_range(ColorRange::Limited)),
+                (1, |e| e.with_color_range(ColorRange::Full)),
+            ],
+            Layout::Rgba8,
+        );
+    }
+
+    #[test]
+    fn chroma_setter_maps_each_constant() {
+        assert_setter(
+            gamut_avif_encoder_set_chroma,
+            &[
+                (GAMUT_CHROMA_SUBSAMPLING_444, |e| {
+                    e.with_chroma(ChromaSubsampling::Cs444)
+                }),
+                (GAMUT_CHROMA_SUBSAMPLING_422, |e| {
+                    e.with_chroma(ChromaSubsampling::Cs422)
+                }),
+                (GAMUT_CHROMA_SUBSAMPLING_420, |e| {
+                    e.with_chroma(ChromaSubsampling::Cs420)
+                }),
+                (GAMUT_CHROMA_SUBSAMPLING_400, |e| {
+                    e.with_chroma(ChromaSubsampling::Cs400)
+                }),
+            ],
+            // RGB, not RGBA: the RGBA path codes 4:4:4 whatever the chroma knob says.
+            Layout::Rgb8,
+        );
+    }
+
+    #[test]
+    fn bit_depth_setter_maps_bits() {
+        assert_setter(
+            gamut_avif_encoder_set_bit_depth,
+            &[
+                (8, |e| e.with_bit_depth(BitDepth::Eight)),
+                (10, |e| e.with_bit_depth(BitDepth::Ten)),
+                (12, |e| e.with_bit_depth(BitDepth::Twelve)),
+            ],
+            Layout::Rgba16,
+        );
+    }
+
+    #[test]
+    fn orientation_setter_maps_each_exif_value() {
+        assert_setter(
+            gamut_avif_encoder_set_orientation,
+            &[
+                (1, |e| e.with_orientation(Orientation::Identity)),
+                (2, |e| e.with_orientation(Orientation::FlipHorizontal)),
+                (3, |e| e.with_orientation(Orientation::Rotate180)),
+                (4, |e| e.with_orientation(Orientation::FlipVertical)),
+                (5, |e| e.with_orientation(Orientation::Transpose)),
+                (6, |e| e.with_orientation(Orientation::Rotate90Cw)),
+                (7, |e| e.with_orientation(Orientation::AntiTranspose)),
+                (8, |e| e.with_orientation(Orientation::Rotate90Ccw)),
+            ],
+            Layout::Rgba8,
+        );
+    }
+
+    /// A setter rebuilds the handle's encoder through a consuming `with_*` builder; the backend
+    /// registry must travel with it (DESIGN.md decision 4 rests on this). The fake backend
+    /// accepts every job, counts each `encode` through `ctx`, and fails it terminally, so the
+    /// built-in tail can never mask a dropped registry: the encode fails only if it ran.
+    #[test]
+    fn setter_after_push_backend_keeps_the_backend() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use gamut_codec_abi::{ABI_VERSION, EncodeConfig, ImageDesc, Status, WriteFn};
+
+        unsafe extern "C" fn accept(_: *mut c_void, _: *const EncodeConfig) -> Status {
+            Status::OK
+        }
+        unsafe extern "C" fn count_and_fail(
+            ctx: *mut c_void,
+            _: *const EncodeConfig,
+            _: *const ImageDesc,
+            _: WriteFn,
+            _: *mut c_void,
+        ) -> Status {
+            // SAFETY: `ctx` is the test's live `AtomicUsize`, which outlives the handle.
+            unsafe { &*ctx.cast_const().cast::<AtomicUsize>() }.fetch_add(1, Ordering::SeqCst);
+            Status(-2)
+        }
+        let vtable = EncoderVTable {
+            abi_version: ABI_VERSION,
+            supports: Some(accept),
+            encode: Some(count_and_fail),
+            destroy: None,
+        };
+        let encodes = AtomicUsize::new(0);
+        let ctx = ptr::from_ref(&encodes).cast_mut().cast();
+
+        let encoder = gamut_avif_encoder_new();
+        assert_eq!(
+            unsafe { gamut_avif_encoder_push_backend(encoder, &vtable, ctx) },
+            GAMUT_OK
+        );
+        assert_eq!(
+            unsafe { gamut_avif_encoder_set_orientation(encoder, 8) },
+            GAMUT_OK
+        );
+        let result = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4);
+        unsafe { gamut_avif_encoder_free(encoder) };
+
+        assert_eq!(result, Err(GAMUT_STATUS_INVALID_INPUT));
+        assert_eq!(encodes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn alpha_quality_setter_forwards_the_quality() {
+        // Both values sit away from the handle's colour quality (50) and from each other, so
+        // the forwarded value, not merely the call, decides the alpha auxiliary's bytes.
+        assert_setter(
+            gamut_avif_encoder_set_alpha_quality,
+            &[
+                (10, |e| e.with_alpha_quality(10)),
+                (90, |e| e.with_alpha_quality(90)),
+            ],
+            Layout::Rgba8,
+        );
+    }
+
+    #[test]
+    fn alpha_mode_setter_maps_each_constant() {
+        assert_setter(
+            gamut_avif_encoder_set_alpha_mode,
+            &[
+                (GAMUT_AVIF_ALPHA_UNASSOCIATED, |e| {
+                    e.with_alpha_mode(AlphaMode::Unassociated)
+                }),
+                (GAMUT_AVIF_ALPHA_PREMULTIPLIED, |e| {
+                    e.with_alpha_mode(AlphaMode::Premultiplied)
+                }),
+                (GAMUT_AVIF_ALPHA_PREMULTIPLY_ON_ENCODE, |e| {
+                    e.with_alpha_mode(AlphaMode::PremultiplyOnEncode)
+                }),
+                (GAMUT_AVIF_ALPHA_CLEAN_ON_ENCODE, |e| {
+                    e.with_alpha_mode(AlphaMode::CleanOnEncode)
+                }),
+            ],
+            Layout::Rgba8,
+        );
+    }
+
+    #[test]
+    fn opaque_alpha_setter_keeps_an_opaque_inputs_alpha_auxiliary() {
+        // Only a fully opaque input reaches the flag: any other alpha keeps its auxiliary
+        // regardless, which is why `assert_setter`'s varying-alpha ramp cannot test it.
+        let opaque: Vec<u8> = ramp8(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b, _]| [r, g, b, 255])
+            .collect();
+        let has_alpha = |keep: Option<u8>| {
+            let configure = |encoder| {
+                if let Some(keep) = keep {
+                    assert_eq!(
+                        unsafe { gamut_avif_encoder_set_opaque_alpha(encoder, keep) },
+                        GAMUT_OK
+                    );
+                }
+            };
+            let opaque_alpha = match keep {
+                Some(GAMUT_AVIF_OPAQUE_ALPHA_KEEP) => OpaqueAlpha::Keep,
+                _ => OpaqueAlpha::Drop,
+            };
+            let rust = AvifEncoder::lossy(50).with_opaque_alpha(opaque_alpha);
+            let file = assert_shim::<Rgba8>(
+                new_lossy_50,
+                configure,
+                rust,
+                gamut_avif_encoder_encode_rgba8,
+                &opaque,
+            )
+            .unwrap();
+            let container = AvifContainer::parse(&file).unwrap();
+            let image = container.image();
+            image
+                .alpha_auxiliary_of(image.primary_item().id())
+                .is_some()
+        };
+        assert!(
+            has_alpha(Some(GAMUT_AVIF_OPAQUE_ALPHA_KEEP)),
+            "the setter keeps the auxiliary"
+        );
+        assert!(!has_alpha(None), "by default an opaque alpha is dropped");
+        assert!(
+            !has_alpha(Some(GAMUT_AVIF_OPAQUE_ALPHA_DROP)),
+            "drop is the default"
+        );
+    }
+
+    #[test]
+    fn metadata_setters_forward_their_bytes() {
+        let bytes = b"MM\0\x2a\0\0\0\x08\0\0";
+        type BytesSetter =
+            unsafe extern "C" fn(*mut GamutAvifEncoder, *const u8, usize) -> GamutStatus;
+        type BytesBuilder = fn(AvifEncoder, &[u8]) -> AvifEncoder;
+        let cases: [(BytesSetter, BytesBuilder); 3] = [
+            (gamut_avif_encoder_set_icc_profile, |e, b| {
+                e.with_icc_profile(b)
+            }),
+            (gamut_avif_encoder_set_exif, |e, b| e.with_exif(b)),
+            (gamut_avif_encoder_set_xmp, |e, b| e.with_xmp(b)),
+        ];
+        let mut outputs = Vec::new();
+        for (set, with) in cases {
+            let configure = |encoder| {
+                assert_eq!(
+                    unsafe { set(encoder, bytes.as_ptr(), bytes.len()) },
+                    GAMUT_OK
+                )
+            };
+            let rust = with(AvifEncoder::new(), bytes);
+            outputs.push(assert_shim::<Rgb8>(
+                gamut_avif_encoder_new,
+                configure,
+                rust,
+                gamut_avif_encoder_encode_rgb8,
+                &ramp8(3),
+            ));
+            // `NULL` with a zero length is the empty payload, not an error.
+            let configure = |encoder| assert_eq!(unsafe { set(encoder, ptr::null(), 0) }, GAMUT_OK);
+            let rust = with(AvifEncoder::new(), &[]);
+            // Only agreement matters here: an empty payload may be one the encoder refuses.
+            let _ = assert_shim::<Rgb8>(
+                gamut_avif_encoder_new,
+                configure,
+                rust,
+                gamut_avif_encoder_encode_rgb8,
+                &ramp8(3),
+            );
+        }
+        outputs.dedup();
+        assert_eq!(outputs.len(), 3, "each payload lands in its own box");
+    }
+
+    /// The handle's C2PA slot report as `gamut_avif_encoder_c2pa_slot` gives it.
+    fn c2pa_slot(encoder: *const GamutAvifEncoder) -> Option<core::ops::Range<u64>> {
+        let (mut present, mut offset, mut len) = (true, usize::MAX, usize::MAX);
+        assert_eq!(
+            unsafe { gamut_avif_encoder_c2pa_slot(encoder, &mut present, &mut offset, &mut len) },
+            GAMUT_OK
+        );
+        if present {
+            Some(offset as u64..(offset + len) as u64)
+        } else {
+            assert_eq!((offset, len), (0, 0), "an absent slot has no range");
+            None
+        }
+    }
+
+    #[test]
+    fn c2pa_setters_and_slot_match_encode_with_report() {
+        type Configure = fn(*mut GamutAvifEncoder);
+        let cases: [(Configure, Builder); 4] = [
+            (
+                |e| {
+                    assert_eq!(
+                        unsafe { gamut_avif_encoder_set_c2pa_reserved(e, 96) },
+                        GAMUT_OK
+                    )
+                },
+                |e| e.with_c2pa_reserved(96).unwrap(),
+            ),
+            (
+                |e| {
+                    let store = b"a-signed-manifest-store";
+                    let status = unsafe { gamut_avif_encoder_set_c2pa(e, store.as_ptr(), 23) };
+                    assert_eq!(status, GAMUT_OK);
+                },
+                |e| e.with_c2pa(b"a-signed-manifest-store"),
+            ),
+            // `NULL` with a zero length is the empty store: a present, zero-length slot.
+            (
+                |e| {
+                    assert_eq!(
+                        unsafe { gamut_avif_encoder_set_c2pa(e, ptr::null(), 0) },
+                        GAMUT_OK
+                    )
+                },
+                |e| e.with_c2pa(&[]),
+            ),
+            (|_| {}, |e| e),
+        ];
+        let rgb = ramp8(3);
+        let mut slots = Vec::new();
+        for (configure, with) in cases {
+            let encoder = gamut_avif_encoder_new();
+            configure(encoder);
+            let c = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &rgb, 4, 4).unwrap();
+            let slot = c2pa_slot(encoder);
+            unsafe { gamut_avif_encoder_free(encoder) };
+
+            let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(4, 4).unwrap()).unwrap();
+            let mut rust = Vec::new();
+            let report = with(AvifEncoder::new())
+                .encode_with_report(image, &mut rust)
+                .unwrap();
+            assert_eq!(c, rust);
+            assert_eq!(slot, report.c2pa);
+            slots.push(slot);
+        }
+        // Each slot is the one its setter asked for, read back out of the C output.
+        let len = |slot: &Option<core::ops::Range<u64>>| slot.as_ref().map(|r| r.end - r.start);
+        assert_eq!(len(&slots[0]), Some(96));
+        assert_eq!(len(&slots[1]), Some(23));
+        assert_eq!(len(&slots[2]), Some(0));
+        assert_eq!(slots[3], None);
+    }
+
+    #[test]
+    fn c2pa_slot_reports_only_the_last_successful_encode() {
+        let encoder = gamut_avif_encoder_new();
+        assert_eq!(c2pa_slot(encoder), None, "no encode has run yet");
+        unsafe {
+            assert_eq!(gamut_avif_encoder_set_c2pa_reserved(encoder, 64), GAMUT_OK);
+        }
+        let first = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4).unwrap();
+        let slot = c2pa_slot(encoder).expect("the reserved slot is reported");
+        assert_eq!(
+            first.get(slot.start as usize..slot.end as usize),
+            Some(&[0; 64][..]),
+            "the slot is the reserved zeros"
+        );
+        // Reading the report does not consume it, and a setting alone does not change it.
+        assert_eq!(c2pa_slot(encoder), Some(slot.clone()));
+        // A reservation below 8 bytes is refused when it is set, leaving the 64-byte one.
+        unsafe {
+            assert_eq!(
+                gamut_avif_encoder_set_c2pa_reserved(encoder, 4),
+                GAMUT_STATUS_INVALID_INPUT
+            );
+        }
+        assert_eq!(c2pa_slot(encoder), Some(slot.clone()));
+        let again = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4).unwrap();
+        assert_eq!(again, first, "the refused reservation changed nothing");
+        // A failed encode (samples that do not fill the dimensions) clears it, as does a
+        // boundary failure.
+        assert_eq!(
+            c_encode(
+                encoder,
+                gamut_avif_encoder_encode_rgb8,
+                &ramp8(3)[1..],
+                4,
+                4
+            ),
+            Err(GAMUT_STATUS_INVALID_INPUT)
+        );
+        assert_eq!(c2pa_slot(encoder), None);
+        unsafe {
+            assert_eq!(gamut_avif_encoder_set_c2pa_reserved(encoder, 64), GAMUT_OK);
+        }
+        c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4).unwrap();
+        let mut out_len = 0;
+        let status = unsafe {
+            gamut_avif_encoder_encode_rgb8(
+                encoder,
+                ramp8(3).as_ptr(),
+                48,
+                4,
+                4,
+                ptr::null_mut(),
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, GAMUT_STATUS_NULL_ARGUMENT);
+        assert_eq!(c2pa_slot(encoder), None);
+        unsafe { gamut_avif_encoder_free(encoder) };
+    }
+
+    #[test]
+    fn c2pa_entry_points_reject_null_arguments() {
+        let encoder = gamut_avif_encoder_new();
+        let (mut present, mut offset, mut len) = (true, 1, 1);
+        unsafe {
+            assert_eq!(
+                gamut_avif_encoder_set_c2pa(encoder, ptr::null(), 1),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_c2pa(ptr::null_mut(), ptr::null(), 0),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_c2pa_reserved(ptr::null_mut(), 64),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            // Each null out-param is refused on its own, leaving the others untouched.
+            assert_eq!(
+                gamut_avif_encoder_c2pa_slot(encoder, ptr::null_mut(), &mut offset, &mut len),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_c2pa_slot(encoder, &mut present, ptr::null_mut(), &mut len),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_c2pa_slot(encoder, &mut present, &mut offset, ptr::null_mut()),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!((present, offset, len), (true, 1, 1));
+            // A null handle clears the out-params.
+            assert_eq!(
+                gamut_avif_encoder_c2pa_slot(ptr::null(), &mut present, &mut offset, &mut len),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!((present, offset, len), (false, 0, 0));
+        }
+        // A rejected store leaves the encoder without a slot.
+        c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4).unwrap();
+        assert_eq!(c2pa_slot(encoder), None);
+        unsafe { gamut_avif_encoder_free(encoder) };
+    }
+
+    #[test]
+    fn setters_reject_null_handles_and_unmapped_values() {
+        let encoder = gamut_avif_encoder_new();
+        unsafe {
+            // Unmapped values, each with its documented status.
+            assert_eq!(
+                gamut_avif_encoder_set_matrix(encoder, 3),
+                GAMUT_STATUS_UNSUPPORTED
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_primaries(encoder, 3),
+                GAMUT_STATUS_UNSUPPORTED
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_transfer(encoder, 3),
+                GAMUT_STATUS_UNSUPPORTED
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_bit_depth(encoder, 9),
+                GAMUT_STATUS_UNSUPPORTED
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_color_range(encoder, 2),
+                GAMUT_STATUS_INVALID_INPUT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_chroma(encoder, 4),
+                GAMUT_STATUS_INVALID_INPUT
+            );
+            for exif in [0, 9] {
+                assert_eq!(
+                    gamut_avif_encoder_set_orientation(encoder, exif),
+                    GAMUT_STATUS_INVALID_INPUT
+                );
+            }
+            assert_eq!(
+                gamut_avif_encoder_set_alpha_mode(encoder, 4),
+                GAMUT_STATUS_INVALID_INPUT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_opaque_alpha(encoder, 2),
+                GAMUT_STATUS_INVALID_INPUT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_exif(encoder, ptr::null(), 1),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_xmp(encoder, ptr::null(), 1),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_icc_profile(encoder, ptr::null(), 1),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+        }
+        // A rejected value leaves the encoder as it was.
+        assert_eq!(
+            c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4),
+            rust_encode::<Rgb8>(&AvifEncoder::new(), &ramp8(3), 4, 4)
+        );
+        unsafe { gamut_avif_encoder_free(encoder) };
+
+        // A null handle is reported first, whatever the value.
+        let null = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                gamut_avif_encoder_set_matrix(null, 3),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_primaries(null, 1),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_transfer(null, 13),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_bit_depth(null, 10),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_color_range(null, 2),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_chroma(null, 0),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_orientation(null, 1),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_alpha_quality(null, 90),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_alpha_mode(null, GAMUT_AVIF_ALPHA_PREMULTIPLIED),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_opaque_alpha(null, GAMUT_AVIF_OPAQUE_ALPHA_KEEP),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_exif(null, ptr::null(), 0),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_xmp(null, ptr::null(), 0),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_icc_profile(null, ptr::null(), 0),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+        }
+    }
+
+    #[test]
+    fn encode_boundary_validates_before_encoding() {
+        let encoder = gamut_avif_encoder_new();
+        let rgb = ramp8(3);
+        let mut out = ptr::NonNull::<u8>::dangling().as_ptr();
+        let mut out_len = 1;
+        unsafe {
+            // Null out-params are rejected without touching the other one.
+            assert_eq!(
+                gamut_avif_encoder_encode_rgb8(
+                    encoder,
+                    rgb.as_ptr(),
+                    rgb.len(),
+                    4,
+                    4,
+                    ptr::null_mut(),
+                    &mut out_len
+                ),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_encode_rgb8(
+                    encoder,
+                    rgb.as_ptr(),
+                    rgb.len(),
+                    4,
+                    4,
+                    &mut out,
+                    ptr::null_mut()
+                ),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            // Every other failure clears both out-params first.
+            assert_eq!(
+                gamut_avif_encoder_encode_rgb8(
+                    ptr::null(),
+                    rgb.as_ptr(),
+                    rgb.len(),
+                    4,
+                    4,
+                    &mut out,
+                    &mut out_len
+                ),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert!(out.is_null() && out_len == 0);
+        }
+        assert_eq!(
+            c_encode::<u8>(encoder, gamut_avif_encoder_encode_rgb8, &[], 4, 4),
+            Err(GAMUT_STATUS_INVALID_INPUT)
+        );
+        let mut no_samples = (ptr::null_mut(), 0);
+        assert_eq!(
+            unsafe {
+                gamut_avif_encoder_encode_rgb8(
+                    encoder,
+                    ptr::null(),
+                    48,
+                    4,
+                    4,
+                    &mut no_samples.0,
+                    &mut no_samples.1,
+                )
+            },
+            GAMUT_STATUS_NULL_ARGUMENT
+        );
+        // The length must be exactly width * height * channels, and the image non-empty.
+        assert_eq!(
+            c_encode(encoder, gamut_avif_encoder_encode_rgb8, &rgb[1..], 4, 4),
+            Err(GAMUT_STATUS_INVALID_INPUT)
+        );
+        assert_eq!(
+            c_encode(encoder, gamut_avif_encoder_encode_rgb8, &rgb, 4, 0),
+            Err(GAMUT_STATUS_INVALID_INPUT)
+        );
+        // A misaligned `uint16_t *` is refused, not read.
+        let wide = ramp16(4);
+        let misaligned = unsafe { wide.as_ptr().cast::<u8>().add(1).cast::<u16>() };
+        let mut result = (ptr::null_mut(), 0);
+        assert_eq!(
+            unsafe {
+                gamut_avif_encoder_encode_rgb16(
+                    encoder,
+                    misaligned,
+                    48,
+                    4,
+                    4,
+                    &mut result.0,
+                    &mut result.1,
+                )
+            },
+            GAMUT_STATUS_INVALID_INPUT
+        );
+        // An encoder error surfaces with its own status: 4:0:0 on the lossy YCbCr path.
+        let lossy = gamut_avif_encoder_new_lossy(50);
+        assert_eq!(
+            unsafe { gamut_avif_encoder_set_chroma(lossy, GAMUT_CHROMA_SUBSAMPLING_400) },
+            GAMUT_OK
+        );
+        assert_eq!(
+            c_encode(lossy, gamut_avif_encoder_encode_rgb8, &rgb, 4, 4),
+            rust_encode::<Rgb8>(
+                &AvifEncoder::lossy(50).with_chroma(ChromaSubsampling::Cs400),
+                &rgb,
+                4,
+                4
+            )
+        );
+        assert!(c_encode(lossy, gamut_avif_encoder_encode_rgb8, &rgb, 4, 4).is_err());
+        unsafe {
+            gamut_avif_encoder_free(lossy);
+            gamut_avif_encoder_free(encoder);
+        }
+    }
+}
