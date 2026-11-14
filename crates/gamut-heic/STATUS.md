@@ -56,6 +56,9 @@ including Apple VideoToolbox, which wants the raw `hvcC` and the length-prefixed
 conversion — is tabulated in the crate docs. Still parsing/classification only — the RBSP payloads
 stay opaque (decode is S3 / issue #18).
 
+The S3–S7 paragraphs from here record each slice as it was delivered, under the names it shipped
+with; the "Since issue #1086" paragraph and the ledger tables state the current surface.
+
 **Implemented (S3).** `HevcDecoder` (`src/decode.rs`) is the pluggable HEVC-intra codestream hook —
 object-safe and byte-slice-shaped for FFI adaptation — that a caller implements over a platform
 decoder. Around it, `HeifImage::decode_item_planar` resolves item derivation (coded → hook;
@@ -286,8 +289,8 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | `Hevc` binding (`gamut_heif::Codestream`: `hvc1`/`hev1`, `hvcC`, still-IRAP check, monochrome alpha, BT.601-limited when no `colr`) and `HeifDecoder` (`DecodeImage<Rgba8>`/`<Rgba16>`, `decode_planar`, `metadata`, `with_limits`, `with_chroma_upsampling`; nearest upsampling by default) — `src/decoder.rs` | #1086 | ✅ | #1086 |
 | Planar decode surface `decode_item_planar` (coded → hook; still-IRAP validated first) | 14496-15; H.265 | ✅ | S3 |
 | `grid`/`iden` derived-image assembly to planes (`iovl` on the RGBA surface); cycle-/depth-limited, checked | 23008-12 §6.6.2 | ✅ | S3 |
-| RGBA presentation surface `decode_item_rgba8`/`decode_primary_rgba8` (colour + alpha + transforms) | 23008-12; H.273 | ✅ | S3 |
-| High-bit-depth presentation surface `decode_item_rgba16`/`decode_primary_rgba16` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
+| RGBA presentation surface — `HeifDecoder`'s `DecodeImage<Rgba8>`, any item through `decode_item_rgba8::<Hevc>` (colour + alpha + transforms; `decode_primary_rgba8` before #1086) | 23008-12; H.273 | ✅ | S3 |
+| High-bit-depth presentation surface — `HeifDecoder`'s `DecodeImage<Rgba16>`, any item through `decode_item_rgba16::<Hevc>` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
 | Colour conversion: BT.709 (1), BT.601 / BT.470 B,G (5/6), unspecified (2, presented as BT.601 since `gamut-heif`), BT.2020 NCL (9) via `gamut-color`, identity (0) GBR, monochrome; missing-`colr` default BT.601 limited | H.273; MIAF | ✅ | S3/S6 |
 | Sample-scale contract: every surface carries samples over its type's full range; the coded depth is read from the planar surface / `pixi`, not the buffer | H.273 | ✅ | S6 |
 | Nearest-neighbour co-sited chroma upsampling (4:2:0 / 4:2:2 → 4:4:4), `HeifDecoder`'s default; libavif's bilinear filter via `with_chroma_upsampling(Interpolated)` | 23008-12 | ✅ | S3 / #1086 |
