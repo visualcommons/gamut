@@ -269,7 +269,7 @@ impl HevcConfig {
     ///
     /// Emitting nothing is valid and not an error: an `hev1` record may carry its parameter sets
     /// inband in the item payload instead (see
-    /// [`HeifItem::hevc_inband_parameter_sets_allowed`](crate::HeifItem::hevc_inband_parameter_sets_allowed)).
+    /// [`HeifContainer::hevc_inband_parameter_sets_allowed`](crate::HeifContainer::hevc_inband_parameter_sets_allowed)).
     ///
     /// # Example
     ///

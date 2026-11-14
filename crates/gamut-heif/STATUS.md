@@ -1,7 +1,7 @@
 # gamut-heif — implementation status
 
 The shared HEIF/MIAF still-image layer (issue #1078). Rows are components; the codec crates
-(`gamut-avif`, `gamut-heic`) move onto it in their own issues.
+bind onto it — `gamut-avif` with `Av1` (#1085), `gamut-heic` with `Hevc` (#1086).
 
 **Status:** ✅ = implemented · ☐ = deferred · **OOS** = permanently out of scope.
 

@@ -282,13 +282,6 @@ exclude_re = [
     # accessors' shifts ARE killed by `decodes_flag_and_attribute_bits`.)
     '^crates/gamut-icc/src/header\.rs:169:25: replace << with >> in ProfileHeader::is_embedded$',
     '^crates/gamut-icc/src/header\.rs:183:30: replace << with >> in ProfileHeader::is_transparency$',
-    # gamut-heic `HevcDecoder::supports` is a *defaulted trait method* whose body already is
-    # `true` (the documented "I will attempt anything" default that keeps every pre-registry
-    # implementation compiling, issue #273). The `-> true` replacement is therefore byte-identical
-    # to the real body — provably equivalent and unkillable. The registry's *use* of the probe (push
-    # order, skip-on-false, short-circuit) is fully covered by `tests/backend.rs`, and the overriding
-    # implementations' `supports` mutants are not excluded.
-    '^crates/gamut-heic/src/decode\.rs:108:9: replace HevcDecoder::supports -> bool with true$',
     # gamut-avif `AvifEncoder::lossless` is again `Self::default()` (#1085): the default
     # configuration *is* lossless, and `Default::default` builds the encoder itself. While
     # `lossless` built the struct and `Default` called it, the replacement recursed; once the
@@ -628,7 +621,7 @@ exclude_re = [
     # its low 8 bits are always zero and never overlap the freshly-read byte (0..=255). Disjoint
     # operands ⇒ `|` is identical to `^`; the `| -> ^` mutant is provably equivalent (same shape as
     # the gamut-ifd `Value::decode` / gamut-iptc `IimBlock::parse` byte-assembly entries above).
-    '^crates/gamut-heic/src/hvcc\.rs:480:49: replace \| with \^ in Reader<.a>::u48$',
+    '^crates/gamut-heic/src/hvcc\.rs:435:49: replace \| with \^ in Reader<.a>::u48$',
     # `NalHeader::parse` (nal.rs) packs `nuh_layer_id` from two disjoint bit fields:
     # `(u16::from(b0 & 0x01) << 5) | u16::from(b1 >> 3)`. The left operand contributes only bit 5
     # (0 or 32); the right only bits 0..=4 (`b1 >> 3` is 0..=31). The operands never share a bit, so

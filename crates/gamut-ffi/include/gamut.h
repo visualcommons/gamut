@@ -109,7 +109,7 @@ typedef struct GamutAvifEncoder GamutAvifEncoder;
 typedef struct GamutAvifImage GamutAvifImage;
 
 /**
- * Opaque handle over the HEIC HEVC-decode backend registry (push order).
+ * Opaque handle over a `gamut::heic::HeifDecoder` and its HEVC backend registry (push order).
  */
 typedef struct GamutHeicDecoder GamutHeicDecoder;
 

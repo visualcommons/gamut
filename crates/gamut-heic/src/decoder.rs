@@ -108,7 +108,9 @@ impl Codestream for Hevc {
         config.validate_still_payload(payload)
     }
 
-    /// [`UNSIGNALLED_COLOUR`]: BT.601 at limited range, whatever the codestream signals.
+    /// BT.601 matrix coefficients at limited range (primaries and transfer unspecified), whatever
+    /// the codestream signals: with no `nclx` the matrix is undefined and libheif assumes BT.601,
+    /// and the HEVC VUI `video_full_range_flag` defaults to 0. The SPS VUI is not read.
     fn signalled_colour(_config: &HevcConfig, _payload: &[u8]) -> Result<Cicp> {
         Ok(UNSIGNALLED_COLOUR)
     }

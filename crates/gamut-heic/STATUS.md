@@ -18,6 +18,17 @@ matrix set, retrofitted **additively** onto the S3 pipeline); **S7** = the C2PA 
 locator slice (delivered — issue #429 under the #239 epic: `src/c2pa.rs`, plus the reporting shape
 that `gamut inspect` prints from, issue #448).
 
+**Since issue #1086** the crate is the HEVC binding over [`gamut-heif`](../gamut-heif/STATUS.md):
+the role-typed view (`HeifImage`/`HeifItem`), the derivation walk, the decode limits, the RGBA
+presentation and the C2PA summary that S1, S3, S6 and S7 below delivered here now live there,
+shared with `gamut-avif`, and are re-exported. What stays here is the HEVC side — the `Hevc`
+binding, `HeifDecoder` (`DecodeImage<Rgba8>`/`<Rgba16>`, `decode_planar`, `metadata`), the
+`HevcCodestreamDecoder` backend trait in a `gamut-codec-abi` `Registry` (which replaced
+`HevcDecoders` and its `BACKEND_DECLINED` sentinel: `supports` is the only fall-through),
+`AbiHevcDecoder` (sizing its planes per call from the SPS), `hvcC`, the NAL layer and
+`HeifContainer`. The rows below keep the slice that first delivered each component; where a
+component now lives in `gamut-heif`, its row is that crate's to keep true.
+
 This crate builds on [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md): the box grammar, item model,
 property/reference parsing, and motion-photo *tolerance* already ship there. This ledger mirrors
 that finalized disposition rather than contradicting it — a ✅ here is the HEIF-specific layer
@@ -226,7 +237,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Each box's position relative to the first `mdat` or `moov` reported as a positional fact, never a verdict (`C2paBoxPosition`) | C2PA 2.4 §A.5.3 | ✅ | S7 (#448) |
 | Rendering split for a host that caps a terminal report (`summary_lines`, `detail_lines`, `detail_line_count`) while every word stays pinned in this crate | — | ✅ | S7 (#448) |
 | Store bounding is `LBox`-only and content-dependent (`LBox` validity alone cannot separate a store bound from a plausible interior length). Two routes close it: assert the `jumb` `TBox` — traceable to §A.3.9/§15.12.3.2 but only as a JPEG XL aside, so it is a maintainer call because it narrows what is reported — or confirm the store by §11.1.4.2's JUMBF type UUID, which needs 19566-5's Description Box layout. A `c2pa-rs` oracle fixture would settle either empirically | C2PA 2.4 §A.3.9, §11.1.4.2, §A.5.3; ISO/IEC 19566-5 (not vendored) | ☐ | #239 oracle |
-| C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` (the store lives in a top-level `uuid` box outside the item model `HeifImage::blocks` reads; a caller appends `MetadataBlock::C2pa(HeifContainer::c2pa().bytes)` itself) | C2PA 2.4 §A.5 | ☐ | later |
+| C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` (the store lives in a top-level `uuid` box outside the item model `HeifDecoder::metadata` reads; a caller appends `MetadataBlock::C2pa(HeifContainer::c2pa().bytes)` itself) | C2PA 2.4 §A.5 | ☐ | later |
 | C2PA validation: JUMBF interior parse, `c2pa.hash.bmff.v3` hard binding, signature/trust verification | C2PA 2.4 §18.6, §A.5.6 | ☐ | user / #239 |
 | `ftyp` brands + `is_hevc_still` (`heic`/`heix`/`heim`/`heis`, or `mif1`+`hvcC` primary) | 23008-12; `references/heif` §7 | ✅ | S1 |
 | Sequence brands `msf1`/`hevc`/`hevx` (image sequences) | `references/heif` §7 | OOS | OOS |
@@ -251,14 +262,14 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | `iden` identity derived item recognised (kind); source via `dimg` | 23008-12 §6.6.2.1 | ✅ | S1 |
 | Entity groups + `altr` alternatives lens | 14496-12; MIAF | ✅ | S1 |
 | Exif `ExifDataBlock` lens: `HeifItem::exif_tiff_stream` applies the 4-byte `exif_tiff_header_offset` (delegating to `gamut_isobmff::Item::exif_tiff_stream` since #872, the lens `gamut-avif` shares) and yields the TIFF stream (`II`/`MM`); `HeifItem::icc_profile` yields the `rICC`/`prof` bytes regardless of `nclx` order | 23008-12 §A.2.1; `references/heif` §9 | ✅ | #420 |
-| Decoded Exif/XMP/ICC bytes → the `gamut-metadata` facade: `HeifImage` implements its `TypedMetadata` trait (#628) — `blocks` (`MetadataBlock`s) and `metadata` (`Metadata`), both returning `gamut_metadata::MetadataError`, a locate failure as `MetadataError::Core` carrying this crate's `Error` — behind the opt-in `metadata` feature (a normal, optional dependency). Pinned by typed extraction from an authored fixture at offsets 0 and 6. **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no HEIF reader), so "exiv2 reads the items out of the HEIC" is untested; the item bytes are pinned byte-exact against libheif (`tests/conformance.rs`) and the leaf crates pin the payloads against exiv2 (#510) | 23008-12 §A; issue #420 | ✅ | #420 |
+| Decoded Exif/XMP/ICC bytes → the `gamut-metadata` facade: `HeifDecoder::metadata` returns them as a `RawMetadata` (a locate failure as this crate's `Error`), whose `TypedMetadata` impl — re-exported behind the opt-in `metadata` feature (a normal, optional dependency) — gives `blocks` and `metadata` (#1086; `HeifImage` implemented the trait itself before, #628). Pinned by typed extraction from an authored fixture at offsets 0 and 6. **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no HEIF reader), so "exiv2 reads the items out of the HEIC" is untested; the item bytes are pinned byte-exact against libheif (`tests/conformance.rs`) and the leaf crates pin the payloads against exiv2 (#510) | 23008-12 §A; issue #420 | ✅ | #420 |
 | Protected / `uri ` items; external data references | 23008-12 | OOS | OOS |
 
 ## C. HEVC configuration & NAL layer (14496-15 · H.265)
 
 | Component | Spec | Status | Slice |
 | --- | --- | --- | --- |
-| Typed `hvcC` HEVCDecoderConfigurationRecord parse (profile/tier/level, arrays) — `HevcConfig::parse` (`src/hvcc.rs`), reached via `HeifItem::hevc_config` | 14496-15 §8.3.3.1; `references/heif` §1 | ✅ | S2 |
+| Typed `hvcC` HEVCDecoderConfigurationRecord parse (profile/tier/level, arrays) — `HevcConfig::parse` (`src/hvcc.rs`), reached via `HeifContainer::hevc_config` | 14496-15 §8.3.3.1; `references/heif` §1 | ✅ | S2 |
 | Item payload → length-prefixed NAL unit split (`lengthSizeMinusOne`) — `iter_nal_units`/`NalUnitIter` (`src/nal.rs`) | 14496-15 §8.3.2; `references/heif` §2 | ✅ | S2 |
 | NAL unit header classify (VPS/SPS/PPS/SEI/IRAP) + still-image IRAP constraint — `NalUnitType`/`NalHeader` (`src/nal.rs`), `HevcConfig::validate_still_payload` | H.265 §7.3.1.2; `references/heif` §3 | ✅ | S2 |
 | Annex-B conversion for a downstream decoder — `HevcConfig::annex_b` (`src/hvcc.rs`) | 14496-15 §8.3.2 | ✅ | S2 |
@@ -271,38 +282,40 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 
 | Component | Spec | Status | Slice |
 | --- | --- | --- | --- |
-| Pluggable codestream-decoder hook — `HevcDecoder` trait + `DecodedFrame` contract (`src/decode.rs`), object-safe & FFI-adaptable | #238 | ✅ | S3 |
+| Pluggable codestream-decoder backend — `HevcCodestreamDecoder` trait (required `supports` + `decode_still`, `src/backend.rs`) over `gamut-heif`'s `DecodedFrame` contract, object-safe & FFI-adaptable | #238 / #1086 | ✅ | S3 |
+| `Hevc` binding (`gamut_heif::Codestream`: `hvc1`/`hev1`, `hvcC`, still-IRAP check, monochrome alpha, BT.601-limited when no `colr`) and `HeifDecoder` (`DecodeImage<Rgba8>`/`<Rgba16>`, `decode_planar`, `metadata`, `with_limits`, `with_chroma_upsampling`; nearest upsampling by default) — `src/decoder.rs` | #1086 | ✅ | #1086 |
 | Planar decode surface `decode_item_planar` (coded → hook; still-IRAP validated first) | 14496-15; H.265 | ✅ | S3 |
 | `grid`/`iden` derived-image assembly to planes (`iovl` on the RGBA surface); cycle-/depth-limited, checked | 23008-12 §6.6.2 | ✅ | S3 |
 | RGBA presentation surface `decode_item_rgba8`/`decode_primary_rgba8` (colour + alpha + transforms) | 23008-12; H.273 | ✅ | S3 |
 | High-bit-depth presentation surface `decode_item_rgba16`/`decode_primary_rgba16` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
-| Colour conversion: BT.709 (1), BT.601 / BT.470 B,G (5/6), BT.2020 NCL (9) via `gamut-color`, identity (0) GBR, monochrome; missing-`colr` default BT.601 limited | H.273; MIAF | ✅ | S3/S6 |
+| Colour conversion: BT.709 (1), BT.601 / BT.470 B,G (5/6), unspecified (2, presented as BT.601 since `gamut-heif`), BT.2020 NCL (9) via `gamut-color`, identity (0) GBR, monochrome; missing-`colr` default BT.601 limited | H.273; MIAF | ✅ | S3/S6 |
 | Sample-scale contract: every surface carries samples over its type's full range; the coded depth is read from the planar surface / `pixi`, not the buffer | H.273 | ✅ | S6 |
-| Nearest-neighbour co-sited chroma upsampling (4:2:0 / 4:2:2 → 4:4:4) | 23008-12 | ✅ | S3 |
+| Nearest-neighbour co-sited chroma upsampling (4:2:0 / 4:2:2 → 4:4:4), `HeifDecoder`'s default; libavif's bilinear filter via `with_chroma_upsampling(Interpolated)` | 23008-12 | ✅ | S3 / #1086 |
 | Alpha-auxiliary merge (dims-checked, bit-depth-scaled); `prem` surfaced, not un-premultiplied | 23008-12 §6 | ✅ | S3 |
 | Transformative-property application (`clap`/`irot`/`imir`) in `ipma` order to output pixels | 23008-12 §7; 14496-12 §12.1.4; MIAF | ✅ | S3 |
 | `iovl` source-over compositing onto a filled canvas (signed offsets, clipping) | 23008-12 §6.6.2.4 | ✅ | S3 |
-| Ordered backend registry `HevcDecoders` (`push_backend`, itself a `HevcDecoder`; `Send` bound at insertion) | #241 / #273 | ✅ | S5 |
-| `HevcDecoder::supports` capability probe (defaulted `true`, additive to the S3 trait) | #273 | ✅ | S5 |
-| Fallback contract: push order; `supports()==false` / `BACKEND_DECLINED` fall through, accepted-then-failed propagates; no implicit software tail ⇒ `ErrorKind::Unsupported` with `NO_BACKEND` | #241 | ✅ | S5 |
-| `AbiHevcDecoder`: `gamut_codec_abi::Decoder` ⇄ `HevcDecoder` (StreamConfig/`ImageDesc` lowering, `Status::UNSUPPORTED` ⇒ late decline) | #241 / #272 | ✅ | S5 |
-| HEVC-intra reconstruction (slice/CTU/transform/intra-pred/in-loop filters) — delegated to the caller's `HevcDecoder` | H.265 (ITU-T) | ☐ | user / #18 |
+| Ordered backend registry: `HeifDecoder::with_backend` into the shared `gamut_codec_abi::Registry` (`Send` bound at insertion), replacing `HevcDecoders` | #241 / #273 / #1086 | ✅ | S5 / #1086 |
+| `HevcCodestreamDecoder::supports` capability probe (required since #1086) | #273 | ✅ | S5 |
+| Fallback contract: push order; `supports()==false` is the only fall-through, accepted-then-failed propagates (a late codec-abi `UNSUPPORTED` included); no implicit software tail ⇒ `ErrorKind::Unsupported` with `gamut_heif::NO_BACKEND` | #241 / #1086 | ✅ | S5 |
+| `AbiHevcDecoder`: `gamut_codec_abi::Decoder` ⇄ `HevcCodestreamDecoder` (StreamConfig/`ImageDesc` lowering; the picture size read per call from the SPS — `pic_width/height_in_luma_samples` less the conformance window, H.265 §7.3.2.2.1/§7.4.3.2.1 — so one adapter serves every item; any non-OK `decode` status terminal) | #241 / #272 / #1086 | ✅ | S5 / #1086 |
+| HEVC-intra reconstruction (slice/CTU/transform/intra-pred/in-loop filters) — delegated to the caller's `HevcCodestreamDecoder` | H.265 (ITU-T) | ☐ | user / #18 |
+| SPS VUI colour description (`colour_primaries`/`matrix_coeffs`/`video_full_range_flag`) presented when the item has no `colr` — today the BT.601-limited default applies whatever the VUI signals | H.265 §E.2.1 | ☐ | later |
 | Matrix coefficients outside the modeled Kr/Kb set (YCgCo 8, chromaticity-derived 12/13/14) and unmodeled coded depths (9/11/13…) on the RGBA surfaces — explicitly refused, never approximated | H.273 | ☐ | later |
 | 10/12-bit differential vs libheif (needs a Main10 encode path in the oracle's `encode_rgba_to_heic`; the wide surface is validated against an independent reference conversion instead) | — | ☐ | later |
 | Depth-map auxiliary presentation | 23008-12 §6.5.8 | ☐ | later |
 | HEVC inter coding (motion, reference frames, sequences) | H.265 | OOS | OOS |
-| CLI / wasm / ffi wiring | gamut-{cli,wasm,ffi} | ☐ | later |
+| CLI / wasm / ffi decode wiring (the ffi handle holds a `HeifDecoder` and adopts backends; no C decode entry point yet) | gamut-{cli,wasm,ffi} | ☐ | later |
 
 ## E. Conformance oracle
 
 | Component | Spec | Status | Slice |
 | --- | --- | --- | --- |
 | libheif (libde265) differential parse + decode oracle (`tooling/libheif-oracle` over the `third_party/{libheif,libde265,kvazaar}` submodules) — `tests/conformance.rs` | `references/heif` "Oracle" | ✅ | S4 |
-| `De265Decoder`: the reference HEVC decoder plugged into the `HevcDecoder` seam (container plumbing proven bit-exact against a direct `decode_hevc_intra`) | #238; `references/heif` §§1–3 | ✅ | S4 |
+| `De265Decoder`: the reference HEVC decoder plugged in as an `HevcCodestreamDecoder` (container plumbing proven bit-exact against a direct `decode_hevc_intra`) | #238; `references/heif` §§1–3 | ✅ | S4 |
 | Structure conformance: `HeifContainer::parse` vs libheif `introspect` (primary id, item ids+types, ispe dims, alpha, thumbnails, Exif/XMP bytes incl. the `exif_tiff_header_offset`) | 23008-12; `references/heif` §9 | ✅ | S4 |
 | Presentation-pixel conformance vs libheif `decode_primary_rgba` (tight measured bound; alpha exact) + orientation `irot`/`imir` direction | 23008-12 §7; H.273 | ✅ | S4 |
 | Motion-photo overlay: appended `mpvd` / second-`ftyp` / trailer decode identically to the pristine still (byte accounting) | `references/heif` §8 | ✅ | S4 |
-| Reference backend driven **through** the registry: `De265Decoder` pushed into `HevcDecoders` decodes the fixture identically (planar + RGBA) to the direct hook; an empty registry errors | #273 | ✅ | S5 |
+| Reference backend driven **through** the registry: `De265Decoder` added to a `HeifDecoder` decodes the fixture identically (planar + RGBA) to the direct hook; an empty registry errors | #273 | ✅ | S5 |
 | Nokia HEIF reference software as a secondary fixture source | `references/heif` "Oracle" | ☐ | later |
 | Real multi-tile `grid` differential (libheif+kvazaar do not auto-emit grids; the oracle API exposes no grid knob — synthetic grid-assembly unit tests cover the path) | 23008-12 §6.6.2.2 | ☐ | later |
 

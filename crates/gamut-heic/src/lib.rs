@@ -80,9 +80,9 @@
 //!
 //! [`HeifDecoder::metadata`] hands over the Exif item's TIFF stream (its
 //! `exif_tiff_header_offset` applied), the XMP item's packet and the primary item's `colr` ICC
-//! profile as a [`RawMetadata`](gamut_core::RawMetadata). With the optional **`metadata`** Cargo
-//! feature (off by default) the facade's [`TypedMetadata`] is re-exported, which parses that into
-//! a unified [`Metadata`]. A C2PA manifest store lives outside the item model, in a top-level
+//! profile as a [`RawMetadata`]. With the optional **`metadata`** Cargo
+//! feature (off by default) the facade's `TypedMetadata` is re-exported, which parses that into
+//! a unified `Metadata`. A C2PA manifest store lives outside the item model, in a top-level
 //! `uuid` box; [`HeifContainer::c2pa`] locates it.
 //!
 //! # Out of scope

@@ -1,6 +1,6 @@
 crates/gamut-avif/src/decoder.rs pub fn with_backend(mut self, backend: impl Av1CodestreamDecoder + Send + 'static) -> Self {
 crates/gamut-avif/src/encoder.rs pub fn with_backend(mut self, backend: impl Av1CodestreamEncoder + Send + 'static) -> Self {
-crates/gamut-heic/src/backend.rs pub fn push_backend(&mut self, backend: impl HevcDecoder + Send + 'static) -> &mut Self {
+crates/gamut-heic/src/decoder.rs pub fn with_backend(mut self, backend: impl HevcCodestreamDecoder + Send + 'static) -> Self {
 crates/gamut-jpeg/src/decoder/mod.rs pub fn with_backend(mut self, backend: impl JpegCodestreamDecoder + Send + 'static) -> Self {
 crates/gamut-jpeg/src/encoder/builder.rs pub fn with_backend(mut self, backend: impl JpegCodestreamEncoder + Send + 'static) -> Self {
 crates/gamut-jxl/src/decoder.rs pub fn with_backend(mut self, backend: impl JxlCodestreamDecoder + Send + 'static) -> Self {

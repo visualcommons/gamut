@@ -142,8 +142,8 @@ rather than restating it. A status of **stable** means the crate is at 1.0 or la
 | `gamut-jxl-sys`   | Static libjxl 0.12.0 FFI declarations — native core of `gamut-jxl` encode | encoder backend (#243)                 |
 | `gamut-jpeg`      | JPEG-1 (ISO/IEC 10918-1) encoder + decoder — baseline & progressive; the jpegli-style XYB colour mode encodes natively and decodes to sRGB through `gamut-cmm` behind the `cmm` feature | encoder + decoder (#28, P1–P17) |
 | `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder, with a public `backend` seam for an alternate VP8/VP8L codestream implementation | implemented VP8 + VP8L (+alpha, metadata, effort/near-lossless) |
-| `gamut-heic`      | HEIC/HEIF still-image container **decoder** — HEVC via a pluggable backend | decode-only container (S1–S7); no encoder, by charter |
-| `gamut-heif`      | Shared HEIF/MIAF still-image layer: item model, derivation walk, decode limits, planar-to-RGBA presentation and the C2PA summary, generic over a per-codec `Codestream` binding | new (#1078); `gamut-avif` and `gamut-heic` not yet moved onto it |
+| `gamut-heic`      | HEIC still-image **decoder** — the HEVC binding over `gamut-heif`, HEVC via a pluggable backend | decode-only container (S1–S7); no encoder, by charter |
+| `gamut-heif`      | Shared HEIF/MIAF still-image layer: item model, derivation walk, decode limits, planar-to-RGBA presentation and the C2PA summary, generic over a per-codec `Codestream` binding | new (#1078); `gamut-avif` (#1085) and `gamut-heic` (#1086) bind onto it |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
 | `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | stable (byte completeness #263); BigTIFF behind Cargo feature `bigtiff` |
 | `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on `gamut-ifd`        | stable (1.0 was #194); MakerNote preserved verbatim, with per-vendor decoding listed in its README |

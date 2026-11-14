@@ -52,7 +52,7 @@
 //!   thread-safety, at which point the adapter is `Send`.
 //! - **C-friendly plain data.** Descriptors carry `u32` ids/dimensions and raw pointer + length
 //!   pairs; they map onto a C struct with no translation layer, matching the
-//!   `gamut_heic::HevcDecoder` precedent (single object-safe method, borrowed bytes in, owned plain
+//!   `gamut_heic::HevcCodestreamDecoder` precedent (object-safe, borrowed bytes in, owned plain
 //!   data out).
 #![no_std]
 #![deny(unsafe_code)]
@@ -435,7 +435,7 @@ pub trait Encoder {
 
 /// A `&mut` reference to a decoder is itself a decoder (as `&mut I` is an `Iterator`), so an owned
 /// backend — e.g. a long-lived [`bridge::ForeignDecoder`] — can be lent to a per-job adapter (such
-/// as a per-item `AbiHevcDecoder`) without moving it and thus without triggering its
+/// as an `AbiHevcDecoder`) without moving it and thus without triggering its
 /// destroy-on-drop teardown.
 impl<D: Decoder + ?Sized> Decoder for &mut D {
     fn supports(&mut self, cfg: &StreamConfig) -> bool {
