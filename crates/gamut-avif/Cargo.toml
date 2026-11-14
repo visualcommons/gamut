@@ -28,6 +28,8 @@ metadata = ["dep:gamut-metadata"]
 gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-av1.workspace = true
+# `write_leb128` for the `obu_size` `Av1Config::full_stream` writes when it re-frames a sizeless OBU.
+gamut-bitstream.workspace = true
 # The shared backend `Registry` (behind its `std` feature) both seams run through.
 gamut-codec-abi = { workspace = true, features = ["std"] }
 gamut-isobmff.workspace = true

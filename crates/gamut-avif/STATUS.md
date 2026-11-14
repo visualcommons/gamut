@@ -377,7 +377,7 @@ codestream itself is decoded by the `Av1CodestreamDecoder` backends the caller a
 consumes. The slices below name the files they shipped in; the item model, the pipeline and the
 C2PA summary now live in `gamut-heif`. Delivered in four slices:
 **S1** byte-accounting container + role-typed view (`container.rs`/`image.rs`), **S2** typed
-`av1C` + OBU layer (`av1c.rs`/`obu.rs`), **S3** the decoder seam + derivation/colour/transform
+`av1C` + OBU layer (`av1c.rs`; its own `obu.rs` split gave way to `gamut-av1`'s in #1176), **S3** the decoder seam + derivation/colour/transform
 pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/conformance.rs`).
 
 | Component | Spec | Status | Slice |
@@ -389,7 +389,7 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | Relationship lenses: thumbnails, aux (alpha/depth URNs), `prem`, `cdsc` Exif/XMP, `dimg` | AVIF §4; 23008-12 §6 | ✅ | S1 |
 | Typed property accessors + `ipma`-ordered transforms + MIAF order check | 23008-12 §7; MIAF | ✅ | S1 |
 | `av1C` typed parse (`Av1Config`), reserved-bit tolerant, `configOBUs` size-field rule | AV1-ISOBMFF §2.3.3/.4 | ✅ | S2 |
-| OBU split (crate-private since #1085; moving onto `gamut-av1`'s `ObuIter`, #1176): low-overhead syntax, LEB128 bounds, size-field framing | AV1 §5.3, §4.10.5; AV1-ISOBMFF §2.4 | ✅ | S2 |
+| OBU split via `gamut-av1`'s `ObuIter` (the crate's own copy deleted in #1176): low-overhead syntax, LEB128 bounds, size-field framing | AV1 §5.3, §4.10.5; AV1-ISOBMFF §2.4 | ✅ | S2 |
 | Still-payload validation (one seq header, sync-RAP key frame, no tile list) | AVIF §2.1; AV1-ISOBMFF §2.4 | ✅ | S2 |
 | `full_stream` bridge (TD + `configOBUs` + payload, size fields normalized) | AV1-ISOBMFF §2.4 | ✅ | S2 |
 | `Av1CodestreamDecoder` seam + validating `DecodedFrame` contract (`gamut-heif`'s) | (crate API) | ✅ | S3 |

@@ -715,6 +715,7 @@ dependencies = [
  "divan",
  "exiv2-oracle",
  "gamut-av1",
+ "gamut-bitstream",
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
