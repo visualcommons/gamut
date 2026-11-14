@@ -121,8 +121,17 @@ impl DecodeLimits {
         }
     }
 
-    /// Refuses a `width × height` image past either cap, under `origin`.
-    pub(crate) fn check(self, width: u32, height: u32, origin: &'static str) -> Result<()> {
+    /// Refuses a `width × height` image past either cap, under `origin` — the check the pipeline
+    /// makes before every buffer it sizes from the file, for a codestream backend that sizes its
+    /// own buffers from the codestream to make before it allocates them.
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error under `origin`:
+    /// [`DIMENSION_LIMIT`] when `width` or `height` exceeds
+    /// [`max_dimension`](Self::max_dimension), else [`PIXEL_LIMIT`] when `width × height`
+    /// exceeds [`max_pixels`](Self::max_pixels).
+    pub fn check(self, width: u32, height: u32, origin: &'static str) -> Result<()> {
         if width.max(height) > self.max_dimension {
             return Err(Error::unsupported(origin, DIMENSION_LIMIT));
         }
