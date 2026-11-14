@@ -115,12 +115,8 @@ fn lossless_rgb16_round_trips_at_the_coded_depth() {
             .unwrap_or_else(|e| panic!("libavif decode failed at {bits:?}: {e}"));
         assert_eq!((decoded.width, decoded.height), (W, H));
         assert_eq!(decoded.bit_depth, bits.bits());
-        for plane in 0..3 {
-            assert_eq!(
-                decoded.planes[plane],
-                expected_plane(plane, bits),
-                "{bits:?}: plane {plane}"
-            );
+        for (plane, got) in decoded.planes.iter().enumerate() {
+            assert_eq!(got, &expected_plane(plane, bits), "{bits:?}: plane {plane}");
         }
     }
 }
@@ -406,10 +402,10 @@ fn lossless_rgb8_widens_by_replication_and_narrows_back_exactly() {
         let decoded = libavif_oracle::decode_avif(&avif)
             .unwrap_or_else(|e| panic!("libavif decode failed at {bits:?}: {e}"));
         assert_eq!(decoded.bit_depth, bits.bits(), "{bits:?}: coded depth");
-        for plane in 0..3 {
+        for (plane, got) in decoded.planes.iter().enumerate() {
             assert_eq!(
-                decoded.planes[plane],
-                expected_plane8(plane, bits),
+                got,
+                &expected_plane8(plane, bits),
                 "{bits:?}: plane {plane}"
             );
         }
