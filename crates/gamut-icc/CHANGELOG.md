@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-icc-v2.0.0...gamut-icc-v3.0.0) - 2026-11-14
+
+### Added
+
+- *(gamut-icc)* locate profile parse errors by byte offset and tag signature ([#1007](https://github.com/visualcommons/gamut/pull/1007))
+
+### Other
+
+- *(gamut-icc)* [**breaking**] named tag table, repr'd header enums, core Cicp/Error, split builtin ([#1146](https://github.com/visualcommons/gamut/pull/1146))
+- *(gamut-color)* [**breaking**] one chroma/CICP vocabulary, kernels to gamut-dsp, Color spelling ([#1135](https://github.com/visualcommons/gamut/pull/1135))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-icc-v1.0.0...gamut-icc-v2.0.0) - 2026-10-12
 
 ### Added

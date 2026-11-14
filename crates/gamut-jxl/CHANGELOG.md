@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/visualcommons/gamut/compare/gamut-jxl-v0.5.0...gamut-jxl-v0.6.0) - 2026-11-14
+
+### Added
+
+- *(gamut-jxl)* expose progressive, responsive and decoding-speed frame settings ([#1037](https://github.com/visualcommons/gamut/pull/1037))
+- *(gamut-jxl)* let callers cap decode dimensions and bytes ([#1031](https://github.com/visualcommons/gamut/pull/1031))
+
+### Other
+
+- *(gamut-jxl)* [**breaking**] workspace config enums, metadata setters, limits and backend registry ([#1160](https://github.com/visualcommons/gamut/pull/1160))
+- *(gamut-metadata)* [**breaking**] one MetadataSink for encoders, transparent errors, capability to the umbrella ([#1150](https://github.com/visualcommons/gamut/pull/1150))
+- *(gamut-icc)* [**breaking**] named tag table, repr'd header enums, core Cicp/Error, split builtin ([#1146](https://github.com/visualcommons/gamut/pull/1146))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- *(gamut-core)* [**breaking**] opaque Error, private Dimensions fields, shared vocabulary ([#1126](https://github.com/visualcommons/gamut/pull/1126))
+- *(gamut-codec-abi)* [**breaking**] own the backend registry, codec ids and pixel-format tags ([#1125](https://github.com/visualcommons/gamut/pull/1125))
+- pin encoder metadata-carrier precedence in jpeg, webp, avif and jxl ([#1122](https://github.com/visualcommons/gamut/pull/1122))
+- pin backend registry fall-through, clone and poison behaviour ([#1123](https://github.com/visualcommons/gamut/pull/1123))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ## [0.5.0](https://github.com/visualcommons/gamut/compare/gamut-jxl-v0.4.0...gamut-jxl-v0.5.0) - 2026-10-12
 
 ### Added

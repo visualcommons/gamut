@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/visualcommons/gamut/compare/gamut-jxl-sys-v0.1.1...gamut-jxl-sys-v0.2.0) - 2026-11-14
+
+### Added
+
+- *(gamut-jxl)* expose progressive, responsive and decoding-speed frame settings ([#1037](https://github.com/visualcommons/gamut/pull/1037))
+
+### Other
+
+- *(gamut-jxl)* [**breaking**] workspace config enums, metadata setters, limits and backend registry ([#1160](https://github.com/visualcommons/gamut/pull/1160))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ## [0.1.1](https://github.com/visualcommons/gamut/compare/gamut-jxl-sys-v0.1.0...gamut-jxl-sys-v0.1.1) - 2026-10-12
 
 ### Added
