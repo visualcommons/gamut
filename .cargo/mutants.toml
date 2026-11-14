@@ -166,12 +166,12 @@ exclude_re = [
     # comparison is equivalent. The *stricter* mutations (`==`/`<`, generated separately) skip a
     # real factor-2 deinterleave and are killed by the single-axis interleave goldens. (gamut-webp
     # has a `decode_image_data` too; its comparisons are not this claim and stay in the survey.)
-    '^crates/gamut-dng/src/decoder\.rs:(1446:19|1446:37): replace > with >= in decode_image_data$',
+    '^crates/gamut-dng/src/decoder\.rs:(1445:19|1445:37): replace > with >= in decode_image_data$',
     # gamut-dng version computation — `if v > *version { *version = v }` (and the analogous
     # `if backward_version > required` pick in encode): at equality both branches produce the
     # same version value, so `>=` cannot change the written tag: equivalent.
-    '^crates/gamut-dng/src/encoder\.rs:660:14: replace > with >= in backward_version_for$',
-    '^crates/gamut-dng/src/encoder\.rs:690:14: replace > with >= in required_dng_version$',
+    '^crates/gamut-dng/src/encoder\.rs:661:14: replace > with >= in backward_version_for$',
+    '^crates/gamut-dng/src/encoder\.rs:691:14: replace > with >= in required_dng_version$',
     '^crates/gamut-dng/src/encoder\.rs:411:33: replace > with >= in DngEncoder::encode$',
     # gamut-av1 quant::dequant — `sign = if dq < 0 { -1 } else { 1 }`. The sign multiplies
     # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
