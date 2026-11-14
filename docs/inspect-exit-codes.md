@@ -5,7 +5,8 @@ PNG's third outcome, the budgets the walk observes, and every reason the PNG fil
 decline to read. What each walk *finds* is the format crate's own contract; this document is only
 about the verdict the command turns those findings into.
 
-Source: `crates/gamut-cli/src/commands/inspect.rs`, `crates/gamut-cli/src/main.rs`,
+Source: `crates/gamut-cli/src/commands/inspect.rs` and its `inspect/` submodules,
+`crates/gamut-cli/src/main.rs`,
 `crates/gamut-png/src/deconstruct.rs`, `crates/gamut-tiff/src/deconstruct.rs`,
 `crates/gamut-dng/src/deconstruct.rs`, `crates/gamut-heic/src/c2pa.rs`, `crates/gamut-avif/src/c2pa.rs`,
 `crates/gamut-riff/src/c2pa.rs`, `crates/gamut-ifd/src/c2pa.rs`, `crates/gamut-png/src/chunk.rs`.
@@ -335,7 +336,7 @@ gamut could not read through.
 
 The document is pinned against each format crate's own summary by the `json_output_*` tests in
 `crates/gamut-cli/tests/inspect.rs` and `tests/inspect_c2pa.rs`, and the writer's escaping by the
-unit tests in `inspect.rs`.
+unit tests in `inspect/json.rs`.
 
 ## PNG alone has a third outcome
 
