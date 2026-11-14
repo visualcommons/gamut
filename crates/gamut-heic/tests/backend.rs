@@ -462,10 +462,10 @@ fn fill_planes(out: &ImageDesc, value: u16) {
         out.height as usize
     };
     let len = chroma_w * chroma_h;
-    for plane in 1..3 {
+    for (plane, &ptr) in (1u16..).zip(&out.planes[1..3]) {
         // SAFETY: the adapter allocated `len` u16 samples at each chroma plane pointer.
-        let p = unsafe { std::slice::from_raw_parts_mut(out.planes[plane].cast::<u16>(), len) };
-        p.fill(value.wrapping_add(plane as u16));
+        let p = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u16>(), len) };
+        p.fill(value.wrapping_add(plane));
     }
 }
 
