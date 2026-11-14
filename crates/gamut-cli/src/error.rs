@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::commands::convert::OutputFormat;
+
 /// Anything that can go wrong while running a `gamut` subcommand.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CliError {
@@ -35,7 +37,8 @@ pub(crate) enum CliError {
 
     /// The requested output format is not (yet) supported by the CLI.
     #[error(
-        "unsupported output format: {0} (supported: 'avif', 'webp', 'tiff', 'png', 'jxl', 'jpg'/'jpeg')"
+        "unsupported output format: {0} (supported: {supported})",
+        supported = OutputFormat::supported_extensions()
     )]
     UnsupportedOutput(String),
 

@@ -23,7 +23,7 @@ use std::path::Path;
 
 use gamut::core::convert::{ConvertPolicy, convert};
 use gamut::core::{
-    DecodeImage, Dimensions, ErrorKind, Gray8, ImageBuf, Rgb8, Rgb16, Rgba8, Rgba16,
+    DecodeImage, Dimensions, ErrorKind, Gray8, ImageBuf, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut::jpeg::JpegDecoder;
 use gamut::jxl::JxlDecoder;
@@ -32,6 +32,7 @@ use gamut::png::{ColorType as PngColorType, PngDecoder, PngMetadata};
 use gamut::webp::WebpDecoder;
 
 use crate::error::CliError;
+use crate::sniff::{Container, sniff};
 
 /// A decoded image in the narrowest layout that holds the input without loss.
 ///
@@ -124,26 +125,6 @@ impl InputMetadata {
         meta
     }
 
-    /// The blocks of a reader that hands its payloads over as raw fields rather than through
-    /// [`TypedMetadata`] (PNG and WebP).
-    fn from_fields(
-        exif: Option<&[u8]>,
-        xmp: Option<&[u8]>,
-        icc: Option<&[u8]>,
-        c2pa: Option<&[u8]>,
-    ) -> Self {
-        let blocks: Vec<MetadataBlock<'_>> = [
-            exif.map(MetadataBlock::Exif),
-            xmp.map(MetadataBlock::Xmp),
-            icc.map(MetadataBlock::Icc),
-            c2pa.map(MetadataBlock::C2pa),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        Self::from_blocks(&blocks)
-    }
-
     /// The blocks a [`TypedMetadata`] reader hands over; none when it cannot locate them.
     fn from_typed(typed: &dyn TypedMetadata) -> Self {
         typed
@@ -153,74 +134,62 @@ impl InputMetadata {
     }
 }
 
-/// Reads the metadata a supported input file carries, through each format's reader: the
-/// [`TypedMetadata`] blocks where the format crate implements the trait (JPEG, JPEG XL), and the
-/// raw fields its reader documents as blocks otherwise (PNG, WebP). PPM carries none.
+/// Reads the metadata a supported input file carries, as the [`TypedMetadata`] blocks of each
+/// format's reader (PNG, JPEG, WebP, JPEG XL). PPM carries none.
 ///
 /// Best-effort and total: the pixels decode separately, so a payload that cannot be read is simply
 /// absent rather than failing the conversion.
 pub(crate) fn read_metadata(bytes: &[u8]) -> InputMetadata {
-    if is_webp(bytes) {
-        // `WebpDecoder::metadata` returns the three metadata carriers; the manifest store is the
-        // `C2PA` chunk's payload, the span `c2pa_span` reports less its 8-byte chunk header.
-        let c2pa = gamut::webp::c2pa_span(bytes)
-            .ok()
-            .flatten()
-            .and_then(|span| {
-                let start = usize::try_from(span.start).ok()?.checked_add(8)?;
-                bytes.get(start..usize::try_from(span.end).ok()?)
-            });
-        return WebpDecoder::new()
-            .metadata(bytes)
-            .map(|m| {
-                InputMetadata::from_fields(
-                    m.exif.as_deref(),
-                    m.xmp.as_deref(),
-                    m.icc.as_deref(),
-                    c2pa,
-                )
-            })
-            .unwrap_or_default();
-    }
-    if is_jxl(bytes) {
-        let decoder = JxlDecoder::new();
-        let mut meta = decoder
-            .metadata(bytes)
-            .map(|m| InputMetadata::from_typed(&m))
-            .unwrap_or_default();
-        // The decoder orients the pixels for display (the `jxl` crate's `adjust_orientation`
-        // default), and an XYB-coded stream decodes to sRGB, not into its embedded profile.
-        meta.oriented = true;
-        if decoder
-            .info(bytes)
-            .is_ok_and(|info| !info.uses_original_profile)
-        {
-            meta.decoded_to_srgb = true;
-            meta.icc = None;
+    match sniff(bytes) {
+        Some(Container::Webp) => {
+            let Ok(raw) = WebpDecoder::new().metadata(bytes) else {
+                return InputMetadata::default();
+            };
+            let mut meta = InputMetadata::from_typed(&raw);
+            // `WebpDecoder::metadata` reads the three carriers, which hold no manifest store; the
+            // store is the `C2PA` chunk's payload, the span `c2pa_span` reports less its 8-byte
+            // chunk header.
+            meta.c2pa = gamut::webp::c2pa_span(bytes)
+                .ok()
+                .flatten()
+                .and_then(|span| {
+                    let start = usize::try_from(span.start).ok()?.checked_add(8)?;
+                    bytes.get(start..usize::try_from(span.end).ok()?)
+                })
+                .is_some();
+            meta
         }
-        return meta;
-    }
-    if is_png(bytes) {
-        return gamut::png::metadata(bytes)
+        Some(Container::Jxl) => {
+            let decoder = JxlDecoder::new();
+            let mut meta = decoder
+                .metadata(bytes)
+                .map(|m| InputMetadata::from_typed(&m))
+                .unwrap_or_default();
+            // The decoder orients the pixels for display (the `jxl` crate's `adjust_orientation`
+            // default), and an XYB-coded stream decodes to sRGB, not into its embedded profile.
+            meta.oriented = true;
+            if decoder
+                .info(bytes)
+                .is_ok_and(|info| !info.uses_original_profile)
+            {
+                meta.decoded_to_srgb = true;
+                meta.icc = None;
+            }
+            meta
+        }
+        Some(Container::Png) => gamut::png::metadata(bytes)
             .map(|m| {
-                let mut meta = InputMetadata::from_fields(
-                    m.exif.as_deref(),
-                    m.xmp(),
-                    m.icc_profile.as_ref().map(|icc| icc.profile.as_slice()),
-                    m.c2pa.as_deref(),
-                );
+                let mut meta = InputMetadata::from_typed(&m);
                 meta.png = Some(m);
                 meta
             })
-            .unwrap_or_default();
-    }
-    if is_jpeg(bytes) {
-        return JpegDecoder::new()
+            .unwrap_or_default(),
+        Some(Container::Jpeg) => JpegDecoder::new()
             .metadata(bytes)
             .map(|m| InputMetadata::from_typed(&m))
-            .unwrap_or_default();
+            .unwrap_or_default(),
+        Some(Container::Isobmff) | None => InputMetadata::default(),
     }
-    InputMetadata::default()
 }
 
 /// Which of [`NativeImage`]'s layouts holds an image without loss.
@@ -248,19 +217,23 @@ impl Layout {
     }
 }
 
-/// Decodes `decoder`'s view of `bytes` in `layout`. A macro because each arm instantiates
-/// `DecodeImage` at a different pixel type; only decoders implementing all five can take it.
-macro_rules! decode_as {
-    ($decoder:expr, $bytes:expr, $layout:expr) => {{
-        let decoder = $decoder;
-        match $layout {
-            Layout::Gray8 => NativeImage::Gray8(decoder.decode_image($bytes)?),
-            Layout::Rgb8 => NativeImage::Rgb8(decoder.decode_image($bytes)?),
-            Layout::Rgba8 => NativeImage::Rgba8(decoder.decode_image($bytes)?),
-            Layout::Rgb16 => NativeImage::Rgb16(decoder.decode_image($bytes)?),
-            Layout::Rgba16 => NativeImage::Rgba16(decoder.decode_image($bytes)?),
-        }
-    }};
+/// Decodes `decoder`'s view of `bytes` in `layout`; only decoders implementing all five layouts
+/// can take it.
+fn decode_as<D>(decoder: &D, bytes: &[u8], layout: Layout) -> Result<NativeImage, CliError>
+where
+    D: DecodeImage<Gray8>
+        + DecodeImage<Rgb8>
+        + DecodeImage<Rgba8>
+        + DecodeImage<Rgb16>
+        + DecodeImage<Rgba16>,
+{
+    Ok(match layout {
+        Layout::Gray8 => NativeImage::Gray8(decoder.decode_image(bytes)?),
+        Layout::Rgb8 => NativeImage::Rgb8(decoder.decode_image(bytes)?),
+        Layout::Rgba8 => NativeImage::Rgba8(decoder.decode_image(bytes)?),
+        Layout::Rgb16 => NativeImage::Rgb16(decoder.decode_image(bytes)?),
+        Layout::Rgba16 => NativeImage::Rgba16(decoder.decode_image(bytes)?),
+    })
 }
 
 /// Decodes a supported image file (PNG, JPEG, PPM/P6, WebP, or JPEG XL) in the narrowest layout
@@ -283,61 +256,61 @@ pub(crate) fn decode_native(path: &Path, bytes: &[u8]) -> Result<NativeImage, Cl
     // where no layout can (a float JPEG XL narrowing to 16 bits), as on the fixed-layout path.
     let lossy = ConvertPolicy::permissive();
 
-    if is_webp(bytes) {
-        // Ask for RGB under the *lossless* policy: the decoder refuses it exactly when the file
-        // carries alpha, and only then is RGBA decoded.
-        let image = match WebpDecoder::new().decode_image(bytes) {
-            Ok(rgb) => NativeImage::Rgb8(rgb),
-            Err(err) if err.kind() == ErrorKind::Unsupported => NativeImage::Rgba8(
-                WebpDecoder::new()
-                    .with_convert_policy(lossy)
-                    .decode_image(bytes)?,
-            ),
-            Err(err) => return Err(err.into()),
-        };
-        return Ok(image);
-    }
-
-    if is_jxl(bytes) {
-        let decoder = JxlDecoder::new().with_convert_policy(lossy);
-        let info = decoder.info(bytes)?;
-        let grey = info.color_channels == 1;
-        let layout = Layout::pick(
-            grey,
-            info.has_alpha,
-            info.is_float || info.bits_per_sample > 8,
-        );
-        return Ok(decode_as!(decoder, bytes, layout));
-    }
-
-    if is_png(bytes) {
-        let decoder = PngDecoder::new().with_convert_policy(lossy);
-        let decoded = decoder.decode(bytes)?;
-        let color = decoded.header.color_type;
-        let alpha = matches!(
-            color,
-            PngColorType::GrayscaleAlpha | PngColorType::TruecolorAlpha
-        ) || decoded.transparency.is_some()
-            || decoded
-                .palette
-                .as_ref()
-                .is_some_and(|palette| palette.has_transparency());
-        let grey = matches!(
-            color,
-            PngColorType::Grayscale | PngColorType::GrayscaleAlpha
-        );
-        let layout = Layout::pick(grey, alpha, decoded.header.bit_depth == 16);
-        return Ok(decode_as!(decoder, bytes, layout));
-    }
-
-    if is_jpeg(bytes) {
-        let decoder = JpegDecoder::new().with_convert_policy(lossy);
-        let image = if decoder.info(bytes)?.components == 1 {
-            NativeImage::Gray8(decoder.decode_image(bytes)?)
-        } else {
-            NativeImage::Rgb8(decoder.decode_image(bytes)?)
-        };
-        return Ok(image);
+    match sniff(bytes) {
+        Some(Container::Webp) => {
+            // Ask for RGB under the *lossless* policy: the decoder refuses it exactly when the
+            // file carries alpha, and only then is RGBA decoded.
+            let image = match WebpDecoder::new().decode_image(bytes) {
+                Ok(rgb) => NativeImage::Rgb8(rgb),
+                Err(err) if err.kind() == ErrorKind::Unsupported => NativeImage::Rgba8(
+                    WebpDecoder::new()
+                        .with_convert_policy(lossy)
+                        .decode_image(bytes)?,
+                ),
+                Err(err) => return Err(err.into()),
+            };
+            return Ok(image);
+        }
+        Some(Container::Jxl) => {
+            let decoder = JxlDecoder::new().with_convert_policy(lossy);
+            let info = decoder.info(bytes)?;
+            let grey = info.color_channels == 1;
+            let layout = Layout::pick(
+                grey,
+                info.has_alpha,
+                info.is_float || info.bits_per_sample > 8,
+            );
+            return decode_as(&decoder, bytes, layout);
+        }
+        Some(Container::Png) => {
+            let decoder = PngDecoder::new().with_convert_policy(lossy);
+            let decoded = decoder.decode(bytes)?;
+            let color = decoded.header.color_type;
+            let alpha = matches!(
+                color,
+                PngColorType::GrayscaleAlpha | PngColorType::TruecolorAlpha
+            ) || decoded.transparency.is_some()
+                || decoded
+                    .palette
+                    .as_ref()
+                    .is_some_and(|palette| palette.has_transparency());
+            let grey = matches!(
+                color,
+                PngColorType::Grayscale | PngColorType::GrayscaleAlpha
+            );
+            let layout = Layout::pick(grey, alpha, decoded.header.bit_depth == 16);
+            return decode_as(&decoder, bytes, layout);
+        }
+        Some(Container::Jpeg) => {
+            let decoder = JpegDecoder::new().with_convert_policy(lossy);
+            let image = if decoder.info(bytes)?.components == 1 {
+                NativeImage::Gray8(decoder.decode_image(bytes)?)
+            } else {
+                NativeImage::Rgb8(decoder.decode_image(bytes)?)
+            };
+            return Ok(image);
+        }
+        Some(Container::Isobmff) | None => {}
     }
 
     let decoded = image::load_from_memory(bytes).map_err(|source| CliError::Decode {
@@ -357,25 +330,35 @@ pub(crate) fn decode_native(path: &Path, bytes: &[u8]) -> Result<NativeImage, Cl
     Ok(image)
 }
 
-/// Unwraps a gamut decode into the flat `(samples, dimensions)` pair the encoders take, choosing
-/// the RGB or RGBA layout by `want_alpha`.
-///
-/// A macro rather than a function because the two arms instantiate `DecodeImage` at different
-/// pixel types, which no single call can express.
-macro_rules! decode_with {
-    ($decoder:expr, $bytes:expr, $want_alpha:expr) => {{
-        let decoder = $decoder;
-        // `?` maps `gamut::core::Error` to `CliError::Codec` via the existing `#[from]` impl.
-        if $want_alpha {
-            let img: ImageBuf<Rgba8> = decoder.decode_image($bytes)?;
-            let dims = img.dimensions();
-            (img.into_samples(), dims)
-        } else {
-            let img: ImageBuf<Rgb8> = decoder.decode_image($bytes)?;
-            let dims = img.dimensions();
-            (img.into_samples(), dims)
-        }
-    }};
+/// The interleaved 8-bit layout a fixed-layout encoder takes, which [`decode_bytes`] decodes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Interleaved {
+    /// Three samples per pixel; any alpha the input carries is dropped.
+    Rgb8,
+    /// Four samples per pixel; fully opaque when the input carries no alpha.
+    Rgba8,
+}
+
+/// A decoded image as the flat `(samples, dimensions)` pair the encoders take.
+fn flat<P: Pixel>(image: ImageBuf<P>) -> (Vec<P::Sample>, Dimensions) {
+    let dims = image.dimensions();
+    (image.into_samples(), dims)
+}
+
+/// Decodes `decoder`'s view of `bytes` in the `target` layout; only decoders implementing both
+/// can take it.
+fn decode_interleaved<D>(
+    decoder: &D,
+    bytes: &[u8],
+    target: Interleaved,
+) -> Result<(Vec<u8>, Dimensions), CliError>
+where
+    D: DecodeImage<Rgb8> + DecodeImage<Rgba8>,
+{
+    Ok(match target {
+        Interleaved::Rgb8 => flat::<Rgb8>(decoder.decode_image(bytes)?),
+        Interleaved::Rgba8 => flat::<Rgba8>(decoder.decode_image(bytes)?),
+    })
 }
 
 /// Decodes a supported image file (PNG, JPEG, PPM/P6, WebP, or JPEG XL) into interleaved 8-bit RGB.
@@ -389,7 +372,7 @@ pub(crate) fn decode_rgb8(path: &Path) -> Result<(Vec<u8>, Dimensions), CliError
         path: path.to_path_buf(),
         source,
     })?;
-    decode_bytes(path, &bytes, false)
+    decode_bytes(path, &bytes, Interleaved::Rgb8)
 }
 
 /// Reads an input file, or all of standard input when `path` is [`STDIO`] (`-`).
@@ -410,8 +393,8 @@ pub(crate) fn read_input(path: &Path) -> Result<Vec<u8>, CliError> {
 /// The path that names standard input (as an input) or standard output (as an output).
 pub(crate) const STDIO: &str = "-";
 
-/// Decodes an already-read image (PNG, JPEG, PPM/P6, WebP, or JPEG XL) to interleaved RGB
-/// (`want_alpha == false`) or RGBA (`want_alpha == true`, fully opaque when the source has none).
+/// Decodes an already-read image (PNG, JPEG, PPM/P6, WebP, or JPEG XL) to the interleaved
+/// `target` layout.
 ///
 /// Format-dispatching core: routes every format gamut can decode to gamut's own decoder, and the
 /// remainder (PPM) to the `image` crate. The format is detected from the contents, never from
@@ -419,94 +402,64 @@ pub(crate) const STDIO: &str = "-";
 pub(crate) fn decode_bytes(
     path: &Path,
     bytes: &[u8],
-    want_alpha: bool,
+    target: Interleaved,
 ) -> Result<(Vec<u8>, Dimensions), CliError> {
     let lossy = ConvertPolicy::permissive();
 
-    if is_webp(bytes) {
-        return Ok(decode_with!(
-            WebpDecoder::new().with_convert_policy(lossy),
-            bytes,
-            want_alpha
-        ));
-    }
-
-    if is_jxl(bytes) {
-        return Ok(decode_with!(
-            JxlDecoder::new().with_convert_policy(lossy),
-            bytes,
-            want_alpha
-        ));
-    }
-
-    if is_png(bytes) {
-        return Ok(decode_with!(
-            PngDecoder::new().with_convert_policy(lossy),
-            bytes,
-            want_alpha
-        ));
-    }
-
-    if is_jpeg(bytes) {
-        // A JPEG never carries alpha, so gamut-jpeg implements no `DecodeImage<Rgba8>`. Decode the
-        // colour it does carry, then let the same conversion engine add the opaque alpha channel
-        // rather than padding it by hand here.
-        let img: ImageBuf<Rgb8> = JpegDecoder::new()
-            .with_convert_policy(lossy)
-            .decode_image(bytes)?;
-        if !want_alpha {
-            let dims = img.dimensions();
-            return Ok((img.into_samples(), dims));
+    match sniff(bytes) {
+        Some(Container::Webp) => {
+            return decode_interleaved(
+                &WebpDecoder::new().with_convert_policy(lossy),
+                bytes,
+                target,
+            );
         }
-        let rgba: ImageBuf<Rgba8> = convert(img.as_ref(), lossy)?;
-        let dims = rgba.dimensions();
-        return Ok((rgba.into_samples(), dims));
+        Some(Container::Jxl) => {
+            return decode_interleaved(
+                &JxlDecoder::new().with_convert_policy(lossy),
+                bytes,
+                target,
+            );
+        }
+        Some(Container::Png) => {
+            return decode_interleaved(
+                &PngDecoder::new().with_convert_policy(lossy),
+                bytes,
+                target,
+            );
+        }
+        Some(Container::Jpeg) => {
+            // A JPEG never carries alpha, so gamut-jpeg implements no `DecodeImage<Rgba8>`. Decode
+            // the colour it does carry, then let the same conversion engine add the opaque alpha
+            // channel rather than padding it by hand here.
+            let img: ImageBuf<Rgb8> = JpegDecoder::new()
+                .with_convert_policy(lossy)
+                .decode_image(bytes)?;
+            return Ok(match target {
+                Interleaved::Rgb8 => flat(img),
+                Interleaved::Rgba8 => flat::<Rgba8>(convert(img.as_ref(), lossy)?),
+            });
+        }
+        Some(Container::Isobmff) | None => {}
     }
 
     let decoded = image::load_from_memory(bytes).map_err(|source| CliError::Decode {
         path: path.to_path_buf(),
         source,
     })?;
-    let (buf, width, height) = if want_alpha {
-        let rgba = decoded.to_rgba8();
-        let (w, h) = rgba.dimensions();
-        (rgba.into_raw(), w, h)
-    } else {
-        let rgb = decoded.to_rgb8();
-        let (w, h) = rgb.dimensions();
-        (rgb.into_raw(), w, h)
+    let (buf, width, height) = match target {
+        Interleaved::Rgb8 => {
+            let rgb = decoded.to_rgb8();
+            let (w, h) = rgb.dimensions();
+            (rgb.into_raw(), w, h)
+        }
+        Interleaved::Rgba8 => {
+            let rgba = decoded.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            (rgba.into_raw(), w, h)
+        }
     };
     Ok((buf, Dimensions::new(width, height)?))
-}
-
-/// Returns `true` if `bytes` begins with a RIFF/WebP container signature (`RIFF`…`WEBP`), matching
-/// how the `image` crate detects formats by content rather than trusting the file extension.
-fn is_webp(bytes: &[u8]) -> bool {
-    bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
-}
-
-/// Returns `true` if `bytes` begins with the 8-byte PNG signature (§5.2). Sniffs by content like
-/// [`is_webp`], so the file extension need not be accurate.
-fn is_png(bytes: &[u8]) -> bool {
-    bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
-}
-
-/// Returns `true` if `bytes` begins with the JPEG SOI marker (`FF D8 FF`). Sniffs by content like
-/// [`is_webp`], so the file extension need not be accurate.
-fn is_jpeg(bytes: &[u8]) -> bool {
-    bytes.starts_with(&[0xFF, 0xD8, 0xFF])
-}
-
-/// Returns `true` if `bytes` begins with a JPEG XL signature — either the 2-byte bare codestream
-/// signature `FF 0A` or the 12-byte ISO BMFF container box signature
-/// (`00 00 00 0C 4A 58 4C 20 0D 0A 87 0A`). Sniffs by content like [`is_webp`], so the file
-/// extension need not be accurate.
-fn is_jxl(bytes: &[u8]) -> bool {
-    /// The ISO BMFF `.jxl` container signature: a 12-byte JXL box.
-    const CONTAINER: [u8; 12] = [
-        0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
-    ];
-    bytes.starts_with(&[0xFF, 0x0A]) || bytes.starts_with(&CONTAINER)
 }
 
 #[cfg(test)]
@@ -550,8 +503,8 @@ mod tests {
             0xa0, 0xb0, 0xc0, 0xff, // px (1,1)
         ];
         let webp = lossless_webp(2, 2, &rgba);
-        assert!(is_webp(&webp));
-        let (rgb, dims) = decode_bytes(Path::new("mem.webp"), &webp, false).unwrap();
+        assert_eq!(sniff(&webp), Some(Container::Webp));
+        let (rgb, dims) = decode_bytes(Path::new("mem.webp"), &webp, Interleaved::Rgb8).unwrap();
         assert_eq!(dims, Dimensions::new(2, 2).unwrap());
         // Lossless: RGB survives exactly; alpha is dropped.
         assert_eq!(
@@ -573,7 +526,7 @@ mod tests {
             0xaa, 0xbb, 0xcc, 0xff,
         ];
         let webp = lossless_webp(2, 2, &rgba);
-        let (out, dims) = decode_bytes(Path::new("mem.webp"), &webp, true).unwrap();
+        let (out, dims) = decode_bytes(Path::new("mem.webp"), &webp, Interleaved::Rgba8).unwrap();
         assert_eq!(dims, Dimensions::new(2, 2).unwrap());
         // Lossless VP8L carries alpha natively, so the round-trip is bit-exact.
         assert_eq!(out, rgba);
@@ -590,8 +543,8 @@ mod tests {
         let jxl = lossless_jxl(2, 2, &rgba);
         // A bare codestream starts with the 2-byte JXL signature.
         assert_eq!(&jxl[0..2], &[0xFF, 0x0A]);
-        assert!(is_jxl(&jxl));
-        let (rgb, dims) = decode_bytes(Path::new("mem.jxl"), &jxl, false).unwrap();
+        assert_eq!(sniff(&jxl), Some(Container::Jxl));
+        let (rgb, dims) = decode_bytes(Path::new("mem.jxl"), &jxl, Interleaved::Rgb8).unwrap();
         assert_eq!(dims, Dimensions::new(2, 2).unwrap());
         // Lossless: RGB survives exactly; alpha is dropped.
         assert_eq!(
@@ -613,24 +566,11 @@ mod tests {
             0xaa, 0xbb, 0xcc, 0xff,
         ];
         let jxl = lossless_jxl(2, 2, &rgba);
-        assert!(is_jxl(&jxl));
-        let (out, dims) = decode_bytes(Path::new("mem.jxl"), &jxl, true).unwrap();
+        assert_eq!(sniff(&jxl), Some(Container::Jxl));
+        let (out, dims) = decode_bytes(Path::new("mem.jxl"), &jxl, Interleaved::Rgba8).unwrap();
         assert_eq!(dims, Dimensions::new(2, 2).unwrap());
         // Lossless JPEG XL carries alpha natively, so the round-trip is bit-exact.
         assert_eq!(out, rgba);
-    }
-
-    #[test]
-    fn jxl_container_signature_is_sniffed() {
-        // The 12-byte ISO BMFF `.jxl` box signature is recognised as JPEG XL.
-        let container = [
-            0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
-        ];
-        assert!(is_jxl(&container));
-        // The bare-codestream signature is also recognised; unrelated bytes are not.
-        assert!(is_jxl(&[0xFF, 0x0A, 0x00]));
-        assert!(!is_jxl(&[0xFF, 0x0B]));
-        assert!(!is_jxl(b"RIFF"));
     }
 
     #[test]
@@ -648,9 +588,9 @@ mod tests {
         PngEncoder::new()
             .encode_image(ImageRef::<Gray16>::new(&gray16, dims).unwrap(), &mut png)
             .expect("encode png");
-        assert!(is_png(&png));
+        assert_eq!(sniff(&png), Some(Container::Png));
 
-        let (rgb, got) = decode_bytes(Path::new("mem.png"), &png, false).unwrap();
+        let (rgb, got) = decode_bytes(Path::new("mem.png"), &png, Interleaved::Rgb8).unwrap();
         assert_eq!(got, dims);
         // 0x8080 -> 128 and 0x0101 -> 1 are the round-to-nearest narrowing; a truncating `>> 8`
         // would give 255 -> 255 but 0x8080 -> 128 and 0xFFFF -> 255 only by luck, so the endpoints
@@ -672,9 +612,9 @@ mod tests {
         JpegEncoder::new()
             .encode_image(ImageRef::<Gray8>::new(&gray, dims).unwrap(), &mut jpeg)
             .expect("encode jpeg");
-        assert!(is_jpeg(&jpeg));
+        assert_eq!(sniff(&jpeg), Some(Container::Jpeg));
 
-        let (rgba, got) = decode_bytes(Path::new("mem.jpg"), &jpeg, true).unwrap();
+        let (rgba, got) = decode_bytes(Path::new("mem.jpg"), &jpeg, Interleaved::Rgba8).unwrap();
         assert_eq!(got, dims);
         assert_eq!(rgba.len(), 64 * 4);
         for px in rgba.as_chunks::<4>().0 {
@@ -801,7 +741,8 @@ mod tests {
         assert!(!meta.oriented && !meta.decoded_to_srgb);
     }
 
-    /// A WebP's raw chunks are read as blocks; a JPEG's through its `TypedMetadata` impl.
+    /// A WebP's and a JPEG's carriers are read through their `TypedMetadata` impls, and a WebP's
+    /// `C2PA` chunk as its presence.
     #[test]
     fn read_metadata_reads_webp_and_jpeg_blocks() {
         use gamut::jpeg::JpegEncoder;
@@ -904,8 +845,8 @@ mod tests {
         // Not a RIFF/WebP container, so it must NOT be routed to the webp decoder; the image path
         // rejects it with a decode error rather than panicking.
         let junk = [0u8; 32];
-        assert!(!is_webp(&junk));
-        let err = decode_bytes(Path::new("junk.bin"), &junk, false).unwrap_err();
+        assert_eq!(sniff(&junk), None);
+        let err = decode_bytes(Path::new("junk.bin"), &junk, Interleaved::Rgb8).unwrap_err();
         assert!(matches!(err, CliError::Decode { .. }));
     }
 }
