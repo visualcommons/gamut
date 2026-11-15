@@ -736,7 +736,7 @@ exclude_re = [
     # caller passes), and `-0 == 0` for integers. Both are equivalent mutants, not coverage gaps.
     # (`walk_block`'s other `<`, the `eob < 16` end-of-block test, is not a sign test and stays in
     # the survey; the path-and-name anchor this replaced reached it too.)
-    '^crates/gamut-webp/src/vp8/tokens\.rs:610:39: replace < with <= in walk_block$',
+    '^crates/gamut-webp/src/vp8/tokens\.rs:611:39: replace < with <= in walk_block$',
     '^crates/gamut-webp/src/vp8/quant\.rs:161:14: replace < with <= in quantize_biased$',
     # gamut-webp VP8L colour-transform block size (encoder.rs `encode_spatial`) — the transform
     # header stores `size_bits - 2` (RFC 9649 §4.4). Every plan in the ladder emits the colour
