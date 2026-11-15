@@ -66,6 +66,25 @@ pub struct PreservedSpan {
     pub len: u64,
 }
 
+impl PreservedSpan {
+    /// The report for the unaccounted run `span` once it has been carried to `offset` in the
+    /// rewritten stream.
+    ///
+    /// The preamble (kept in place) and the appended runs share this one constructor. When each
+    /// site spelt out its own `range.end - range.start`, the preamble's copy survived mutation:
+    /// no fixture both carries a preamble and asserts its reported length. With one shared
+    /// expression, the trailer pin in `tests/real_world_shapes.rs` covers both sites. Merging
+    /// them also removed the preamble site's own two mutants.
+    fn carried(span: &gamut_ifd::Segment, offset: u64) -> Self {
+        Self {
+            kind: span.kind,
+            original_offset: span.range.start,
+            offset,
+            len: span.range.end - span.range.start,
+        }
+    }
+}
+
 /// The output of [`DngRewrite::write`]: the serialised stream and what happened to the
 /// offset-sensitive material.
 #[derive(Debug, Clone)]
@@ -318,12 +337,7 @@ impl DngRewrite {
         let mut preserved = Vec::with_capacity(self.unaccounted.len());
         if let Some(span) = preamble {
             // Already emitted, in place, by the writer.
-            preserved.push(PreservedSpan {
-                kind: span.kind,
-                original_offset: span.range.start,
-                offset: span.range.start,
-                len: span.range.end - span.range.start,
-            });
+            preserved.push(PreservedSpan::carried(span, span.range.start));
         }
         for span in appended {
             let source = self.slice(span)?;
@@ -333,12 +347,7 @@ impl DngRewrite {
             })?;
             bytes.resize(at_usize, 0); // the <=1 byte of word-alignment padding
             bytes.extend_from_slice(source);
-            preserved.push(PreservedSpan {
-                kind: span.kind,
-                original_offset: span.range.start,
-                offset: at,
-                len: span.range.end - span.range.start,
-            });
+            preserved.push(PreservedSpan::carried(span, at));
         }
 
         if stream_overflows(self.variant, bytes.len() as u64) {
