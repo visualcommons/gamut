@@ -970,6 +970,27 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "decode")]
+    #[test]
+    fn from_sequence_header_reads_back_mono_chrome() {
+        // §5.5.2's `mono_chrome` makes the stream 4:0:0, which is where `from_sequence_header`
+        // reads `monochrome` from. Reading a header back must recover the flag both ways: a
+        // 4:2:0 stream is not monochrome, and a monochrome one is.
+        use crate::decode::SequenceHeader;
+        for monochrome in [false, true] {
+            let cfg = Av1StillConfig {
+                monochrome,
+                ..cfg_for(0, 1, 1, 0)
+            };
+            let seq = SequenceHeader::parse(&sequence_header_payload(&cfg, 64, 64, true, false))
+                .expect("sequence header parses");
+            assert_eq!(
+                Av1StillConfig::from_sequence_header(&seq).monochrome,
+                monochrome
+            );
+        }
+    }
+
     #[test]
     fn level_selection() {
         assert_eq!(pick_level(16, 16).unwrap(), 0);
