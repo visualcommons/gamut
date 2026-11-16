@@ -943,6 +943,33 @@ mod tests {
         assert_ne!(p422, p420);
     }
 
+    #[cfg(feature = "decode")]
+    #[test]
+    fn from_sequence_header_reads_back_the_coded_bit_depth() {
+        // §5.5.2 codes `high_bitdepth` for every profile and `twelve_bit` only for profile 2, and
+        // `BitDepth` is derived from both. Reading a header back must recover both flags at each
+        // of the three depths. The doc example covers only 8-bit, which reads `high_bitdepth`
+        // as false whether it is compared with `!=` or `==`.
+        use crate::decode::SequenceHeader;
+        for (profile, high_bitdepth, twelve_bit) in
+            [(0, false, false), (0, true, false), (2, true, true)]
+        {
+            let cfg = Av1StillConfig {
+                high_bitdepth,
+                twelve_bit,
+                ..cfg_for(profile, 1, 1, 0)
+            };
+            let seq = SequenceHeader::parse(&sequence_header_payload(&cfg, 64, 64, true, false))
+                .expect("sequence header parses");
+            let read = Av1StillConfig::from_sequence_header(&seq);
+            assert_eq!(
+                (read.high_bitdepth, read.twelve_bit),
+                (high_bitdepth, twelve_bit),
+                "profile {profile}"
+            );
+        }
+    }
+
     #[test]
     fn level_selection() {
         assert_eq!(pick_level(16, 16).unwrap(), 0);
