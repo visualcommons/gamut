@@ -1266,6 +1266,24 @@ mod tests {
     }
 
     #[test]
+    fn luma_candidates_offer_every_angle_delta_under_the_full_search() {
+        // §5.11.42 codes `AngleDeltaY` in [-MAX_ANGLE_DELTA, MAX_ANGLE_DELTA] = [-3, 3]. The full
+        // search tries each directional mode at all seven deltas, once each. The count in the
+        // test above cannot see a delta that is repeated in place of another.
+        let p = grey4x4();
+        let e = at_effort(&p, 40, Effort::Thorough);
+        let candidates = e.luma_candidates(8, 8);
+        for &mode in &DIRECTIONAL_MODES {
+            let deltas: Vec<i8> = candidates
+                .iter()
+                .filter(|m| m.mode == mode)
+                .map(|m| m.angle_delta)
+                .collect();
+            assert_eq!(deltas, (-3..=3).collect::<Vec<i8>>(), "mode {mode}");
+        }
+    }
+
+    #[test]
     fn cfl_sign_is_the_spec_sign_code() {
         assert_eq!([cfl_sign(0), cfl_sign(-3), cfl_sign(5)], [0, 1, 2]);
     }
