@@ -639,7 +639,7 @@ impl AvifEncoder {
     /// effort — only the coded tile data differs.
     ///
     /// A [backend](Self::with_backend) receives the preset as [`Av1EncodeRequest::effort`] —
-    /// through [`AbiAv1CodestreamEncoder`](crate::AbiAv1CodestreamEncoder), as the second byte of
+    /// through [`AbiAv1Encoder`](crate::AbiAv1Encoder), as the second byte of
     /// the `extra` blob (see there) — and is free to map it onto its own effort scale or to ignore
     /// it.
     #[must_use]

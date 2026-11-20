@@ -358,11 +358,11 @@ copy, which is what a decoder does for an independently decodable tile.
 | Subsampled chroma at 10/12-bit (`with_chroma` reaches the `Rgb16` path; `Planar16::from_rgb16_matrix_subsampled` shares `Planar8`'s box filter, so the two cannot drift) | — | ✅ (#399) | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ✅ (`Planar16`; 16-bit input narrows to a 10/12-bit coded depth — float HDR ☐) | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; rate control deferred) | M1 |
-| encode effort (`AvifEncoder::with_effort(Effort)`: `gamut-av1`'s preset, applied to the colour **and** alpha stills; default is `Effort::default()` (`Balanced`, #799), `Thorough` the full search; lossless is effort-invariant; a pushed backend sees `Av1EncodeRequest::effort`, and `AbiAv1CodestreamEncoder` appends the preset's persisted wire speed value (`Balanced` = 1, `Fast` = 2, `Fastest` = 3 — not the `Effort` discriminant) as `extra[1]` for any non-`Thorough` job, the default `Balanced` included — absence still means `Thorough`) | gamut-avif/av1 | ✅ (#654; dav1d decodes every preset to `gamut-av1`'s reconstruction; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
-| encode threads (`AvifEncoder::with_threads(Option<NonZeroUsize>)` / `config().threads`: `Some(1)` default spawns nothing, `None` is `available_parallelism`; an RGBA input codes its alpha still on a scoped thread beside the colour, the budget split colour `ceil(n/2)` / alpha `floor(n/2)`, each still coded tile-parallel through `gamut-av1`'s `Av1EncodeConfig::threads` at its default tile layout; output is thread-count-invariant; a spawn failure, e.g. on `wasm32`, codes the alpha on the calling thread; a pushed backend sees the colour share as the hint `Av1EncodeRequest::threads()`, which does not cross the C seam: `AbiAv1CodestreamEncoder`'s `extra` blob is unchanged) | gamut-avif/av1 | ✅ (#655; caps 2/3/4/16/`None` give the 1-thread bytes, libavif decodes a 4-thread RGBA file to `gamut-av1`'s reconstructions; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
+| encode effort (`AvifEncoder::with_effort(Effort)`: `gamut-av1`'s preset, applied to the colour **and** alpha stills; default is `Effort::default()` (`Balanced`, #799), `Thorough` the full search; lossless is effort-invariant; a pushed backend sees `Av1EncodeRequest::effort`, and `AbiAv1Encoder` appends the preset's persisted wire speed value (`Balanced` = 1, `Fast` = 2, `Fastest` = 3 — not the `Effort` discriminant) as `extra[1]` for any non-`Thorough` job, the default `Balanced` included — absence still means `Thorough`) | gamut-avif/av1 | ✅ (#654; dav1d decodes every preset to `gamut-av1`'s reconstruction; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
+| encode threads (`AvifEncoder::with_threads(Option<NonZeroUsize>)` / `config().threads`: `Some(1)` default spawns nothing, `None` is `available_parallelism`; an RGBA input codes its alpha still on a scoped thread beside the colour, the budget split colour `ceil(n/2)` / alpha `floor(n/2)`, each still coded tile-parallel through `gamut-av1`'s `Av1EncodeConfig::threads` at its default tile layout; output is thread-count-invariant; a spawn failure, e.g. on `wasm32`, codes the alpha on the calling thread; a pushed backend sees the colour share as the hint `Av1EncodeRequest::threads()`, which does not cross the C seam: `AbiAv1Encoder`'s `extra` blob is unchanged) | gamut-avif/av1 | ✅ (#655; caps 2/3/4/16/`None` give the 1-thread bytes, libavif decodes a 4-thread RGBA file to `gamut-av1`'s reconstructions; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
 | separate alpha quality (`AvifEncoder::with_alpha_quality` / `AvifConfig::alpha_quality`; same 0..=100 → `base_q_idx` mapping, `None` follows `quality`, ignored when lossless) | gamut-avif/av1 | ✅ (#656; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
 | AVIF container decode + codestream handoff (`AvifContainer`/`AvifDecoder`/`Av1` over `gamut-heif`, `Av1CodestreamDecoder`) | gamut-avif §L | ✅ | D |
-| AV1 **encode** backend seam (`Av1CodestreamEncoder`/`Av1EncodeRequest`/`with_backend`/`AbiAv1CodestreamEncoder`) | gamut-avif §M | ✅ | D |
+| AV1 **encode** backend seam (`Av1CodestreamEncoder`/`Av1EncodeRequest`/`with_backend`/`AbiAv1Encoder`) | gamut-avif §M | ✅ | D |
 | AV1 **decode** backend registry (`AvifDecoder::with_backend` over `Av1CodestreamDecoder`) | gamut-avif §M | ✅ (#1085; the `gamut-codec-abi` adapter is ☐) | D |
 | `gamut_core::Decoder` (AVIF → pixels with **no** external decoder; needs the pure-Rust AV1 decoder — `libaom`'s reference encoder is staged as its oracle) | gamut-avif | ☐ | D |
 | CLI / wasm / ffi wiring for AVIF | gamut-{cli,wasm,ffi} | ☐ | D |
@@ -470,12 +470,12 @@ propagating its error rather than being silently re-encoded.
 | `Av1EncodeRequest`: `#[non_exhaustive]`, private fields + getters, carries the derived `base_q_idx` | (crate API) | ✅ | #274 |
 | `AvifEncoder::with_backend` registry (`gamut_codec_abi::Registry`; `Clone` **shares** backends) | (crate API) | ✅ | #274, #1085 |
 | Fallback contract: push order, decline-only fall-through, `gamut-av1` tail, error propagation | #241 | ✅ | #274 |
-| `AbiAv1CodestreamEncoder` adapter over `gamut_codec_abi::Encoder` (codec id `av01`, `base_q_idx` in `extra[0]`; a non-`Thorough` preset's wire speed value in `extra[1]`, #654) | #272 | ✅ (8, 10 and 12-bit — `encode_still16` lowers `Planar16` as native-endian `u16` planes with the coded depth in `ImageDesc::bit_depth` and **byte** strides) | #274 |
+| `AbiAv1Encoder` adapter over `gamut_codec_abi::Encoder` (codec id `av01`, `base_q_idx` in `extra[0]`; a non-`Thorough` preset's wire speed value in `extra[1]`, #654) | #272 | ✅ (8, 10 and 12-bit — `encode_still16` lowers `Planar16` as native-endian `u16` planes with the coded depth in `ImageDesc::bit_depth` and **byte** strides) | #274 |
 | `av1C`/`colr` re-derived from a backend stream's sequence header (§2.3.4 consistency) | AV1-ISOBMFF §2.3.4 | ✅ | #274 |
 | Byte-identical default output with no pushed backend (the 1.0 additivity guarantee) | (crate API) | ✅ | #274 |
 | Typed decode trait `Av1CodestreamDecoder` (`supports` + `decode_still` → `DecodedFrame`) | (crate API) | ✅ | #250, #1085 |
 | Decode registry `AvifDecoder::with_backend` | #241 | ✅ | #1085 |
-| `AbiAv1CodestreamDecoder` adapter over `gamut_codec_abi::Decoder` | #241 | ☐ | D |
+| `AbiAv1Decoder` adapter over `gamut_codec_abi::Decoder` | #241 | ☐ | D |
 | Backend selection beyond first-supporter (cost/priority hints, per-request negotiation) | — | ☐ | D |
 | Colour on `Av1EncodeRequest` (`colour()`), validated against the returned stream's `color_config()` | AV1 §5.5.2 | ✅ (#335) | M2 |
 | Chroma on `Av1EncodeRequest` (`chroma()`), validated against the returned stream's `seq_profile` | AV1-ISOBMFF §2.3.4 | ✅ | M2 |
@@ -489,7 +489,7 @@ mirroring section M's encode side, whose name is reserved here rather than shipp
 surface:
 
 ```text
-pub struct AbiAv1CodestreamDecoder<D: gamut_codec_abi::Decoder>;  // StreamConfig(av01) + ImageDesc
+pub struct AbiAv1Decoder<D: gamut_codec_abi::Decoder>;  // StreamConfig(av01) + ImageDesc
 ```
 
 It lands semver-minor. The pure-Rust AV1 decoder, when it arrives, becomes the implicit tail

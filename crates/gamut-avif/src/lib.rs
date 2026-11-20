@@ -115,7 +115,7 @@
 //! Symmetrically, the AV1 codestream on the **write** side is pluggable: [`AvifEncoder`] encodes
 //! with [`gamut_av1`] by default, and [`AvifEncoder::with_backend`] adds
 //! [`Av1CodestreamEncoder`] backends that are tried ahead of it in the order they were added
-//! (`gamut-av1` is the implicit tail). [`AbiAv1CodestreamEncoder`] bridges the shared
+//! (`gamut-av1` is the implicit tail). [`AbiAv1Encoder`] bridges the shared
 //! [`gamut_codec_abi`] seam — and hence any C/`-sys` encoder — onto that trait. An encoder with no
 //! backend is byte-for-byte the encoder this crate has always been. Both directions share the
 //! workspace's registry contract: `supports` returning `false` is the only fall-through, and a
@@ -222,8 +222,7 @@ pub mod invariants;
 
 pub use av1c::Av1Config;
 pub use backend::{
-    AV1_CODEC_ID, AbiAv1CodestreamEncoder, Av1CodestreamDecoder, Av1CodestreamEncoder,
-    Av1EncodeRequest,
+    AV1_CODEC_ID, AbiAv1Encoder, Av1CodestreamDecoder, Av1CodestreamEncoder, Av1EncodeRequest,
 };
 pub use config::{AlphaMode, AvifConfig, AvifMode, OpaqueAlpha};
 pub use container::AvifContainer;

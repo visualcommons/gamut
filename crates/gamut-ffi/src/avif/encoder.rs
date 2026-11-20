@@ -87,7 +87,7 @@ seam_handle! {
     fields = { c2pa: Cell::new(None) },
     seam = encoder,
     push = |host, backend| {
-        *host = core::mem::take(host).with_backend(gamut::avif::AbiAv1CodestreamEncoder::new(backend));
+        *host = core::mem::take(host).with_backend(gamut::avif::AbiAv1Encoder::new(backend));
     },
     fns = (gamut_avif_encoder_new, gamut_avif_encoder_free, gamut_avif_encoder_push_backend),
     tests = avif_encoder_tests,
