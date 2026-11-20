@@ -5,9 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::Av1Color;
-use gamut_avif::{
-    AbiAv1CodestreamEncoder, Av1CodestreamEncoder, Av1EncodeRequest, AvifEncoder, Effort,
-};
+use gamut_avif::{AbiAv1Encoder, Av1CodestreamEncoder, Av1EncodeRequest, AvifEncoder, Effort};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr,
@@ -1257,7 +1255,7 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
         vec![head.to_vec(), tail.to_vec()],
     ))));
     let mut encoder = AvifEncoder::lossy(50); // quality 50 ⇒ base_q_idx 127
-    encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
+    encoder = encoder.with_backend(AbiAv1Encoder::new(stub.clone()));
     let out = encode(&encoder).expect("adapter encodes");
     assert_eq!(
         out,
@@ -1317,7 +1315,7 @@ fn abi_adapter_appends_a_non_thorough_effort_to_the_extra_blob() {
             vec![obus.clone()],
         ))));
         let mut encoder = encoder;
-        encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
+        encoder = encoder.with_backend(AbiAv1Encoder::new(stub.clone()));
         encode(&encoder).expect("adapter encodes");
         stub.0.lock().unwrap().seen_extra.clone()
     };
@@ -1348,7 +1346,7 @@ fn abi_adapter_unsupported_declines() {
         vec![],
     ))));
     let mut encoder = AvifEncoder::new();
-    encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
+    encoder = encoder.with_backend(AbiAv1Encoder::new(stub.clone()));
     let out = encode(&encoder).expect("falls through to the built-in tail");
     assert_eq!(out, encode(&AvifEncoder::new()).unwrap());
     assert!(
@@ -1370,7 +1368,7 @@ fn abi_adapter_late_unsupported_is_terminal() {
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
     encoder = encoder
-        .with_backend(AbiAv1CodestreamEncoder::new(late.clone()))
+        .with_backend(AbiAv1Encoder::new(late.clone()))
         .with_backend(Scripted::new("next", true, Outcome::Passthrough, &log));
     let err = encode(&encoder).expect_err("the accepting backend owns the job");
     assert_owned_error(
@@ -1389,7 +1387,7 @@ fn abi_adapter_late_unsupported_is_terminal() {
     assert!(events(&log).is_empty(), "no later backend, no tail");
 
     // With no later backend the late decline does not reach the built-in tail either.
-    let solo = AvifEncoder::new().with_backend(AbiAv1CodestreamEncoder::new(SharedStub(Arc::new(
+    let solo = AvifEncoder::new().with_backend(AbiAv1Encoder::new(SharedStub(Arc::new(
         Mutex::new(AbiStub::new(Status::OK, Status::UNSUPPORTED, vec![])),
     ))));
     assert_owned_error(
@@ -1405,9 +1403,9 @@ fn abi_adapter_other_status_propagates() {
     let log = log();
     let mut encoder = AvifEncoder::new();
     encoder = encoder
-        .with_backend(AbiAv1CodestreamEncoder::new(SharedStub(Arc::new(
-            Mutex::new(AbiStub::new(Status::OK, Status(-42), vec![])),
-        ))))
+        .with_backend(AbiAv1Encoder::new(SharedStub(Arc::new(Mutex::new(
+            AbiStub::new(Status::OK, Status(-42), vec![]),
+        )))))
         .with_backend(Scripted::new("never", true, Outcome::Passthrough, &log));
     let err = encode(&encoder).expect_err("a terminal backend status propagates");
     assert_owned_error(
@@ -1427,8 +1425,8 @@ fn abi_adapter_exposes_the_wrapped_encoder() {
         Status::OK,
         vec![],
     ))));
-    let adapter = AbiAv1CodestreamEncoder::new(stub.clone());
-    assert!(format!("{adapter:?}").contains("AbiAv1CodestreamEncoder"));
+    let adapter = AbiAv1Encoder::new(stub.clone());
+    assert!(format!("{adapter:?}").contains("AbiAv1Encoder"));
     let inner = adapter.into_inner();
     assert!(
         Arc::ptr_eq(&inner.0, &stub.0),
@@ -1517,7 +1515,7 @@ fn abi_adapter_lowers_a_high_bit_depth_job() {
     let mut encoder = AvifEncoder::lossy(50) // quality 50 ⇒ base_q_idx 127
         .with_bit_depth(BitDepth::Twelve)
         .with_chroma(ChromaSubsampling::Cs420);
-    encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
+    encoder = encoder.with_backend(AbiAv1Encoder::new(stub.clone()));
     let out = encode16(&encoder).expect("the adapter owns the 12-bit job");
     assert_eq!(
         out,
@@ -1580,7 +1578,7 @@ fn abi_adapter_lowers_the_requested_depth_not_a_fixed_one() {
             vec![obus],
         ))));
         let mut encoder = AvifEncoder::new().with_bit_depth(bits);
-        encoder = encoder.with_backend(AbiAv1CodestreamEncoder::new(stub.clone()));
+        encoder = encoder.with_backend(AbiAv1Encoder::new(stub.clone()));
         encode16(&encoder).unwrap_or_else(|e| panic!("{bits:?}: {e}"));
         let seen = stub.0.lock().unwrap();
         let image = seen.seen_image.expect("the adapter lowered an image");

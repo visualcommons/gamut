@@ -1,6 +1,6 @@
 //! The AV1 codestream backend seams: the typed [`Av1CodestreamEncoder`] trait a caller plugs an
 //! alternate AV1 encoder into, the [`Av1EncodeRequest`] describing one encode job, the
-//! [`AbiAv1CodestreamEncoder`] adapter that bridges a [`gamut_codec_abi::Encoder`] (and, through
+//! [`AbiAv1Encoder`] adapter that bridges a [`gamut_codec_abi::Encoder`] (and, through
 //! [`gamut_codec_abi::bridge::ForeignEncoder`], a C/`-sys` backend) onto it, and the decode-side
 //! [`Av1CodestreamDecoder`] the [`AvifDecoder`](crate::AvifDecoder) runs coded items through.
 //!
@@ -117,7 +117,7 @@ impl Av1EncodeRequest {
     ///
     /// Like [`effort`](Self::effort) this is a **hint**: a backend may run on fewer threads or ignore
     /// it. The built-in encoder's output does not depend on it; whether a backend's does is the
-    /// backend's own contract. It does not cross the C seam — [`AbiAv1CodestreamEncoder`]'s `extra`
+    /// backend's own contract. It does not cross the C seam — [`AbiAv1Encoder`]'s `extra`
     /// blob is unchanged — since a C backend schedules its own threads.
     #[must_use]
     pub fn threads(&self) -> NonZeroUsize {
@@ -215,7 +215,7 @@ impl Av1EncodeRequest {
 /// Implement this to route [`AvifEncoder`](crate::AvifEncoder)'s codestream through an alternate
 /// AV1 encoder (a platform/hardware encoder, libaom, SVT-AV1, …) and add it with
 /// [`AvifEncoder::with_backend`](crate::AvifEncoder::with_backend). A C or `-sys` backend reaches
-/// this trait through [`AbiAv1CodestreamEncoder`] rather than implementing it directly.
+/// this trait through [`AbiAv1Encoder`] rather than implementing it directly.
 ///
 /// `Send` is not a supertrait: the encoder requires it where a backend is added, so the trait
 /// itself stays usable by single-threaded hosts.
@@ -600,12 +600,12 @@ impl SeqHeaderParams {
 /// accepted a job, every non-OK status from `encode` — [`Status::UNSUPPORTED`] included — is a
 /// terminal failure returned as an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput)
 /// error carrying the status, and no later backend is tried.
-pub struct AbiAv1CodestreamEncoder<E: Encoder> {
+pub struct AbiAv1Encoder<E: Encoder> {
     /// The wrapped ABI encoder.
     inner: E,
 }
 
-impl<E: Encoder> AbiAv1CodestreamEncoder<E> {
+impl<E: Encoder> AbiAv1Encoder<E> {
     /// Wraps a [`gamut_codec_abi::Encoder`] as an [`Av1CodestreamEncoder`].
     #[must_use]
     pub fn new(inner: E) -> Self {
@@ -640,7 +640,7 @@ impl<E: Encoder> AbiAv1CodestreamEncoder<E> {
     }
 }
 
-/// The codec-specific `extra` blob [`AbiAv1CodestreamEncoder`] lowers `req` to: the `base_q_idx`,
+/// The codec-specific `extra` blob [`AbiAv1Encoder`] lowers `req` to: the `base_q_idx`,
 /// then — only when the job runs at a preset other than [`Effort::Thorough`] — the preset's
 /// [`wire_speed`] value. A full-search job therefore lowers to exactly the one-byte blob the
 /// adapter wrote before presets existed. The test is against `Thorough`, not against
@@ -673,10 +673,9 @@ fn wire_speed(effort: Effort) -> Option<u8> {
     }
 }
 
-impl<E: Encoder> std::fmt::Debug for AbiAv1CodestreamEncoder<E> {
+impl<E: Encoder> std::fmt::Debug for AbiAv1Encoder<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AbiAv1CodestreamEncoder")
-            .finish_non_exhaustive()
+        f.debug_struct("AbiAv1Encoder").finish_non_exhaustive()
     }
 }
 
@@ -693,7 +692,7 @@ fn encode_status(status: Status, obus: Vec<u8>) -> Result<Vec<u8>> {
     }
 }
 
-impl<E: Encoder> Av1CodestreamEncoder for AbiAv1CodestreamEncoder<E> {
+impl<E: Encoder> Av1CodestreamEncoder for AbiAv1Encoder<E> {
     fn supports(&mut self, req: &Av1EncodeRequest) -> bool {
         let extra = extra_blob(req);
         self.inner.supports(&Self::config(&extra))

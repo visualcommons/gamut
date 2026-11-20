@@ -349,7 +349,7 @@ repo — nothing here sets file modes — so do not work around it by editing bu
   `ZlibInflater`/`ZlibDeflater`) in the `gamut_heic::HevcCodestreamDecoder` shape (object-safe,
   borrowed bytes in, owned plain data out) — plus a thin **codec-abi adapter**,
   `Abi<Codec>Decoder` / `Abi<Codec>Encoder` (`AbiHevcDecoder`, `AbiJpegEncoder`,
-  `AbiZlibInflater`; gamut-avif's is `AbiAv1CodestreamEncoder`), bridging that typed trait to the
+  `AbiZlibInflater`, `AbiAv1Encoder`), bridging that typed trait to the
   shared `Decoder`/`Encoder` twins and their `repr(C)` vtables, so a C/`-sys` backend and a
   pure-Rust one enter by the same door. The host holds its backends in a
   `gamut_codec_abi::Registry` (that crate's `std` feature), never a registry of its own, and its
