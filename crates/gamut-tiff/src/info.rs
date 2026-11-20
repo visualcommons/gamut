@@ -173,6 +173,25 @@ mod tests {
         ifd
     }
 
+    /// A page with either side zero is refused as zero-sized, each side on its own: a zero
+    /// width with a non-zero height (and the reverse) must not slip past the check.
+    #[test]
+    fn page_info_rejects_a_zero_width_or_a_zero_height() {
+        for (width, height) in [(0, 1), (1, 0)] {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![width]));
+            ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![height]));
+            ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![1]));
+            let err = page_info(&ifd, ByteOrder::LittleEndian).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{width}x{height}");
+            assert_eq!(
+                err.static_message(),
+                Some("TIFF: zero-sized image"),
+                "{width}x{height}"
+            );
+        }
+    }
+
     #[test]
     fn page_info_rejects_zero_samples_per_pixel_as_invalid_input() {
         let err = page_info(&zero_samples_ifd(), ByteOrder::LittleEndian).unwrap_err();

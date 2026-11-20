@@ -483,8 +483,10 @@ pub fn decode_block(
     let mut ctx3 = nonzero_ctx;
     let mut prev_zero = false;
     let mut has_coeffs = false;
-    let mut i = first;
-    while i < 16 {
+    // Walks the block's positions, not a counter it advances itself: a `while` driven by
+    // `i += 1` hung under its `*=` mutant (scored only as a TIMEOUT), because `i` then never
+    // leaves `first` and only an end-of-block token could end the loop.
+    for i in first..16 {
         let band = COEFF_BANDS_MAP[i];
         let node_probs = &probs[plane][band][ctx3];
         let token = if prev_zero {
@@ -514,7 +516,6 @@ pub fn decode_block(
         }
         ctx3 = complexity(abs);
         prev_zero = token == DCT_0;
-        i += 1;
     }
     has_coeffs
 }
