@@ -15,7 +15,7 @@ use gamut_core::Result;
 
 use self::pipeline::{encode_with, encode16_with};
 use crate::headers::{Av1Color, Av1StillConfig, Tiling};
-use crate::tile::BlockVariation;
+use crate::policy::EncodePolicy;
 
 /// How much mode-decision search the lossy intra encoder runs: a preset that trades encode time
 /// for search. Higher is slower, as everywhere in the workspace.
@@ -334,7 +334,7 @@ pub fn encode_still_with_recon(
     planes: &Planar8,
     config: &Av1EncodeConfig,
 ) -> Result<StillWithRecon> {
-    encode_with(planes, config, BlockVariation::Frame)
+    encode_with(planes, config, EncodePolicy::default())
 }
 
 /// Encodes **10- or 12-bit** planes as an AV1 intra keyframe, as `config` says.
@@ -363,7 +363,7 @@ pub fn encode_still16_with_recon(
     planes: &Planar16,
     config: &Av1EncodeConfig,
 ) -> Result<StillWithRecon> {
-    encode16_with(planes, config, BlockVariation::Frame)
+    encode16_with(planes, config, EncodePolicy::default())
 }
 
 #[cfg(test)]

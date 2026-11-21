@@ -70,6 +70,8 @@
 //! transforms (§7.13), `cdf` = default CDF + scan + context tables and the adapting per-tile CDF
 //! context (§9.2/§9.4/§8.2.6/§8.3.2),
 //! `quant` = quantizer tables + dequant (§7.12), `filter` = in-loop filters (§7.14-§7.17).
+//! `policy` gathers the decisions a lossy encode leaves to the encoder (distortion measure, `λ`,
+//! sharpness, quantizer matrices, screen-content tools) into one crate-internal value.
 #![forbid(unsafe_code)]
 
 // Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
@@ -84,6 +86,7 @@ mod encoder;
 mod filter;
 mod geom;
 mod headers;
+mod policy;
 mod quant;
 mod tile;
 mod transform;

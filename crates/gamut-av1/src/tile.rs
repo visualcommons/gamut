@@ -8,7 +8,8 @@
 //!   `PARTITION_NONE` except at the right/bottom frame edges.
 //! - **Lossy** (`qindex > 0`): recursive `PARTITION_NONE`/`HORZ`/`VERT`/`SPLIT` down to 4×4, every
 //!   block at the frame quantizer and loop-filter level — per-superblock `delta_q`/`delta_lf` and
-//!   segmentation (`SEG_LVL_ALT_Q`) are coded only under the test-only [`BlockVariation`]. Each luma
+//!   segmentation (`SEG_LVL_ALT_Q`) are coded only under the test-only [`BlockVariation`], one of
+//!   the lossy decisions the frame reads from its [`EncodePolicy`]. Each luma
 //!   block codes a transform under `TX_MODE_SELECT` (square `tx_depth` 0..2; sizes `TX_4X4`..
 //!   `TX_64X64`, with `TX_32X32`/`TX_64X64` DCT-only). The luma prediction mode is chosen per block
 //!   from all 13 intra modes (`DC`, the eight directional `V`/`H`/`D45`/`D135`/`D113`/`D157`/`D203`/
@@ -66,6 +67,7 @@ use crate::encoder::Effort;
 use crate::filter::{CdefBlocks, CdefStrengths, FrameFilters, LrUnits};
 use crate::geom::PlaneGeom;
 use crate::headers::TileLayout;
+use crate::policy::{EncodePolicy, Sharpness};
 use crate::quant::{ac_q, dc_q};
 
 mod coder;
@@ -344,6 +346,8 @@ pub(crate) struct FrameEncoder<'a> {
     current_qindex: i32,
     /// `CurrentDeltaLF` (§7.14.4): the accumulated per-superblock loop-filter-level delta.
     current_dlf: i32,
+    /// The lossy decisions the frame is coded under ([`EncodePolicy::default`] unless replaced).
+    policy: EncodePolicy,
     /// Whether the frame codes the position-only block variation ([`BlockVariation::exercised`]):
     /// segmentation is enabled, so every block codes a segment id, and `delta_q_present` /
     /// `delta_lf_present` are set, so the first block of each superblock signals a `delta_q` and a
@@ -530,6 +534,7 @@ impl<'a> FrameEncoder<'a> {
             ac_quant: ac_q(bit_depth, i32::from(qindex)),
             current_qindex: i32::from(qindex),
             current_dlf: 0,
+            policy: EncodePolicy::default(),
             block_variation: false,
             read_deltas: false,
             bit_depth,
@@ -578,12 +583,19 @@ impl<'a> FrameEncoder<'a> {
         self
     }
 
-    /// Replaces the block variation ([`BlockVariation::Frame`] by default). The frame header must
-    /// be written with the same `variation`, which is what tells the decoder to read the symbols
-    /// it adds.
-    pub(crate) fn with_block_variation(mut self, variation: BlockVariation) -> Self {
-        self.block_variation = variation.exercised(self.qindex);
+    /// Replaces the lossy decisions ([`EncodePolicy::default`] by default). The frame header must
+    /// be written with the same `policy`, which is what tells the decoder to read the symbols its
+    /// block variation adds and how to filter and dequantize.
+    pub(crate) fn with_policy(mut self, policy: EncodePolicy) -> Self {
+        self.policy = policy;
+        self.block_variation = policy.block_variation.exercised(self.qindex);
         self
+    }
+
+    /// `allow_screen_content_tools` (§5.9.2) as the frame header codes it, which gates every
+    /// block's `palette_mode_info` (§5.11.46).
+    fn screen_content_tools(&self) -> bool {
+        self.policy.screen_content.allowed(self.qindex > 0)
     }
 
     /// Makes this encoder the second pass of a frame `first` coded: the tiles are coded again
@@ -940,6 +952,9 @@ impl<'a> FrameEncoder<'a> {
 
     /// Deblocks `planes` in place at frame `level`, over this frame's transform and block maps.
     fn deblock(&self, planes: &mut [Vec<u16>; 3], level: u8) {
+        // `filter::deblock` derives its thresholds at `loop_filter_sharpness = 0` only, so this
+        // pattern is irrefutable until a sharpness variant lands with the §7.14.4 derivation.
+        let Sharpness::Zero = self.policy.sharpness;
         crate::filter::deblock(
             planes,
             &self.geom,
@@ -983,8 +998,8 @@ impl<'a> FrameEncoder<'a> {
         )
     }
 
-    /// The squared error against the source of the visible samples of `planes` in `range`, each
-    /// plane on its coded stride.
+    /// The distortion ([`EncodePolicy::distortion`]) against the source of the visible samples of
+    /// `planes` in `range`, each plane on its coded stride.
     fn frame_sse(&self, planes: &[Vec<u16>; 3], range: std::ops::Range<usize>) -> u64 {
         let mut sse = 0u64;
         for plane in range {
@@ -993,7 +1008,7 @@ impl<'a> FrameEncoder<'a> {
                 for x in 0..g.w {
                     let d = i64::from(planes[plane][y * g.coded_w + x])
                         - i64::from(self.planes.at(plane, y * g.w + x));
-                    sse += (d * d) as u64;
+                    sse += self.policy.distortion.sample(d);
                 }
             }
         }
@@ -1184,11 +1199,9 @@ mod tests {
         assert!(!BlockVariation::SyntaxExercise.exercised(0));
         let p = busy64();
         assert!(!FrameEncoder::new(&p, 40).block_variation);
-        let exercised =
-            FrameEncoder::new(&p, 40).with_block_variation(BlockVariation::SyntaxExercise);
+        let exercised = FrameEncoder::new(&p, 40).with_policy(EncodePolicy::SYNTAX_EXERCISE);
         assert!(exercised.block_variation);
-        let lossless =
-            FrameEncoder::new(&p, 0).with_block_variation(BlockVariation::SyntaxExercise);
+        let lossless = FrameEncoder::new(&p, 0).with_policy(EncodePolicy::SYNTAX_EXERCISE);
         assert!(!lossless.block_variation);
     }
 

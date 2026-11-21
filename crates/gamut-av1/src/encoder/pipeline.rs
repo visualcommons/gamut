@@ -12,7 +12,8 @@ use super::{Av1EncodeConfig, EncodedStill, ReconImage, StillWithRecon};
 use crate::filter::{FrameFilters, LrUnits};
 use crate::geom::PlaneGeom;
 use crate::headers::{self, Av1Color, Av1StillConfig, TileLayout};
-use crate::tile::{BlockVariation, FrameEncoder, Reconstruction, Search};
+use crate::policy::EncodePolicy;
+use crate::tile::{FrameEncoder, Reconstruction, Search};
 
 /// Validates the source layout shared by every entry point, returning whether the frame is
 /// monochrome.
@@ -169,12 +170,12 @@ fn append_tiles(frame_payload: &mut Vec<u8>, tile_bytes: &[Vec<u8>]) {
     }
 }
 
-/// The high-bit-depth encode behind [`super::encode_still16_with_recon`], with the block variation
+/// The high-bit-depth encode behind [`super::encode_still16_with_recon`], under the lossy policy
 /// as [`encode_with`] takes it.
 pub(super) fn encode16_with(
     planes: &Planar16,
     config: &Av1EncodeConfig,
-    variation: BlockVariation,
+    policy: EncodePolicy,
 ) -> Result<StillWithRecon> {
     let &Av1EncodeConfig {
         qindex,
@@ -212,7 +213,7 @@ pub(super) fn encode16_with(
     let encoder = || {
         FrameEncoder::new16(planes, qindex)
             .with_search(Search::for_effort(effort))
-            .with_block_variation(variation)
+            .with_policy(policy)
     };
     let frame = if qindex == 0 {
         // Lossless: the reconstruction *is* the source. Each plane crops at its own extent, so a
@@ -239,7 +240,7 @@ pub(super) fn encode16_with(
         monochrome,
         frame.filters,
         frame.lr.any(),
-        variation,
+        policy,
     );
     append_tiles(&mut frame_payload, &frame.tile_bytes);
     let recon_planes = frame.planes;
@@ -259,14 +260,14 @@ pub(super) fn encode16_with(
     })
 }
 
-/// The 8-bit encode behind every [`Planar8`] entry point. `variation` is the position-only block
-/// variation the crate's oracle tests exercise; every public entry point passes
-/// [`BlockVariation::Frame`], so no public encode varies a block's quantizer or loop-filter level
-/// by position (#1011).
+/// The 8-bit encode behind every [`Planar8`] entry point, under the lossy decisions `policy`.
+/// Every public entry point passes [`EncodePolicy::default`], so no public encode varies a
+/// block's quantizer or loop-filter level by position (#1011); the crate's oracle tests pass
+/// the test-only `EncodePolicy::SYNTAX_EXERCISE` to keep that syntax under test.
 pub(super) fn encode_with(
     planes: &Planar8,
     config: &Av1EncodeConfig,
-    variation: BlockVariation,
+    policy: EncodePolicy,
 ) -> Result<StillWithRecon> {
     let &Av1EncodeConfig {
         qindex,
@@ -347,7 +348,7 @@ pub(super) fn encode_with(
     let encoder = || {
         FrameEncoder::new(&coded_src, qindex)
             .with_search(Search::for_effort(effort))
-            .with_block_variation(variation)
+            .with_policy(policy)
     };
     let frame = if qindex == 0 {
         // Lossless: the reconstruction equals the 8-bit source; widen it into the u16 recon buffer.
@@ -382,7 +383,7 @@ pub(super) fn encode_with(
         monochrome,
         frame.filters,
         frame.lr.any(),
-        variation,
+        policy,
     );
     append_tiles(&mut frame_payload, &frame.tile_bytes);
 
@@ -682,7 +683,7 @@ mod tests {
     /// `p` encoded as `encode_still_with_recon` would under `config`, with the position-only
     /// block variation switched on.
     fn exercised(p: &Planar8, config: &Av1EncodeConfig) -> StillWithRecon {
-        encode_with(p, config, BlockVariation::SyntaxExercise).unwrap()
+        encode_with(p, config, EncodePolicy::SYNTAX_EXERCISE).unwrap()
     }
 
     /// Decodes `still` with libaom (the AV1 reference decoder) and dav1d, and asserts each
@@ -938,7 +939,7 @@ mod tests {
             let coded = encode16_with(
                 &src,
                 &base.with_qindex(q).with_color(colour),
-                BlockVariation::SyntaxExercise,
+                EncodePolicy::SYNTAX_EXERCISE,
             );
             assert_both_oracles_reconstruct(&coded.unwrap(), &format!("10-bit 4:2:0 q{q}"));
         }
@@ -947,7 +948,7 @@ mod tests {
         let coded = encode_with(
             &wide,
             &base.with_qindex(100).with_superres(4),
-            BlockVariation::SyntaxExercise,
+            EncodePolicy::SYNTAX_EXERCISE,
         );
         assert_both_oracles_reconstruct(&coded.unwrap(), "superres");
     }
