@@ -9,6 +9,7 @@ use gamut_color::{ColorRange, bt601_rgb_to_ycbcr, xyb};
 use gamut_core::{EncodeImage, Error, Gray8, ImageRef, PixelFormat, Result, Rgb8};
 
 use super::block::{Plane, downsample};
+use super::builder::{Frame, FrameQuant};
 use super::entropy::{
     BaselineCoder, Component, Histograms, emit_huffman_tables, encode_scan, optimized_tables,
     standard_tables,
@@ -37,12 +38,13 @@ impl JpegEncoder {
         samples: &[u8],
         out: &mut Vec<u8>,
     ) -> Result<Option<usize>> {
-        // Caller-supplied quantization tables, RD optimization, the XYB colour mode, and a
-        // non-default progressive scan script cannot ride a `JpegEncodeRequest`, so any of them
-        // pins the encode to the built-in path rather than let a backend silently encode with a
-        // different configuration (the same host-side veto gamut-jxl applies to its container
-        // features).
+        // Caller-supplied quantization tables, a jpegli distance, RD optimization, the XYB colour
+        // mode, and a non-default progressive scan script cannot ride a `JpegEncodeRequest`, so
+        // any of them pins the encode to the built-in path rather than let a backend silently
+        // encode with a different configuration (the same host-side veto gamut-jxl applies to its
+        // container features).
         if self.quant_tables.is_some()
+            || self.distance.is_some()
             || self.rd != RdOptimization::None
             || self.color_mode != JpegColorMode::Ycbcr
             || matches!(self.process, Process::Progressive(script) if script != ProgressiveScript::Libjpeg)
@@ -168,16 +170,20 @@ impl JpegEncoder {
     /// ratio as their sampling factors,
     /// B stays 1×1 — jpegli's B-only layout), coded with component
     /// ids `R`,`G`,`B` under a no-APP0 / APP14 `transform = 0` prologue that embeds
-    /// [`XYB_ICC_PROFILE`]. X and Y quantize with the luminance table (destination 0), the stored
-    /// B−Y with the chrominance table (destination 1) — Annex K tables are YCbCr-tuned, so this
-    /// pairing is an honest placeholder, not XYB-tuned (see STATUS.md). A caller X table
-    /// ([`QuantTables::with_xyb_x`]) moves X alone to destination 2. The caller writes EOI.
+    /// [`XYB_ICC_PROFILE`], quantized by `fq` ([`JpegEncoder::frame_quant`]). Under the quality
+    /// mapping or caller tables X and Y quantize with the luminance table (destination 0), the
+    /// stored B−Y with the chrominance table (destination 1) — Annex K tables are YCbCr-tuned, so
+    /// that pairing is an honest placeholder (see STATUS.md) — and a caller X table
+    /// ([`QuantTables::with_xyb_x`]) moves X alone to destination 2. A jpegli distance
+    /// ([`JpegEncoder::with_distance`]) gives X, Y and B jpegli's XYB tables at destinations 0, 1
+    /// and 2. The caller writes EOI.
     fn encode_xyb(
         &self,
         rgb: &[u8],
         width: u16,
         height: u16,
         (hx, vx): (u8, u8),
+        fq: &FrameQuant,
         out: &mut Vec<u8>,
     ) {
         let (w, h) = (usize::from(width), usize::from(height));
@@ -220,8 +226,6 @@ impl JpegEncoder {
         // stays 1×1 — the same frame shape the YCbCr path gives luma and chroma.
         let b_plane = downsample(&b, w, h, usize::from(hx), usize::from(vx));
 
-        let luma_quant = self.luma_quant();
-        let chroma_quant = self.chroma_quant();
         let luma_rd = self.rd_ctx(false);
         let chroma_rd = self.rd_ctx(true);
 
@@ -236,20 +240,7 @@ impl JpegEncoder {
             appmeta::write_app1_xmp(out, xmp);
         }
         appmeta::write_app2_icc(out, XYB_ICC_PROFILE);
-        // X quantizes with its own table at destination 2 when the caller supplied one; otherwise
-        // it shares Y's luminance table at destination 0 (the default two-table stream).
-        let x_table = self.xyb_x_quant();
-        let (x_tq, extended) = match &x_table {
-            Some(x) => (
-                2,
-                quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant), (2, x)]),
-            ),
-            None => (
-                0,
-                quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant)]),
-            ),
-        };
-        let x_quant = x_table.as_ref().unwrap_or(&luma_quant);
+        let extended = quant::emit_dqt(out, &fq.dqt());
 
         // Component ids are the bytes 'R','G','B' (the jpegli convention for XYB streams),
         // belt-and-braces beside the APP14: either signal alone keeps a decoder from applying a
@@ -261,27 +252,27 @@ impl JpegEncoder {
                     id: ids[0],
                     h: hx,
                     v: vx,
-                    tq: x_tq,
+                    tq: fq.tq(0),
                     plane: &x_plane,
-                    quant: x_quant,
+                    quant: fq.table(0),
                     rd: luma_rd.as_ref(),
                 },
                 progressive::ProgComponent {
                     id: ids[1],
                     h: hx,
                     v: vx,
-                    tq: 0,
+                    tq: fq.tq(1),
                     plane: &y_plane,
-                    quant: &luma_quant,
+                    quant: fq.table(1),
                     rd: luma_rd.as_ref(),
                 },
                 progressive::ProgComponent {
                     id: ids[2],
                     h: 1,
                     v: 1,
-                    tq: 1,
+                    tq: fq.tq(2),
                     plane: &b_plane,
-                    quant: &chroma_quant,
+                    quant: fq.table(2),
                     rd: chroma_rd.as_ref(),
                 },
             ];
@@ -301,7 +292,7 @@ impl JpegEncoder {
                     h: hx,
                     v: vx,
                     plane: &x_plane,
-                    quant: x_quant,
+                    quant: fq.table(0),
                     dest: 0,
                     rd: luma_rd.as_ref(),
                 },
@@ -309,7 +300,7 @@ impl JpegEncoder {
                     h: hx,
                     v: vx,
                     plane: &y_plane,
-                    quant: &luma_quant,
+                    quant: fq.table(1),
                     dest: 0,
                     rd: luma_rd.as_ref(),
                 },
@@ -317,7 +308,7 @@ impl JpegEncoder {
                     h: 1,
                     v: 1,
                     plane: &b_plane,
-                    quant: &chroma_quant,
+                    quant: fq.table(2),
                     dest: 1,
                     rd: chroma_rd.as_ref(),
                 },
@@ -327,9 +318,9 @@ impl JpegEncoder {
                 extended,
                 (width, height),
                 &[
-                    (ids[0], hx, vx, x_tq),
-                    (ids[1], hx, vx, 0),
-                    (ids[2], 1, 1, 1),
+                    (ids[0], hx, vx, fq.tq(0)),
+                    (ids[1], hx, vx, fq.tq(1)),
+                    (ids[2], 1, 1, fq.tq(2)),
                 ],
                 &[(ids[0], 0, 0), (ids[1], 0, 0), (ids[2], 1, 1)],
                 &components,
@@ -351,6 +342,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
         }
         let (width, height) = Self::check_dimensions(image.dimensions())?;
         self.check_metadata()?;
+        let fq = self.frame_quant(Frame::Gray)?;
         if let Some(written) =
             self.encode_via_backend(width, height, PixelFormat::Gray8, image.as_samples(), out)?
         {
@@ -363,18 +355,17 @@ impl EncodeImage<Gray8> for JpegEncoder {
             width: usize::from(width),
             height: usize::from(height),
         };
-        let luma_quant = self.luma_quant();
         let luma_rd = self.rd_ctx(false);
 
-        let extended = self.write_prologue(out, &[(0, &luma_quant)]);
+        let extended = self.write_prologue(out, &fq.dqt());
         if let Process::Progressive(script) = self.process {
             let comps = [progressive::ProgComponent {
                 id: 1,
                 h: 1,
                 v: 1,
-                tq: 0,
+                tq: fq.tq(0),
                 plane: &plane,
-                quant: &luma_quant,
+                quant: fq.table(0),
                 rd: luma_rd.as_ref(),
             }];
             progressive::encode(
@@ -391,7 +382,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
                 h: 1,
                 v: 1,
                 plane: &plane,
-                quant: &luma_quant,
+                quant: fq.table(0),
                 dest: 0,
                 rd: luma_rd.as_ref(),
             };
@@ -399,7 +390,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
                 out,
                 extended,
                 (width, height),
-                &[(1, 1, 1, 0)],
+                &[(1, 1, 1, fq.tq(0))],
                 &[(1, 0, 0)],
                 &[comp],
             );
@@ -420,6 +411,11 @@ impl EncodeImage<Rgb8> for JpegEncoder {
         // Checked before any backend runs, so a backend is never offered a layout the frame
         // cannot carry.
         let (yh, yv) = luma_factors(self.subsampling)?;
+        let fq = self.frame_quant(if self.color_mode == JpegColorMode::Xyb {
+            Frame::Xyb
+        } else {
+            Frame::Ycbcr { luma: (yh, yv) }
+        })?;
         if let Some(written) =
             self.encode_via_backend(width, height, PixelFormat::Rgb8, image.as_samples(), out)?
         {
@@ -429,7 +425,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
         let (w, h) = (usize::from(width), usize::from(height));
 
         if self.color_mode == JpegColorMode::Xyb {
-            self.encode_xyb(image.as_samples(), width, height, (yh, yv), out);
+            self.encode_xyb(image.as_samples(), width, height, (yh, yv), &fq, out);
             marker::write_marker(out, marker::code::EOI);
             return Ok(out.len() - start);
         }
@@ -455,39 +451,37 @@ impl EncodeImage<Rgb8> for JpegEncoder {
         let cb_plane = downsample(&cb, w, h, sx, sy);
         let cr_plane = downsample(&cr, w, h, sx, sy);
 
-        let luma_quant = self.luma_quant();
-        let chroma_quant = self.chroma_quant();
         let luma_rd = self.rd_ctx(false);
         let chroma_rd = self.rd_ctx(true);
 
-        let extended = self.write_prologue(out, &[(0, &luma_quant), (1, &chroma_quant)]);
+        let extended = self.write_prologue(out, &fq.dqt());
         if let Process::Progressive(script) = self.process {
             let comps = [
                 progressive::ProgComponent {
                     id: 1,
                     h: yh,
                     v: yv,
-                    tq: 0,
+                    tq: fq.tq(0),
                     plane: &luma_plane,
-                    quant: &luma_quant,
+                    quant: fq.table(0),
                     rd: luma_rd.as_ref(),
                 },
                 progressive::ProgComponent {
                     id: 2,
                     h: 1,
                     v: 1,
-                    tq: 1,
+                    tq: fq.tq(1),
                     plane: &cb_plane,
-                    quant: &chroma_quant,
+                    quant: fq.table(1),
                     rd: chroma_rd.as_ref(),
                 },
                 progressive::ProgComponent {
                     id: 3,
                     h: 1,
                     v: 1,
-                    tq: 1,
+                    tq: fq.tq(2),
                     plane: &cr_plane,
-                    quant: &chroma_quant,
+                    quant: fq.table(2),
                     rd: chroma_rd.as_ref(),
                 },
             ];
@@ -506,7 +500,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     h: yh,
                     v: yv,
                     plane: &luma_plane,
-                    quant: &luma_quant,
+                    quant: fq.table(0),
                     dest: 0,
                     rd: luma_rd.as_ref(),
                 },
@@ -514,7 +508,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     h: 1,
                     v: 1,
                     plane: &cb_plane,
-                    quant: &chroma_quant,
+                    quant: fq.table(1),
                     dest: 1,
                     rd: chroma_rd.as_ref(),
                 },
@@ -522,7 +516,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     h: 1,
                     v: 1,
                     plane: &cr_plane,
-                    quant: &chroma_quant,
+                    quant: fq.table(2),
                     dest: 1,
                     rd: chroma_rd.as_ref(),
                 },
@@ -531,7 +525,11 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                 out,
                 extended,
                 (width, height),
-                &[(1, yh, yv, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
+                &[
+                    (1, yh, yv, fq.tq(0)),
+                    (2, 1, 1, fq.tq(1)),
+                    (3, 1, 1, fq.tq(2)),
+                ],
                 &[(1, 0, 0), (2, 1, 1), (3, 1, 1)],
                 &components,
             );
