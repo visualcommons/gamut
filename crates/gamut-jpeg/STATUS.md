@@ -77,7 +77,8 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   accepts and then fails — a codec-abi backend's late `UNSUPPORTED` status included — returns its
   error unchanged.
 - Decoder resource guards (P9, issue #306; default-on since issue #1024): `JpegDecoder::new()`
-  caps dimensions at 65535 × 65535 and the native raster at 64 MiB, and
+  caps each side at 32768 and the frame at 16384 × 16384 pixels with no byte budget (issue #1226;
+  65535 × 65535 and a 64 MiB raster before it), and
   `JpegDecoder::with_limits(DecodeLimits)` overrides them (the workspace's shared limits type,
   issue #1083), enforced before built-in frame allocations and backend selection, while bounding
   sequential DNL-deferred sample-plane growth until the exact height arrives.
@@ -276,14 +277,16 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **DNL (define number of lines, §B.2.5).** The **decoder** parses DNL and resolves a *sequential*
   frame with `Y = 0` by decoding MCU rows until the entropy data ends at a marker (the `Y = 0`
   frame's height then arrives in the following DNL). A DNL after a `Y ≠ 0` frame is advisory and
-  ignored. The dimension and byte caps derive an MCU-row ceiling before this dynamic decode,
+  ignored. The dimension, pixel-count and byte caps derive an MCU-row ceiling before this dynamic decode,
   then the exact resolved height is checked when DNL arrives. The encoder never emits `Y = 0` (it
   always knows its height and writes it in SOF0).
 - **Resource-budget accounting.** `DecodeLimits::max_image_bytes` budgets the native 8-bit interleaved
   raster (`width × height × frame components`), independent of chroma subsampling or requested
-  `Gray8`/`Rgb8`/`Cmyk8` presentation. The default budget is 64 MiB (issue #1024, matching
-  `gamut-png`); a trusted image beyond it needs `with_max_image_bytes(usize::MAX)` on the
-  `DecodeLimits` handed to `with_limits`. SOF limits
+  `Gray8`/`Rgb8`/`Cmyk8` presentation. It is opt-in: the default sets none (issue #1226; it was
+  64 MiB from issue #1024, which refused an ordinary 6000 × 4000 RGB photograph), leaving the
+  32768-per-side and 16384 × 16384-pixel caps as the default guard. A frame with a side over 32768
+  — which T.81 Table B.2 permits up to 65535 — is refused by default and needs widened limits. SOF
+  limits
   run before built-in frame-sized allocation or backend selection; accepted backend output is
   checked again, although the host cannot cap memory internal to an accepted foreign backend.
 - **Progressive + `Y = 0` (deferred height) is rejected as `Unsupported`.** The progressive
