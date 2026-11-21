@@ -43,6 +43,12 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   (libwebp's `alpha_quality`, libvips' `alpha_q`) trades that away below it, reducing the lossy
   image's alpha plane to at most `2 + q / 5` levels up to `70` and `16 + (q − 70) · 8` above —
   the same plane libwebp produces. Lossless encodes keep alpha bit-exact regardless.
+- **Transparent colour** — `WebpEncoder::with_exact(Exact)` is libwebp's `exact`: whether the RGB
+  under `alpha = 0` pixels is preserved or cleaned so it costs fewer bits. The default,
+  `Exact::ByMode`, **cleans lossy** encodes (libwebp's default; a port of its
+  `WebPCleanupTransparentArea`) and **preserves lossless** ones, so lossless stays bit-exact
+  including the invisible colour; `Exact::Clean` sets it to transparent black in lossless too.
+  Pixels with `alpha > 0` are never touched.
 - **Compression effort** — `WebpEncoder::with_effort(Effort)` is libwebp's `method` dial, `0..=6`,
   defaulting to `4`. It applies to both codestreams and never changes what the format guarantees:
   lossless stays bit-exact at every rung, lossy keeps its quality target. The lossless rungs race

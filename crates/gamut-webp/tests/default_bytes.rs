@@ -31,7 +31,7 @@
 
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy};
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
-use gamut_webp::{ChromaUpsampling, Effort, WebpDecoder, WebpEncoder};
+use gamut_webp::{ChromaUpsampling, Effort, Exact, WebpDecoder, WebpEncoder};
 
 /// FNV-1a (64-bit) over `bytes` — a dependency-free digest for pinning fixture bytes.
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -121,8 +121,21 @@ fn lossy_rgb_default_bytes_are_unchanged() {
 fn lossy_rgba_extended_default_bytes_are_unchanged() {
     // The transparent path: VP8X + ALPH + VP8 . `ALPH` stays container-side, so its bytes are
     // pinned here too.
+    //
+    // Issue #1207 moved the default: a lossy encode now cleans the colour under `alpha = 0` first
+    // (libwebp's `exact = 0`), which flattens the fixture's transparent luma (202 → 192 bytes).
+    // `Exact::Preserve` still reproduces the pre-#1207 bytes, which is what shows the cleanup is the
+    // only thing that moved.
     let file = encode_rgba(&WebpEncoder::lossy(60), &rgba_fixture(32, 24), dims(32, 24));
-    assert_bytes("lossy rgba extended", &file, 202, 0x519a_6ee2_7660_1fb4);
+    assert_bytes("lossy rgba extended", &file, 192, 0xb44a_1f81_12d0_5f0d);
+    let exact = WebpEncoder::lossy(60).with_exact(Exact::Preserve);
+    let file = encode_rgba(&exact, &rgba_fixture(32, 24), dims(32, 24));
+    assert_bytes(
+        "lossy rgba extended exact",
+        &file,
+        202,
+        0x519a_6ee2_7660_1fb4,
+    );
 }
 
 #[test]
@@ -146,9 +159,12 @@ fn default_decode_output_is_unchanged() {
     // with libwebp's fancy upsampler (byte-identical to libwebp, gated in `tests/oracle.rs`). The
     // digests from before that change held under `ChromaUpsampling::Nearest`, which is what showed
     // the switch moved only the upsampler. Both rows were re-pinned by issue #1204, which re-coded
-    // the files they decode at a finer quantizer.
+    // the files they decode at a finer quantizer. The transparent file is encoded with
+    // `Exact::Preserve` since issue #1207, so it is still the very file these digests decode: this
+    // pins the decoder, and the encoder's cleanup default is pinned above.
     let lossy = encode_rgb(&WebpEncoder::lossy(60), &rgb_fixture(32, 24), dims(32, 24));
-    let ext = encode_rgba(&WebpEncoder::lossy(60), &rgba_fixture(32, 24), dims(32, 24));
+    let exact = WebpEncoder::lossy(60).with_exact(Exact::Preserve);
+    let ext = encode_rgba(&exact, &rgba_fixture(32, 24), dims(32, 24));
     let nearest = WebpDecoder::new().with_chroma_upsampling(ChromaUpsampling::Nearest);
     for (decoder, rgb_digest, rgba_digest) in [
         (
