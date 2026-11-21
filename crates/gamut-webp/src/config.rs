@@ -199,6 +199,14 @@ pub struct WebpConfig {
     /// Lossy quality factor, `0..=100` (higher = larger, closer to the source). Ignored for
     /// lossless. Values above `100` behave as `100` (the encoder clamps silently) — a frozen
     /// contract.
+    ///
+    /// It selects the VP8 base quantizer index along libwebp's `QualityToCompression` curve, so a
+    /// given `quality` here means what the same `quality` means to libwebp, cwebp's `-q` and
+    /// libvips' `Q`: with `c = quality / 100`, `linear_c = c·2/3` below `c = 0.75` and `2c − 1` from
+    /// there up, and the index is `⌊127·(1 − linear_c^(1/3))⌋` — `127` at `0`, `26` at the default
+    /// `75`, `0` at `100`. That is libwebp's base quantizer with spatial noise shaping off; gamut
+    /// codes the whole frame at it and does not yet modulate it per segment the way libwebp's SNS
+    /// does (deferred, issue #1017).
     pub quality: u8,
     /// Compression effort (libwebp's `method`, `0..=6`). Applies to **both** modes; it never
     /// changes the decoded pixels of a lossless encode nor the quality target of a lossy one,

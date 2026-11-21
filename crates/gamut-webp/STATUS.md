@@ -305,5 +305,6 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | VP8L candidate-plan search: transform chain, palette order, cache size, grouping, LZ77 depth | issue #31 | ✅ | M4 |
 | VP8 two-pass entropy: derived coefficient probabilities + measured skip probability | issue #32 | ✅ | M4 |
 | VP8 dead-zone quantizer (AC only; DC stays round-to-nearest) | issue #32 | ✅ | M4 |
+| lossy `quality` → base quantizer along libwebp's `QualityToCompression` curve, libwebp-differential at every `0..=100` (SNS off, one segment) | issue #1204 | ✅ | M4 |
 | near-lossless preprocessing (`NearLossless`, host-side RGB quantization before VP8L) | issue #261 | ✅ | M4 |
 | wasm / ffi bindings for WebP | gamut-{wasm,ffi} | ☐ | future |

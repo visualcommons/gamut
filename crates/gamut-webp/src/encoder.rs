@@ -30,10 +30,27 @@ use crate::vp8l::near_lossless;
 use crate::vp8l::transform::make_argb;
 
 /// Maps a `0..=100` quality to a VP8 base quantizer index (`0..=127`); higher quality → lower index
-/// (less quantization). This is the keystone's simple mapping; finer rate control is issue #32.
+/// (less quantization).
+///
+/// This is libwebp's `QualityToCompression` curve (`src/enc/quant_enc.c`) with SNS off: with
+/// `c = quality / 100`, the piecewise-linear `linear_c = c < 0.75 ? c·2/3 : 2c − 1` is raised to
+/// `1/3` (file size scales roughly as the cube of the quantizer), and the index is
+/// `⌊127·(1 − linear_c^(1/3))⌋`. So the same `quality` lands on the same base quantizer as libwebp
+/// at `sns_strength = 0` — the oracle test below checks every `0..=100`.
+///
+/// The two lines meet at `c = 0.75` (both `0.5`), and below it `c·2/3` is the larger of the two, so
+/// `linear_c` is written as their `max` rather than as libwebp's branch: the branch's `<` and `<=`
+/// are indistinguishable on every input, and `max` leaves no such twin. That removes the
+/// comparison's mutants along with its equivalent one. The floor's fractional distance from an
+/// integer is at least `0.0119` over `0..=100`, so a last-ulp difference in a platform's `powf`
+/// cannot move an index.
 fn quality_to_quant(quality: u8) -> u8 {
-    let q = u32::from(quality.min(100));
-    ((100 - q) * 127 / 100) as u8
+    let c = f64::from(quality.min(100)) / 100.0;
+    let linear_c = (c * (2.0 / 3.0)).max(2.0 * c - 1.0);
+    let compression = linear_c.powf(1.0 / 3.0);
+    // `compression` lies in `0.0..=1.0`, so the product is in `0.0..=127.0` and the truncating cast
+    // is libwebp's `(int)` floor.
+    (127.0 * (1.0 - compression)) as u8
 }
 
 /// Whether `fourcc` names a chunk that is genuinely *unknown* — the only kind
@@ -855,17 +872,80 @@ mod tests {
 
     #[test]
     fn quality_to_quant_maps_endpoints_and_is_monotonic() {
-        // Higher quality → lower base quantizer index; pins the exact mapping the lossy path relies
-        // on (otherwise the function can be replaced by a constant with no test noticing).
+        // Higher quality → lower base quantizer index. The exact values are libwebp's, pinned over
+        // the whole range by `quality_to_quant_matches_libwebp_base_quantizer`; this keeps the
+        // endpoints, the shared default 75 (libwebp's 26), and the saturation above 100, which
+        // libwebp's float `quality` cannot reach.
         assert_eq!(quality_to_quant(0), 127);
         assert_eq!(quality_to_quant(100), 0);
-        assert_eq!(quality_to_quant(50), 63);
-        assert_eq!(quality_to_quant(75), 31);
+        assert_eq!(quality_to_quant(50), 38);
+        assert_eq!(quality_to_quant(75), 26);
         assert_eq!(quality_to_quant(255), 0, "quality saturates at 100");
         for q in 1u8..=100 {
             assert!(
                 quality_to_quant(q) <= quality_to_quant(q - 1),
                 "must be non-increasing at q={q}"
+            );
+        }
+    }
+
+    /// The base quantizer index (`y_ac_qi`, RFC 6386 §9.6) in the frame header of the `VP8 ` chunk
+    /// of the WebP file `file`.
+    fn base_q_index(file: &[u8]) -> u8 {
+        use gamut_riff::{RiffReader, WebpChunkId};
+
+        use crate::vp8::bool_coder::BoolDecoder;
+        use crate::vp8::header::{
+            UNCOMPRESSED_CHUNK_LEN, read_frame_header, read_uncompressed_chunk,
+        };
+
+        let vp8 = RiffReader::new(file)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|c| matches!(WebpChunkId::from(c.fourcc), WebpChunkId::Vp8))
+            .expect("a lossy file carries a VP8 chunk")
+            .payload;
+        let chunk = read_uncompressed_chunk(vp8).unwrap();
+        let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
+        let mut dec = BoolDecoder::new(&vp8[UNCOMPRESSED_CHUNK_LEN..part0_end]);
+        read_frame_header(&chunk, &mut dec).0.quant.y_ac
+    }
+
+    #[test]
+    fn quality_to_quant_matches_libwebp_base_quantizer() {
+        // Differential against libwebp (issue #1204): with SNS off and one segment, libwebp's frame
+        // header carries `QualityToCompression(quality)` unmodulated as its base quantizer, so the
+        // same `quality` must put the same index in gamut's header at every `0..=100`.
+        use libwebp_oracle::fixtures::photo_like_rgba;
+        use libwebp_oracle::{LibwebpLossyConfig, libwebp_encode_lossy_rgba_config};
+
+        let (w, h) = (16u32, 16u32);
+        let rgba = photo_like_rgba(w, h, 0x00c0_ffee);
+        for quality in 0u8..=100 {
+            let libwebp = libwebp_encode_lossy_rgba_config(
+                &rgba,
+                w,
+                h,
+                &LibwebpLossyConfig {
+                    quality: f32::from(quality),
+                    filter_type: 1,
+                    segments: 1,
+                    method: 4,
+                    filter_strength: 60,
+                    sns_strength: 0,
+                },
+            );
+            let mut gamut = Vec::new();
+            WebpEncoder::lossy(quality)
+                .encode_image(
+                    ImageRef::<Rgba8>::new(&rgba, dims(w, h)).unwrap(),
+                    &mut gamut,
+                )
+                .expect("encode");
+            assert_eq!(
+                base_q_index(&gamut),
+                base_q_index(&libwebp),
+                "base quantizer at quality {quality}"
             );
         }
     }

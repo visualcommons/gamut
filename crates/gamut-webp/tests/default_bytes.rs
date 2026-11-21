@@ -22,6 +22,12 @@
 //! `effort_two_still_reproduces_the_historical_lossy_bytes` keeps the pre-ladder bytes pinned at the
 //! rung that still produces them, which is what made the two-pass restructure checkable as a pure
 //! refactor.
+//!
+//! They moved again with issue #1204, when `quality` began following libwebp's
+//! `QualityToCompression` curve instead of a straight line: quality 60 now codes at base quantizer
+//! 33 rather than 50, so each lossy file is larger and closer to its source (lossy RGB 134 → 152
+//! bytes, transparent lossy 184 → 202, the 16×16 opaque file 58 → 62). The historical anchor asks
+//! for quality 33, which lands on the old quantizer 50, and its bytes did not move.
 
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy};
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
@@ -108,7 +114,7 @@ fn lossless_rgba_default_bytes_are_unchanged() {
 #[test]
 fn lossy_rgb_default_bytes_are_unchanged() {
     let file = encode_rgb(&WebpEncoder::lossy(60), &rgb_fixture(32, 24), dims(32, 24));
-    assert_bytes("lossy rgb", &file, 134, 0x414b_d885_3a94_d316);
+    assert_bytes("lossy rgb", &file, 152, 0x9408_de4e_61f6_9872);
 }
 
 #[test]
@@ -116,17 +122,18 @@ fn lossy_rgba_extended_default_bytes_are_unchanged() {
     // The transparent path: VP8X + ALPH + VP8 . `ALPH` stays container-side, so its bytes are
     // pinned here too.
     let file = encode_rgba(&WebpEncoder::lossy(60), &rgba_fixture(32, 24), dims(32, 24));
-    assert_bytes("lossy rgba extended", &file, 184, 0xe2df_69e2_2c62_ce64);
+    assert_bytes("lossy rgba extended", &file, 202, 0x519a_6ee2_7660_1fb4);
 }
 
 #[test]
 fn lossy_rgba_opaque_default_bytes_are_unchanged() {
     // Small enough to pin every byte of the file, container header included.
-    const OPAQUE: [u8; 58] = [
-        0x52, 0x49, 0x46, 0x46, 0x32, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
-        0x20, 0x26, 0x00, 0x00, 0x00, 0xb0, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00, 0x10, 0x00,
-        0x06, 0x40, 0x64, 0x08, 0x09, 0xd3, 0xd1, 0xbb, 0xe5, 0xc3, 0x40, 0xd4, 0x00, 0xfe, 0x6d,
-        0x4c, 0x7f, 0xd5, 0xdf, 0x9d, 0xbf, 0x53, 0xde, 0xc2, 0xb4, 0x9a, 0x44, 0x80,
+    const OPAQUE: [u8; 62] = [
+        0x52, 0x49, 0x46, 0x46, 0x36, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x20, 0x2a, 0x00, 0x00, 0x00, 0xb0, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00, 0x10, 0x00,
+        0x04, 0x00, 0x42, 0x08, 0x09, 0xd3, 0xd1, 0xbb, 0xe5, 0xc3, 0x40, 0xd4, 0x00, 0xfe, 0xca,
+        0xc3, 0x6f, 0xff, 0x25, 0x3f, 0xfb, 0xca, 0xff, 0x5d, 0xdb, 0x86, 0xdd, 0x27, 0xea, 0x7f,
+        0x28, 0x00,
     ];
     let px = [120u8, 60, 200, 0xff].repeat(16 * 16);
     let file = encode_rgba(&WebpEncoder::lossy(60), &px, dims(16, 16));
@@ -137,18 +144,19 @@ fn lossy_rgba_opaque_default_bytes_are_unchanged() {
 fn default_decode_output_is_unchanged() {
     // Re-pinned once, deliberately, by issue #1016: the default lossy decode now upsamples chroma
     // with libwebp's fancy upsampler (byte-identical to libwebp, gated in `tests/oracle.rs`). The
-    // digests from before that change still hold under `ChromaUpsampling::Nearest`, which is what
-    // shows the switch moved only the upsampler.
+    // digests from before that change held under `ChromaUpsampling::Nearest`, which is what showed
+    // the switch moved only the upsampler. Both rows were re-pinned by issue #1204, which re-coded
+    // the files they decode at a finer quantizer.
     let lossy = encode_rgb(&WebpEncoder::lossy(60), &rgb_fixture(32, 24), dims(32, 24));
     let ext = encode_rgba(&WebpEncoder::lossy(60), &rgba_fixture(32, 24), dims(32, 24));
     let nearest = WebpDecoder::new().with_chroma_upsampling(ChromaUpsampling::Nearest);
     for (decoder, rgb_digest, rgba_digest) in [
         (
             WebpDecoder::new(),
-            0x3f94_72ce_7cb2_a7a0,
-            0x9e12_c909_ceb2_704e,
+            0x9831_b6e7_fd42_bef8,
+            0x34f1_7011_1a16_f0f2,
         ),
-        (nearest, 0x5b45_4f5a_c084_c917, 0xd12d_2572_ff93_296f),
+        (nearest, 0x2882_b3e0_5228_16ef, 0x2a7b_fe1d_d054_bd01),
     ] {
         let rgb: ImageBuf<Rgb8> = decoder.decode_image(&lossy).expect("decode");
         assert_eq!(rgb.dimensions(), dims(32, 24));
@@ -169,7 +177,11 @@ fn effort_two_still_reproduces_the_historical_lossy_bytes() {
     //
     // Keeping the anchor as a test rather than as a comment means a future change to the low rungs
     // has to be deliberate.
-    let e2 = WebpEncoder::lossy(60).with_effort(Effort::Fast);
+    //
+    // Those digests were captured at quality 60, which the old linear mapping sent to base
+    // quantizer 50. Since issue #1204 quality follows libwebp's curve, on which 33 is the quality
+    // that lands on 50, so the anchor now asks for 33 and the bytes are untouched.
+    let e2 = WebpEncoder::lossy(33).with_effort(Effort::Fast);
     let rgb = encode_rgb(&e2, &rgb_fixture(32, 24), dims(32, 24));
     assert_bytes("lossy rgb @ effort 2", &rgb, 136, 0x2eb3_c30d_36b6_067e);
 
