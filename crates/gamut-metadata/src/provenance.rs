@@ -47,8 +47,8 @@
 /// change; match with a wildcard arm, or use [`is_embedded`](Self::is_embedded) and
 /// [`remote_url`](Self::remote_url), which answer the two underlying questions directly and are
 /// the C-portable surface of this type (a data-carrying enum's tag cannot be read in safe Rust,
-/// and `String` is not FFI-safe). There is deliberately no `Default`: this is a computed report, and a default
-/// of "no provenance" would be a confident answer nobody asked for.
+/// and `String` is not FFI-safe). There is deliberately no `Default`: this is a computed report,
+/// and a default of "no provenance" would be a confident answer nobody asked for.
 ///
 /// `#[repr(u8)]` with permanent, append-only discriminants: the leading `u8` tag of the layout
 /// that representation defines is `0`–`3` in declaration order, and a new state takes the next

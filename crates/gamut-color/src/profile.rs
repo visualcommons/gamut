@@ -87,9 +87,9 @@ impl SourceTransfer {
 /// assert!((lab[0] - 1.0).abs() < 1e-6);
 /// ```
 ///
-/// `#[non_exhaustive]`: the bundle is an open set — a further encoder-exact parameter (an HDR
-/// tone-map target, say) may join `gamut` and `transfer` later. Start from one of the named
-/// profiles and assign the public fields to build another:
+/// `#[non_exhaustive]`: the bundle is an open set, so a further encoder-exact parameter may join
+/// `gamut` and `transfer` later without a breaking change. Start from one of the named profiles
+/// and assign the public fields to build another:
 ///
 /// ```
 /// use gamut_color::{SourceProfile, SourceTransfer};
