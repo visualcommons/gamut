@@ -729,9 +729,12 @@ impl DngEncoder {
                     ))
                 }
             }
-            DngCompression::Uncompressed | DngCompression::Deflate => {
+            DngCompression::Uncompressed => {
+                Ok(bitpack::pack(samples, bits, cols * spp, self.order))
+            }
+            DngCompression::Deflate => {
                 let packed = bitpack::pack(samples, bits, cols * spp, self.order);
-                compression::compress(self.compression.code(), &packed)
+                Ok(compression::deflate(&packed))
             }
         }
     }

@@ -5,7 +5,8 @@
 //! 8`) is zlib-format (RFC 1950), matching what the reference implementation reads/writes via
 //! zlib's `compress2`/`uncompress`. Compression uses [`gamut_deflate`]'s encoder; decompression
 //! uses its shared bounded [`gamut_deflate::inflate_zlib`], as `gamut-png` and `gamut-tiff` do.
-//! Lossless JPEG and JPEG XL are added in later phases.
+//! Lossless JPEG and JPEG XL code samples rather than packed bytes, so they live in the encoder's
+//! and decoder's own chunk coders, not here.
 
 use gamut_core::{Error, Result};
 
@@ -38,28 +39,18 @@ pub fn is_lossy(scheme: Compression) -> bool {
     matches!(scheme, Compression::LossyJpeg | Compression::JpegXl)
 }
 
-/// Compresses one already-packed strip with `scheme`.
+/// Deflates one already-packed strip to DNG's `Compression = 8` zlib stream.
 ///
-/// # Errors
-///
-/// Returns an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a scheme
-/// gamut-dng cannot yet encode.
-pub(crate) fn compress(scheme: Compression, packed: &[u8]) -> Result<Vec<u8>> {
-    match scheme {
-        Compression::None => Ok(packed.to_vec()),
-        // Encoding goes through the workspace's own space-optimising zlib encoder at its default
-        // level (lazy matching + per-block dynamic Huffman), the same choice `gamut-tiff` makes for
-        // Adobe Deflate. Inflation is its shared bounded inflate — see [`decompress`].
-        Compression::Deflate => {
-            let mut out = Vec::new();
-            gamut_deflate::DeflateEncoder::new().zlib_compress(packed, &mut out);
-            Ok(out)
-        }
-        _ => Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "DNG: this compression is not yet encodable",
-        )),
-    }
+/// Encoding goes through the workspace's own space-optimising zlib encoder at its default level
+/// (lazy matching + per-block dynamic Huffman), the same choice `gamut-tiff` makes for Adobe
+/// Deflate. Inflation is its shared bounded inflate — see [`decompress`]. Uncompressed strips are
+/// the packed bytes themselves, and lossless JPEG and JPEG XL code samples rather than packed
+/// bytes, so Deflate is the one scheme that compresses here and the caller selects it by calling
+/// this function: no scheme parameter means no arm for a scheme it cannot encode.
+pub(crate) fn deflate(packed: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    gamut_deflate::DeflateEncoder::new().zlib_compress(packed, &mut out);
+    out
 }
 
 /// Decompresses one strip produced with `scheme` back to the packed sample bytes.
@@ -122,7 +113,7 @@ mod tests {
     #[test]
     fn deflate_roundtrips() {
         let data: Vec<u8> = (0..4096).map(|i| (i * 7 % 251) as u8).collect();
-        let packed = compress(Compression::Deflate, &data).unwrap();
+        let packed = deflate(&data);
         assert!(packed.len() < data.len(), "structured data should shrink");
         assert_eq!(
             decompress(Compression::Deflate, &packed, data.len()).unwrap(),
@@ -135,7 +126,7 @@ mod tests {
     #[test]
     fn inflation_is_capped_at_max_out() {
         let data: Vec<u8> = (0..4096).map(|i| (i * 7 % 251) as u8).collect();
-        let packed = compress(Compression::Deflate, &data).unwrap();
+        let packed = deflate(&data);
         assert!(decompress(Compression::Deflate, &packed, data.len()).is_ok());
         let over = decompress(Compression::Deflate, &packed, data.len() - 1).unwrap_err();
         assert_eq!(
@@ -154,7 +145,7 @@ mod tests {
                 .static_message(),
             Some("corrupt zlib stream")
         );
-        let mut packed = compress(Compression::Deflate, &[1, 2, 3, 4]).unwrap();
+        let mut packed = deflate(&[1, 2, 3, 4]);
         packed.pop();
         assert_eq!(
             decompress(Compression::Deflate, &packed, 4)
@@ -167,17 +158,8 @@ mod tests {
     #[test]
     fn uncompressed_is_passthrough() {
         assert_eq!(
-            compress(Compression::None, &[1, 2, 3]).unwrap(),
-            vec![1, 2, 3]
-        );
-        assert_eq!(
             decompress(Compression::None, &[1, 2, 3], 3).unwrap(),
             vec![1, 2, 3]
         );
-    }
-
-    #[test]
-    fn lossless_jpeg_not_yet_encodable() {
-        assert!(compress(Compression::Jpeg, &[0; 16]).is_err());
     }
 }
