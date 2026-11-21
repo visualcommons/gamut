@@ -310,6 +310,16 @@ The API was frozen after a full-surface review; the additions and breaks:
   `encode_pages<P: TiffPixel>`, where the new sealed `TiffPixel` names every layout the
   `EncodeImage` impls write (all but `Indexed8`, whose colour table has its own entry point); an
   `Rgb8` caller changes only the method name (`tests/multipage.rs`).
+- **Additions since the freeze (#1105) — `Bilevel` and `Indexed8` decode.** `TiffDecoder`
+  implements `DecodeImage<Bilevel>` and `DecodeImage<Indexed8>`, so every layout the encoder
+  writes reads back through the trait. A 1-bit page is now natively `Bilevel` (0/255 samples)
+  rather than `Gray8`; every existing presentation of it is unchanged, since gamut-core widens
+  `Bilevel` losslessly to every grey/colour layout. `DecodeImage<Indexed8>` returns a palette
+  page's bare indices and refuses any other page as `Unsupported`. The colour table comes from
+  the new inherent `TiffDecoder::decode_page_indexed8(data, page)`, the decode twin of
+  `encode_indexed8`, which returns the new `#[non_exhaustive]` `IndexedPage` (`image()`,
+  `palette()`, `into_parts()`); its `Palette` always holds the 256 entries a `ColorMap` carries
+  (TIFF 6.0 §5), black padding included (`tests/palette.rs`, `tests/bilevel.rs`).
 - **The workspace shapes (#1082). Breaking.** `TiffMetadata::exif` is gamut-exif's `Exif` model
   (a new normal `gamut-exif` edge, re-exported with `ExifTag`), replacing the raw `exif`/`ifd0`/
   `gps` directories and `exif_byte_order`: the model carries all three and its byte order, as

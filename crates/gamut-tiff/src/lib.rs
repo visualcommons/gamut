@@ -99,7 +99,7 @@ mod palette;
 mod typed;
 mod writer;
 
-pub use decoder::TiffDecoder;
+pub use decoder::{IndexedPage, TiffDecoder};
 pub use deconstruct::deconstruct;
 pub use encoder::{TiffEncodeReport, TiffEncoder, TiffPixel};
 // The core types this crate's own signatures take (`TiffDecoder::with_limits`,

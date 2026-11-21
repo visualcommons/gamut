@@ -11,8 +11,9 @@ use gamut_core::convert::{
     ConvertPolicy, DepthPolicy, RawImage, convert_from_raw, unpremultiply_alpha,
 };
 use gamut_core::{
-    Cmyk8, DecodeImage, DecodeLimits, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
-    ImageBuf, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16, Sample,
+    Bilevel, Cmyk8, DecodeImage, DecodeLimits, Dimensions, Error, Gray8, Gray16, GrayAlpha8,
+    GrayAlpha16, ImageBuf, Indexed8, Palette, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8,
+    Rgba16, Sample,
 };
 use gamut_ifd::{ByteOrder, Ifd, ZeroRowsPerStrip, extent_slices, read, rows_per_strip};
 
@@ -50,6 +51,11 @@ use crate::tags;
 /// 16-bit by `×257` (exact). A request that would *lose* information — dropping alpha, narrowing
 /// 16-bit samples to 8, reducing colour to luma — is refused by default; call
 /// [`TiffDecoder::with_convert_policy`] to opt into it.
+///
+/// A 1-bit page is natively [`Bilevel`] (0/255 samples), so it passes through to that layout and
+/// widens losslessly to every grey or colour one. A palette page is natively [`Indexed8`]: that
+/// layout receives its bare indices, every other layout the RGB they select, and
+/// [`TiffDecoder::decode_page_indexed8`] returns the indices with their colour table.
 ///
 /// Use [`TiffDecoder::info`] to see a page's declared depth before deciding, rather than relying
 /// on the conversions above.
@@ -89,21 +95,27 @@ fn within_size_limit(bytes: usize, max_bytes: usize, message: &'static str) -> R
 
 /// Decoded samples at the width the file stores them in.
 ///
-/// Sub-byte and 8-bit sources land in [`Samples::U8`] — bilevel expanded to 0/255, palette resolved
-/// to RGB bytes — and 16-bit sources in [`Samples::U16`]. Keeping the native width here rather than
-/// normalising to one type is what lets the 8-bit path stay a move: converting everything to `u16`
-/// would make every ordinary image pay a widen and a narrow it does not need.
+/// Sub-byte and 8-bit sources land in [`Samples::U8`] — bilevel expanded to 0/255 — and 16-bit
+/// sources in [`Samples::U16`]. Keeping the native width here rather than normalising to one type
+/// is what lets the 8-bit path stay a move: converting everything to `u16` would make every
+/// ordinary image pay a widen and a narrow it does not need.
+///
+/// A palette page keeps its indices and its colour table apart, in [`Samples::Indexed`], until the
+/// requested layout is known: [`Indexed8`] takes the indices as they are, and every other layout
+/// takes the RGB they select.
 enum Samples {
     U8(Vec<u8>),
     U16(Vec<u16>),
+    /// 8-bit palette indices, and the `ColorMap` they select from. Boxed as in [`Mode::Palette`].
+    Indexed(Vec<u8>, Box<Palette8>),
 }
 
 /// An image decoded to interleaved samples in `BlackIsZero`/RGB convention.
 ///
-/// `format` is the layout those samples are *already* in — palette indices are expanded,
-/// `WhiteIsZero` is inverted, and bilevel is expanded to 0/255 during decode, so what reaches
-/// [`gamut_core::convert`] is a plain grayscale, RGB, RGBA, or CMYK buffer. It is the pairing of
-/// `format` with `samples` that is load-bearing: a 4-sample page is `Rgba*` or `Cmyk8` by its
+/// `format` is the layout those samples are *already* in — `WhiteIsZero` is inverted and bilevel
+/// is expanded to 0/255 [`Bilevel`] samples during decode, so what reaches [`gamut_core::convert`]
+/// is a plain bilevel, grayscale, RGB, RGBA, or CMYK buffer, or palette indices. It is the pairing
+/// of `format` with `samples` that is load-bearing: a 4-sample page is `Rgba*` or `Cmyk8` by its
 /// photometric tag, which a sample count alone cannot distinguish.
 struct DecodedImage {
     dims: Dimensions,
@@ -375,9 +387,113 @@ impl TiffDecoder {
             Samples::U16(ref samples) => {
                 convert_from_raw(RawImage::new(samples, img.format, img.dims)?, self.policy)
             }
+            // Palette indices are not a colour layout, so the conversion engine moves them only
+            // into `Indexed8` itself; every other request is served the RGB they select, which the
+            // engine then presents like any RGB page.
+            Samples::Indexed(ref indices, _) if P::FORMAT == PixelFormat::Indexed8 => {
+                convert_from_raw(
+                    RawImage::new(indices, PixelFormat::Indexed8, img.dims)?,
+                    self.policy,
+                )
+            }
+            Samples::Indexed(ref indices, ref palette) => {
+                let rgb: Vec<u8> = indices.iter().flat_map(|&i| palette.entry(i)).collect();
+                convert_from_raw(
+                    RawImage::new(&rgb, PixelFormat::Rgb8, img.dims)?,
+                    self.policy,
+                )
+            }
         }
     }
+
+    /// Decodes palette-colour page `page` to its bare [`Indexed8`] indices together with the
+    /// colour table they select from — the decode-side twin of
+    /// [`TiffEncoder::encode_indexed8`](crate::TiffEncoder::encode_indexed8).
+    ///
+    /// The returned [`Palette`] always holds 256 entries: TIFF 6.0 §5 fixes the `ColorMap` at
+    /// `2**BitsPerSample` entries and records no count of the ones in use, so a palette shorter
+    /// than 256 that [`encode_indexed8`](crate::TiffEncoder::encode_indexed8) padded with black
+    /// comes back with that padding. Each 16-bit `ColorMap` value is reduced to its high byte,
+    /// the inverse of the encoder's `×257`.
+    ///
+    /// ```
+    /// use gamut_core::{Dimensions, ImageRef, Indexed8};
+    /// use gamut_tiff::{Palette, TiffDecoder, TiffEncoder};
+    ///
+    /// # fn main() -> gamut_core::Result<()> {
+    /// let palette = Palette::new(&[[255, 0, 0], [0, 0, 255]])?;
+    /// let indices = [0u8, 1, 1, 0];
+    /// let mut tiff = Vec::new();
+    /// TiffEncoder::new().encode_indexed8(
+    ///     ImageRef::<Indexed8>::new(&indices, Dimensions::new(2, 2)?)?,
+    ///     &palette,
+    ///     &mut tiff,
+    /// )?;
+    ///
+    /// let page = TiffDecoder::new().decode_page_indexed8(&tiff, 0)?;
+    /// assert_eq!(page.image().as_samples(), &indices);
+    /// assert_eq!(page.palette().rgb(1), Some([0, 0, 255]));
+    /// assert_eq!(page.palette().rgb_entries().len(), 256);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`TiffDecoder::decode_page_as`] at [`Indexed8`]: in particular an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a page that is not
+    /// palette colour, since no other layout carries indices.
+    pub fn decode_page_indexed8(&self, data: &[u8], page: usize) -> Result<IndexedPage> {
+        let img = decode_page_samples(data, page, self.limits)?;
+        let Samples::Indexed(indices, table) = img.samples else {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                NOT_PALETTE_REFUSAL,
+            ));
+        };
+        let entries: Vec<[u8; 3]> = (0..=u8::MAX).map(|i| table.entry(i)).collect();
+        Ok(IndexedPage {
+            image: ImageBuf::new(indices, img.dims)?,
+            palette: Palette::new(&entries)?,
+        })
+    }
 }
+
+/// A palette-colour page decoded by [`TiffDecoder::decode_page_indexed8`]: its bare [`Indexed8`]
+/// indices and the colour table they select from.
+///
+/// `#[non_exhaustive]` so it can gain fields (as gamut-png's `DecodedPng` carries its palette
+/// beside the image) without a breaking change; read it through the accessors, or take both
+/// halves with [`IndexedPage::into_parts`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct IndexedPage {
+    image: ImageBuf<Indexed8>,
+    palette: Palette,
+}
+
+impl IndexedPage {
+    /// The page's palette indices, one byte per pixel.
+    #[must_use]
+    pub fn image(&self) -> &ImageBuf<Indexed8> {
+        &self.image
+    }
+
+    /// The page's colour table, always 256 entries (see
+    /// [`TiffDecoder::decode_page_indexed8`]).
+    #[must_use]
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    /// Splits the page into its indices and its colour table, without copying either.
+    pub fn into_parts(self) -> (ImageBuf<Indexed8>, Palette) {
+        (self.image, self.palette)
+    }
+}
+
+/// The refusal for a palette-index decode of a page that carries no palette.
+const NOT_PALETTE_REFUSAL: &str = "TIFF: only a palette-colour page carries Indexed8 indices";
 
 impl DecodeImage<Rgb8> for TiffDecoder {
     /// Grayscale and palette pages widen into RGB. Dropping an alpha or ink channel, and narrowing
@@ -450,6 +566,26 @@ impl DecodeImage<GrayAlpha16> for TiffDecoder {
     /// samples by `×257`; a grey page gains opaque alpha. A colour page needs a
     /// [`LumaPolicy`](gamut_core::convert::LumaPolicy).
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<GrayAlpha16>> {
+        self.decode_page_as(data, 0)
+    }
+}
+
+impl DecodeImage<Bilevel> for TiffDecoder {
+    /// A 1-bit page passes through as 0/255 samples (`WhiteIsZero` inverted). Any deeper page is a
+    /// reduction to two states, so it needs a [`DepthPolicy`] (thresholded at
+    /// [`ConvertPolicy::threshold`]), and a colour one a
+    /// [`LumaPolicy`](gamut_core::convert::LumaPolicy) as well.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Bilevel>> {
+        self.decode_page_as(data, 0)
+    }
+}
+
+impl DecodeImage<Indexed8> for TiffDecoder {
+    /// A palette page's bare indices; any other page is refused with an
+    /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error, since no policy turns
+    /// colour into indices. The colour table does not fit the single-buffer [`DecodeImage`] shape,
+    /// so it comes from [`TiffDecoder::decode_page_indexed8`].
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Indexed8>> {
         self.decode_page_as(data, 0)
     }
 }
@@ -733,16 +869,11 @@ fn decode_page_samples(data: &[u8], page: usize, limits: DecodeLimits) -> Result
                     px.push(if white { 255 } else { 0 });
                 }
             }
-            (PixelFormat::Gray8, Samples::U8(px))
+            (PixelFormat::Bilevel, Samples::U8(px))
         }
-        Mode::Palette(palette) => {
-            // Each 8-bit index selects an RGB triple from the colour table.
-            let mut px = Vec::with_capacity(width * height * 3);
-            for &idx in &packed {
-                px.extend_from_slice(&palette.entry(idx));
-            }
-            (PixelFormat::Rgb8, Samples::U8(px))
-        }
+        // The indices stay as stored; `decode_page_as` resolves them once it knows whether the
+        // caller wants indices or colour.
+        Mode::Palette(palette) => (PixelFormat::Indexed8, Samples::Indexed(packed, palette)),
     };
 
     Ok(DecodedImage {

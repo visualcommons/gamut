@@ -75,3 +75,32 @@ fn libtiff_bilevel_is_decoded_by_gamut() {
         }
     }
 }
+
+/// A 1-bit page is natively `Bilevel`, so `DecodeImage<Bilevel>` hands back the 0/255 samples
+/// encoded, with no `DepthPolicy` (a deeper page would need one to reach two states).
+#[test]
+fn bilevel_roundtrips_as_bilevel() {
+    for &(w, h) in SIZES {
+        let src = pattern(w, h);
+        let tiff = TiffEncoder::new()
+            .encode_to_vec(ImageRef::<Bilevel>::new(&src, Dimensions::new(w, h).unwrap()).unwrap())
+            .expect("encode");
+        let got: ImageBuf<Bilevel> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+        assert_eq!(got.as_samples(), src.as_slice(), "{w}x{h}");
+    }
+}
+
+/// The same pass-through for a page libtiff wrote: the reference packs the bits, gamut presents
+/// them as `Bilevel`.
+#[test]
+fn libtiff_bilevel_is_decoded_by_gamut_as_bilevel() {
+    for &(w, h) in SIZES {
+        let src = pattern(w, h);
+        let tiff = libtiff_oracle::encode_bilevel(&src, w, h, libtiff_oracle::Compression::None)
+            .expect("libtiff encode");
+        let got: ImageBuf<Bilevel> = TiffDecoder::new()
+            .decode_image(&tiff)
+            .expect("gamut decode");
+        assert_eq!(got.as_samples(), src.as_slice(), "{w}x{h}");
+    }
+}

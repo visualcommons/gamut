@@ -76,8 +76,9 @@ backward-compatible; removing or reshaping any of the above would not.
 
 ## Deferred / tracked follow-ups (all additive — none blocks v1)
 - **`Indexed8` and the shared `Palette`.** `Palette` ships here; `gamut-png` takes and returns it
-  (`PngEncoder::encode_indexed8`, `DecodedPng::palette`) and `gamut-tiff` takes it
-  (`TiffEncoder::encode_indexed8`, #1082). `Indexed8` still has no `EncodeImage` path, because the
+  (`PngEncoder::encode_indexed8`, `DecodedPng::palette`) and `gamut-tiff` takes and returns it
+  (`TiffEncoder::encode_indexed8`, #1082; `TiffDecoder::decode_page_indexed8`'s `IndexedPage`,
+  #1105). `Indexed8` still has no `EncodeImage` path, because the
   single-buffer trait shape cannot carry the table alongside the indices.
 
 ## Validation
