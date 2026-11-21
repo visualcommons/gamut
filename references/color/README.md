@@ -49,7 +49,12 @@ constant they define is instead transcribed with its exact value in the tables b
   above is the freely-published primary reference for the same primaries and encoding.
 - **CIE 15:2004** (colorimetry — CIELab) — CIE, paywalled; the ε/κ junction rationals are
   transcribed in the *CIELab* section below, and the freely-published Lindbloom page above is
-  the vendored transcription of the same equations.
+  the vendored transcription of the same equations. Its daylight locus — `x` as a cubic in
+  `1/T` (`−4.6070e9/T³ + 2.9678e6/T² + 0.09911e3/T + 0.244063` for 4000–7000 K,
+  `−2.0064e9/T³ + 1.9018e6/T² + 0.24748e3/T + 0.237040` for 7000–25 000 K) and
+  `y = −3.000x² + 2.870x − 0.275` — is transcribed in `cct::daylight_xy`, coefficient for
+  coefficient what Little-CMS's `cmsWhitePointFromTemp` (`third_party/lcms2/src/cmswtpnt.c`)
+  carries.
 - **Wyszecki & Stiles, _Color Science: Concepts and Methods, Quantitative Data and Formulae_,
   2nd ed. (Wiley, 1982), p. 228** (Robertson's isotemperature lines) — a book, not vendorable;
   the 31-row table is transcribed in the *Correlated colour temperature* section below.
