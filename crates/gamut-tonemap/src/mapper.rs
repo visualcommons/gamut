@@ -121,9 +121,12 @@ pub enum ApplyMode {
 /// master into SDR is then `source_peak = 10`, `target_peak = 1`.
 ///
 /// Luma uses `gamut_core`'s fixed-point weights ([`BT709_LUMA_WEIGHTS`] unless
-/// [`with_luma_weights`](Self::with_luma_weights) says otherwise), each exactly `W / 65536`: within
-/// `2⁻¹⁷` of the decimal coefficient, so `Y` is within `2⁻¹⁷ · (r + g + b)` of the decimal-weight
-/// luma ffmpeg computes.
+/// [`with_luma_weights`](Self::with_luma_weights) says otherwise), each exactly `W / 65536`. The
+/// BT.709 defaults round to nearest, each within `2⁻¹⁷` of its decimal coefficient, so `Y` is
+/// within `2⁻¹⁷ · (r + g + b)` of the decimal-weight luma ffmpeg computes. `gamut_core`'s other
+/// tables are within one fixed-point unit, `2⁻¹⁶`, per weight (luma within `2⁻¹⁶ · (r + g + b)`):
+/// [`BT2020_LUMA_WEIGHTS`](gamut_core::luminance::BT2020_LUMA_WEIGHTS) gives green the spare unit
+/// that makes the triple sum to [`LUMA_ONE`], leaving it `0.59` units off.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurveToneMapper<C> {
     curve: C,

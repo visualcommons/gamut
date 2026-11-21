@@ -284,8 +284,9 @@ becomes `(1 − p) / p`, and `gamma`/`mobius`, which default to 1.8/0.3):
 scalar curve, and adds two driving signals ffmpeg does not have (per channel, and luma — the
 latter as in libplacebo). It keeps both `1e-6` floors as written, including the consequence that a
 pixel with `Y < 1e-6` desaturates fully (`overbright = 1e-6 / 1e-6 = 1`). Its luma weights are
-`gamut_core`'s fixed-point ones (`W / 65536`, each within `2⁻¹⁷` of the decimal), the one
-intended departure from the source.
+`gamut_core`'s fixed-point ones (`W / 65536`; the BT.709 defaults each within `2⁻¹⁷` of the
+decimal, the other tables within one unit, `2⁻¹⁶`, since BT.2020's green carries the spare unit
+that makes the sum exact), the one intended departure from the source.
 
 ---
 

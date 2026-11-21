@@ -23,7 +23,7 @@ constructible operator across the full f32 input range.
 | `Clamp`, `Exposure`, `ReinhardExtended`, `Hable`, `Drago` | validated constructors returning `gamut_core::Result`; by-value accessors | private fields — adding fields is non-breaking |
 | `SDR_WHITE_NORMALIZED`, `DEFAULT_REINHARD_WHITE`, `DEFAULT_HABLE_WHITE`, `DEFAULT_DRAGO_BIAS` | `f32` constants | documented literals backing the `Default` impls |
 | `ToneMapper` (#1236) | `map_rgb(&self, [f32; 3]) -> [f32; 3]` + provided `map_rgb_slice(&mut [[f32; 3]])`; dyn-compatible | open trait; no blanket impl, so forwarding impls stay possible |
-| `CurveToneMapper<C: ToneCurve>` (#1236) | `new(curve, source_peak)` + `with_target_peak` / `with_desat` / `with_luma_weights` (validated, `gamut_core::Result`) and `with_mode`; by-reference accessors | private fields; `Debug + Clone + Copy + PartialEq` where `C` is |
+| `CurveToneMapper<C: ToneCurve>` (#1236) | `new(curve, source_peak)` + `with_target_peak` / `with_desat` / `with_luma_weights` (validated, `gamut_core::Result`) and `with_mode`; accessors (`curve()` by reference, `mode` / `desat` / `source_peak` / `target_peak` / `luma_weights` by value) | private fields; `Debug + Clone + Copy + PartialEq` where `C` is |
 | `ApplyMode` (#1236) | `PerChannel = 0`, `Luminance = 1`, `MaxRgb = 2` (default) | `#[non_exhaustive]`, `#[repr(u32)]`; discriminants permanent (C ABI, #1103), new variants append |
 | `DEFAULT_DESAT` (#1236) | `f32` constant `2.0` | ffmpeg `tonemap`'s `desat` default |
 
@@ -102,8 +102,10 @@ any of the above would not.
   - **Defaults.** They are ffmpeg's: `MaxRgb`, `desat = 2`, target peak `1`. Desaturation runs
     before the mode in every mode, and its `1e-6` floors are kept as written.
   - **Luma weights.** They are `gamut_core`'s fixed-point ones: BT.709 by default, any triple
-    summing to `LUMA_ONE` via `with_luma_weights`. This adds no dependency edge. Each weight is
-    within `2⁻¹⁷` of ffmpeg's decimals, which is the one intended difference.
+    summing to `LUMA_ONE` via `with_luma_weights`. This adds no dependency edge. The BT.709
+    defaults are each within `2⁻¹⁷` of ffmpeg's decimals, which is the one intended difference;
+    `gamut_core`'s other tables are within one unit, `2⁻¹⁶` (BT.2020's green carries the spare
+    unit that makes the sum exact, `0.59` units off).
   - **Precision.** It stays `f32`. Luma and the gain are capped at `f32::MAX`, so a saturating
     curve cannot produce `∞/∞` or `0·∞`.
 - **Composition stays a closure.** `|x| b.map(a.map(x))` composes curves today; a `then`
