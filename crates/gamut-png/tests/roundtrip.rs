@@ -35,7 +35,7 @@ where
 fn every_colour_type_and_level_round_trips() {
     let (w, h) = (23u32, 11u32);
     for level in [Level::Fast, Level::Default, Level::Best] {
-        let encoder = PngEncoder::new().with_compression(level);
+        let encoder = PngEncoder::new().with_level(level);
         let n = (w * h) as usize;
         round_trip::<Gray8>(&encoder, &noise(n, 1), w, h);
         round_trip::<GrayAlpha8>(&encoder, &noise(n * 2, 2), w, h);
@@ -67,7 +67,7 @@ fn effort_budget_round_trips_and_defaults_to_six_passes() {
         .collect();
     for effort in [0u8, 15] {
         let encoder = PngEncoder::new()
-            .with_compression(Level::Best)
+            .with_level(Level::Best)
             .with_deflate_passes(effort)
             .with_filter(FilterStrategy::None);
         round_trip::<Rgb8>(&encoder, &src, w, h);
@@ -79,7 +79,7 @@ fn effort_budget_round_trips_and_defaults_to_six_passes() {
     let encode = |encoder: PngEncoder| {
         let mut png = Vec::new();
         encoder
-            .with_compression(Level::Best)
+            .with_level(Level::Best)
             .with_filter(FilterStrategy::None)
             .with_icc_profile_name("prof")
             .with_icc_profile(&tiny_icc_profile())

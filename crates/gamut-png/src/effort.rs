@@ -14,7 +14,7 @@ use crate::filter::{FilterStrategy, FilterType};
 /// One rung of the encoder's size/time ladder: a named setting for all five of the knobs that
 /// trade encoding time for output size (issue #484).
 ///
-/// The knobs — [`with_compression`](PngEncoder::with_compression),
+/// The knobs — [`with_level`](PngEncoder::with_level),
 /// [`with_deflate_passes`](PngEncoder::with_deflate_passes), [`with_filter`](PngEncoder::with_filter),
 /// [`with_optimal_parse_limit`](PngEncoder::with_optimal_parse_limit) and
 /// [`with_auto_reduce`](PngEncoder::with_auto_reduce) — are independent, and nothing mapped one

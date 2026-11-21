@@ -257,7 +257,7 @@ fn pixels(fixture: &str, side: u32) -> (Vec<u8>, usize) {
 /// run to run.
 fn gamut_best(samples: &[u8], channels: usize, depth: u8, side: u32, cleanup: bool) -> Vec<u8> {
     let encoder = PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .with_filter(FilterStrategy::BruteForce)
         .with_auto_reduce(true)
         .with_transparent_cleanup(cleanup);
