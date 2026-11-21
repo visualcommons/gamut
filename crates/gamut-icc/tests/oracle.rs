@@ -655,3 +655,44 @@ fn oracle_pq_diffuse_white_is_dark_grey_in_lcms_srgb() {
         );
     }
 }
+
+/// The three identity built-ins are lcms2's own `cmsCreateLab4Profile(NULL)`,
+/// `cmsCreateLab2Profile(NULL)` and `cmsCreateXYZProfile()`: lcms2's bytes, decoded, carry the
+/// same header model and the same tags in the same order with equal values — the whole profile
+/// but the per-run header stamps (date, creator, platform). And lcms2 reads ours back with that
+/// tag set, so the writer's encoding of each is one the reference accepts.
+#[test]
+fn oracle_identity_builtins_match_lcms_tag_for_tag() {
+    let pairs = [
+        ("lab_v4", IccProfile::lab_v4(), lcms2_oracle::lab4()),
+        ("lab_v2", IccProfile::lab_v2(), lcms2_oracle::lab2()),
+        ("xyz", IccProfile::xyz(), lcms2_oracle::xyz()),
+    ];
+    for (label, ours, lcms) in pairs {
+        let theirs =
+            IccProfile::parse(&lcms.to_bytes()).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        let (h, t) = (&ours.header, &theirs.header);
+        assert_eq!(h.version, t.version, "{label}: version");
+        assert_eq!(h.device_class, t.device_class, "{label}: class");
+        assert_eq!(
+            h.data_color_space, t.data_color_space,
+            "{label}: data space"
+        );
+        assert_eq!(h.pcs, t.pcs, "{label}: pcs");
+        assert_eq!(h.rendering_intent, t.rendering_intent, "{label}: intent");
+        assert_eq!(h.pcs_illuminant, t.pcs_illuminant, "{label}: illuminant");
+        assert_eq!(ours.tags, theirs.tags, "{label}: tags");
+
+        let reread = lcms2_oracle::Profile::from_bytes(&ours.to_bytes().expect("serializes"))
+            .unwrap_or_else(|| panic!("{label}: lcms2 opens ours"));
+        let signatures: Vec<u32> = (0..reread.tag_count())
+            .map(|i| reread.tag_signature(i))
+            .collect();
+        let want: Vec<u32> = ours
+            .tags
+            .iter()
+            .map(|tag| u32::from(tag.signature))
+            .collect();
+        assert_eq!(signatures, want, "{label}: tags lcms2 reads back");
+    }
+}

@@ -27,7 +27,10 @@
 //! [`IccProfile::from_cicp_with`] takes a [`CicpTransferReading`] as well, for the BT.1886
 //! display reading of the BT.709-family transfers in place of the literal inverse OETF. Each
 //! returns `None` for signalling no matrix/TRC profile can describe. The colorimetry behind them
-//! is [`gamut_color`]'s, never restated here; see `src/builtin/`.
+//! is [`gamut_color`]'s, never restated here; see `src/builtin/`. [`IccProfile::lab_v4`],
+//! [`IccProfile::lab_v2`] and [`IccProfile::xyz`] are the PCS identity profiles a transform
+//! chain ends on to get colorimetry out — Little-CMS's built-in Lab and XYZ profiles, tag for
+//! tag.
 //!
 //! ```no_run
 //! use gamut_icc::{IccProfile, KnownTag, TagData};
