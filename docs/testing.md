@@ -278,11 +278,11 @@ carry no function bodies.
 | gamut-exif | exiv2 | differential + golden | `parse` ☑ |
 | gamut-xmp | exiv2 XMPCore | differential + golden | `parse` ☑ |
 | gamut-iptc | exiv2; IPTC tech reference | differential + drift guard | `read_irb` ☑ |
-| gamut-metadata | *facade* | law (round-trip through the facade) | — |
+| gamut-metadata | exiv2 `copyExifToXmp`/`copyXmpToExif` for the EXIF ↔ XMP mapping; otherwise *facade* | differential + law (round-trip through the facade) | — |
 
-Nine crates hold no oracle dev-dependency of their own: `gamut-core`, `gamut-ifd`,
-`gamut-tonemap`, `gamut-bitstream`, `gamut-dsp`, `gamut-codec-abi`, `gamut-isobmff`, `gamut-heif`
-and `gamut-metadata`. Most have something else standing in — `gamut-isobmff` has specification vectors,
+Eight crates hold no oracle dev-dependency of their own: `gamut-core`, `gamut-ifd`,
+`gamut-tonemap`, `gamut-bitstream`, `gamut-dsp`, `gamut-codec-abi`, `gamut-isobmff` and
+`gamut-heif`. Most have something else standing in — `gamut-isobmff` has specification vectors,
 exact-byte assertions and libavif's reach through `gamut-avif`; `gamut-heif` has its inline
 exact-sample tests and its decode-limit law (`src/invariants.rs`), driven by a pinned-seed property
 and the `heif_decode_limits` fuzz target; `gamut-ifd` is covered through

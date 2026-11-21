@@ -976,6 +976,7 @@ dependencies = [
 name = "gamut-metadata"
 version = "2.0.0"
 dependencies = [
+ "exiv2-oracle",
  "gamut-core",
  "gamut-exif",
  "gamut-icc",
