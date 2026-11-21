@@ -517,6 +517,7 @@ fn chunk_types(png: &[u8]) -> Vec<[u8; 4]> {
 /// vendored libpng 1.6.43 predates both chunks, so it keeps them as unknown chunks and reports
 /// their payloads verbatim (`libpng_oracle::KEPT_UNKNOWN_CHUNKS`); what libpng attests is the
 /// framing, the CRC and the position, and the expected bytes below are the spec's own examples.
+/// A value-level cross-check in both directions waits on a vendored libpng >= 1.6.45 (#1256).
 ///
 /// A palette image, so the position claim has a `PLTE` to be measured against. The level is set
 /// from the ISOBMFF-shaped whole-cd/m² type, which converts exactly.
