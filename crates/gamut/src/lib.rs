@@ -25,6 +25,26 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+/// `cmm` alone names the transform's inputs: `gamut::icc` comes with it, not only with
+/// `metadata`. Built under `cargo test -p gamut --no-default-features --features cmm --doc`.
+///
+/// ```
+/// use gamut::cmm::{IccTransform, TransformOptions, transform_in_place};
+/// use gamut::core::{Dimensions, ImageBuf, Rgb8};
+/// use gamut::icc::{BuiltinProfile, IccProfile, RenderingIntent};
+///
+/// let srgb = IccProfile::builtin(BuiltinProfile::Srgb).expect("sRGB is built in");
+/// let options =
+///     TransformOptions::default().with_intent(RenderingIntent::MediaRelativeColorimetric);
+/// let transform = IccTransform::between(&srgb, &srgb, options)?;
+/// let mut image = ImageBuf::<Rgb8>::new(vec![12, 128, 250], Dimensions::new(1, 1)?)?;
+/// transform_in_place(&transform, &mut image)?;
+/// assert_eq!(image.as_samples(), [12, 128, 250]);
+/// # Ok::<(), gamut::core::Error>(())
+/// ```
+#[cfg(all(doctest, feature = "cmm"))]
+struct CmmDoctests;
+
 /// The version of this `gamut` library crate, taken from its `Cargo.toml` at compile time.
 ///
 /// Exposed so tooling (e.g. the `gamut` CLI's `-V` output) can report the resolved library
@@ -64,7 +84,9 @@ pub use gamut_exif as exif;
 pub use gamut_heic as heic;
 #[cfg(feature = "heif")]
 pub use gamut_heif as heif;
-#[cfg(feature = "metadata")]
+// Also under `cmm`: every gamut-cmm constructor takes gamut-icc's profile types, which gamut-cmm
+// does not re-export.
+#[cfg(any(feature = "metadata", feature = "cmm"))]
 pub use gamut_icc as icc;
 #[cfg(feature = "ifd")]
 pub use gamut_ifd as ifd;
