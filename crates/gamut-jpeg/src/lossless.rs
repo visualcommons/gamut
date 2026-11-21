@@ -182,18 +182,31 @@ impl Predictor {
 /// assert_eq!(lossless::decode(&jpeg)?.samples, samples);
 /// # Ok::<(), gamut_core::Error>(())
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LosslessEncoder {
     predictor: Predictor,
     point_transform: u8,
     restart_interval: u16,
 }
 
+impl Default for LosslessEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LosslessEncoder {
     /// An encoder with [`Predictor::Left`], no point transform and no restart interval.
+    // The fields are spelled out rather than taken from `Default`, which delegates here (the
+    // `JpegEncoder` shape): a `new() -> Default::default()` replacement then recurses instead of
+    // returning the identical value.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            predictor: Predictor::Left,
+            point_transform: 0,
+            restart_interval: 0,
+        }
     }
 
     /// Selects the [`Predictor`] (`Ss`) every sample past the first line and column is coded
@@ -379,9 +392,14 @@ struct Geometry {
 /// that line's first sample.
 fn differences(samples: &[u16], g: Geometry, predictor: Predictor) -> Vec<i16> {
     let mut diffs = Vec::with_capacity(samples.len());
+    let mut origin_y = 0;
     for y in 0..g.height {
-        // The line the current interval opened on; with no restarts, the scan's first.
-        let origin_y = y.checked_rem(g.interval_lines).map_or(0, |into| y - into);
+        // Each interval's first line becomes the origin; with no restarts (`interval_lines == 0`,
+        // so no remainder) the scan's first line stays it. Tracked rather than computed as
+        // `y - y % n`, whose `- → +` twin agrees wherever the origin is consulted (`y == origin`).
+        if y.checked_rem(g.interval_lines) == Some(0) {
+            origin_y = y;
+        }
         for x in 0..g.width {
             for c in 0..g.components {
                 let actual = i32::from(samples[(y * g.width + x) * g.components + c]);
@@ -1076,6 +1094,11 @@ mod tests {
     }
 
     #[test]
+    fn the_default_encoder_is_new() {
+        assert_eq!(LosslessEncoder::default(), LosslessEncoder::new());
+    }
+
+    #[test]
     fn encode_writes_predictor_point_transform_and_restart_interval_in_the_headers() {
         // 4 wide, Ri = 8 = two lines: the DRI follows the DHT, and the SOS tail is Ss = 5, Se = 0,
         // Ah|Al = Pt = 3.
@@ -1169,6 +1192,7 @@ mod tests {
         };
         assert!(enc(7, 0).is_ok()); // Pt = P - 1 is the largest legal transform
         assert!(enc(8, 0).is_err());
+        assert!(enc(9, 0).is_err()); // past the precision too, not only at it
         assert!(enc(0, 4).is_ok()); // one line
         assert!(enc(0, 12).is_ok()); // three lines, past the frame: no marker, still legal
         assert!(enc(0, 6).is_err()); // a line and a half (§H.1.1)
