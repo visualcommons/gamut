@@ -252,7 +252,7 @@ fn colr_nclx_states_the_planes_declaration_not_the_encoders_knobs() {
     // other input.
     let encoder = AvifEncoder::lossy(80)
         .with_matrix(MatrixCoefficients::Bt709)
-        .with_color_range(ColorRange::Full)
+        .with_range(ColorRange::Full)
         .with_chroma(ChromaSubsampling::Cs444)
         .with_primaries(ColorPrimaries::Bt2020)
         .with_transfer(TransferCharacteristics::Pq);

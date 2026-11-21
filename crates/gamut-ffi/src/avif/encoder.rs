@@ -304,7 +304,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_transfer(
 }
 
 /// Selects the signal range by its H.273 `full_range` flag (`0` limited, `1` full;
-/// `AvifEncoder::with_color_range`). Ignored by a lossless encoder.
+/// `AvifEncoder::with_range`). Ignored by a lossless encoder.
 ///
 /// Returns `GAMUT_STATUS_INVALID_INPUT` for any other flag value,
 /// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_color_range(
     let value = ColorRange::from_flag(full_range);
     unsafe {
         configure(encoder, value, GAMUT_STATUS_INVALID_INPUT, |e, r| {
-            e.with_color_range(r)
+            e.with_range(r)
         })
     }
 }
@@ -395,7 +395,7 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_alpha_quality(
 ) -> GamutStatus {
     unsafe {
         configure(encoder, Some(quality), GAMUT_OK, |e, q| {
-            e.with_alpha_quality(q)
+            e.with_alpha_quality(Some(q))
         })
     }
 }
@@ -1079,8 +1079,8 @@ mod tests {
         assert_setter(
             gamut_avif_encoder_set_color_range,
             &[
-                (0, |e| e.with_color_range(ColorRange::Limited)),
-                (1, |e| e.with_color_range(ColorRange::Full)),
+                (0, |e| e.with_range(ColorRange::Limited)),
+                (1, |e| e.with_range(ColorRange::Full)),
             ],
             Layout::Rgba8,
         );
@@ -1196,8 +1196,8 @@ mod tests {
         assert_setter(
             gamut_avif_encoder_set_alpha_quality,
             &[
-                (10, |e| e.with_alpha_quality(10)),
-                (90, |e| e.with_alpha_quality(90)),
+                (10, |e| e.with_alpha_quality(Some(10))),
+                (90, |e| e.with_alpha_quality(Some(90))),
             ],
             Layout::Rgba8,
         );
