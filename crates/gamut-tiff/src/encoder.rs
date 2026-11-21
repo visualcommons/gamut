@@ -7,6 +7,7 @@ use gamut_core::{
     Bilevel, Cmyk8, ColorModel, Dimensions, EncodeImage, Error, Gray8, Gray16, GrayAlpha8,
     GrayAlpha16, ImageRef, Indexed8, Palette, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
+use gamut_deflate::Level;
 use gamut_exif::Exif;
 use gamut_ifd::{
     ByteOrder, C2paExclusions, Ifd, Value, Variant, append_c2pa_store, c2pa_exclusions,
@@ -182,6 +183,7 @@ mod sealed {
 pub struct TiffEncoder {
     order: ByteOrder,
     compression: Compression,
+    deflate_level: Level,
     predictor: Predictor,
     tiling: Option<(u32, u32)>,
     variant: Variant,
@@ -214,6 +216,7 @@ impl Default for TiffEncoder {
         Self {
             order: ByteOrder::LittleEndian,
             compression: Compression::None,
+            deflate_level: Level::Default,
             predictor: Predictor::None,
             tiling: None,
             variant: Variant::Classic,
@@ -242,6 +245,20 @@ impl TiffEncoder {
     #[must_use]
     pub fn with_compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Returns a copy of this encoder that runs [`Compression::Deflate`] at `level` (default
+    /// [`DeflateLevel::Default`](crate::DeflateLevel::Default)), trading encode time for file size
+    /// as `gamut-png`'s `with_level` does. Every level writes a valid zlib stream any Adobe Deflate
+    /// reader inflates; they differ only in ratio.
+    ///
+    /// The level is read only when [`with_compression`](Self::with_compression) selects Deflate,
+    /// and is otherwise ignored rather than refused: the builders compose in any order, and the
+    /// level changes no byte of the file outside the Deflate streams.
+    #[must_use]
+    pub fn with_deflate_level(mut self, level: Level) -> Self {
+        self.deflate_level = level;
         self
     }
 
@@ -910,7 +927,7 @@ impl TiffEncoder {
                 Ok(out)
             }
             Compression::Lzw => Ok(lzw::encode(raw)),
-            Compression::Deflate => Ok(deflate::encode(raw)),
+            Compression::Deflate => Ok(deflate::encode(raw, self.deflate_level)),
             _ => Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "TIFF: unsupported compression for encoding",
@@ -1526,5 +1543,59 @@ mod tests {
         assert_eq!(variant, Variant::Big);
         assert_eq!(out[2], 0x2b);
         assert!(first >= 16);
+    }
+
+    #[test]
+    fn with_deflate_level_sets_the_level_and_keeps_other_builder_state() {
+        assert_eq!(TiffEncoder::new().deflate_level, Level::Default);
+        let enc = TiffEncoder::new()
+            .with_compression(Compression::Deflate)
+            .with_deflate_level(Level::Store);
+        assert_eq!(enc.deflate_level, Level::Store);
+        // A reset to `Default::default()` would clear the compression; the real setter must not.
+        assert_eq!(enc.compression, Compression::Deflate);
+    }
+
+    /// `compress_bytes` hands the configured level to the Deflate strips: `Store` writes a larger
+    /// file than `Best`, both decode to the same pixels, the default level writes the bytes an
+    /// encoder that never heard of the knob writes, and another compression ignores it.
+    #[test]
+    fn the_deflate_level_reaches_the_strips_and_only_the_deflate_strips() {
+        use gamut_core::{DecodeImage, ImageBuf};
+
+        let pixels: Vec<u8> = (0..32 * 8 * 3u32).map(|i| (i * 7 % 251) as u8).collect();
+        let encode = |encoder: TiffEncoder| {
+            let mut out = Vec::new();
+            encoder
+                .encode_image(
+                    ImageRef::<Rgb8>::new(&pixels, Dimensions::new(32, 8).unwrap()).unwrap(),
+                    &mut out,
+                )
+                .expect("encode");
+            out
+        };
+        let deflate = TiffEncoder::new().with_compression(Compression::Deflate);
+        let default = encode(deflate.clone());
+        assert_eq!(
+            encode(deflate.clone().with_deflate_level(Level::Default)),
+            default
+        );
+        let store = encode(deflate.clone().with_deflate_level(Level::Store));
+        let best = encode(deflate.with_deflate_level(Level::Best));
+        assert!(
+            store.len() > best.len(),
+            "{} vs {}",
+            store.len(),
+            best.len()
+        );
+        for tiff in [&store, &best] {
+            let decoded: ImageBuf<Rgb8> = crate::TiffDecoder::new().decode_image(tiff).unwrap();
+            assert_eq!(decoded.as_samples(), &pixels[..]);
+        }
+        let lzw = TiffEncoder::new().with_compression(Compression::Lzw);
+        assert_eq!(
+            encode(lzw.clone().with_deflate_level(Level::Store)),
+            encode(lzw)
+        );
     }
 }

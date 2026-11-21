@@ -106,6 +106,10 @@ pub use encoder::{TiffEncodeReport, TiffEncoder, TiffPixel};
 // `TiffDecoder::with_convert_policy`, `TiffEncoder::encode_indexed8`), so a caller needs no direct
 // gamut-core dependency.
 pub use gamut_core::{DecodeLimits, Palette, convert::ConvertPolicy};
+// The effort `TiffEncoder::with_deflate_level` takes, so a caller needs no direct gamut-deflate
+// dependency. Aliased because `Level` alone does not say which of this crate's compressions it
+// tunes.
+pub use gamut_deflate::Level as DeflateLevel;
 // `TiffMetadata::exif` is gamut-exif's model, as `gamut-dng`'s is; re-exported with the tag
 // vocabulary its accessors take so a caller needs no direct gamut-exif dependency.
 pub use gamut_exif::{Exif, ExifTag};
