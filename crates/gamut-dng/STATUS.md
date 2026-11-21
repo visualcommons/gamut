@@ -736,6 +736,12 @@ use; additions are semver-additive.
   position is interior to a payload layout the rewrite does not reproduce (the strips it sat
   between are re-packed), so there is no offset to restore it to. `PreservedSpan` reports both
   offsets, so a caller can see which happened.
+- **Sub-8-bit raws are not valid DNG 1.7.1** (known limitation, pre-existing; #1259) —
+  `RawImage` accepts `bits_per_sample` in `1..=16` and the encoder writes a 1–7-bit raw, but DNG
+  1.7.1.0's `BitsPerSample` entry supports only 8 to 32 bits/sample, so such a file is outside
+  the spec under every compression. Lossless JPEG codes a 1-bit raw in a 2-bit SOF3 frame (T.81
+  B.2.2's floor) and gamut reads it back exactly, but no Adobe-SDK check covers a sub-8-bit file.
+  Whether the encoder refuses those depths or widens them to 8 bits is #1259's decision.
 - **Floating-point samples** (`SampleFormat = 3`, fp16 JPEG XL, the float predictors
   34894/34895) — rejected with typed errors on decode; the u16 sample model would need a float
   sibling.
