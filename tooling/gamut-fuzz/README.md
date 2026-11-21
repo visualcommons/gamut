@@ -93,7 +93,7 @@ over normalised inputs, per the section above.
 | `ifd_read_ledger` | `gamut-ifd` | `ledger_is_canonical`, `subtract_is_set_difference` |
 | `ifd_one_store` | `gamut-ifd` | `setters_keep_one_store_per_tag`, `one_store_per_tag` |
 | `core_convert` | `gamut-core` | `acceptance_is_independent_of_the_samples`, `output_shape_matches_the_target_layout`, `palette_and_cmyk_convert_only_to_themselves`, `the_in_place_door_matches_the_allocating_door`, `converting_a_layout_to_itself_changes_nothing` |
-| `tonemap_curves` | `gamut-tonemap` | `output_is_non_negative_and_never_nan`, `map_slice_is_elementwise_map`, `map_slice_is_order_independent`, `monotonic_non_decreasing` |
+| `tonemap_curves` | `gamut-tonemap` | `output_is_non_negative_and_never_nan`, `map_slice_is_elementwise_map`, `map_slice_is_order_independent`, `monotonic_non_decreasing`; through `CurveToneMapper`: `rgb_output_is_non_negative_and_never_nan`, `map_rgb_slice_is_pixelwise_map_rgb`, `source_peak_grey_maps_to_target_peak`, `common_gain_preserves_channel_ratios` |
 | `avif_clean_alpha` | `gamut-avif` | `cleaning_8_bit_rgba_keeps_the_composite`, `cleaning_16_bit_rgba_keeps_the_composite` |
 | `avif_parse_decode` | `gamut-avif` | `decoding_stays_within_limits` |
 | `heif_decode_limits` | `gamut-heif` | `decoding_stays_within_limits` |

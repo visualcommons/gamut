@@ -22,7 +22,7 @@
 //! This module is the test oracle, not the system under test, so `.cargo/mutants.toml` excludes
 //! `crates/*/src/invariants.rs` from mutation.
 
-use crate::ToneCurve;
+use crate::{CurveToneMapper, ToneCurve, ToneMapper};
 
 /// The largest magnitude a normalised input can take.
 ///
@@ -262,18 +262,170 @@ pub fn map_slice_is_order_independent(curve: &dyn ToneCurve, xs: &[f32]) -> Resu
     Ok(())
 }
 
+// ---- the `ToneMapper` contract ---------------------------------------------------------------
+//
+// The same discipline for the RGB-aware trait (#1236): `ToneMapper`'s documented contract, made
+// executable. The ffmpeg golden test (`tests/ffmpeg_desat_golden.rs`) pins *where* max-RGB mode
+// goes against a published formula; these pin what holds in every mode, at every parameter.
+
+/// Law: for every pixel of finite, non-negative channels, every output channel is non-negative
+/// and never NaN.
+///
+/// `+∞` is permitted where the curve itself saturates, as for [`ToneCurve`]. NaN is the hazard
+/// this law exists for: the mapper divides by the pixel's luma and by its driving signal, and
+/// multiplies a gain into channels that may be zero.
+///
+/// # Errors
+///
+/// Returns the first pixel with a NaN or negative output channel.
+pub fn rgb_output_is_non_negative_and_never_nan(
+    mapper: &dyn ToneMapper,
+    pixels: &[[f32; 3]],
+) -> Result<(), Violation> {
+    const LAW: &str = "rgb_output_is_non_negative_and_never_nan";
+
+    for &pixel in pixels {
+        let out = mapper.map_rgb(pixel);
+        if out.iter().any(|c| c.is_nan() || *c < 0.0) {
+            return Err(Violation::new(
+                LAW,
+                format!("map_rgb({pixel:?}) == {out:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Law: [`ToneMapper::map_rgb_slice`] is exactly pixelwise [`ToneMapper::map_rgb`], bit for bit.
+///
+/// The pixel-level twin of [`map_slice_is_elementwise_map`], for the same reason: it is what makes
+/// a vectorised override safe.
+///
+/// # Errors
+///
+/// Returns the first pixel at which the two disagree.
+pub fn map_rgb_slice_is_pixelwise_map_rgb(
+    mapper: &dyn ToneMapper,
+    pixels: &[[f32; 3]],
+) -> Result<(), Violation> {
+    const LAW: &str = "map_rgb_slice_is_pixelwise_map_rgb";
+
+    let mut actual = pixels.to_vec();
+    mapper.map_rgb_slice(&mut actual);
+    for (index, (&pixel, got)) in pixels.iter().zip(&actual).enumerate() {
+        let want = mapper.map_rgb(pixel);
+        if got.map(f32::to_bits) != want.map(f32::to_bits) {
+            return Err(Violation::new(
+                LAW,
+                format!("at pixel {index}: map_rgb_slice gave {got:?}, map_rgb gave {want:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Law: a mapper that scales every channel by one gain keeps the pixel's channel ratios — its hue
+/// and saturation.
+///
+/// This is what [`ApplyMode::Luminance`](crate::ApplyMode::Luminance) and
+/// [`ApplyMode::MaxRgb`](crate::ApplyMode::MaxRgb) promise over
+/// [`ApplyMode::PerChannel`](crate::ApplyMode::PerChannel), so the caller checks it only for those
+/// modes, with desaturation off (desaturation changes the ratios by design). A zero channel must
+/// stay zero, and every channel whose output is a normal, finite `f32` must imply the same gain
+/// `out / in` to within four ULPs: one rounding on the way out, one in the quotient. Subnormal
+/// and saturated outputs have no relative digits to compare and are skipped.
+///
+/// # Errors
+///
+/// Returns the first pixel whose channels were scaled by different gains.
+pub fn common_gain_preserves_channel_ratios(
+    mapper: &dyn ToneMapper,
+    pixels: &[[f32; 3]],
+) -> Result<(), Violation> {
+    const LAW: &str = "common_gain_preserves_channel_ratios";
+
+    for &pixel in pixels {
+        let out = mapper.map_rgb(pixel);
+        let mut gains = Vec::with_capacity(3);
+        for (&c, &o) in pixel.iter().zip(&out) {
+            if c == 0.0 {
+                if o != 0.0 {
+                    return Err(Violation::new(
+                        LAW,
+                        format!("map_rgb({pixel:?}) == {out:?}: a zero channel moved"),
+                    ));
+                }
+            } else if o.is_normal() {
+                gains.push(o / c);
+            }
+        }
+        let lo = gains.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = gains.iter().copied().fold(0.0_f32, f32::max);
+        if hi - lo > hi * 4.0 * f32::EPSILON {
+            return Err(Violation::new(
+                LAW,
+                format!("map_rgb({pixel:?}) == {out:?}: gains {gains:?} differ"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Law: a grey pixel at the source peak maps to the target peak in every channel, in every mode
+/// and at every desaturation strength.
+///
+/// The normalization's defining property. A grey pixel's luma and brightest channel are both its
+/// value, and desaturating a grey is a no-op, so whatever the mode, the curve sees the source peak
+/// and the normalization must return the target peak — up to the eight ULPs the luma sum, the mix
+/// and the gain round through.
+///
+/// "Sees the source peak" holds to an ULP: the `f32` luma of a grey can differ from its value by
+/// one rounding. So the caller holds the law only at source peaks where the curve is well
+/// conditioned, which for the built-ins is `source_peak ≥ 1`. Below that, `Hable`'s `partial` is a
+/// cancelling difference, and a one-ULP step in its input moves its output by more than eight
+/// ULPs.
+///
+/// # Errors
+///
+/// Returns the channel that missed the target peak.
+pub fn source_peak_grey_maps_to_target_peak<C: ToneCurve>(
+    mapper: &CurveToneMapper<C>,
+) -> Result<(), Violation> {
+    const LAW: &str = "source_peak_grey_maps_to_target_peak";
+
+    let peak = mapper.source_peak();
+    let target = mapper.target_peak();
+    let out = mapper.map_rgb([peak; 3]);
+    if out
+        .iter()
+        .any(|c| (c - target).abs() > target * 8.0 * f32::EPSILON)
+    {
+        return Err(Violation::new(
+            LAW,
+            format!("map_rgb([{peak:e}; 3]) == {out:?}, want {target:e}"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use gamut_core::luminance::{BT601_LUMA_WEIGHTS, BT709_LUMA_WEIGHTS, BT2020_LUMA_WEIGHTS};
     use proptest::collection;
     use proptest::prelude::{Just, Strategy, prop_assert, prop_oneof, proptest};
     use proptest::test_runner::{Config, RngSeed};
 
     use super::{
-        MAX_INPUT, ToneCurve, Violation, map_slice_is_elementwise_map,
+        MAX_INPUT, ToneCurve, Violation, common_gain_preserves_channel_ratios,
+        map_rgb_slice_is_pixelwise_map_rgb, map_slice_is_elementwise_map,
         map_slice_is_order_independent, monotonic_non_decreasing, normalise_input,
-        output_is_non_negative_and_never_nan,
+        output_is_non_negative_and_never_nan, rgb_output_is_non_negative_and_never_nan,
+        source_peak_grey_maps_to_target_peak,
     };
-    use crate::{Aces, Clamp, Drago, Exposure, Hable, Linear, Reinhard, ReinhardExtended};
+    use crate::{
+        Aces, ApplyMode, Clamp, CurveToneMapper, Drago, Exposure, Hable, Linear, Reinhard,
+        ReinhardExtended, ToneMapper,
+    };
 
     /// The workspace property-test configuration (`docs/testing.md`).
     ///
@@ -511,6 +663,180 @@ mod tests {
                 "is_monotonic() == false but no decrease was found on [0.5·world_max, world_max]"
             );
         }
+    }
+
+    // ---- `ToneMapper` ------------------------------------------------------------------------
+
+    /// A `CurveToneMapper`'s configuration, drawn as data for the same reason `Operator` is.
+    ///
+    /// Every range keeps construction infallible: the smallest `curve(source_peak)` any operator
+    /// reaches over `source_peak ≥ 1e-2` is above `1e-3` and the largest (`Exposure` at `1e6`
+    /// times `1e4`) is `1e10`, so `target_peak / curve(source_peak)` stays a normal, positive
+    /// `f32` across the whole box.
+    #[derive(Debug, Clone, Copy)]
+    struct MapperConfig {
+        operator: Operator,
+        mode: ApplyMode,
+        desat: f32,
+        source_peak: f32,
+        target_peak: f32,
+        luma_weights: [u32; 3],
+    }
+
+    impl MapperConfig {
+        fn build(self) -> CurveToneMapper<impl ToneCurve> {
+            // `Box<dyn ToneCurve>` is not itself a curve (the blanket `Fn` impl forecloses it);
+            // the closure is.
+            let curve = self.operator.build();
+            CurveToneMapper::new(move |x: f32| curve.map(x), self.source_peak)
+                .and_then(|m| m.with_target_peak(self.target_peak))
+                .and_then(|m| m.with_desat(self.desat))
+                .and_then(|m| m.with_luma_weights(self.luma_weights))
+                .expect("every drawn configuration is constructible")
+                .with_mode(self.mode)
+        }
+    }
+
+    fn mode() -> impl Strategy<Value = ApplyMode> {
+        prop_oneof![
+            Just(ApplyMode::PerChannel),
+            Just(ApplyMode::Luminance),
+            Just(ApplyMode::MaxRgb),
+        ]
+    }
+
+    fn mapper_config() -> impl Strategy<Value = MapperConfig> {
+        (
+            operator(),
+            mode(),
+            prop_oneof![Just(0.0_f32), 0.0_f32..16.0],
+            1e-2_f32..1e4,
+            1e-2_f32..1e2,
+            prop_oneof![
+                Just(BT709_LUMA_WEIGHTS),
+                Just(BT2020_LUMA_WEIGHTS),
+                Just(BT601_LUMA_WEIGHTS),
+            ],
+        )
+            .prop_map(
+                |(operator, mode, desat, source_peak, target_peak, luma_weights)| MapperConfig {
+                    operator,
+                    mode,
+                    desat,
+                    source_peak,
+                    target_peak,
+                    luma_weights,
+                },
+            )
+    }
+
+    /// Pixels of finite, non-negative channels, each channel normalised exactly as the curve
+    /// laws' inputs are — and, as there, by the caller rather than the law.
+    fn pixels() -> impl Strategy<Value = Vec<[f32; 3]>> {
+        collection::vec(
+            proptest::array::uniform3(proptest::num::u32::ANY.prop_map(normalise_input)),
+            1..16,
+        )
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+
+        /// No mode, curve or parameter produces a NaN or negative channel from a valid pixel.
+        #[test]
+        fn no_tone_mapper_produces_nan_or_a_negative_channel(
+            config in mapper_config(),
+            pixels in pixels(),
+        ) {
+            let result = rgb_output_is_non_negative_and_never_nan(&config.build(), &pixels);
+            prop_assert!(result.is_ok(), "{}", describe(&result));
+        }
+
+        /// `map_rgb_slice` is pixelwise `map_rgb`, bit for bit.
+        #[test]
+        fn map_rgb_slice_agrees_with_map_rgb_on_every_pixel(
+            config in mapper_config(),
+            pixels in pixels(),
+        ) {
+            let result = map_rgb_slice_is_pixelwise_map_rgb(&config.build(), &pixels);
+            prop_assert!(result.is_ok(), "{}", describe(&result));
+        }
+
+        /// Luminance and max-RGB modes scale a pixel by one gain, so they keep its hue.
+        #[test]
+        fn luminance_and_max_rgb_modes_preserve_channel_ratios(
+            config in mapper_config(),
+            luminance in proptest::bool::ANY,
+            pixels in pixels(),
+        ) {
+            let mode = if luminance { ApplyMode::Luminance } else { ApplyMode::MaxRgb };
+            let mapper = MapperConfig { mode, desat: 0.0, ..config }.build();
+            let result = common_gain_preserves_channel_ratios(&mapper, &pixels);
+            prop_assert!(result.is_ok(), "{}", describe(&result));
+        }
+
+        /// The source peak maps onto the target peak, whatever the curve, mode and desat.
+        #[test]
+        fn a_grey_source_peak_maps_to_the_target_peak(
+            config in mapper_config(),
+            source_peak in 1.0_f32..1e4,
+        ) {
+            let mapper = MapperConfig { source_peak, ..config }.build();
+            let result = source_peak_grey_maps_to_target_peak(&mapper);
+            prop_assert!(result.is_ok(), "{}", describe(&result));
+        }
+    }
+
+    #[test]
+    fn per_channel_mode_violates_the_common_gain_law() {
+        // The law must be able to fail: per-channel Reinhard compresses 4 by more than 1.
+        let mapper = CurveToneMapper::new(Reinhard, 4.0)
+            .and_then(|m| m.with_desat(0.0))
+            .expect("valid")
+            .with_mode(ApplyMode::PerChannel);
+        let violation = common_gain_preserves_channel_ratios(&mapper, &[[4.0, 1.0, 0.0]])
+            .expect_err("per-channel mapping changes channel ratios");
+        assert_eq!(violation.law(), "common_gain_preserves_channel_ratios");
+    }
+
+    #[test]
+    fn a_mapper_that_lifts_a_zero_channel_violates_the_common_gain_law() {
+        struct Lifts;
+        impl ToneMapper for Lifts {
+            fn map_rgb(&self, rgb: [f32; 3]) -> [f32; 3] {
+                rgb.map(|c| c + 1.0)
+            }
+        }
+        let violation = common_gain_preserves_channel_ratios(&Lifts, &[[1.0, 0.0, 0.0]])
+            .expect_err("a zero channel became non-zero");
+        assert!(violation.detail().contains("zero channel"), "{violation}");
+    }
+
+    #[test]
+    fn the_rgb_laws_can_fail() {
+        struct Broken;
+        impl ToneMapper for Broken {
+            fn map_rgb(&self, rgb: [f32; 3]) -> [f32; 3] {
+                [f32::NAN, -rgb[1], rgb[2]]
+            }
+            fn map_rgb_slice(&self, buf: &mut [[f32; 3]]) {
+                buf.reverse();
+            }
+        }
+        let pixels = [[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        assert!(rgb_output_is_non_negative_and_never_nan(&Broken, &pixels).is_err());
+        assert!(map_rgb_slice_is_pixelwise_map_rgb(&Broken, &pixels).is_err());
+
+        // The normalization is measured once, at construction, so a curve that answers
+        // differently afterwards is the one way to make a real `CurveToneMapper` miss its target.
+        let jumps = std::cell::Cell::new(false);
+        let curve = |x: f32| if jumps.replace(true) { 2.0 * x } else { x };
+        let mapper = CurveToneMapper::new(curve, 1.0)
+            .expect("valid")
+            .with_mode(ApplyMode::MaxRgb);
+        let violation = source_peak_grey_maps_to_target_peak(&mapper)
+            .expect_err("a curve that changed since construction misses the target");
+        assert_eq!(violation.law(), "source_peak_grey_maps_to_target_peak");
     }
 
     /// A sample set drawn entirely from `Hable`'s near-zero cancellation region is not a

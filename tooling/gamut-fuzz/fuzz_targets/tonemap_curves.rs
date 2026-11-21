@@ -15,10 +15,15 @@
 #![no_main]
 
 use gamut_tonemap::invariants::{
+    common_gain_preserves_channel_ratios, map_rgb_slice_is_pixelwise_map_rgb,
     map_slice_is_elementwise_map, map_slice_is_order_independent, monotonic_non_decreasing,
     normalise_input, output_is_non_negative_and_never_nan,
+    rgb_output_is_non_negative_and_never_nan, source_peak_grey_maps_to_target_peak,
 };
-use gamut_tonemap::{Aces, Clamp, Drago, Exposure, Hable, Linear, Reinhard, ReinhardExtended};
+use gamut_tonemap::{
+    Aces, ApplyMode, Clamp, CurveToneMapper, Drago, Exposure, Hable, Linear, Reinhard,
+    ReinhardExtended,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// A constructed operator, kept behind an enum rather than a `Box<dyn ToneCurve>`.
@@ -137,6 +142,54 @@ fuzz_target!(|data: &[u8]| {
     // … and does not depend on the order it visits elements in.
     if let Err(violation) = map_slice_is_order_independent(curve, &xs) {
         panic!("{violation}");
+    }
+
+    // The pixel laws: the same curve applied to a pixel through `CurveToneMapper` (#1236). The
+    // mode and desaturation strength come from the selector's high bits, the source peak from the
+    // first sample, and pixels from consecutive sample triples. Drago is left out, for the domain
+    // reason above: its pixels would have to be fractions of `world_max` channel by channel. A
+    // configuration the constructor rejects (a curve that overflows at the peak) is skipped, and
+    // the grey law is held only at source peaks of at least 1, the domain its doc states.
+    if !matches!(operator, Operator::Drago(_)) {
+        let mode = [
+            ApplyMode::PerChannel,
+            ApplyMode::Luminance,
+            ApplyMode::MaxRgb,
+        ][usize::from(selector / 8) % 3];
+        let desat = [0.0, 0.5, 2.0, 8.0][usize::from(selector / 24) % 4];
+        let built = CurveToneMapper::new(|x: f32| curve.map(x), xs[0])
+            .and_then(|m| m.with_desat(desat))
+            .map(|m| m.with_mode(mode));
+        if let Ok(mapper) = built {
+            let pixels: Vec<[f32; 3]> = xs.as_chunks::<3>().0.to_vec();
+            if let Err(violation) = rgb_output_is_non_negative_and_never_nan(&mapper, &pixels) {
+                panic!("{violation}");
+            }
+            if let Err(violation) = map_rgb_slice_is_pixelwise_map_rgb(&mapper, &pixels) {
+                panic!("{violation}");
+            }
+            if xs[0] >= 1.0
+                && let Err(violation) = source_peak_grey_maps_to_target_peak(&mapper)
+            {
+                panic!("{violation}");
+            }
+            // One gain per pixel is the promise of the two hue-preserving modes, without
+            // desaturation (which changes the ratios by design).
+            let hue_preserving = CurveToneMapper::new(|x: f32| curve.map(x), xs[0])
+                .and_then(|m| m.with_desat(0.0))
+                .map(|m| {
+                    m.with_mode(if mode == ApplyMode::Luminance {
+                        mode
+                    } else {
+                        ApplyMode::MaxRgb
+                    })
+                });
+            if let Ok(mapper) = hue_preserving
+                && let Err(violation) = common_gain_preserves_channel_ratios(&mapper, &pixels)
+            {
+                panic!("{violation}");
+            }
+        }
     }
 
     // Law 3: the curve never decreases. Sorted first, because the law is about adjacent pairs of
