@@ -404,6 +404,73 @@ fn libwebp_decodes_gamut_lossy_alpha_exactly() {
 }
 
 #[test]
+fn libwebp_decodes_gamut_level_reduced_alpha() {
+    // Below alpha quality 100 gamut level-reduces the `ALPH` plane (`P = 1`) before coding it.
+    // libwebp must decode the plane gamut's own decoder does; that plane must have at most the
+    // level count the quality implies (libwebp's `2 + q / 5` up to 70, `16 + (q − 70) · 8` above);
+    // and it must be the plane libwebp itself produces at the same `alpha_quality`, which checks the
+    // quantizer end to end against `QuantizeLevels`.
+    use libwebp_oracle::{libwebp_decode_rgba, libwebp_encode_lossy_rgba_alpha_quality};
+
+    let alpha_of =
+        |rgba: &[u8]| -> Vec<u8> { rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect() };
+    for &(w, h) in &[(16u32, 16u32), (49, 33)] {
+        let rgba: Vec<u8> = (0..(w * h) as usize)
+            .flat_map(|i| {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                [
+                    (x * 7) as u8,
+                    (y * 9) as u8,
+                    (x ^ y) as u8,
+                    ((x * 11 + y * 5) & 0xff) as u8,
+                ]
+            })
+            .collect();
+        for quality in [0u8, 40, 70, 85, 99] {
+            let mut file = Vec::new();
+            WebpEncoder::lossy(70)
+                .with_alpha_quality(quality)
+                .encode_image(
+                    ImageRef::<Rgba8>::new(&rgba, Dimensions::new(w, h).unwrap()).unwrap(),
+                    &mut file,
+                )
+                .expect("gamut rgba encode");
+            let lib_alpha = alpha_of(&libwebp_decode_rgba(&file).rgba);
+            let ours: ImageBuf<Rgba8> = WebpDecoder::new()
+                .decode_image(&file)
+                .expect("gamut decode");
+            assert_eq!(
+                alpha_of(ours.as_samples()),
+                lib_alpha,
+                "libwebp and gamut disagree on the alpha at {w}x{h}, alpha quality {quality}"
+            );
+
+            let mut levels = lib_alpha.clone();
+            levels.sort_unstable();
+            levels.dedup();
+            let budget = if quality <= 70 {
+                2 + usize::from(quality) / 5
+            } else {
+                16 + (usize::from(quality) - 70) * 8
+            };
+            assert!(
+                levels.len() <= budget,
+                "{} alpha levels exceed the {budget} alpha quality {quality} allows at {w}x{h}",
+                levels.len()
+            );
+
+            let reference =
+                libwebp_encode_lossy_rgba_alpha_quality(&rgba, w, h, 70.0, i32::from(quality));
+            assert_eq!(
+                lib_alpha,
+                alpha_of(&libwebp_decode_rgba(&reference).rgba),
+                "gamut's level-reduced alpha differs from libwebp's at {w}x{h}, alpha quality {quality}"
+            );
+        }
+    }
+}
+
+#[test]
 fn gamut_decodes_libwebp_lossy_alpha_exactly() {
     // libwebp encodes lossy color plus a *compressed* (C=1) `ALPH` plane (what cwebp emits); gamut's
     // decoder must recover the exact alpha — the reverse-direction gate for the lossless-alpha path.

@@ -39,6 +39,10 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   segmentation, token partitions, and skip); `WebpDecoder` decodes any conformant key frame.
 - **Alpha** — `EncodeImage<Rgba8>` / `DecodeImage<Rgba8>`. A transparent lossy image uses the extended
   (`VP8X`) format with an `ALPH` chunk (raw or lossless); an opaque one stays a simple file.
+  Alpha is stored exactly at the default alpha quality `100`; `WebpEncoder::with_alpha_quality(q)`
+  (libwebp's `alpha_quality`, libvips' `alpha_q`) trades that away below it, reducing the lossy
+  image's alpha plane to at most `2 + q / 5` levels up to `70` and `16 + (q − 70) · 8` above —
+  the same plane libwebp produces. Lossless encodes keep alpha bit-exact regardless.
 - **Compression effort** — `WebpEncoder::with_effort(Effort)` is libwebp's `method` dial, `0..=6`,
   defaulting to `4`. It applies to both codestreams and never changes what the format guarantees:
   lossless stays bit-exact at every rung, lossy keeps its quality target. The lossless rungs race

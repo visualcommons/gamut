@@ -3,9 +3,10 @@
 //!
 //! Both the lossless **VP8L** path (see [`crate::vp8l::encoder`]) and the lossy **VP8** path are
 //! implemented, via the [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) and `EncodeImage<Rgba8>`
-//! impls; transparent lossy images use the extended (`VP8X`) format with a lossless `ALPH` alpha
-//! chunk (raw or VP8L-compressed, whichever is smaller, searched at the configured effort), as does
-//! any image carrying embedded metadata.
+//! impls; transparent lossy images use the extended (`VP8X`) format with an `ALPH` alpha chunk
+//! (raw or VP8L-compressed, whichever is smaller, searched at the configured effort; lossless at
+//! the default alpha quality `100`, level-reduced first below it), as does any image carrying
+//! embedded metadata.
 
 use core::ops::Range;
 use std::fmt;
@@ -152,8 +153,8 @@ impl WebpEncoder {
         })
     }
 
-    /// Creates an encoder with every knob [`WebpConfig`] holds — mode, quality, effort and
-    /// near-lossless strength — and no metadata or backends. The inverse of
+    /// Creates an encoder with every knob [`WebpConfig`] holds — mode, quality, effort,
+    /// near-lossless strength and alpha quality — and no metadata or backends. The inverse of
     /// [`config`](Self::config).
     #[must_use]
     pub fn from_config(config: WebpConfig) -> Self {
@@ -279,6 +280,17 @@ impl WebpEncoder {
     #[must_use]
     pub fn with_near_lossless(mut self, near_lossless: Option<NearLossless>) -> Self {
         self.config.near_lossless = near_lossless;
+        self
+    }
+
+    /// Sets the alpha quality, `0..=100` — libwebp's `alpha_quality` (see
+    /// [`WebpConfig::alpha_quality`]). The default `100` stores alpha losslessly; below it a
+    /// transparent lossy encode level-reduces its `ALPH` plane first, trading alpha precision for
+    /// size. Applies to [`WebpMode::Lossy`] only; a lossless encode keeps alpha bit-exact.
+    /// Calling this twice keeps the last value.
+    #[must_use]
+    pub fn with_alpha_quality(mut self, alpha_quality: u8) -> Self {
+        self.config.alpha_quality = alpha_quality;
         self
     }
 
@@ -515,9 +527,9 @@ impl WebpEncoder {
 
     /// Encodes interleaved 8-bit RGBA `pixels` (row-major) of `dims`, appending the WebP file to
     /// `out`. A fully opaque image with no metadata produces a simple file; a transparent one uses
-    /// the extended (`VP8X`) format with a lossless `ALPH` alpha chunk (lossy color) or in-bitstream
-    /// alpha (lossless). Backs the [`EncodeImage<Rgba8>`] impl; the buffer is already validated by
-    /// [`ImageRef`].
+    /// the extended (`VP8X`) format with an `ALPH` alpha chunk (lossy color; lossless at alpha
+    /// quality `100`) or in-bitstream alpha (lossless). Backs the [`EncodeImage<Rgba8>`] impl; the
+    /// buffer is already validated by [`ImageRef`].
     fn encode_rgba8_inner(
         &self,
         pixels: &[u8],
@@ -549,12 +561,14 @@ impl WebpEncoder {
                 if transparent {
                     let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
                     // The configured effort reaches the alpha coder too: rungs 5-6 search every
-                    // `ALPH` pre-filter, which a default-effort call here would never reach.
+                    // `ALPH` pre-filter, which a default-effort call here would never reach. The
+                    // alpha quality decides whether the plane is level-reduced first.
                     let alph = alpha::write_alph_with_effort(
                         &alpha,
                         dims.width() as usize,
                         dims.height() as usize,
                         self.config.effort,
+                        self.config.alpha_quality,
                     )?;
                     self.wrap(dims, WebpCodestream::Vp8, &vp8, Some(&alph), true)
                 } else {
@@ -703,8 +717,87 @@ mod tests {
             quality: 33,
             effort: Effort::Fast,
             near_lossless: NearLossless::from_libwebp_strength(40),
+            alpha_quality: 41,
         };
         assert_eq!(WebpEncoder::from_config(config).config(), config);
+    }
+
+    #[test]
+    fn with_alpha_quality_sets_the_knob_and_the_last_call_wins() {
+        assert_eq!(WebpEncoder::lossy(40).config().alpha_quality, 100);
+        let enc = WebpEncoder::lossy(40)
+            .with_alpha_quality(10)
+            .with_alpha_quality(55);
+        assert_eq!(enc.config().alpha_quality, 55);
+        assert_eq!(enc.config().quality, 40, "colour quality is untouched");
+    }
+
+    /// The lossy RGBA path hands the configured alpha quality to the `ALPH` coder: at `0` the plane
+    /// is level-reduced to two values and the header's pre-processing field (bits 4-5, RFC 9649
+    /// §2.7.1) says so; at the default `100` it is untouched and stored exactly.
+    #[test]
+    fn lossy_rgba_codes_alph_at_the_configured_alpha_quality() {
+        let (w, h) = (16u32, 16u32);
+        let rgba: Vec<u8> = (0..(w * h) as usize)
+            .flat_map(|i| [0x40, 0x80, 0xc0, (i % 256) as u8])
+            .collect();
+        let src_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+        let encode = |enc: WebpEncoder| -> (u8, Vec<u8>) {
+            let mut file = Vec::new();
+            enc.encode_image(
+                ImageRef::<Rgba8>::new(&rgba, dims(w, h)).unwrap(),
+                &mut file,
+            )
+            .expect("rgba encode");
+            let header = gamut_riff::WebpLayout::parse(&file)
+                .expect("own output parses")
+                .alph
+                .expect("transparent lossy output carries ALPH")[0];
+            let decoded: ImageBuf<Rgba8> = crate::WebpDecoder::new()
+                .decode_image(&file)
+                .expect("rgba decode");
+            let alpha = decoded
+                .as_samples()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3])
+                .collect();
+            (header, alpha)
+        };
+
+        let (header, alpha) = encode(WebpEncoder::lossy(75).with_alpha_quality(0));
+        assert_eq!(header >> 4 & 0x03, 1, "P = 1: level reduction");
+        let mut levels = alpha.clone();
+        levels.sort_unstable();
+        levels.dedup();
+        assert_eq!(levels, [0, 255], "quality 0 keeps only the two extremes");
+
+        let (header, alpha) = encode(WebpEncoder::lossy(75));
+        assert_eq!(header >> 4 & 0x03, 0, "P = 0 at the default alpha quality");
+        assert_eq!(alpha, src_alpha, "alpha quality 100 stores alpha exactly");
+    }
+
+    /// A lossless encode carries alpha inside its VP8L bitstream, never through `ALPH`, so the alpha
+    /// quality cannot reach it: alpha stays bit-exact.
+    #[test]
+    fn lossless_rgba_ignores_alpha_quality() {
+        let (w, h) = (16u32, 16u32);
+        let rgba: Vec<u8> = (0..(w * h) as usize)
+            .flat_map(|i| [0x40, 0x80, 0xc0, (i % 256) as u8])
+            .collect();
+        let mut file = Vec::new();
+        WebpEncoder::lossless()
+            .with_alpha_quality(0)
+            .encode_image(
+                ImageRef::<Rgba8>::new(&rgba, dims(w, h)).unwrap(),
+                &mut file,
+            )
+            .expect("rgba encode");
+        let decoded: ImageBuf<Rgba8> = crate::WebpDecoder::new()
+            .decode_image(&file)
+            .expect("rgba decode");
+        assert_eq!(decoded.as_samples(), rgba.as_slice());
     }
 
     #[test]
@@ -813,7 +906,8 @@ mod tests {
 
     #[test]
     fn lossy_rgba_round_trips_alpha_exactly() {
-        // Transparent content: the alpha is stored losslessly (raw `ALPH`), so it round-trips
+        // Transparent content: at the default alpha quality `100` the alpha is stored losslessly
+        // (raw `ALPH`), so it round-trips
         // bit-exactly through the extended container; only the color is lossy.
         let (w, h) = (32u32, 24u32);
         let rgba: Vec<u8> = (0..(w * h) as usize)
