@@ -8,6 +8,7 @@
 /// reader keeps whatever value a file carries, including ones H.273 reserves; mapping them to
 /// concrete primaries and transfer functions is `gamut-color`'s job, not this type's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cicp {
     /// `ColourPrimaries` (H.273 §8.1).
     pub color_primaries: u16,

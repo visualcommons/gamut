@@ -81,6 +81,7 @@ use crate::{
 ///
 /// Discriminants are explicit and permanent — they are C ABI values; new variants append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u32)]
 pub enum AlphaPolicy {
@@ -107,6 +108,7 @@ pub enum AlphaPolicy {
 ///
 /// Discriminants are explicit and permanent — they are C ABI values; new variants append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u32)]
 pub enum DepthPolicy {
@@ -130,6 +132,7 @@ pub enum DepthPolicy {
 ///
 /// Discriminants are explicit and permanent — they are C ABI values; new variants append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u32)]
 pub enum LumaPolicy {
@@ -172,6 +175,7 @@ impl LumaPolicy {
 ///     .with_luma(LumaPolicy::Bt709);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[must_use]
 pub struct ConvertPolicy {
     alpha: AlphaPolicy,

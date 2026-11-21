@@ -109,11 +109,37 @@ pub use pixel::{
 /// The fields are private so [`Dimensions::new`] and [`Dimensions::from_nonzero`] are the only
 /// ways to build one, and the non-zero invariant holds for every value. `#[repr(C)]`: the layout — `width` then `height`, two `u32`s
 /// — is a public guarantee so the value can cross the C ABI boundary as-is (issue #242).
+///
+/// With the `serde` feature it serializes as `{"width": w, "height": h}`, and deserializing goes
+/// through [`Dimensions::new`], so a zero width or height is rejected there too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(try_from = "DimensionsFields")
+)]
 #[repr(C)]
 pub struct Dimensions {
     width: u32,
     height: u32,
+}
+
+/// The unvalidated `{width, height}` wire shape [`Dimensions`] deserializes from before
+/// [`Dimensions::new`] checks it.
+#[cfg(feature = "serde")]
+#[derive(serde::Deserialize)]
+struct DimensionsFields {
+    width: u32,
+    height: u32,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<DimensionsFields> for Dimensions {
+    type Error = Error;
+
+    fn try_from(fields: DimensionsFields) -> Result<Self> {
+        Self::new(fields.width, fields.height)
+    }
 }
 
 impl Dimensions {

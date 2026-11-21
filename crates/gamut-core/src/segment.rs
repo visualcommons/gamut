@@ -21,7 +21,12 @@ use core::ops::Range;
 /// default) for an in-memory input, `u64` for a file addressed past `usize` (`gamut_ifd`'s
 /// TIFF/DNG accounting). A `usize` list is total over an input of `len` bytes exactly when
 /// [`covers`] says so; [`tiles`] asks the same of any offset type.
+///
+/// With the `serde` feature it serializes as `{"range": {"start", "end"}, "kind"}` whenever `K`
+/// and `O` do. A lone segment has no invariant to check (an empty or reversed range is
+/// representable, as it is through the public fields); tiling is [`covers`]' question.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Segment<K, O = usize> {
     /// The half-open byte range this segment occupies within the input (`start..end`).
     pub range: Range<O>,
