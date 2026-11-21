@@ -19,12 +19,19 @@
 //! codes unreachable, where the DCT decoder rejects such a table — sharing the DCT decoder's would
 //! narrow what this reader accepts.
 //!
-//! **Encode** deliberately stays a valid subset — predictor 1, one Huffman table, no point
-//! transform, no restarts — which every reader must accept; the wider decode surface exists for
-//! files other writers produce. The one table is fitted to each call's own data: the optimal
+//! **Encode** is the [`LosslessEncoder`] builder — `cjpeg -lossless psv,Pt`'s parameters: any of
+//! the seven [`Predictor`]s of Table H.1 ([`LosslessEncoder::with_predictor`]), the point
+//! transform ([`LosslessEncoder::with_point_transform`], §A.4: the samples' low `Pt` bits are
+//! discarded before coding and the decoder shifts the reconstruction back up), and a restart
+//! interval ([`LosslessEncoder::with_restart_interval`]). Its default — predictor 1, no point
+//! transform, no restarts — is the subset every reader must accept and the stream gamut-dng
+//! writes. All components share one Huffman table, fitted to each call's own data: the optimal
 //! 16-bit length-limited code of T.81 Annex K.2 (§K.2) over the frame's magnitude-category
 //! histogram, built by [`gamut_bitstream::build_optimal_table`] and written in the frame's `DHT`.
-//! A DNG writer calls it once per tile or strip, so each chunk carries its own table.
+//! A DNG writer calls it once per tile or strip, so each chunk carries its own table. The encoder
+//! is checked against libjpeg-turbo's SOF3 decoder for every predictor at `Pt = 0..=2`.
+
+use std::borrow::Cow;
 
 use gamut_bitstream::build_optimal_table;
 use gamut_core::{Error, Result};
@@ -114,115 +121,282 @@ fn predict(
     }
 }
 
-/// Encodes interleaved `samples` (`width * height * components`) as a lossless JPEG at
-/// `precision` bits per sample, using predictor 1, a single Huffman table fitted to these samples
-/// (T.81 Annex K.2), and no point transform or restarts (a valid encoder free choice — see the
-/// module docs).
+/// A lossless-coding predictor: one row of T.81 Table H.1, selected by the scan header's `Ss`.
 ///
-/// # Errors
-///
-/// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `precision`
-/// is not `2..=16`, `components` is not `1..=4`,
-/// a dimension is zero or exceeds 65535, or `samples.len()` is not
-/// `width * height * components`.
-pub fn encode(
-    samples: &[u16],
-    width: usize,
-    height: usize,
-    components: usize,
-    precision: u16,
-) -> Result<Vec<u8>> {
-    if !(2..=16).contains(&precision) {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "JPEG: lossless-JPEG precision must be 2..=16",
-        ));
-    }
-    if !(1..=4).contains(&components) {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "JPEG: lossless JPEG carries 1..=4 interleaved components",
-        ));
-    }
-    if width == 0 || height == 0 || width > 65535 || height > 65535 {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "JPEG: lossless-JPEG dimensions must be 1..=65535",
-        ));
-    }
-    if samples.len() != width * height * components {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "JPEG: lossless-JPEG sample count must be width * height * components",
-        ));
-    }
-    let diffs = differences(samples, width, height, components, precision);
-    // gamut-bitstream's table, not this module's decode-side `HuffmanTable`.
-    let gamut_bitstream::HuffmanTable {
-        bits,
-        values: huffval,
-    } = build_optimal_table(&category_histogram(&diffs));
-    let codes = EncTable::from_bits_values(&bits, &huffval);
-    let mut out = Vec::new();
-    marker::write_marker(&mut out, SOI);
-
-    // SOF3 (§B.2.2): P, Y, X, Nf, then per component its id, H=1/V=1, and Tq=0 (unused).
-    marker::write_segment_header(&mut out, SOF3, 8 + 3 * components);
-    out.push(precision as u8);
-    out.extend_from_slice(&(height as u16).to_be_bytes());
-    out.extend_from_slice(&(width as u16).to_be_bytes());
-    out.push(components as u8);
-    for c in 0..components {
-        out.extend_from_slice(&[(c + 1) as u8, pack_nibbles(1, 1), 0]);
-    }
-
-    // DHT: one DC-class table (Tc = 0, Th = 0), fitted to this frame's categories.
-    huffman::emit_dht_dynamic(&mut out, &[(0, 0, &bits, &huffval)]);
-
-    // SOS (§B.2.3): every component on table 0, predictor selector Ss = 1, Se = 0, Ah = Al = 0.
-    marker::write_segment_header(&mut out, SOS, 6 + 2 * components);
-    out.push(components as u8);
-    for c in 0..components {
-        out.extend_from_slice(&[(c + 1) as u8, 0]);
-    }
-    out.extend_from_slice(&[1, 0, 0]);
-
-    let mut writer = BitWriter::new(&mut out);
-    for &diff in &diffs {
-        let diff = i32::from(diff);
-        let ssss = magnitude_category(diff);
-        // The table codes every category the histogram counted, and `diffs` is what it counted.
-        let (code, len) = codes.lookup(ssss).unwrap_or((0, 0));
-        writer.write_bits(code, len);
-        // Categories 0 and 16 carry no mantissa (§H.1.2.2, Table H.2); `1..16` do.
-        if ssss < 16 {
-            writer.write_bits(additional_bits(diff, ssss), ssss);
-        }
-    }
-    writer.flush();
-    marker::write_marker(&mut out, EOI);
-    Ok(out)
+/// `#[repr(u8)]` with each discriminant the `Ss` value (the Table H.1 selection value) it writes.
+/// Not `#[non_exhaustive]`: Table H.1 defines exactly these seven (`Ss = 0`, "no prediction", is
+/// for the hierarchical mode's differential frames only). `Ra` is the reconstructed sample to the
+/// left, `Rb` the one above, `Rc` the one above-left. The first line of the scan and of each
+/// restart interval predicts from `Ra`, and the first sample of every other line from `Rb`
+/// (§H.1.2.1), whatever is selected here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+pub enum Predictor {
+    /// `Px = Ra` (`Ss = 1`): the left neighbour — the default, and DNG's usual choice.
+    #[default]
+    Left = 1,
+    /// `Px = Rb` (`Ss = 2`): the neighbour above.
+    Above = 2,
+    /// `Px = Rc` (`Ss = 3`): the neighbour above-left.
+    AboveLeft = 3,
+    /// `Px = Ra + Rb − Rc` (`Ss = 4`): the plane through the three neighbours.
+    Plane = 4,
+    /// `Px = Ra + ((Rb − Rc) >> 1)` (`Ss = 5`): the left neighbour plus half the vertical
+    /// gradient.
+    LeftHalfGradient = 5,
+    /// `Px = Rb + ((Ra − Rc) >> 1)` (`Ss = 6`): the neighbour above plus half the horizontal
+    /// gradient.
+    AboveHalfGradient = 6,
+    /// `Px = (Ra + Rb) >> 1` (`Ss = 7`): the mean of the left and upper neighbours.
+    Average = 7,
 }
 
-/// The predictor-1 prediction error of every sample, in scan order, reduced mod 2^16 to
-/// `[-32768, 32767]` (so it fits an `i16`, the size of the sample it came from).
+impl Predictor {
+    /// Every predictor, in `Ss` order.
+    pub const ALL: [Self; 7] = [
+        Self::Left,
+        Self::Above,
+        Self::AboveLeft,
+        Self::Plane,
+        Self::LeftHalfGradient,
+        Self::AboveHalfGradient,
+        Self::Average,
+    ];
+}
+
+/// A reusable lossless-JPEG (SOF3) encoder: the coding parameters `cjpeg -lossless psv,Pt`
+/// exposes, applied to whatever [`Self::encode`] is handed.
 ///
-/// The encoder needs the errors twice — once to count the table's histogram, once to code them —
-/// so they are computed once here rather than predicted twice.
-fn differences(
-    samples: &[u16],
+/// [`Self::new`] (and [`Default`]) is predictor 1, no point transform and no restarts — the
+/// subset every reader must accept. Every component of a frame shares one Huffman table, fitted to
+/// that frame's own data (Annex K.2).
+///
+/// ```
+/// use gamut_jpeg::lossless::{self, LosslessEncoder, Predictor};
+///
+/// let samples: Vec<u16> = (0..16 * 8).map(|i| (i * 37 % 4096) as u16).collect();
+/// let jpeg = LosslessEncoder::new()
+///     .with_predictor(Predictor::Plane)
+///     .with_restart_interval(32) // two 16-sample lines per interval
+///     .encode(&samples, 16, 8, 1, 12)?;
+/// assert_eq!(lossless::decode(&jpeg)?.samples, samples);
+/// # Ok::<(), gamut_core::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LosslessEncoder {
+    predictor: Predictor,
+    point_transform: u8,
+    restart_interval: u16,
+}
+
+impl LosslessEncoder {
+    /// An encoder with [`Predictor::Left`], no point transform and no restart interval.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Selects the [`Predictor`] (`Ss`) every sample past the first line and column is coded
+    /// against.
+    #[must_use]
+    pub fn with_predictor(mut self, predictor: Predictor) -> Self {
+        self.predictor = predictor;
+        self
+    }
+
+    /// Sets the point transform `Pt` (§A.4, written as the scan header's `Al`): every sample is
+    /// divided by `2^Pt` before coding, so its low `Pt` bits are **discarded** and a decoder
+    /// returns `(sample >> Pt) << Pt`. `0` (the default) is truly lossless. Must be below the
+    /// sample precision, checked by [`Self::encode`].
+    #[must_use]
+    pub fn with_point_transform(mut self, pt: u8) -> Self {
+        self.point_transform = pt;
+        self
+    }
+
+    /// Sets the restart interval `Ri` in MCUs — for this interleaved coder, one sample of every
+    /// component — written as the `DRI` segment; a restart marker (`RSTn`) then separates every
+    /// `mcus` MCUs and the prediction resets at each. `0` (the default) writes no `DRI`. T.81
+    /// §H.1.1 requires a lossless restart interval to be a whole number of lines, so a non-zero
+    /// value must be a multiple of the frame width, checked by [`Self::encode`].
+    #[must_use]
+    pub fn with_restart_interval(mut self, mcus: u16) -> Self {
+        self.restart_interval = mcus;
+        self
+    }
+
+    /// Encodes interleaved `samples` (`width * height * components`, row-major) as a lossless
+    /// JPEG at `precision` bits per sample.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
+    /// `precision` is not `2..=16`, `components` is not `1..=4`, a dimension is zero or exceeds
+    /// 65535, `samples.len()` is not `width * height * components`, the point transform is not
+    /// below `precision`, or a non-zero restart interval is not a multiple of `width`.
+    pub fn encode(
+        &self,
+        samples: &[u16],
+        width: usize,
+        height: usize,
+        components: usize,
+        precision: u16,
+    ) -> Result<Vec<u8>> {
+        if !(2..=16).contains(&precision) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: lossless-JPEG precision must be 2..=16",
+            ));
+        }
+        if !(1..=4).contains(&components) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: lossless JPEG carries 1..=4 interleaved components",
+            ));
+        }
+        if width == 0 || height == 0 || width > 65535 || height > 65535 {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: lossless-JPEG dimensions must be 1..=65535",
+            ));
+        }
+        if samples.len() != width * height * components {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: lossless-JPEG sample count must be width * height * components",
+            ));
+        }
+        let pt = u16::from(self.point_transform);
+        if pt >= precision {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: lossless-JPEG point transform must be below the precision",
+            ));
+        }
+        let ri = usize::from(self.restart_interval);
+        if !ri.is_multiple_of(width) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: a lossless-JPEG restart interval must be a whole number of lines",
+            ));
+        }
+        // Lines per restart interval; 0 when there are no restarts.
+        let interval_lines = ri / width;
+        // §A.4: the point transform divides every input sample by 2^Pt before prediction. Only a
+        // non-zero transform pays for the shifted copy; the default codes the caller's slice.
+        let shifted: Cow<'_, [u16]> = if pt == 0 {
+            Cow::Borrowed(samples)
+        } else {
+            Cow::Owned(samples.iter().map(|&s| s >> pt).collect())
+        };
+        let geometry = Geometry {
+            width,
+            height,
+            components,
+            precision,
+            pt,
+            interval_lines,
+        };
+        let diffs = differences(&shifted, geometry, self.predictor);
+        // gamut-bitstream's table, not this module's decode-side `HuffmanTable`.
+        let gamut_bitstream::HuffmanTable {
+            bits,
+            values: huffval,
+        } = build_optimal_table(&category_histogram(&diffs));
+        let codes = EncTable::from_bits_values(&bits, &huffval);
+        let mut out = Vec::new();
+        marker::write_marker(&mut out, SOI);
+
+        // SOF3 (§B.2.2): P, Y, X, Nf, then per component its id, H=1/V=1, and Tq=0 (unused).
+        marker::write_segment_header(&mut out, SOF3, 8 + 3 * components);
+        out.push(precision as u8);
+        out.extend_from_slice(&(height as u16).to_be_bytes());
+        out.extend_from_slice(&(width as u16).to_be_bytes());
+        out.push(components as u8);
+        for c in 0..components {
+            out.extend_from_slice(&[(c + 1) as u8, pack_nibbles(1, 1), 0]);
+        }
+
+        // DHT: one DC-class table (Tc = 0, Th = 0), fitted to this frame's categories.
+        huffman::emit_dht_dynamic(&mut out, &[(0, 0, &bits, &huffval)]);
+        if ri != 0 {
+            marker::write_dri(&mut out, self.restart_interval);
+        }
+
+        // SOS (§B.2.3): every component on table 0; Ss = predictor, Se = 0, Ah = 0, Al = Pt.
+        marker::write_segment_header(&mut out, SOS, 6 + 2 * components);
+        out.push(components as u8);
+        for c in 0..components {
+            out.extend_from_slice(&[(c + 1) as u8, 0]);
+        }
+        out.extend_from_slice(&[self.predictor as u8, 0, self.point_transform]);
+
+        let mut writer = BitWriter::new(&mut out);
+        for (y, line) in diffs.chunks_exact(width * components).enumerate() {
+            // Every interval after the first opens with RSTn, `n` cycling mod 8 (§B.2.1). With no
+            // restarts `interval_lines` is 0, of which no non-zero line is a multiple.
+            if y != 0 && y.is_multiple_of(interval_lines) {
+                writer.restart((y / interval_lines - 1) as u8);
+            }
+            for &diff in line {
+                let diff = i32::from(diff);
+                let ssss = magnitude_category(diff);
+                // The table codes every category the histogram counted, and `diffs` is what it
+                // counted.
+                let (code, len) = codes.lookup(ssss).unwrap_or((0, 0));
+                writer.write_bits(code, len);
+                // Categories 0 and 16 carry no mantissa (§H.1.2.2, Table H.2); `1..16` do.
+                if ssss < 16 {
+                    writer.write_bits(additional_bits(diff, ssss), ssss);
+                }
+            }
+        }
+        writer.flush();
+        marker::write_marker(&mut out, EOI);
+        Ok(out)
+    }
+}
+
+/// The frame shape [`differences`] predicts over: dimensions, precision, the point transform the
+/// samples were already divided by, and the lines per restart interval (`0` for none).
+#[derive(Clone, Copy)]
+struct Geometry {
     width: usize,
     height: usize,
     components: usize,
     precision: u16,
-) -> Vec<i16> {
+    pt: u16,
+    interval_lines: usize,
+}
+
+/// The prediction error of every sample, in scan order, reduced mod 2^16 to `[-32768, 32767]`
+/// (so it fits an `i16`, the size of the sample it came from). `samples` are already in the
+/// point-transformed domain.
+///
+/// The encoder needs the errors twice — once to count the table's histogram, once to code them —
+/// so they are computed once here rather than predicted twice. Every restart interval begins a
+/// line (§H.1.1), so its origin — where [`predict`] falls back to the default prediction — is
+/// that line's first sample.
+fn differences(samples: &[u16], g: Geometry, predictor: Predictor) -> Vec<i16> {
     let mut diffs = Vec::with_capacity(samples.len());
-    for y in 0..height {
-        for x in 0..width {
-            for c in 0..components {
-                let actual = i32::from(samples[(y * width + x) * components + c]);
-                let prediction =
-                    predict(samples, width, components, x, y, c, precision, 0, 1, (0, 0));
+    for y in 0..g.height {
+        // The line the current interval opened on; with no restarts, the scan's first.
+        let origin_y = y.checked_rem(g.interval_lines).map_or(0, |into| y - into);
+        for x in 0..g.width {
+            for c in 0..g.components {
+                let actual = i32::from(samples[(y * g.width + x) * g.components + c]);
+                let prediction = predict(
+                    samples,
+                    g.width,
+                    g.components,
+                    x,
+                    y,
+                    c,
+                    g.precision,
+                    g.pt,
+                    predictor as u8,
+                    (origin_y, 0),
+                );
                 // `reduce` lands in `[-32768, 32767]`, so the cast is exact.
                 diffs.push(reduce(actual - prediction) as i16);
             }
@@ -862,6 +1036,145 @@ mod tests {
     const BITS: [u8; 16] = [0, 0, 0, 15, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     const HUFFVAL: [u8; 17] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
+    /// The default encoder (predictor 1, no point transform, no restarts) — the stream gamut-dng
+    /// writes, and the configuration the pinned outputs below were recorded under.
+    fn encode(
+        samples: &[u16],
+        width: usize,
+        height: usize,
+        components: usize,
+        precision: u16,
+    ) -> Result<Vec<u8>> {
+        LosslessEncoder::new().encode(samples, width, height, components, precision)
+    }
+
+    /// [`differences`] under the default encoder's choices: predictor 1, `Pt = 0`, no restarts.
+    fn predictor1_differences(
+        samples: &[u16],
+        width: usize,
+        height: usize,
+        components: usize,
+        precision: u16,
+    ) -> Vec<i16> {
+        let geometry = Geometry {
+            width,
+            height,
+            components,
+            precision,
+            pt: 0,
+            interval_lines: 0,
+        };
+        differences(samples, geometry, Predictor::Left)
+    }
+
+    #[test]
+    fn predictor_discriminants_are_the_table_h1_selection_values() {
+        // Drift guard for the C-facing tag: `Ss` is the discriminant, in Table H.1 order.
+        let ss: Vec<u8> = Predictor::ALL.iter().map(|&p| p as u8).collect();
+        assert_eq!(ss, [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(Predictor::default(), Predictor::Left);
+    }
+
+    #[test]
+    fn encode_writes_predictor_point_transform_and_restart_interval_in_the_headers() {
+        // 4 wide, Ri = 8 = two lines: the DRI follows the DHT, and the SOS tail is Ss = 5, Se = 0,
+        // Ah|Al = Pt = 3.
+        let samples = test_samples(4, 4, 1, 12);
+        let stream = LosslessEncoder::new()
+            .with_predictor(Predictor::LeftHalfGradient)
+            .with_point_transform(3)
+            .with_restart_interval(8)
+            .encode(&samples, 4, 4, 1, 12)
+            .expect("encode");
+        let dri = stream
+            .windows(2)
+            .position(|w| w == [MARKER, DRI])
+            .expect("DRI");
+        assert_eq!(stream[dri + 2..dri + 6], [0x00, 0x04, 0x00, 0x08]);
+        let sos = stream.windows(2).position(|w| w == [MARKER, SOS]).unwrap();
+        assert!(dri < sos);
+        assert_eq!(stream[sos + 7..sos + 10], [5, 0, 3]);
+        // No restart interval writes no DRI at all.
+        let plain = encode(&samples, 4, 4, 1, 12).unwrap();
+        assert!(!plain.windows(2).any(|w| w == [MARKER, DRI]));
+    }
+
+    #[test]
+    fn every_predictor_point_transform_and_interval_round_trips_through_the_decoder() {
+        // The decoder hands back (s >> Pt) << Pt: the low Pt bits are the transform's loss.
+        let (w, h, c) = (5, 7, 2);
+        for predictor in Predictor::ALL {
+            for pt in 0..=2u8 {
+                for ri in [0u16, 5, 15] {
+                    let samples = test_samples(w, h, c, 12);
+                    let stream = LosslessEncoder::new()
+                        .with_predictor(predictor)
+                        .with_point_transform(pt)
+                        .with_restart_interval(ri)
+                        .encode(&samples, w, h, c, 12)
+                        .expect("encode");
+                    let want: Vec<u16> = samples.iter().map(|&s| (s >> pt) << pt).collect();
+                    let got = decode(&stream).expect("decode").samples;
+                    assert_eq!(got, want, "{predictor:?} Pt={pt} Ri={ri}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn restart_markers_follow_each_interval_and_cycle_mod_8() {
+        // 3 wide, one line per interval, 11 lines: ten RSTn markers, numbered 0..=7 then 0, 1.
+        let samples = test_samples(3, 11, 1, 8);
+        let stream = LosslessEncoder::new()
+            .with_restart_interval(3)
+            .encode(&samples, 3, 11, 1, 8)
+            .expect("encode");
+        let sos = stream.windows(2).position(|w| w == [MARKER, SOS]).unwrap();
+        let rst: Vec<u8> = stream[sos..]
+            .windows(2)
+            .filter(|w| w[0] == MARKER && (RST0..RST0 + 8).contains(&w[1]))
+            .map(|w| w[1] - RST0)
+            .collect();
+        assert_eq!(rst, [0, 1, 2, 3, 4, 5, 6, 7, 0, 1]);
+        assert_eq!(decode(&stream).expect("decode").samples, samples);
+    }
+
+    #[test]
+    fn each_restart_interval_opens_on_the_default_prediction() {
+        // Two lines per interval: lines 0 and 2 start from 2^(P - Pt - 1); lines 1 and 3 start
+        // from the sample above. Flat samples make every other difference zero.
+        let samples = [100u16; 2 * 4];
+        let g = Geometry {
+            width: 2,
+            height: 4,
+            components: 1,
+            precision: 8,
+            pt: 1,
+            interval_lines: 2,
+        };
+        assert_eq!(
+            differences(&samples, g, Predictor::Above),
+            [100 - 64, 0, 0, 0, 100 - 64, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn encode_rejects_a_point_transform_at_the_precision_and_a_partial_line_interval() {
+        let samples = [0u16; 4 * 2];
+        let enc = |pt: u8, ri: u16| {
+            LosslessEncoder::new()
+                .with_point_transform(pt)
+                .with_restart_interval(ri)
+                .encode(&samples, 4, 2, 1, 8)
+        };
+        assert!(enc(7, 0).is_ok()); // Pt = P - 1 is the largest legal transform
+        assert!(enc(8, 0).is_err());
+        assert!(enc(0, 4).is_ok()); // one line
+        assert!(enc(0, 12).is_ok()); // three lines, past the frame: no marker, still legal
+        assert!(enc(0, 6).is_err()); // a line and a half (§H.1.1)
+        assert!(enc(0, 2).is_err());
+    }
+
     #[test]
     fn roundtrips_varied_shapes_and_depths() {
         for &precision in &[8u16, 12, 14, 16] {
@@ -936,7 +1249,7 @@ mod tests {
     #[test]
     fn encode_writes_the_table_fitted_to_its_own_categories() {
         let row = [128u16, 129, 129, 127];
-        assert_eq!(differences(&row, 4, 1, 1, 8), [0, 1, 0, -2]);
+        assert_eq!(predictor1_differences(&row, 4, 1, 1, 8), [0, 1, 0, -2]);
         let mut expected_histogram = [0u32; 17];
         expected_histogram[..3].copy_from_slice(&[2, 1, 1]);
         assert_eq!(category_histogram(&[0, 1, 0, -2]), expected_histogram);
@@ -994,7 +1307,7 @@ mod tests {
         // 2x2, two components, 16-bit. Row 0: (10, 500) (13, 400); row 1: (7, 65535) (9, 0).
         let samples = [10u16, 500, 13, 400, 7, 65535, 9, 0];
         assert_eq!(
-            differences(&samples, 2, 2, 2, 16),
+            predictor1_differences(&samples, 2, 2, 2, 16),
             // The first pixel predicts 2^15, the next its left neighbour, and row 1 starts from
             // above: 10 - 32768, 500 - 32768, 3, -100, -3, (65535 - 500) - 65536, 2, 1 - 0.
             [-32758, -32268, 3, -100, -3, -501, 2, 1],
@@ -1828,7 +2141,7 @@ mod tests {
     mod sdk_differential {
         use super::super::*;
         use super::{
-            BITS_EVERY_LENGTH, HUFFVAL, HUFFVAL_REV, StreamBuilder, every_category_row,
+            BITS_EVERY_LENGTH, HUFFVAL, HUFFVAL_REV, StreamBuilder, encode, every_category_row,
             test_samples,
         };
 

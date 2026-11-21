@@ -85,9 +85,10 @@
 //!
 //! The [`lossless`] module is T.81's lossless process (Annex H, SOF3): the predictive,
 //! Huffman-coded coder DNG uses for its raw data, sharing this crate's entropy-coded-segment writer,
-//! marker writers and Huffman tables. It is a separate entry point
-//! ([`lossless::encode`] / [`lossless::decode`] over 2- to 16-bit samples) rather than a
-//! [`JpegDecoder`] path: its samples are not the 8-bit pixels the DCT decoder presents.
+//! marker writers and Huffman tables. It is a separate entry point — the
+//! [`lossless::LosslessEncoder`] builder (any Table H.1 predictor, point transform and restart
+//! interval) and [`lossless::decode`], over 2- to 16-bit samples — rather than a [`JpegDecoder`]
+//! path: its samples are not the 8-bit pixels the DCT decoder presents.
 //!
 //! Out of scope (see `STATUS.md`): 12-bit DCT precision, arithmetic coding, the hierarchical
 //! process, the SPIFF/T.84/T.872 layers, ExtendedXMP, and APP13 IPTC-IIM.

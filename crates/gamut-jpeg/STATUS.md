@@ -140,7 +140,13 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Lossless process (P18, issue #1083): the `lossless` module, T.81 Annex H (SOF3), moved here from
   `gamut-dng`, whose `Compression = 7` it codes. Decode covers the full process-14 reader envelope
   (predictors 1–7, point transform, per-component tables, restarts) over 2- to 16-bit samples;
-  encode writes predictor 1 with one Annex K.2 table fitted per call. The encoder shares the DCT
+  encode is the `LosslessEncoder` builder (issue #1231, replacing the positional
+  `lossless::encode`): any Table H.1 `Predictor`, the §A.4 point transform, and a restart
+  interval that §H.1.1 requires to be whole lines, with one Annex K.2 table fitted per call; its
+  default (predictor 1, no transform, no restarts) is the stream gamut-dng writes, byte-identical
+  to the positional function's. Oracle: libjpeg-turbo's SOF3 decoder reads every predictor at
+  `Pt = 0..=2`, with and without restarts, back to the (point-transformed) input
+  (`tests/oracle.rs`). The encoder shares the DCT
   path's magnitude category and additional bits, entropy-coded-segment writer, marker writers and
   DHT emission, and the decoder its `EXTEND`; the decoder keeps its own marker walk, bit reader
   and decode table, because the DCT decoder's reject an over-subscribed `BITS` list and stray

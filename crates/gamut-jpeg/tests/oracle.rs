@@ -1101,3 +1101,49 @@ fn trellis_composes_with_custom_tables_and_progressive() {
         );
     }
 }
+
+// ================================================================================================
+// Lossless (SOF3) encode through libjpeg-turbo's lossless decoder.
+// ================================================================================================
+
+#[test]
+fn lossless_encoder_every_predictor_and_point_transform_decodes_in_libjpeg_turbo() {
+    // `cjpeg -lossless psv,Pt`'s whole parameter space at Pt = 0..=2: libjpeg-turbo, an
+    // independent SOF3 decoder, must return the input with its low Pt bits cleared — at a
+    // precision on each of its three sample-width paths (8-, 12- and 16-bit), gray and
+    // three-component, with and without a restart interval (two lines per interval).
+    use gamut_jpeg::lossless::{LosslessEncoder, Predictor};
+    let (w, h) = (13usize, 9usize);
+    for precision in [2u16, 8, 12, 16] {
+        for components in [1usize, 3] {
+            let max = (1u32 << precision) - 1;
+            let mut lcg = Lcg::new(0x1055_1E55 ^ u32::from(precision));
+            let samples: Vec<u16> = (0..w * h * components)
+                .map(|_| (((u32::from(lcg.byte()) << 8) | u32::from(lcg.byte())) & max) as u16)
+                .collect();
+            for predictor in Predictor::ALL {
+                for pt in (0..=2u8).filter(|&pt| u16::from(pt) < precision) {
+                    for ri in [0, 2 * w as u16] {
+                        let jpeg = LosslessEncoder::new()
+                            .with_predictor(predictor)
+                            .with_point_transform(pt)
+                            .with_restart_interval(ri)
+                            .encode(&samples, w, h, components, precision)
+                            .expect("encode");
+                        let case =
+                            format!("P={precision} Nf={components} {predictor:?} Pt={pt} Ri={ri}");
+                        let got = libjpeg_oracle::decode_lossless(&jpeg)
+                            .unwrap_or_else(|e| panic!("{case}: {e}"));
+                        assert_eq!(
+                            (got.width, got.height, got.channels, got.precision),
+                            (w as u32, h as u32, components as u32, precision as u8),
+                            "{case}"
+                        );
+                        let want: Vec<u16> = samples.iter().map(|&s| (s >> pt) << pt).collect();
+                        assert_eq!(got.samples, want, "{case}");
+                    }
+                }
+            }
+        }
+    }
+}

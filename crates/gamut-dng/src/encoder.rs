@@ -683,7 +683,8 @@ impl DngEncoder {
         match self.compression {
             Compression::Jpeg => {
                 let (width, components) = lossless_jpeg_geometry(cols, spp, period);
-                gamut_jpeg::lossless::encode(samples, width, rows, components, bits)
+                gamut_jpeg::lossless::LosslessEncoder::new()
+                    .encode(samples, width, rows, components, bits)
             }
             Compression::JpegXl => {
                 #[cfg(all(

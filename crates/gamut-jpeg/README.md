@@ -138,8 +138,14 @@ owns the container" means the crate owns **metadata and validation** — APPn EX
 crate-owned in both directions, and the crate patches its metadata into a backend-produced stream.
 
 The **lossless process** (SOF3, T.81 Annex H) ships as the separate `lossless` module —
-`lossless::encode` / `lossless::decode` over 2- to 16-bit samples, the coder DNG's
-`Compression = 7` uses — differentially tested against the Adobe DNG SDK's codec.
+the `lossless::LosslessEncoder` builder (`cjpeg -lossless psv,Pt`: any of the seven Table H.1
+predictors, the point transform, and a restart interval) and `lossless::decode`, over 2- to
+16-bit samples, the coder DNG's `Compression = 7` uses — differentially tested against the Adobe
+DNG SDK's codec and libjpeg-turbo's SOF3 decoder.
+
+Quantization tables are 16-bit capable: `QuantTables` entries are `u16`, and a table with any
+entry above 255 is written with `Pq = 1` under an extended-sequential (SOF1) frame, as libjpeg
+does; `QuantTables::scaled_extended` is `cjpeg`'s default (non-`-baseline`) quality mapping.
 
 Out of scope (documented in [STATUS.md](STATUS.md)): a finer per-scan codestream seam, 12-bit
 DCT precision, arithmetic coding (SOF9/10), hierarchical (SOF5–7), SPIFF/T.84 extensions, T.872 printing
