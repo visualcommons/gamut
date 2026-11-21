@@ -494,8 +494,12 @@ mod tests {
             cfg.seq_level_idx_0,
             superres,
         );
+        let policy = crate::policy::EncodePolicy {
+            block_variation: variation,
+            ..Default::default()
+        };
         let frame_payload = crate::headers::frame_header_payload(
-            &layout, base_q_idx, superres, false, filters, luma_lr, variation,
+            &layout, base_q_idx, superres, false, filters, luma_lr, policy,
         );
         let unit = crate::headers::assemble_temporal_unit(&seq_payload, &frame_payload);
         let obus: Vec<_> = ObuIter::new(&unit).collect::<Result<Vec<_>>>().unwrap();
@@ -923,7 +927,7 @@ mod tests {
             crate::filter::FrameFilters::default(),
             true,
             // The longest lossy header: segmentation and the delta params are coded too.
-            crate::tile::BlockVariation::SyntaxExercise,
+            crate::policy::EncodePolicy::SYNTAX_EXERCISE,
         );
         for cut in 0..frame.len() {
             let mut r = BitReader::new(&frame[..cut]);

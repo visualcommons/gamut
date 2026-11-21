@@ -991,9 +991,9 @@ impl LrUnits {
 
 /// Decides each luma restoration unit of a `width × height` frame by the distortion it leaves:
 /// a unit is restored when the default Wiener filter's output `restored` is closer to `source`,
-/// by squared error over the unit, than the unrestored `cdef`. A tie leaves the unit unrestored.
-/// `cdef` and `restored` are strided by `stride`; `source` by `width`. Restoring one unit reads
-/// no other unit's output, so each is decided on its own.
+/// by `distortion` summed over the unit, than the unrestored `cdef`. A tie leaves the unit
+/// unrestored. `cdef` and `restored` are strided by `stride`; `source` by `width`. Restoring one
+/// unit reads no other unit's output, so each is decided on its own.
 pub(crate) fn choose_lr_units<S: Copy + Into<i64>>(
     source: &[S],
     cdef: &[u16],
@@ -1001,6 +1001,7 @@ pub(crate) fn choose_lr_units<S: Copy + Into<i64>>(
     stride: usize,
     width: usize,
     height: usize,
+    distortion: crate::policy::Distortion,
 ) -> LrUnits {
     let (cols, rows) = (
         crate::tile::lr_unit_count(width, LR_UNIT),
@@ -1011,18 +1012,19 @@ pub(crate) fn choose_lr_units<S: Copy + Into<i64>>(
         rows,
         wiener: vec![false; cols * rows],
     };
-    // Per unit, the squared error restoring it removes (negative where it adds error).
-    let mut gain = vec![0i64; cols * rows];
+    // Per unit, the distortion it leaves unrestored and restored.
+    let mut off = vec![0u64; cols * rows];
+    let mut on = vec![0u64; cols * rows];
     for y in 0..height {
         for x in 0..width {
             let s: i64 = source[y * width + x].into();
-            let off = i64::from(cdef[y * stride + x]) - s;
-            let on = i64::from(restored[y * stride + x]) - s;
-            gain[units.unit_of(x, y)] += off * off - on * on;
+            let unit = units.unit_of(x, y);
+            off[unit] += distortion.sample(i64::from(cdef[y * stride + x]) - s);
+            on[unit] += distortion.sample(i64::from(restored[y * stride + x]) - s);
         }
     }
-    for (wiener, g) in units.wiener.iter_mut().zip(gain) {
-        *wiener = g > 0;
+    for ((wiener, off), on) in units.wiener.iter_mut().zip(off).zip(on) {
+        *wiener = on < off;
     }
     units
 }
@@ -1194,6 +1196,7 @@ mod tests {
     use gamut_color::ChromaSubsampling;
 
     use super::*;
+    use crate::policy::Distortion;
 
     /// The 4:4:4 geometry of a `w`x`h` frame whose coded grid is `cw`x`ch`, as the tests below use
     /// it: every plane full resolution, so all three share one `PlaneGeom`.
@@ -1411,7 +1414,7 @@ mod tests {
                 restored[y * stride + x] = on;
             }
         }
-        let lr = choose_lr_units(&source, &cdef, &restored, stride, w, h);
+        let lr = choose_lr_units(&source, &cdef, &restored, stride, w, h, Distortion::Sse);
         assert_eq!(
             lr,
             LrUnits {
@@ -1435,7 +1438,15 @@ mod tests {
 
         // One unit whose restored and unrestored errors tie is left alone, and a frame with no
         // restored unit has none to signal.
-        let tie = choose_lr_units(&[100u16; 64], &[101; 64], &[99; 64], 8, 8, 8);
+        let tie = choose_lr_units(
+            &[100u16; 64],
+            &[101; 64],
+            &[99; 64],
+            8,
+            8,
+            8,
+            Distortion::Sse,
+        );
         assert_eq!(tie.wiener, [false]);
         assert!(!tie.any());
     }

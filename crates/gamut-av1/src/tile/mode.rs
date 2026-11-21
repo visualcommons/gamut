@@ -321,7 +321,7 @@ impl FrameEncoder<'_> {
         // `skip = 1`: the reconstruction is the palette (luma) plus DC chroma, so no residual is
         // needed. Otherwise a block whose residual is identically zero (flat + DC-predicted) is also
         // `skip = 1`. The skip context is the above/left skip flags.
-        let palette = if self.qindex > 0 && !is_rect && (8..=32).contains(&bw) {
+        let palette = if self.screen_content_tools() && !is_rect && (8..=32).contains(&bw) {
             self.decide_palette(r, c, bw)
         } else {
             None
@@ -503,7 +503,7 @@ impl FrameEncoder<'_> {
         // `has_palette_y` (when YMode == DC_PRED) and `has_palette_uv` (when UVMode == DC_PRED). When
         // luma palette is selected, the palette size, the cache-usage flags, and the colors follow.
         // (Palette is only *chosen* for ≤32 — `palette` is `None` at 64 — but the flag is still coded.)
-        if self.qindex > 0 && (8..=64).contains(&bw) {
+        if self.screen_content_tools() && (8..=64).contains(&bw) {
             if y_mode == DC_PRED {
                 let (bctx, pctx) = self.palette_y_ctx(r, c, bw, bh);
                 self.sym.encode(

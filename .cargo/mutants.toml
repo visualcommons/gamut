@@ -221,7 +221,7 @@ exclude_re = [
     '^crates/gamut-av1/src/filter\.rs:525:38: replace - with \+ in centred$',
     # superres_err: see the doc comment — `err` reaches the offset only as `-err/2` and the `& 0x3fff`
     # discards the `2¹⁴`-multiple that `-`→`+` introduces. (The `*`/`<<`/`/` mutants are not masked.)
-    '^crates/gamut-av1/src/filter\.rs:1093:18: replace - with \+ in superres_err$',
+    '^crates/gamut-av1/src/filter\.rs:1095:18: replace - with \+ in superres_err$',
     # gamut-av1 tile::{mode,coder} — equivalents in the segment/entropy helpers (the snapshot + round-trip tests pin
     # everything observable). last_ref: `max - 1` is the largest valid segment ref; a ref is always
     # `< max`, so widening the threshold is never reached and the general neg_interleave path maps
