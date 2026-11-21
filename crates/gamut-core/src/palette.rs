@@ -11,11 +11,38 @@ const OPAQUE: u8 = u8::MAX;
 /// One representation for every format that carries a palette (PNG `PLTE`/`tRNS`, TIFF
 /// `ColorMap`, …). Entries beyond the alpha values supplied are fully opaque, so a palette with no
 /// alpha is an opaque one. An [`crate::Indexed8`] sample is an index into it.
+///
+/// With the `serde` feature it serializes as `{"rgb": [[r, g, b], …], "alpha": [a, …]}` (the
+/// stored alpha, trailing opaque values dropped), and deserializing goes through
+/// [`Palette::with_alpha`], so an empty, oversized or over-long-alpha table is rejected there too.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(try_from = "PaletteFields")
+)]
 pub struct Palette {
     rgb: Vec<[u8; 3]>,
     /// Per-entry alpha for the leading entries; entries beyond `alpha.len()` are opaque.
     alpha: Vec<u8>,
+}
+
+/// The unvalidated `{rgb, alpha}` wire shape [`Palette`] deserializes from before
+/// [`Palette::with_alpha`] checks it.
+#[cfg(feature = "serde")]
+#[derive(serde::Deserialize)]
+struct PaletteFields {
+    rgb: Vec<[u8; 3]>,
+    alpha: Vec<u8>,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<PaletteFields> for Palette {
+    type Error = Error;
+
+    fn try_from(fields: PaletteFields) -> Result<Self> {
+        Self::with_alpha(&fields.rgb, &fields.alpha)
+    }
 }
 
 impl Palette {

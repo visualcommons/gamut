@@ -6,7 +6,11 @@
 use core::fmt::Debug;
 
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy};
-use gamut_core::{Cicp, ColorModel, DecodeLimits, Dimensions, ErrorKind, Orientation, PixelFormat};
+use gamut_core::segment::Segment;
+use gamut_core::{
+    Cicp, ColorModel, DecodeLimits, Dimensions, ErrorKind, Orientation, Palette, PixelFormat,
+    RawMetadata,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -151,5 +155,59 @@ fn dimensions_deserialize_rejects_a_zero_side() {
     for json in [r#"{"width":0,"height":2}"#, r#"{"width":3,"height":0}"#] {
         let err = serde_json::from_str::<Dimensions>(json).unwrap_err();
         assert!(err.to_string().contains("zero-sized image"), "{err}");
+    }
+}
+
+#[test]
+fn raw_metadata_round_trips_by_field_name() {
+    let mut metadata = RawMetadata::default();
+    metadata.exif = Some(vec![0x49, 0x49]);
+    metadata.icc = Some(Vec::new());
+    assert_json(metadata, r#"{"exif":[73,73],"xmp":null,"icc":[]}"#);
+}
+
+#[test]
+fn segments_round_trip_by_field_name() {
+    assert_json(
+        Segment {
+            range: 4..10,
+            kind: ErrorKind::Io,
+        },
+        r#"{"range":{"start":4,"end":10},"kind":"Io"}"#,
+    );
+    assert_json(
+        Segment::<u8, u64> {
+            range: 0..(1 << 40),
+            kind: 7,
+        },
+        r#"{"range":{"start":0,"end":1099511627776},"kind":7}"#,
+    );
+}
+
+#[test]
+fn palette_round_trips_by_field_name() {
+    // The stored alpha, trailing opaque values dropped.
+    let palette = Palette::with_alpha(&[[1, 2, 3], [4, 5, 6]], &[0, 255]).unwrap();
+    assert_json(palette, r#"{"rgb":[[1,2,3],[4,5,6]],"alpha":[0]}"#);
+}
+
+#[test]
+fn palette_deserialize_rejects_what_with_alpha_rejects() {
+    // Deserializing goes through `Palette::with_alpha`, so a table read from untrusted data
+    // holds the same 1..=256-entry and alpha-length invariants as one built in code.
+    let oversized = format!(r#"{{"rgb":[{}],"alpha":[]}}"#, ["[0,0,0]"; 257].join(","));
+    for (json, message) in [
+        (
+            r#"{"rgb":[],"alpha":[]}"#,
+            "palette must have 1..=256 entries",
+        ),
+        (oversized.as_str(), "palette must have 1..=256 entries"),
+        (
+            r#"{"rgb":[[0,0,0]],"alpha":[0,0]}"#,
+            "palette has more alpha values than entries",
+        ),
+    ] {
+        let err = serde_json::from_str::<Palette>(json).unwrap_err();
+        assert!(err.to_string().contains(message), "{err}");
     }
 }

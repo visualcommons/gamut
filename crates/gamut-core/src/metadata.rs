@@ -6,7 +6,10 @@
 /// One shape for every format crate that surfaces them; parsing them into typed models is the
 /// `gamut-metadata` facade's job. Built from [`Default`] and filled field by field, because the
 /// struct is `#[non_exhaustive]`.
+///
+/// With the `serde` feature each field serializes by name as `null` or an array of byte values.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct RawMetadata {
     /// The EXIF TIFF stream (starting `II`/`MM`), with any container signature stripped.
