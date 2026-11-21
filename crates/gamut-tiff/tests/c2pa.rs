@@ -194,7 +194,7 @@ fn a_multipage_document_puts_the_entry_in_its_last_page() {
     TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
         .with_c2pa(STORE)
-        .encode_pages_rgb8(&[page, page], &mut bytes)
+        .encode_pages(&[page, page], &mut bytes)
         .expect("encode");
     let file = read(&bytes).expect("read");
     assert_eq!(file.ifds.len(), 2);
