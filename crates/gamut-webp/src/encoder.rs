@@ -528,8 +528,8 @@ impl WebpEncoder {
     /// Encodes interleaved 8-bit RGBA `pixels` (row-major) of `dims`, appending the WebP file to
     /// `out`. A fully opaque image with no metadata produces a simple file; a transparent one uses
     /// the extended (`VP8X`) format with an `ALPH` alpha chunk (lossy color; lossless at alpha
-    /// quality `100`) or in-bitstream alpha (lossless). Backs the [`EncodeImage<Rgba8>`] impl; the buffer is already validated by
-    /// [`ImageRef`].
+    /// quality `100`) or in-bitstream alpha (lossless). Backs the [`EncodeImage<Rgba8>`] impl; the
+    /// buffer is already validated by [`ImageRef`].
     fn encode_rgba8_inner(
         &self,
         pixels: &[u8],
