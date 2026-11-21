@@ -304,6 +304,18 @@ impl WebpEncoder {
         self
     }
 
+    /// Sets how a lossy encode derives 4:2:0 chroma from RGB: the default
+    /// [`ChromaDownsampling::Box`] average, or [`ChromaDownsampling::Sharp`] — libwebp's
+    /// sharp-YUV (`cwebp -sharp_yuv`), which keeps sharp colour edges free of chroma halos at
+    /// several times the conversion cost. See
+    /// [`WebpConfig::chroma_downsampling`](crate::WebpConfig::chroma_downsampling). A lossless
+    /// encode ignores it. Calling this twice keeps the last value.
+    #[must_use]
+    pub fn with_chroma_downsampling(mut self, downsampling: ChromaDownsampling) -> Self {
+        self.config.chroma_downsampling = downsampling;
+        self
+    }
+
     /// Encodes the lossless codestream, applying near-lossless preprocessing when configured.
     ///
     /// With a strength set, the image is coded **both ways** and the smaller result kept. That
@@ -418,7 +430,8 @@ impl WebpEncoder {
         clean_under: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         // `from_rgb8_bt601` builds 4:2:0 planes by contract, which `try_from` re-checks.
-        let planar = Planar8::from_rgb8_bt601(rgb, ColorRange::Limited, ChromaDownsampling::Box);
+        let planar =
+            Planar8::from_rgb8_bt601(rgb, ColorRange::Limited, self.config.chroma_downsampling);
         let yuv = &match clean_under {
             None => Vp8Planes::try_from(planar)?,
             Some(alpha) => {
@@ -757,8 +770,78 @@ mod tests {
             near_lossless: NearLossless::from_libwebp_strength(40),
             alpha_quality: 41,
             exact: Exact::Clean,
+            chroma_downsampling: ChromaDownsampling::Sharp,
         };
         assert_eq!(WebpEncoder::from_config(config).config(), config);
+    }
+
+    #[test]
+    fn with_chroma_downsampling_sets_the_knob_and_the_last_call_wins() {
+        assert_eq!(
+            WebpEncoder::lossy(40).config().chroma_downsampling,
+            ChromaDownsampling::Box
+        );
+        let enc = WebpEncoder::lossy(40)
+            .with_chroma_downsampling(ChromaDownsampling::Box)
+            .with_chroma_downsampling(ChromaDownsampling::Sharp);
+        assert_eq!(enc.config().chroma_downsampling, ChromaDownsampling::Sharp);
+    }
+
+    /// A backend that records the planes it is handed and then fails the job, so the test sees
+    /// exactly what the lossy path converted to without decoding anything.
+    struct PlaneRecorder(Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl WebpCodestreamEncoder for PlaneRecorder {
+        fn supports(&mut self, _req: &WebpEncodeRequest) -> bool {
+            true
+        }
+
+        fn encode(
+            &mut self,
+            _req: &WebpEncodeRequest,
+            raster: &WebpRasterRef<'_>,
+        ) -> Result<Vec<u8>> {
+            if let WebpRasterRef::Yuv420(yuv) = raster {
+                *self.0.lock().unwrap() = yuv.planes().map(<[u8]>::to_vec).to_vec();
+            }
+            Err(Error::unsupported("test", "recorded"))
+        }
+    }
+
+    /// The lossy path converts with the configured downsampling: the planes a backend receives
+    /// are gamut-color's for that choice, and on hard colour edges the two choices differ.
+    #[test]
+    fn lossy_converts_with_the_configured_chroma_downsampling() {
+        let (w, h) = (9u32, 6u32);
+        let rgb: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if (i % w + i / w) % 2 == 0 {
+                    [255, 0, 40]
+                } else {
+                    [0, 200, 255]
+                }
+            })
+            .collect();
+        let image = ImageRef::<Rgb8>::new(&rgb, dims(w, h)).unwrap();
+        let planes_for = |downsampling| {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let enc = WebpEncoder::lossy(80)
+                .with_chroma_downsampling(downsampling)
+                .with_backend(PlaneRecorder(Arc::clone(&seen)));
+            assert!(enc.encode_image(image, &mut Vec::new()).is_err());
+            let expected = Planar8::from_rgb8_bt601(image, ColorRange::Limited, downsampling);
+            let planes = seen.lock().unwrap().clone();
+            assert_eq!(
+                planes,
+                expected.planes().map(<[u8]>::to_vec),
+                "{downsampling:?}"
+            );
+            planes
+        };
+        assert_ne!(
+            planes_for(ChromaDownsampling::Box),
+            planes_for(ChromaDownsampling::Sharp)
+        );
     }
 
     #[test]

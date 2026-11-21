@@ -1,6 +1,8 @@
 //! Encoder configuration: lossless vs. lossy selection, the quality knob, and the compression
 //! effort ladder.
 
+use gamut_color::ChromaDownsampling;
+
 /// Compression effort: the encode-time/output-size trade-off, from fastest ([`Effort::Fastest`])
 /// to densest ([`Effort::Slowest`]).
 ///
@@ -293,6 +295,15 @@ pub struct WebpConfig {
     /// (libwebp's `exact`). The default [`Exact::ByMode`] cleans a [`WebpMode::Lossy`] encode and
     /// preserves a [`WebpMode::Lossless`] one; see [`Exact`].
     pub exact: Exact,
+    /// How the lossy encoder derives 4:2:0 chroma from RGB. The default
+    /// [`ChromaDownsampling::Box`] averages each 2×2 block; [`ChromaDownsampling::Sharp`] is
+    /// libwebp's sharp-YUV (`use_sharp_yuv`, cwebp's `-sharp_yuv`, libvips' `smart_subsample`),
+    /// byte for byte the planes libwebp converts to, which keeps sharp colour edges free of
+    /// chroma halos at several times the conversion cost.
+    ///
+    /// Applies to [`WebpMode::Lossy`] only; lossless codes RGB directly and ignores it. Unlike
+    /// libwebp, which skips sharp-YUV below 4 pixels a side, gamut applies it at every size.
+    pub chroma_downsampling: ChromaDownsampling,
 }
 
 impl Default for WebpConfig {
@@ -304,6 +315,7 @@ impl Default for WebpConfig {
             near_lossless: None,
             alpha_quality: 100,
             exact: Exact::ByMode,
+            chroma_downsampling: ChromaDownsampling::Box,
         }
     }
 }
@@ -321,6 +333,7 @@ mod tests {
         assert_eq!(c.near_lossless, None);
         assert_eq!(c.alpha_quality, 100, "alpha is lossless by default");
         assert_eq!(c.exact, Exact::ByMode);
+        assert_eq!(c.chroma_downsampling, ChromaDownsampling::Box);
         assert_eq!(Exact::default(), Exact::ByMode);
         assert_eq!(WebpMode::default(), WebpMode::Lossless);
     }

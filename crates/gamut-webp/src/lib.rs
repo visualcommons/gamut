@@ -163,7 +163,7 @@ pub use decoder::WebpDecoder;
 pub use encoder::{WebpEncodeReport, WebpEncoder};
 // The shared vocabulary types this crate's signatures take and return, so a caller needs no direct
 // dependency on gamut-color, gamut-core or gamut-riff to name them.
-pub use gamut_color::{ChromaUpsampling, Planar8};
+pub use gamut_color::{ChromaDownsampling, ChromaUpsampling, Planar8};
 pub use gamut_core::{DecodeLimits, Dimensions, RawMetadata};
 // The facade types named in the `metadata`-feature surface, so a caller can spell
 // `WebpEncoder::with_metadata` and read a `RawMetadata` as a `Metadata` without a direct
