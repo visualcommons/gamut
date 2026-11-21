@@ -140,7 +140,7 @@ panic, a hang, or an allocation past libFuzzer's limit is the defect.
 The six targets #264 added each carry at least one check the engine cannot make on its own, so
 that a defect producing no crash is still visible — all but `dng_decode`, which has none that can
 fail (both of its assertions are structure pins, below) and runs for the crash oracle alone, which
-is what found #564. The ten #311 added (the second table) are crash-oracle-only by the same
+is what found #564. The twelve #311 added (the second table) are crash-oracle-only by the same
 standard: none lists a check, so none owes the injection audit an entry, and a check is added to
 one only together with the injection that shows it can fail.
 
@@ -171,10 +171,22 @@ defect, not a restatement of a documented default:
 | `exif_parse` | `gamut-exif` | `ExifReader::parse_with_report`, then `gps`, `thumbnail_bytes`, `MakerNote::canon` | `with_entry_recovery` and `with_byte_audit` on: the widest walk |
 | `xmp_parse` | `gamut-xmp` | `XmpMeta::parse` | — |
 | `iptc_read_irb` | `gamut-iptc` | `IptcReader::read_irb`, then `read` | default conflict policy |
+| `cmm_transform` | `gamut-cmm` | `IccTransform::embedded_to_srgb`; `between` from built-in sRGB at the header's intent; `device_link` for a `link` profile; each transform run over a fixed 81-pixel grid as `f64`, `u16` and `u8` | `embedded_to_srgb` as `gamut-jpeg`'s `decode_srgb` calls it; the reverse link with black-point compensation and `PrecalculateFixed16` |
+| `metadata_extract` | `gamut-metadata` | `MetadataExtractor::{extract,conflicts}` over EXIF/XMP/IIM blocks, then `Metadata::iptc`, `exif_to_xmp`/`xmp_to_exif`, `Metadata::to_blocks` | both IPTC and both EXIF conflict policies, chosen by the input's first byte |
 
 `gamut-deflate`'s entry point, `inflate_zlib`, is driven by the law target `deflate_inflate_zlib`
 above rather than here, and `gamut-av2`/`gamut-vvc` have none because they are stubs with no
 function bodies.
+
+The last two are the layers **above** the byte parsers, added by #311's audit
+([`docs/security-audit.md`](../../docs/security-audit.md)). A profile or a metadata block that
+parses still carries every value its writer chose, and the code that consumes the parsed model is
+reached by no parser target: `cmm_transform` links and evaluates the profile `icc_parse` only
+parses (the path `gamut-jpeg`'s `decode_srgb` takes with an untrusted JPEG's `APP2` profile), and
+`metadata_extract` reconciles an IIM block *with* an XMP packet and maps EXIF to XMP and back, where
+`iptc_read_irb` reads IIM with no XMP beside it. `metadata_extract` splits its input into three
+blocks by two little-endian `u16` lengths after a policy byte, so its seed is the three per-carrier
+seeds concatenated in that shape.
 
 **Two of them ran slowly by design, not by defect.** In the 60-second local run that preceded them,
 `webp_decode` and `jxl_decode` both wrote `slow-unit-*` artifacts and ran at under a hundred

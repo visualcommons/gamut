@@ -62,6 +62,10 @@ gamut-icc = { path = "../../crates/gamut-icc" }
 gamut-exif = { path = "../../crates/gamut-exif" }
 gamut-xmp = { path = "../../crates/gamut-xmp" }
 gamut-iptc = { path = "../../crates/gamut-iptc" }
+# The two layers above the byte parsers (#311): gamut-cmm links and evaluates a profile that parsed,
+# and gamut-metadata reconciles the carriers the per-format targets above parse one at a time.
+gamut-cmm = { path = "../../crates/gamut-cmm" }
+gamut-metadata = { path = "../../crates/gamut-metadata" }
 
 [[bin]]
 name = "ifd_read_ledger"
@@ -234,6 +238,20 @@ bench = false
 [[bin]]
 name = "iptc_read_irb"
 path = "fuzz_targets/iptc_read_irb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cmm_transform"
+path = "fuzz_targets/cmm_transform.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata_extract"
+path = "fuzz_targets/metadata_extract.rs"
 test = false
 doc = false
 bench = false
