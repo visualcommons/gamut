@@ -23,8 +23,11 @@ on what condition the deferred work starts.
 programmatic compatibility query, benchmarked against MediaInfo's format coverage. The maintainer's
 disposition on the issue is to **halt until there is a confirmed direct consumer**, and that audio
 and video coverage go hand in hand — so this work is gated on, and lands interleaved with, the
-container work of [#217] (*Extend `gamut` to non-image formats*). Nothing below exists today; no
-type, function or crate named here is published.
+container work of [#217] (*Extend `gamut` to non-image formats*). None of the audio/video support
+below exists today: no audio or video carrier, container crate, or MIME-keyed query function
+(`is_mime_supported`, `extract_if_supported`) is published. The shipped items the sketch builds on
+— `gamut::capability`, `Carrier`, `Direction`, `Metadata`, `gamut_metadata::Result` — are named as
+they exist now.
 
 **Start condition.** A confirmed direct consumer, with its access pattern, is recorded on [#216] or
 [#217]. That is phase 0 of both roadmaps in
