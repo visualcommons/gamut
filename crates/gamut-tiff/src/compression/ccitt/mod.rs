@@ -296,6 +296,20 @@ mod tests {
         assert_eq!(mh_decode_strip(&enc, 2, 16).expect("decode"), packed);
     }
 
+    /// Fill bits are skipped whatever they hold: Modified Huffman gives them no meaning (TIFF 6.0
+    /// §10), so a writer that leaves them set still decodes. This pins `skip_to_byte_boundary`
+    /// against the shared reader's `align`, which rejects non-zero padding.
+    #[test]
+    fn skips_set_fill_bits_between_rows() {
+        let starts_black: Vec<u8> = (0..16).map(|i| u8::from(i < 5)).collect();
+        let alt: Vec<u8> = (0..16).map(|i| (i % 2) as u8).collect();
+        let packed = [pack(&starts_black), pack(&alt)].concat();
+        let mut enc = mh_encode_strip(&packed, 2, 16).expect("encode");
+        // The first row's 17th code bit is enc[2]'s top bit; the 7 bits below it are fill.
+        enc[2] |= 0b0111_1111;
+        assert_eq!(mh_decode_strip(&enc, 2, 16).expect("decode"), packed);
+    }
+
     /// A run whose length needs the make-up code for exactly 64.
     ///
     /// `decode_run` accumulates make-up codes and stops at the first *terminating* code, which is
