@@ -12,7 +12,11 @@ use crate::{ByteOrder, Ifd, ReadAt, Value, Variant};
 
 /// A parsed TIFF/IFD stream: its byte order, container variant, and the chain of Image File
 /// Directories.
+///
+/// `#[non_exhaustive]` so a field can be added without a breaking change: build one with
+/// [`TiffFile::new`]; the fields stay public to read and to modify.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct TiffFile {
     /// The byte order the stream was written in.
     pub order: ByteOrder,
@@ -20,6 +24,18 @@ pub struct TiffFile {
     pub variant: Variant,
     /// The Image File Directories, in stream order (one per subfile/page).
     pub ifds: Vec<Ifd>,
+}
+
+impl TiffFile {
+    /// A stream of `ifds`, in stream order, to be written in `order` as a `variant` container.
+    #[must_use]
+    pub fn new(order: ByteOrder, variant: Variant, ifds: Vec<Ifd>) -> Self {
+        Self {
+            order,
+            variant,
+            ifds,
+        }
+    }
 }
 
 /// An upper bound on the number of IFDs followed, to bound malformed/looping chains.
@@ -386,11 +402,11 @@ pub(crate) fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
 /// let mut page = Ifd::new();
 /// page.set_sub_ifd(EXIF_IFD, vec![exif.clone()]);
 /// page.set(SUB_IFDS, Value::Long(vec![0xFFFF_FFF0])); // dangling: points past the end
-/// let bytes = write(&TiffFile {
-///     order: ByteOrder::LittleEndian,
-///     variant: Variant::Classic,
-///     ifds: vec![page],
-/// })
+/// let bytes = write(&TiffFile::new(
+///     ByteOrder::LittleEndian,
+///     Variant::Classic,
+///     vec![page],
+/// ))
 /// .unwrap();
 ///
 /// // Follow only `ExifIFD` at the page, so the dangling `SubIFDs` cannot fail the walk.
@@ -496,7 +512,7 @@ pub struct AuditedFile {
 ///
 /// let mut ifd = Ifd::new();
 /// ifd.set(256, Value::Short(vec![640]));
-/// let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
+/// let file = TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![ifd]);
 /// let bytes = write(&file).unwrap();
 /// let from_slice = read_audited(&bytes[..]).unwrap();
 /// let from_stream = read_audited(StreamSource::new(std::io::Cursor::new(&bytes))).unwrap();

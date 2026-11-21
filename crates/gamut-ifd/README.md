@@ -54,7 +54,7 @@ let mut ifd = Ifd::new();
 ifd.set(256, Value::Short(vec![640])); // ImageWidth
 ifd.set(257, Value::Short(vec![480])); // ImageLength
 ifd.set_sub_ifd(34665, vec![exif]); // ExifIFD pointer
-let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
+let file = TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![ifd]);
 let bytes = write(&file).unwrap();
 let tree = IfdReader::open(&bytes[..]).unwrap().read_tree(&[34665]).unwrap();
 assert_eq!(tree, file); // write's inverse

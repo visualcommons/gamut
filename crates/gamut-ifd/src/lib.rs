@@ -49,11 +49,12 @@
 //! // internal offsets relative to its own start.
 //! let mut note = Ifd::new();
 //! note.set(1, Value::Ascii("vendor mode".to_owned()));
-//! let note_bytes = write(&TiffFile {
-//!     order: ByteOrder::LittleEndian,
-//!     variant: Variant::Classic,
-//!     ifds: vec![note.clone()],
-//! }).unwrap();
+//! let note_bytes = write(&TiffFile::new(
+//!     ByteOrder::LittleEndian,
+//!     Variant::Classic,
+//!     vec![note.clone()],
+//! ))
+//! .unwrap();
 //! let mut file = vec![0u8; 1000];
 //! file.extend_from_slice(&note_bytes);
 //!
@@ -89,7 +90,7 @@
 //! let mut ifd = Ifd::new();
 //! ifd.set(256, Value::Short(vec![640])); // ImageWidth
 //! ifd.set(257, Value::Short(vec![480])); // ImageLength
-//! let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
+//! let file = TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![ifd]);
 //! let bytes = write(&file).unwrap();
 //! assert_eq!(read(&bytes).unwrap(), file);
 //! ```

@@ -680,11 +680,11 @@ fn a_tiff_whose_store_entry_is_mistyped_is_not_reported_as_without_provenance() 
     let mut ifd = gamut::tiff::Ifd::new();
     ifd.set(256, gamut::tiff::Value::Short(vec![1]));
     ifd.set(52545, gamut::tiff::Value::Byte(vec![0x10; 12]));
-    let file = gamut::ifd::write(&gamut::ifd::TiffFile {
-        order: gamut::tiff::ByteOrder::LittleEndian,
-        variant: gamut::tiff::Variant::Classic,
-        ifds: vec![ifd],
-    })
+    let file = gamut::ifd::write(&gamut::ifd::TiffFile::new(
+        gamut::tiff::ByteOrder::LittleEndian,
+        gamut::tiff::Variant::Classic,
+        vec![ifd],
+    ))
     .expect("write");
     let out = run_inspect("mistyped.tif", &file, Some("tiff"));
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1175,11 +1175,11 @@ fn json_output_lists_a_mistyped_tiff_store_entry_as_unread_with_its_reason() {
     let mut ifd = gamut::tiff::Ifd::new();
     ifd.set(256, gamut::tiff::Value::Short(vec![1]));
     ifd.set(52545, gamut::tiff::Value::Byte(vec![0x10; 12]));
-    let file = gamut::ifd::write(&gamut::ifd::TiffFile {
-        order: gamut::tiff::ByteOrder::LittleEndian,
-        variant: gamut::tiff::Variant::Classic,
-        ifds: vec![ifd],
-    })
+    let file = gamut::ifd::write(&gamut::ifd::TiffFile::new(
+        gamut::tiff::ByteOrder::LittleEndian,
+        gamut::tiff::Variant::Classic,
+        vec![ifd],
+    ))
     .expect("write");
     let (_, doc) = run_inspect_json("mistyped-json.tif", &file, Some("tiff"));
 

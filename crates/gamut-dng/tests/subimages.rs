@@ -128,11 +128,7 @@ fn build_masked_dng() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     );
 
     // Two-pass layout: learn the tree length, patch real offsets, re-write, append pixels.
-    let file = TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    };
+    let file = TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![ifd0]);
     let base = write(&file).expect("first pass").len();
     let mut file = file;
     let ifd0 = &mut file.ifds[0];
@@ -317,11 +313,11 @@ fn an_image_bearing_sub_ifd_preview_stays_out_of_sub_ifd_extra() {
     let mut ifd0 = Ifd::new();
     ifd0.set(tags::DNG_VERSION, Value::Byte(vec![1, 7, 1, 0]));
     ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw, preview]);
-    let dng = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let dng = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");

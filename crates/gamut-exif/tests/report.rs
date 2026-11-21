@@ -31,11 +31,11 @@ const MARKER: &[u8] = b"Exif\x00\x00";
 
 /// Serialises `ifds` as a bare little-endian TIFF stream.
 fn tiff(ifds: Vec<Ifd>) -> Vec<u8> {
-    write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
+    write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
         ifds,
-    })
+    ))
     .expect("write")
 }
 

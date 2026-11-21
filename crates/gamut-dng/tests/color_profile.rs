@@ -126,11 +126,7 @@ fn build_profile_dng_at(noise_profile: Value, at: NoiseAt) -> Vec<u8> {
     ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw]);
 
     // Two-pass layout: learn the tree length, patch real offsets, re-write, append pixels.
-    let file = TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    };
+    let file = TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![ifd0]);
     let base = write(&file).expect("first pass").len();
     let mut file = file;
     let ifd0 = &mut file.ifds[0];

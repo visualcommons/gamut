@@ -157,11 +157,11 @@ fn sub_ifd_depth_bomb() {
         parent.set_sub_ifd(330, vec![ifd]);
         ifd = parent;
     }
-    let data = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd],
-    })
+    let data = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd],
+    ))
     .expect("write");
     assert_eq!(
         msg(IfdReader::open(&data[..]).and_then(|mut r| r.read_tree(&[330]))),

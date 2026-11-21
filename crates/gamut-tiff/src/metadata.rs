@@ -946,12 +946,7 @@ mod tests {
     /// [`file_with`] in a named container variant, for the axes on which classic and BigTIFF
     /// differ: the width of a pointer's value word, and therefore its field type.
     fn file_with_variant(ifd0: Ifd, variant: Variant) -> Vec<u8> {
-        write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant,
-            ifds: vec![ifd0],
-        })
-        .expect("write")
+        write(&TiffFile::new(ByteOrder::LittleEndian, variant, vec![ifd0])).expect("write")
     }
 
     /// One value of every on-disk field type, keyed by the type's code.
@@ -1123,11 +1118,11 @@ mod tests {
         // silent loss on every BigTIFF, the one file shape where the type differs.
         let mut ifd0 = Ifd::new();
         ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif_ifd()]);
-        let bytes = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Big,
-            ifds: vec![ifd0],
-        })
+        let bytes = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Big,
+            vec![ifd0],
+        ))
         .expect("write");
         assert!(matches!(
             read(&bytes).expect("read").ifds[0].get(tags::EXIF_IFD),
@@ -1900,11 +1895,11 @@ mod tests {
         let mut last = Ifd::new();
         last.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(vec![0xBB; 12]));
         last.set(tags::XMP, Value::Byte(b"last".to_vec()));
-        let bytes = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![first, last],
-        })
+        let bytes = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![first, last],
+        ))
         .expect("write");
         let read = read_metadata(&bytes).expect("read");
         assert_eq!(read.c2pa.as_deref(), Some(&[0xBB; 12][..]));
@@ -1928,12 +1923,7 @@ mod tests {
                 .collect();
             let mut ifd0 = Ifd::new();
             ifd0.set(tags::IPTC_NAA, Value::Long(words));
-            let bytes = write(&TiffFile {
-                order,
-                variant: Variant::Classic,
-                ifds: vec![ifd0],
-            })
-            .expect("write");
+            let bytes = write(&TiffFile::new(order, Variant::Classic, vec![ifd0])).expect("write");
             assert!(
                 bytes.windows(iim.len()).any(|w| w == iim),
                 "{order:?}: the file holds the stream verbatim"

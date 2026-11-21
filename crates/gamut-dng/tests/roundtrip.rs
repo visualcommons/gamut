@@ -855,11 +855,8 @@ fn rebuilt_with_raw_ifd(mutate: impl FnOnce(&mut gamut_ifd::Ifd)) -> Vec<u8> {
         }
     }
     // Place the strip immediately after the written IFD structure (two-pass: size, then emit).
-    let single = |ifd: gamut_ifd::Ifd| TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd],
-    };
+    let single =
+        |ifd: gamut_ifd::Ifd| TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![ifd]);
     let mut rebuilt = write(&single(rebuilt_ifd.clone())).expect("write");
     let data_at = rebuilt.len() as u32;
     rebuilt_ifd.set(gamut_dng::tags::STRIP_OFFSETS, Value::Long(vec![data_at]));

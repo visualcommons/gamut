@@ -166,11 +166,11 @@ mod tests {
             parent.set_sub_ifd(tags::SUB_IFDS, vec![ifd]);
             ifd = parent;
         }
-        let bytes = gamut_ifd::write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![ifd],
-        })
+        let bytes = gamut_ifd::write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![ifd],
+        ))
         .expect("write");
         let file = read(&bytes).expect("read");
         assert_eq!(walk_ifds(&file, &bytes).0.len(), MAX_SUBIFD_DEPTH);
@@ -194,11 +194,11 @@ mod tests {
         nested.set_sub_ifd(tags::SUB_IFDS, vec![width(5)]);
         let mut page1 = width(3);
         page1.set_sub_ifd(tags::SUB_IFDS, vec![width(6), nested]);
-        let bytes = gamut_ifd::write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![page0, page1],
-        })
+        let bytes = gamut_ifd::write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![page0, page1],
+        ))
         .expect("write");
         let file = read(&bytes).expect("read");
         let (ifds, positions) = walk_ifds(&file, &bytes);
@@ -229,11 +229,11 @@ mod tests {
         };
         let mut page = width(1);
         page.set_sub_ifd(tags::SUB_IFDS, vec![width(2), width(3), width(4)]);
-        let mut bytes = gamut_ifd::write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![page],
-        })
+        let mut bytes = gamut_ifd::write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![page],
+        ))
         .expect("write");
         // Point the second entry at the first child, so the walk skips it as visited.
         let file = read(&bytes).expect("read");
