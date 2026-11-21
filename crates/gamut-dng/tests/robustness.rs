@@ -19,7 +19,7 @@ mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 
 use gamut_core::ErrorKind;
-use gamut_dng::{Compression, DngDecoder, DngEncoder, DngRewrite, Value, tags};
+use gamut_dng::{DngCompression, DngDecoder, DngEncoder, DngRewrite, Value, tags};
 
 /// The largest single allocation this binary grants: far above anything decoding an 8×6 raw
 /// needs, and far below what the patched geometry would request.
@@ -122,7 +122,7 @@ fn a_strip_declaring_huge_geometry_is_rejected_without_a_geometry_sized_allocati
 fn a_deflate_tile_inflating_short_of_its_geometry_is_rejected_as_truncated() {
     let dng = patched_raw_ifd_at(
         DngEncoder::new()
-            .with_compression(Compression::Deflate)
+            .with_compression(DngCompression::Deflate)
             .with_tiling(16, 16),
         16,
         |raw| {

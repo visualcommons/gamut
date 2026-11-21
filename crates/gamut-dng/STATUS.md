@@ -134,7 +134,8 @@ One path per item, ahead of the API freeze. Every change below is breaking:
   they are `gamut_core`'s. The root carries the `gamut-ifd` structural and C2PA-summary core
   `gamut-tiff` does — without its tag-value codes or `c2pa_exclusions`, with `TiffFile` and
   `C2PA_MANIFEST_STORE` added — plus
-  `gamut_jxl::{Distance, Effort}` and, as `gamut-tiff` does, `gamut_exif::{Exif, ExifTag}`. It
+  `gamut_jxl::{Distance, Effort as JxlEffort}` (renamed by #1237, so it no longer collides with
+  `gamut_png::Effort`) and, as `gamut-tiff` does, `gamut_exif::{Exif, ExifTag}`. It
   no longer re-exports `Rational`.
 - **`metadata` is an optional feature, off by default.** It is the same as every other codec's
   `metadata` feature. Without it, `gamut-metadata` is not built; `DngMetadata::exif` is still
@@ -150,8 +151,12 @@ One path per item, ahead of the API freeze. Every change below is breaking:
   `c2pa_exclusions`. `TypedMetadata::blocks` therefore yields no C2PA block.
 - **One encode.** `DngEncoder::encode` returns `DngEncodeReport`, and `encode_with_report` is
   gone. `with_metadata(DngMetadata)` is now `with_dng_metadata`. `with_big_tiff(bool)` is now
-  `with_variant(Variant)`. `with_jxl_distance` takes `Distance`, and lossless is its unset
-  state. `with_jxl_effort` takes `Effort`.
+  `with_variant(Variant)`. Since #1237 `with_compression` takes the encoder's own
+  `DngCompression` (`Uncompressed`/`Deflate`/`LosslessJpeg`/`Jxl(JxlSettings)`) rather than
+  gamut-ifd's `Compression` code list, and JPEG XL's distance and effort travel in its
+  `JxlSettings` payload (`lossless()`, the default, or `lossy(Distance)`, then
+  `with_effort(JxlEffort)`); `with_jxl_distance`/`with_jxl_effort` are gone, so a JPEG XL
+  setting can no longer be configured where it is ignored.
 - **`DngDecoder::deconstruct` is removed.** The free `deconstruct` remains.
 - **The tag-value enums are `repr`'d.** `CalibrationIlluminant` and `CfaLayout` are
   `repr(u16)`. `ProfileEmbedPolicy`, `PreviewColorSpace` and `TableEncoding` are `repr(u32)`,

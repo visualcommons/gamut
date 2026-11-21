@@ -202,7 +202,7 @@ fn avif_enables_gamut_avif_alone() {
 /// `jxl` forwards gamut-dng's JPEG XL encode path weakly, and only from `jxl`.
 ///
 /// Without the forward, `features = ["jxl", "dng"]` builds libjxl and still refuses
-/// `Compression::JpegXl` on DNG encode; the strong form would compile gamut-dng under `jxl` alone.
+/// `DngCompression::Jxl` on DNG encode; the strong form would compile gamut-dng under `jxl` alone.
 #[test]
 fn jxl_forwards_dng_jxl_encode_weakly() {
     const WEAK: &str = "\"gamut-dng?/jxl-encode\"";

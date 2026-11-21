@@ -10,9 +10,9 @@ use gamut_core::{Error, Result};
 use gamut_ifd::{
     ByteOrder, C2paExclusions, Ifd, Value, Variant, append_c2pa_store, reserve_c2pa_entry,
 };
-use gamut_jxl::{Distance, Effort};
 
 use crate::gain_map::ProfileGainTableMap;
+use crate::jxl::JxlSettings;
 use crate::metadata::DngMetadata;
 use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
@@ -32,16 +32,59 @@ pub struct DngEncoder {
     dng_version: Option<[u8; 4]>,
     backward_version: [u8; 4],
     variant: Variant,
-    compression: Compression,
+    compression: DngCompression,
     tiling: Option<(u32, u32)>,
-    /// `None` is lossless, the default; `Some` is lossy at that Butteraugli distance.
-    jxl_distance: Option<Distance>,
-    jxl_effort: Effort,
     gain_table_map: Option<ProfileGainTableMap>,
     gain_table_map2: Option<ProfileGainTableMap>,
     metadata: DngMetadata,
     c2pa: Option<Vec<u8>>,
     c2pa_reserve: Option<usize>,
+}
+
+/// The raw-image compression [`DngEncoder::with_compression`] writes: the schemes gamut-dng
+/// encodes, each carrying only the parameters it reads.
+///
+/// [`code`](Self::code) is the `Compression` (tag 259) value written. Unlike gamut-ifd's plain
+/// [`Compression`] code list, this is the encoder's choice, so a scheme it cannot write (lossy
+/// JPEG, the TIFF-only codes) is not representable, and JPEG XL's [`JxlSettings`] cannot be set
+/// without selecting JPEG XL. The payload is reachable through [`jxl`](Self::jxl).
+///
+/// `#[non_exhaustive]`: a scheme the encoder learns later is added without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub enum DngCompression {
+    /// Uncompressed (`Compression = 1`), the default.
+    #[default]
+    Uncompressed,
+    /// Deflate (`Compression = 8`, zlib; DNG 1.4), 8/16-bit samples only.
+    Deflate,
+    /// Lossless JPEG (`Compression = 7`, ITU-T T.81 SOF3), DNG's standard raw compression.
+    LosslessJpeg,
+    /// JPEG XL (`Compression = 52546`, DNG 1.7) with the given settings: full-range 16-bit
+    /// samples, and the `jxl-encode` cargo feature (non-wasm) to encode.
+    Jxl(JxlSettings),
+}
+
+impl DngCompression {
+    /// The `Compression` (tag 259) code written for this scheme.
+    #[must_use]
+    pub fn code(&self) -> Compression {
+        match self {
+            Self::Uncompressed => Compression::None,
+            Self::Deflate => Compression::Deflate,
+            Self::LosslessJpeg => Compression::Jpeg,
+            Self::Jxl(_) => Compression::JpegXl,
+        }
+    }
+
+    /// The JPEG XL settings, for [`Jxl`](Self::Jxl); `None` for every other scheme.
+    #[must_use]
+    pub fn jxl(&self) -> Option<JxlSettings> {
+        match self {
+            Self::Jxl(settings) => Some(*settings),
+            _ => None,
+        }
+    }
 }
 
 /// What [`DngEncoder::encode`] produced: the byte count, and — when the file
@@ -74,11 +117,8 @@ impl Default for DngEncoder {
             dng_version: None,
             backward_version: [1, 1, 0, 0],
             variant: Variant::Classic,
-            compression: Compression::None,
+            compression: DngCompression::Uncompressed,
             tiling: None,
-            // JPEG XL defaults: lossless at libjxl's default effort (7, squirrel).
-            jxl_distance: None,
-            jxl_effort: Effort::Squirrel,
             gain_table_map: None,
             gain_table_map2: None,
             metadata: DngMetadata::default(),
@@ -138,35 +178,17 @@ impl DngEncoder {
         self
     }
 
-    /// Returns a copy of this encoder that compresses the raw image with `compression`.
+    /// Returns a copy of this encoder that compresses the raw image with `compression` (default
+    /// [`DngCompression::Uncompressed`]).
     ///
-    /// [`None`](Compression::None), [`Deflate`](Compression::Deflate) (8/16-bit),
-    /// [`Jpeg`](Compression::Jpeg) (lossless JPEG, DNG's standard raw compression), and — with the
-    /// `jxl-encode` cargo feature — [`JpegXl`](Compression::JpegXl) (full-range 16-bit samples)
-    /// are supported; every other scheme is refused at encode time. The preview is always stored
-    /// uncompressed.
+    /// Each [`DngCompression`] is a scheme the encoder writes, with two encode-time limits:
+    /// [`Deflate`](DngCompression::Deflate) needs 8/16-bit samples, and
+    /// [`Jxl`](DngCompression::Jxl) needs the `jxl-encode` cargo feature and full-range 16-bit
+    /// samples. JPEG XL's distance and effort travel in that variant's [`JxlSettings`]. The
+    /// preview is always stored uncompressed.
     #[must_use]
-    pub fn with_compression(mut self, compression: Compression) -> Self {
+    pub fn with_compression(mut self, compression: DngCompression) -> Self {
         self.compression = compression;
-        self
-    }
-
-    /// Returns a copy of this encoder that encodes JPEG XL **lossy** at the given Butteraugli
-    /// `distance` (1.0 ≈ visually lossless). Without it JPEG XL is lossless, the default. The
-    /// written raw IFD records the distance in the `JXLDistance` tag — `0.0` for lossless. Only
-    /// meaningful with [`Compression::JpegXl`].
-    #[must_use]
-    pub fn with_jxl_distance(mut self, distance: Distance) -> Self {
-        self.jxl_distance = Some(distance);
-        self
-    }
-
-    /// Returns a copy of this encoder that encodes JPEG XL at the given libjxl effort (default
-    /// [`Effort::Squirrel`], level 7). The written raw IFD records its level in the `JXLEffort`
-    /// tag. Only meaningful with [`Compression::JpegXl`].
-    #[must_use]
-    pub fn with_jxl_effort(mut self, effort: Effort) -> Self {
-        self.jxl_effort = effort;
         self
     }
 
@@ -302,7 +324,7 @@ impl DngEncoder {
         // Deflate compresses the *packed* byte stream, and the DNG SDK's reader only accepts it
         // at whole-byte integer depths (8/16/32-bit; dng_read_image::CanReadTile) — a sub-byte
         // deflate raw would be a file the reference reader cannot decode.
-        if self.compression == Compression::Deflate && !matches!(bits, 8 | 16) {
+        if self.compression == DngCompression::Deflate && !matches!(bits, 8 | 16) {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "DNG: Deflate compression requires 8- or 16-bit samples",
@@ -313,7 +335,7 @@ impl DngEncoder {
         // Encoding N-bit code values directly would produce a file the reference SDK decodes
         // scaled — misrendering against the written levels — so sub-16-bit input is rejected:
         // scale the code values and levels to 16-bit first.
-        if self.compression == Compression::JpegXl && bits != 16 {
+        if self.compression.jxl().is_some() && bits != 16 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "DNG: JPEG XL compression requires full-range 16-bit samples",
@@ -365,7 +387,7 @@ impl DngEncoder {
         // every oracle-gated test enforces this value against the SDK's own computation. For
         // lossy-compressed storage (JPEG XL) the digest covers the compressed chunks; for
         // everything else, the raw samples.
-        let digest = if self.compression == Compression::JpegXl {
+        let digest = if self.compression.jxl().is_some() {
             crate::digest::lossy_compressed_digest(&raw_data)
         } else {
             crate::digest::new_raw_image_digest(raw)
@@ -614,10 +636,11 @@ fn backward_version_for(encoder: &DngEncoder, raw: &RawImage, profile: &CameraPr
             raise(opcode.spec_version, &mut version);
         }
     }
+    // Lossy JPEG would also need a 1.4 reader (Issue 11), but the encoder does not write it.
     match encoder.compression {
-        Compression::JpegXl => raise([1, 7, 0, 0], &mut version),
-        Compression::Deflate | Compression::LossyJpeg => raise([1, 4, 0, 0], &mut version),
-        _ => {}
+        DngCompression::Jxl(_) => raise([1, 7, 0, 0], &mut version),
+        DngCompression::Deflate => raise([1, 4, 0, 0], &mut version),
+        DngCompression::Uncompressed | DngCompression::LosslessJpeg => {}
     }
     if uses_spectral_illuminant(profile) {
         raise([1, 6, 0, 0], &mut version);
@@ -638,7 +661,7 @@ fn required_dng_version(encoder: &DngEncoder, raw: &RawImage, profile: &CameraPr
             *version = v;
         }
     };
-    if encoder.compression == Compression::JpegXl {
+    if encoder.compression.jxl().is_some() {
         raise([1, 7, 0, 0], &mut version);
     }
     if encoder.gain_table_map.is_some() {
@@ -681,40 +704,37 @@ impl DngEncoder {
         bits: u16,
     ) -> Result<Vec<u8>> {
         match self.compression {
-            Compression::Jpeg => {
+            DngCompression::LosslessJpeg => {
                 let (width, components) = lossless_jpeg_geometry(cols, spp, period);
                 gamut_jpeg::lossless::LosslessEncoder::new()
                     .encode(samples, width, rows, components, bits)
             }
-            Compression::JpegXl => {
+            DngCompression::Jxl(settings) => {
                 #[cfg(all(
                     feature = "jxl-encode",
                     any(not(target_arch = "wasm32"), target_os = "emscripten")
                 ))]
                 {
-                    crate::jxl::encode_chunk(
-                        samples,
-                        cols,
-                        rows,
-                        spp,
-                        self.jxl_distance,
-                        self.jxl_effort,
-                    )
+                    crate::jxl::encode_chunk(samples, cols, rows, spp, settings)
                 }
                 #[cfg(not(all(
                     feature = "jxl-encode",
                     any(not(target_arch = "wasm32"), target_os = "emscripten")
                 )))]
                 {
+                    let _ = settings;
                     Err(Error::unsupported(
                         env!("CARGO_PKG_NAME"),
                         "DNG: JPEG XL encoding requires the `jxl-encode` feature (non-wasm)",
                     ))
                 }
             }
-            _ => {
+            DngCompression::Uncompressed => {
+                Ok(bitpack::pack(samples, bits, cols * spp, self.order))
+            }
+            DngCompression::Deflate => {
                 let packed = bitpack::pack(samples, bits, cols * spp, self.order);
-                compression::compress(self.compression, &packed)
+                Ok(compression::deflate(&packed))
             }
         }
     }
@@ -807,7 +827,7 @@ fn color_plane_count(raw: &RawImage) -> usize {
 /// length doesn't match the active area, a non-integral white level, or a level outside the
 /// tag's representable range.
 fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
-    let compression = encoder.compression;
+    let compression = encoder.compression.code();
     let mut ifd = Ifd::new();
     let dims = raw.dimensions();
     let spp = raw.samples_per_pixel();
@@ -833,13 +853,14 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
         None => ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height())),
     }
     // JPEG XL records its encode parameters (optional tags; DNG 1.7.1 pp. 97-98).
-    if compression == Compression::JpegXl {
-        // Lossless is recorded as distance 0.0, libjxl's own lossless sentinel.
-        let distance = encoder.jxl_distance.map_or(0.0, Distance::get);
-        ifd.set(tags::JXL_DISTANCE, Value::Float(vec![distance]));
+    if let Some(settings) = encoder.compression.jxl() {
+        ifd.set(
+            tags::JXL_DISTANCE,
+            Value::Float(vec![settings.distance_tag()]),
+        );
         ifd.set(
             tags::JXL_EFFORT,
-            Value::Long(vec![u32::from(encoder.jxl_effort.level())]),
+            Value::Long(vec![u32::from(settings.effort().level())]),
         );
     }
     // The v1 gain-table map lives in the raw IFD (its v2 sibling lives in IFD 0).
@@ -1325,7 +1346,7 @@ mod tests {
         let raw = sample_raw(8, 6, 16);
         let mut out = Vec::new();
         DngEncoder::new()
-            .with_compression(Compression::Jpeg)
+            .with_compression(DngCompression::LosslessJpeg)
             .encode(&raw, &sample_profile(), &mut out)
             .expect("encode");
         let file = gamut_ifd::read(&out).expect("parse DNG");
@@ -1352,7 +1373,7 @@ mod tests {
         let encode = |w: u32| {
             let mut out = Vec::new();
             DngEncoder::new()
-                .with_compression(Compression::Jpeg)
+                .with_compression(DngCompression::LosslessJpeg)
                 .encode(&sample_raw(w, 2, 16), &sample_profile(), &mut out)
                 .map(|_| out)
         };
@@ -1442,7 +1463,7 @@ mod tests {
         // Deflate raises the backward version to 1.4 (Compatibility Issue 10).
         assert_eq!(
             versions_of(
-                DngEncoder::new().with_compression(crate::values::Compression::Deflate),
+                DngEncoder::new().with_compression(DngCompression::Deflate),
                 &raw,
                 &profile
             ),
@@ -1545,7 +1566,7 @@ mod tests {
         #[cfg(feature = "jxl-encode")]
         assert_eq!(
             versions_of(
-                DngEncoder::new().with_compression(crate::values::Compression::JpegXl),
+                DngEncoder::new().with_compression(DngCompression::Jxl(JxlSettings::lossless())),
                 &raw,
                 &profile
             ),
@@ -1560,12 +1581,38 @@ mod tests {
         assert_eq!(count_value(65536), Value::Long(vec![65536]));
     }
 
+    /// Each scheme writes its own `Compression` (tag 259) code.
+    #[test]
+    fn dng_compression_code_is_the_written_tag_value() {
+        assert_eq!(DngCompression::Uncompressed.code(), Compression::None);
+        assert_eq!(DngCompression::Deflate.code(), Compression::Deflate);
+        assert_eq!(DngCompression::LosslessJpeg.code(), Compression::Jpeg);
+        assert_eq!(
+            DngCompression::Jxl(JxlSettings::lossless()).code(),
+            Compression::JpegXl
+        );
+    }
+
+    /// Only the JPEG XL scheme carries settings, and it hands back exactly the ones it holds.
+    #[test]
+    fn dng_compression_jxl_is_the_jxl_payload_only() {
+        let settings = JxlSettings::lossless().with_effort(crate::JxlEffort::Hare);
+        assert_eq!(DngCompression::Jxl(settings).jxl(), Some(settings));
+        for scheme in [
+            DngCompression::Uncompressed,
+            DngCompression::Deflate,
+            DngCompression::LosslessJpeg,
+        ] {
+            assert_eq!(scheme.jxl(), None, "{scheme:?}");
+        }
+    }
+
     #[test]
     fn with_compression_preserves_other_builder_state() {
         let enc = DngEncoder::new()
             .with_variant(Variant::Big)
-            .with_compression(crate::values::Compression::Deflate);
-        assert!(enc.compression == crate::values::Compression::Deflate);
+            .with_compression(DngCompression::Deflate);
+        assert!(enc.compression == DngCompression::Deflate);
         // A reset to `Default::default()` would clear the variant; the real setter must not.
         assert_eq!(
             enc.variant(),
