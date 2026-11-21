@@ -57,8 +57,10 @@ compression schemes land additively on this frozen surface (see Status).
 **Implemented and conformance-checked against libtiff** (issue #107):
 
 - **Structure** — byte-order header, IFD/tag read & write, strips and tiles, multi-page documents.
-- **Colour modes** — grayscale, RGB and RGBA at 8 and 16 bits; CMYK (8-bit encode, 8- or 16-bit
-  decode); 8-bit palette; 1-bit bilevel. Cross-depth requests resolve rather than fail: 8-bit
+- **Colour modes** — grayscale, grey + alpha, RGB and RGBA at 8 and 16 bits;
+  CMYK (8-bit encode, 8- or 16-bit decode); 8-bit palette; 1-bit bilevel. Alpha is
+  read by its `ExtraSamples` code and presented unassociated: premultiplied alpha is
+  un-premultiplied, as libtiff's RGBA reader reads it. Cross-depth requests resolve rather than fail: 8-bit
   widens to 16-bit exactly (`×257`), 16-bit narrows to 8-bit by truncation (lossy).
 - **Sample format** — `SampleFormat` (339) is honoured: signed-integer, IEEE-float and 32-bit
   samples are refused with a typed error naming the offending tag, never truncated or

@@ -4,8 +4,8 @@ use std::borrow::Cow;
 
 use gamut_core::c2pa::MIN_STORE_LEN;
 use gamut_core::{
-    Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, Gray16, ImageRef, Indexed8, Palette,
-    Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
+    ImageRef, Indexed8, Palette, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_exif::Exif;
 use gamut_ifd::{
@@ -34,7 +34,8 @@ struct SampleLayout {
 /// Encoder for baseline TIFF images.
 ///
 /// Writes chunky (`PlanarConfiguration = 1`) strips or tiles using the compression selected by
-/// [`Self::with_compression`]. Supports 8- and 16-bit grayscale/RGB/RGBA, 8-bit CMYK/palette, and
+/// [`Self::with_compression`]. Supports 8- and 16-bit grayscale/grey + alpha/RGB/RGBA (alpha always
+/// written unassociated, `ExtraSamples = 2`), 8-bit CMYK/palette, and
 /// 1-bit bilevel. 16-bit samples are written in this encoder's byte order; no `SampleFormat` tag is
 /// emitted, since unsigned integer is the TIFF default and the only format written.
 /// Emits classic TIFF by default, or BigTIFF (64-bit offsets) when [`Self::with_variant`] selects
@@ -969,6 +970,43 @@ impl EncodeImage<Rgba8> for TiffEncoder {
             },
             &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
             store,
+            out,
+        )
+    }
+}
+
+impl EncodeImage<GrayAlpha8> for TiffEncoder {
+    /// `PhotometricInterpretation = BlackIsZero` (1) with the second sample stored as
+    /// *unassociated* alpha (`ExtraSamples = 2`), matching the [`Rgba8`] impl.
+    fn encode_image(&self, image: ImageRef<'_, GrayAlpha8>, out: &mut Vec<u8>) -> Result<usize> {
+        let store = self.checked_store()?;
+        let row_bytes = image.width() as usize * 2;
+        self.encode_packed(
+            image.as_samples(),
+            image.dimensions(),
+            &SampleLayout {
+                spp: 2,
+                bits_per_sample: 8,
+                stored_row_bytes: row_bytes,
+                photometric: PhotometricInterpretation::BlackIsZero,
+            },
+            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
+            store,
+            out,
+        )
+    }
+}
+
+impl EncodeImage<GrayAlpha16> for TiffEncoder {
+    /// As the [`GrayAlpha8`] impl, with two 16-bit samples per pixel written in the encoder's
+    /// byte order.
+    fn encode_image(&self, image: ImageRef<'_, GrayAlpha16>, out: &mut Vec<u8>) -> Result<usize> {
+        self.encode_16bit(
+            image.as_samples(),
+            image.dimensions(),
+            2,
+            PhotometricInterpretation::BlackIsZero,
+            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
             out,
         )
     }

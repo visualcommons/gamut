@@ -182,7 +182,7 @@ oracle the way every codec above did:
   P8); `PlanarConfiguration = 2`; IEEE-float and 32-bit samples (§19) with the TN floating-point
   predictor 3 — `gamut-core`'s `Sample` is sealed to `u8`/`u16`, so float decode needs a core-level
   pixel type first, and until then these are refused with a typed error rather than approximated;
-  4-bit grayscale; 16-bit palette (`ColorMap` indices stay 8-bit); `Cmyk16`/`GrayAlpha16`
+  4-bit grayscale; 16-bit palette (`ColorMap` indices stay 8-bit); `Cmyk16`
   presentation (no such `gamut-core` pixel type — a 16-bit CMYK page decodes through `Cmyk8` by
   narrowing, or `Rgb16` with the fourth sample dropped); halftone hints (§17); document-storage
   metadata tags (§12 beyond `PageNumber`); the facade EXIF model's thumbnail (the 1st IFD, which a
@@ -291,6 +291,18 @@ The API was frozen after a full-surface review; the additions and breaks:
   `deconstruct` no longer reports their codes as `Anomaly::UnknownCode`. Decoding their data is
   still refused with `ErrorKind::Unsupported`, and encoding them is too; decoders for them are
   not yet planned (each needs an external codec — zstd, libwebp, a JPEG 2000 codec, LERC).
+- **`ExtraSamples` and grey + alpha (#1234).** The decoder reads `ExtraSamples` (338), reported
+  as `TiffInfo::extra_sample` (the new `ExtraSample` enum; a field on a `#[non_exhaustive]`
+  struct), and presents alpha the way libtiff's RGBA reader does: associated alpha is
+  un-premultiplied (by `gamut_core::convert::unpremultiply_alpha`) into the unassociated
+  `Rgba8`/`Rgba16`, unassociated passes through. `BlackIsZero` grey + alpha (8/16-bit, codes 1
+  and 2) decodes to `GrayAlpha8`/`GrayAlpha16`, which the encoder now writes too (unassociated,
+  `ExtraSamples = 2`, as RGBA is). **Behaviour change:** a four-sample RGB page
+  declaring `ExtraSamples = 0` or none — which libtiff reads as associated — is now
+  un-premultiplied where it used to pass through as straight alpha, and a page whose first
+  `ExtraSamples` code is past §18's three is refused as `Unsupported` (by `info` too) where the
+  tag used to be ignored; no conformant file carries such a code. Checked against libtiff-written
+  fixtures for codes 0, 1, 2 and an absent tag (`tests/rgba.rs`).
 - **The workspace shapes (#1082). Breaking.** `TiffMetadata::exif` is gamut-exif's `Exif` model
   (a new normal `gamut-exif` edge, re-exported with `ExifTag`), replacing the raw `exif`/`ifd0`/
   `gps` directories and `exif_byte_order`: the model carries all three and its byte order, as

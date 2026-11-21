@@ -318,12 +318,62 @@ pub fn encode_rgba8(
     height: u32,
     compression: Compression,
 ) -> Result<Vec<u8>, String> {
-    if pixels.len() != (width as usize) * (height as usize) * 4 {
+    encode_with_alpha(
+        pixels,
+        width,
+        height,
+        AlphaLayout::Rgba,
+        8,
+        Some(sys::EXTRASAMPLE_UNASSALPHA as u16),
+        compression,
+    )
+}
+
+/// The colour samples an alpha-carrying image stores before its one `ExtraSamples` component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlphaLayout {
+    /// `BlackIsZero` grey + alpha (2 samples per pixel).
+    GrayAlpha,
+    /// RGB + alpha (4 samples per pixel).
+    Rgba,
+}
+
+/// Encodes interleaved grey + alpha or RGB + alpha with libtiff at `bits` (8 or 16) per sample,
+/// declaring the alpha component as the raw `ExtraSamples` code `extra` (0 unspecified, 1
+/// associated, 2 unassociated; `None` writes no `ExtraSamples` tag). `packed` holds the samples
+/// exactly as stored — 16-bit samples in **native** byte order (see [`native_u16_bytes`]);
+/// libtiff writes them verbatim, never premultiplying, whatever `extra` says.
+///
+/// # Errors
+///
+/// Returns a message if `packed` does not match the dimensions or libtiff fails to write.
+pub fn encode_with_alpha(
+    packed: &[u8],
+    width: u32,
+    height: u32,
+    layout: AlphaLayout,
+    bits: u16,
+    extra: Option<u16>,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    let (spp, photometric) = match layout {
+        AlphaLayout::GrayAlpha => (2u16, sys::PHOTOMETRIC_MINISBLACK as u16),
+        AlphaLayout::Rgba => (4u16, sys::PHOTOMETRIC_RGB as u16),
+    };
+    let row_bytes = (width as usize) * usize::from(spp) * usize::from(bits / 8);
+    if packed.len() != row_bytes * (height as usize) {
         return Err("pixel buffer does not match dimensions".into());
     }
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let path = dir.path().join("oracle.tiff");
     let cpath = c_path(&path)?;
+    let shape = AlphaShape {
+        spp,
+        bits,
+        photometric,
+        extra,
+        row_bytes,
+    };
     // SAFETY: `cpath` is valid; the handle is closed before we read the file back.
     unsafe {
         let mode = CString::new("w").map_err(|e| e.to_string())?;
@@ -331,38 +381,51 @@ pub fn encode_rgba8(
         if t.is_null() {
             return Err("TIFFOpen (write) failed".into());
         }
-        let result = write_rgba(t, pixels, width, height, compression.code());
+        let result = write_alpha(t, packed, width, height, shape, compression.code());
         sys::TIFFClose(t);
         result?;
     }
     std::fs::read(&path).map_err(|e| e.to_string())
 }
 
-unsafe fn write_rgba(
+/// The on-disk shape [`write_alpha`] declares.
+#[derive(Clone, Copy)]
+struct AlphaShape {
+    spp: u16,
+    bits: u16,
+    photometric: u16,
+    extra: Option<u16>,
+    row_bytes: usize,
+}
+
+unsafe fn write_alpha(
     t: *mut sys::TIFF,
     pixels: &[u8],
     width: u32,
     height: u32,
+    shape: AlphaShape,
     compression: u16,
 ) -> Result<(), String> {
-    let extra: [u16; 1] = [sys::EXTRASAMPLE_UNASSALPHA as u16];
     unsafe {
         sys::TIFFSetField(t, sys::TIFFTAG_IMAGEWIDTH, width);
         sys::TIFFSetField(t, sys::TIFFTAG_IMAGELENGTH, height);
-        sys::TIFFSetField(t, sys::TIFFTAG_BITSPERSAMPLE, 8 as c_int);
-        sys::TIFFSetField(t, sys::TIFFTAG_SAMPLESPERPIXEL, 4 as c_int);
-        sys::TIFFSetField(t, sys::TIFFTAG_PHOTOMETRIC, sys::PHOTOMETRIC_RGB as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_BITSPERSAMPLE, shape.bits as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_SAMPLESPERPIXEL, shape.spp as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_PHOTOMETRIC, shape.photometric as c_int);
         sys::TIFFSetField(
             t,
             sys::TIFFTAG_PLANARCONFIG,
             sys::PLANARCONFIG_CONTIG as c_int,
         );
         sys::TIFFSetField(t, sys::TIFFTAG_COMPRESSION, compression as c_int);
-        sys::TIFFSetField(t, sys::TIFFTAG_EXTRASAMPLES, 1 as c_int, extra.as_ptr());
+        if let Some(code) = shape.extra {
+            let extra: [u16; 1] = [code];
+            sys::TIFFSetField(t, sys::TIFFTAG_EXTRASAMPLES, 1 as c_int, extra.as_ptr());
+        }
         let rps = sys::TIFFDefaultStripSize(t, 0);
         sys::TIFFSetField(t, sys::TIFFTAG_ROWSPERSTRIP, rps);
     }
-    let row_bytes = (width as usize) * 4;
+    let row_bytes = shape.row_bytes;
     let mut scratch = vec![0u8; row_bytes];
     for row in 0..height as usize {
         scratch.copy_from_slice(&pixels[row * row_bytes..(row + 1) * row_bytes]);
@@ -374,6 +437,11 @@ unsafe fn write_rgba(
         }
     }
     Ok(())
+}
+
+/// Packs 16-bit samples in **native** byte order, the form [`encode_with_alpha`] takes them in.
+pub fn native_u16_bytes(samples: &[u16]) -> Vec<u8> {
+    native_bytes(samples)
 }
 
 /// Encodes interleaved 8-bit CMYK with libtiff (`PhotometricInterpretation = Separated`).

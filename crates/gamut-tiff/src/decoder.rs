@@ -7,16 +7,18 @@
 //! permitted; the default permits none. [`TiffDecoder::with_limits`] bounds what a page may make
 //! it allocate.
 
-use gamut_core::convert::{ConvertPolicy, DepthPolicy, RawImage, convert_from_raw};
+use gamut_core::convert::{
+    ConvertPolicy, DepthPolicy, RawImage, convert_from_raw, unpremultiply_alpha,
+};
 use gamut_core::{
-    Cmyk8, DecodeImage, DecodeLimits, Dimensions, Error, Gray8, Gray16, ImageBuf, Pixel,
-    PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16, Sample,
+    Cmyk8, DecodeImage, DecodeLimits, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
+    ImageBuf, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16, Sample,
 };
 use gamut_ifd::{ByteOrder, Ifd, ZeroRowsPerStrip, extent_slices, read, rows_per_strip};
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor, SampleFormat};
-use crate::info::{self, TiffInfo};
+use crate::info::{self, ExtraSample, TiffInfo};
 use crate::metadata::{self, TiffMetadata};
 use crate::palette::Palette8;
 use crate::tags;
@@ -24,9 +26,21 @@ use crate::tags;
 /// Decoder for baseline TIFF images.
 ///
 /// Reads chunky strips or tiles compressed with None, PackBits, LZW, Adobe Deflate, Modified
-/// Huffman, or Group 4 fax. Supported layouts are 8- and 16-bit grayscale/RGB/RGBA/CMYK, 8-bit
-/// palette, and 1-bit bilevel; other compression and colour modes return an
+/// Huffman, or Group 4 fax. Supported layouts are 8- and 16-bit grayscale/grey + alpha/RGB/RGBA/
+/// CMYK, 8-bit palette, and 1-bit bilevel; other compression and colour modes return an
 /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
+///
+/// # Alpha
+///
+/// An alpha sample is read by its `ExtraSamples` code ([`TiffInfo::extra_sample`]) and always
+/// presented as *unassociated* alpha, the only alpha layout gamut's pixel types name: associated
+/// (premultiplied) colour is un-premultiplied by
+/// [`unpremultiply_alpha`](gamut_core::convert::unpremultiply_alpha), and unassociated alpha
+/// passes through. As libtiff reads them, a four-sample RGB page declaring `ExtraSamples = 0`
+/// (unspecified), or no `ExtraSamples` at all, is read as associated alpha; a grey page carries
+/// alpha only under codes 1 and 2. Un-premultiplying is exact only up to the
+/// precision premultiplying kept, so re-premultiplying the result reproduces a well-formed
+/// associated page exactly.
 ///
 /// # Choosing a pixel type
 ///
@@ -116,8 +130,12 @@ enum Mode {
     Gray { white_is_zero: bool },
     /// Interleaved RGB.
     Rgb,
-    /// Interleaved RGBA (RGB + one extra alpha sample).
-    Rgba,
+    /// Interleaved RGBA (RGB + one extra alpha sample); `associated` when the colour samples are
+    /// premultiplied by it and must be un-premultiplied for presentation.
+    Rgba { associated: bool },
+    /// Interleaved `BlackIsZero` grey + one extra alpha sample; `associated` as for
+    /// [`Mode::Rgba`].
+    GrayAlpha { associated: bool },
     /// Interleaved CMYK (4 separated ink samples).
     Cmyk,
     /// Palette colour: 8-bit indices into a [`Palette8`] colour table. Boxed because the 768-byte
@@ -418,6 +436,24 @@ impl DecodeImage<Rgba16> for TiffDecoder {
     }
 }
 
+impl DecodeImage<GrayAlpha8> for TiffDecoder {
+    /// A grey + alpha page passes through (associated alpha un-premultiplied); a grey page gains
+    /// opaque alpha. A colour page needs a [`LumaPolicy`](gamut_core::convert::LumaPolicy), and a
+    /// 16-bit one a [`DepthPolicy`].
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<GrayAlpha8>> {
+        self.decode_page_as(data, 0)
+    }
+}
+
+impl DecodeImage<GrayAlpha16> for TiffDecoder {
+    /// A grey + alpha page passes through (associated alpha un-premultiplied), widening 8-bit
+    /// samples by `×257`; a grey page gains opaque alpha. A colour page needs a
+    /// [`LumaPolicy`](gamut_core::convert::LumaPolicy).
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<GrayAlpha16>> {
+        self.decode_page_as(data, 0)
+    }
+}
+
 fn decode_page_samples(data: &[u8], page: usize, limits: DecodeLimits) -> Result<DecodedImage> {
     let file = read(data)?;
     let ifd = file.ifds.get(page).ok_or_else(|| {
@@ -544,6 +580,11 @@ fn decode_page_samples(data: &[u8], page: usize, limits: DecodeLimits) -> Result
         }
     };
 
+    // Whether an alpha sample is premultiplied (TIFF 6.0 §18 ExtraSamples). Only unassociated
+    // alpha is straight: associated alpha is, and so — as libtiff's RGBA reader reads them
+    // (`tif_getimage.c`), the crate's oracle — are `Unspecified` and an absent tag.
+    let associated = info.extra_sample != Some(ExtraSample::UnassociatedAlpha);
+
     // How stored samples become the decoded output (TIFF 6.0 §8 PhotometricInterpretation).
     let mode = match (spp, bps, info.photometric) {
         (1, 1 | 8 | 16, PhotometricInterpretation::WhiteIsZero) => Mode::Gray {
@@ -552,8 +593,20 @@ fn decode_page_samples(data: &[u8], page: usize, limits: DecodeLimits) -> Result
         (1, 1 | 8 | 16, PhotometricInterpretation::BlackIsZero) => Mode::Gray {
             white_is_zero: false,
         },
+        // Grey + alpha is read only when `ExtraSamples` declares the second sample alpha. libtiff
+        // extends its `Unspecified`-as-alpha workaround only to pages of more than three samples,
+        // so a two-sample grey page that is absent or `Unspecified` has no alpha reading to
+        // follow, and stays refused — as does `WhiteIsZero` + alpha.
+        (2, 8 | 16, PhotometricInterpretation::BlackIsZero)
+            if matches!(
+                info.extra_sample,
+                Some(ExtraSample::AssociatedAlpha | ExtraSample::UnassociatedAlpha)
+            ) =>
+        {
+            Mode::GrayAlpha { associated }
+        }
         (3, 8 | 16, PhotometricInterpretation::Rgb) => Mode::Rgb,
-        (4, 8 | 16, PhotometricInterpretation::Rgb) => Mode::Rgba,
+        (4, 8 | 16, PhotometricInterpretation::Rgb) => Mode::Rgba { associated },
         (4, 8 | 16, PhotometricInterpretation::Cmyk) => Mode::Cmyk,
         (1, 8, PhotometricInterpretation::Palette) => {
             let cm = ifd.get_u32_vec(tags::COLOR_MAP).ok_or_else(|| {
@@ -613,17 +666,37 @@ fn decode_page_samples(data: &[u8], page: usize, limits: DecodeLimits) -> Result
     // Unpack the stored bytes into output samples per the photometric mode. 16-bit samples are
     // deserialised from the file's byte order here — after the predictor, which by §14 operates on
     // the samples as stored.
+    let dims = Dimensions::new(info.width, info.height)?;
     let (format, samples) = match mode {
         Mode::Rgb if bps == 16 => (
             PixelFormat::Rgb16,
             Samples::U16(samples_u16(&packed, layout.order)),
         ),
         Mode::Rgb => (PixelFormat::Rgb8, Samples::U8(packed)),
-        Mode::Rgba if bps == 16 => (
+        Mode::Rgba { associated } if bps == 16 => (
             PixelFormat::Rgba16,
-            Samples::U16(samples_u16(&packed, layout.order)),
+            Samples::U16(straight::<Rgba16>(
+                samples_u16(&packed, layout.order),
+                dims,
+                associated,
+            )?),
         ),
-        Mode::Rgba => (PixelFormat::Rgba8, Samples::U8(packed)),
+        Mode::Rgba { associated } => (
+            PixelFormat::Rgba8,
+            Samples::U8(straight::<Rgba8>(packed, dims, associated)?),
+        ),
+        Mode::GrayAlpha { associated } if bps == 16 => (
+            PixelFormat::GrayAlpha16,
+            Samples::U16(straight::<GrayAlpha16>(
+                samples_u16(&packed, layout.order),
+                dims,
+                associated,
+            )?),
+        ),
+        Mode::GrayAlpha { associated } => (
+            PixelFormat::GrayAlpha8,
+            Samples::U8(straight::<GrayAlpha8>(packed, dims, associated)?),
+        ),
         // There is no `Cmyk16`, so a 16-bit ink page is tagged by its ink model and carries its
         // native width; `decode_page_as` settles the narrowing against the policy.
         Mode::Cmyk if bps == 16 => (
@@ -673,10 +746,27 @@ fn decode_page_samples(data: &[u8], page: usize, limits: DecodeLimits) -> Result
     };
 
     Ok(DecodedImage {
-        dims: Dimensions::new(width as u32, height as u32)?,
+        dims,
         format,
         samples,
     })
+}
+
+/// Presents alpha-carrying samples as unassociated ("straight") alpha, the only alpha layout a
+/// [`PixelFormat`] names: associated samples are un-premultiplied by
+/// [`gamut_core::convert::unpremultiply_alpha`], the workspace's one implementation of it,
+/// whose rounding inverts libtiff's own premultiply exactly on well-formed input.
+fn straight<P: Pixel>(
+    samples: Vec<P::Sample>,
+    dims: Dimensions,
+    associated: bool,
+) -> Result<Vec<P::Sample>> {
+    if !associated {
+        return Ok(samples);
+    }
+    let mut image = ImageBuf::<P>::new(samples, dims)?;
+    unpremultiply_alpha(&mut image);
+    Ok(image.into_samples())
 }
 
 /// The decoded image's storage parameters, shared by the strip and tile readers.
