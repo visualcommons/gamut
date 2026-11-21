@@ -75,7 +75,7 @@ fn check_limits(
             "AV1 decode: frame has a zero dimension",
         ));
     }
-    if width > limits.max_width() || height > limits.max_height() {
+    if !limits.admits_dimensions(width, height) {
         return Err(Error::unsupported(
             ORIGIN,
             "AV1 decode: frame dimensions exceed the configured limit",
@@ -137,9 +137,9 @@ pub struct StreamInfo {
 /// A decoder is the format's attack surface: every buffer it allocates is sized by numbers an
 /// attacker chose. The [`DecodeLimits`] and the tile cap are checked against the *header* before
 /// a single sample is allocated, so a hostile stream is refused rather than serviced. The
-/// [`DecodeLimits`] bound the frame's width, height and decoded size in bytes (every plane it
-/// carries, one byte per sample at 8 bits and two above); the tile cap bounds
-/// `TileCols * TileRows`.
+/// [`DecodeLimits`] bound the frame's width, height, pixel count and, when the caller sets one,
+/// decoded size in bytes (every plane it carries, one byte per sample at 8 bits and two above); the
+/// tile cap bounds `TileCols * TileRows`.
 ///
 /// ```
 /// use gamut_av1::Av1Decoder;
@@ -166,23 +166,17 @@ impl Default for Av1Decoder {
 }
 
 impl Av1Decoder {
-    /// The per-side cap [`Av1Decoder::new`] applies: 16384 luma samples, the `MaxHSize` and
-    /// `MaxVSize` bound of level 6.x, the highest level Annex A defines.
-    pub const DEFAULT_MAX_DIMENSION: u32 = 16384;
-
     /// The tile cap [`Av1Decoder::new`] applies: `MAX_TILE_ROWS * MAX_TILE_COLS` (§3), every tile
     /// a conformant frame can carry.
     pub const DEFAULT_MAX_TILES: usize = 64 * 64;
 
-    /// A decoder with the default limits: [`DecodeLimits::new`] with each side capped at
-    /// [`DEFAULT_MAX_DIMENSION`](Self::DEFAULT_MAX_DIMENSION), and
+    /// A decoder with the default limits: the workspace's [`DecodeLimits::new`] (each side at most
+    /// 32768 and at most 16384 × 16384 pixels, libavif's defaults, with no byte budget), and
     /// [`DEFAULT_MAX_TILES`](Self::DEFAULT_MAX_TILES) tiles.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            limits: DecodeLimits::new()
-                .with_max_width(Self::DEFAULT_MAX_DIMENSION)
-                .with_max_height(Self::DEFAULT_MAX_DIMENSION),
+            limits: DecodeLimits::new(),
             max_tiles: Self::DEFAULT_MAX_TILES,
         }
     }
@@ -1131,14 +1125,14 @@ mod tests {
             Some("AV1 decode: frame has a zero dimension")
         );
         // A breach is a policy refusal, `Unsupported`, as at every gamut decoder.
-        let wide = check(&decoder, 16385, 16, 1).unwrap_err();
+        let wide = check(&decoder, 32769, 16, 1).unwrap_err();
         assert_eq!(wide.kind(), gamut_core::ErrorKind::Unsupported);
         assert_eq!(
             wide.static_message(),
             Some("AV1 decode: frame dimensions exceed the configured limit")
         );
         assert_eq!(
-            check(&decoder, 16, 16385, 1).unwrap_err().static_message(),
+            check(&decoder, 16, 32769, 1).unwrap_err().static_message(),
             Some("AV1 decode: frame dimensions exceed the configured limit")
         );
         let tiled = check(&decoder, 16, 16, 4097).unwrap_err();
@@ -1150,15 +1144,21 @@ mod tests {
     }
 
     #[test]
-    fn the_default_decoder_caps_each_side_at_level_six_and_the_bytes_at_the_core_default() {
+    fn the_default_decoder_takes_the_core_default_limits() {
         let decoder = Av1Decoder::new();
         assert_eq!(decoder, Av1Decoder::default());
-        assert_eq!(decoder.limits().max_width(), 16384);
-        assert_eq!(decoder.limits().max_height(), 16384);
-        assert_eq!(
-            decoder.limits().max_image_bytes(),
-            DecodeLimits::DEFAULT_MAX_IMAGE_BYTES
-        );
+        assert_eq!(decoder.limits(), DecodeLimits::new());
+        // `frame_width_minus_1` can declare 65536 (§5.9.5); the default stops at 32768 per side
+        // and 16384² pixels, as libavif's does.
+        check(&decoder, 32768, 1, 1).unwrap();
+        for (width, height) in [(32769, 1), (1, 32769), (16384, 16385)] {
+            assert_eq!(
+                check(&decoder, width, height, 1)
+                    .unwrap_err()
+                    .static_message(),
+                Some("AV1 decode: frame dimensions exceed the configured limit")
+            );
+        }
         assert_eq!(decoder.max_tiles(), 64 * 64);
         // Each builder sets only its own bound.
         let limits = DecodeLimits::new().with_max_width(9);
@@ -1193,6 +1193,13 @@ mod tests {
         assert_eq!(
             check(&decoder, 64, 32, 5).unwrap_err().static_message(),
             Some("AV1 decode: tile count exceeds the configured limit")
+        );
+        // The pixel cap is exact as well, whatever the sides allow.
+        let pixels = Av1Decoder::new().with_limits(DecodeLimits::new().with_max_pixels(64 * 32));
+        check(&pixels, 64, 32, 4).unwrap();
+        assert_eq!(
+            check(&pixels, 65, 32, 4).unwrap_err().static_message(),
+            Some("AV1 decode: frame dimensions exceed the configured limit")
         );
         // The byte cap is exact too: 64x32 fits, 65x32 would exceed it even if the dimension
         // caps allowed it.
