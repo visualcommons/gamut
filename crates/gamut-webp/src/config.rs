@@ -189,7 +189,7 @@ pub enum WebpMode {
 /// loop filter mix neighbours, so a cleaned lossy file's visible pixels may decode marginally
 /// differently from an uncleaned one, exactly as libwebp's do. And with `exact` off libwebp's
 /// lossless encoder additionally zeroes the predictor residual of transparent pixels inside VP8L,
-/// which gamut does not yet do (see `STATUS.md`), so a cleaned lossless file can still be larger
+/// which gamut does not yet do (issue #1282), so a cleaned lossless file can still be larger
 /// than libwebp's.
 ///
 /// The discriminants are permanent and append-only, so the setting crosses a C or FFI boundary as
