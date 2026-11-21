@@ -154,8 +154,8 @@ never the problem: the nearest candidate already reaches the maximal match and e
   property.
 - The public API surface (`DeflateEncoder`, `Level`, `adler32`) is stable from P-D1; later phases
   only improve the ratio, never change behaviour observable through the inflater. #337 grew it
-  additively: `with_effort(u8)` exposes the optimal-parse pass budget (`DEFAULT_EFFORT = 6` keeps
-  the default output byte-identical), and `Level` gained `#[repr(u8)]` with permanent
+  additively: a setter exposes the optimal-parse pass budget (default 6 keeps the default output
+  byte-identical), and `Level` gained `#[repr(u8)]` with permanent
   discriminants per the workspace C-portability convention. #1064 reshaped it before the freeze:
   the pass budget is `with_deflate_passes` / `DEFAULT_DEFLATE_PASSES`, `Level` is
   `#[non_exhaustive]`, `DeflateEncoder` is `Copy`, and the optional `inflate` feature adds

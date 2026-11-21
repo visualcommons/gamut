@@ -116,8 +116,9 @@ impl Codestream for Av1 {
 /// with no backend — or whose every backend declines the item — refuses it with
 /// [`gamut_heif::NO_BACKEND`].
 ///
-/// [`Rgba8`] presents any coded depth scaled to 8 bits and [`Rgba16`] scaled to the full 16-bit
-/// range; both apply the item's colour, alpha, `iovl` compositing and `clap`/`irot`/`imir`.
+/// [`Rgba8`] presents 8-bit coded frames (a deeper frame is refused with
+/// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) rather than narrowed) and
+/// [`Rgba16`] any coded depth scaled to the full 16-bit range; both apply the item's colour, alpha, `iovl` compositing and `clap`/`irot`/`imir`.
 ///
 /// # Resource limits
 ///
@@ -239,7 +240,7 @@ impl AvifDecoder {
 }
 
 impl DecodeImage<Rgba8> for AvifDecoder {
-    /// Decodes the primary item to 8-bit RGBA, any coded depth scaled to 8 bits.
+    /// Decodes the primary item to 8-bit RGBA; a frame coded deeper than 8 bits is refused.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
         let image = Self::parse(data)?;
         image.decode_item_rgba8::<Av1>(image.primary_item().id(), &self.backends, self.options)
