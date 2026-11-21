@@ -12,7 +12,7 @@ use super::{Av1EncodeConfig, EncodedStill, ReconImage, StillWithRecon};
 use crate::filter::{FrameFilters, LrUnits};
 use crate::geom::PlaneGeom;
 use crate::headers::{self, Av1Color, Av1StillConfig, TileLayout};
-use crate::policy::EncodePolicy;
+use crate::policy::{Distortion, EncodePolicy};
 use crate::tile::{FrameEncoder, Reconstruction, Search};
 
 /// Validates the source layout shared by every entry point, returning whether the frame is
@@ -231,6 +231,7 @@ pub(super) fn encode16_with(
             planes.planes()[0],
             None,
             (width as usize, height as usize),
+            policy.distortion,
         )
     };
     let mut frame_payload = headers::frame_header_payload(
@@ -374,6 +375,7 @@ pub(super) fn encode_with(
             planes.planes()[0],
             coded_denom.map(|cd| (usize::from(cd) + 9, coded_w as usize)),
             (width as usize, height as usize),
+            policy.distortion,
         )
     };
     let mut frame_payload = headers::frame_header_payload(
@@ -444,7 +446,9 @@ impl CodedFrame {
     /// The first pass codes the tiles with no restoration and filters them (§7.4: deblocking,
     /// CDEF, both chosen against the source by [`FrameEncoder::encode`]; then, with `superres` —
     /// `(SuperresDenom, FrameWidth)` — the upscale to the display `width × height`). Each
-    /// restoration unit is then decided by [`crate::filter::choose_lr_units`] on the result. Only
+    /// restoration unit is then decided by [`crate::filter::choose_lr_units`] on the result, by
+    /// `distortion` — the policy's ([`EncodePolicy::distortion`]), the measure `encoder`'s
+    /// [`FrameEncoder`]s carry for the tiles and the other filter searches. Only
     /// if some unit is restored are the tiles coded again, to signal the units
     /// ([`FrameEncoder::recoding`]); the reconstruction is the first pass's either way.
     fn lossy<'a, S: Copy + Into<i64>>(
@@ -454,6 +458,7 @@ impl CodedFrame {
         source_luma: &[S],
         superres: Option<(usize, usize)>,
         (width, height): (usize, usize),
+        distortion: Distortion,
     ) -> Self {
         let (mut tile_bytes, first) = encoder().encode(layout, threads);
         let bit_depth = first.bit_depth;
@@ -499,6 +504,7 @@ impl CodedFrame {
             stride,
             width,
             height,
+            distortion,
         );
         if lr.any() {
             crate::filter::apply_lr_units(&lr, &mut planes[0], &restored, stride, width, height);
@@ -613,6 +619,7 @@ mod tests {
             p.planes()[0],
             None,
             (w, h),
+            Distortion::default(),
         )
     }
 
