@@ -230,6 +230,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::transform::AdaptationState;
 
     /// [`TransformOptions`] at `intent` with every other knob at its default (BPC off,
     /// optimization off) — the shape the intent-only constructors take.
@@ -398,6 +399,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(check.threshold, ERR_THRESHOLD);
+    }
+
+    #[test]
+    fn the_input_leg_runs_at_the_requested_adaptation_state() {
+        // A source whose `chad` and D65 media white make its ICC-absolute seam to the Lab
+        // identity depend on the adaptation state: at state 0 the `src` → Lab leg must be
+        // linked at that state, not at the FULL default.
+        let mut src = scaled_shaper(1.0);
+        src.tags.push(Tag::new(
+            *b"wtpt",
+            TagData::Xyz(vec![XyzNumber::from_f64([0.9504, 1.0, 1.0889])]),
+        ));
+        src.tags.push(Tag::new(
+            *b"chad",
+            TagData::S15Fixed16Array(
+                [1.1, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.9]
+                    .map(gamut_icc::S15Fixed16::from_f64)
+                    .to_vec(),
+            ),
+        ));
+        let proof = scaled_shaper(0.5);
+        let absolute = RenderingIntent::IccAbsoluteColorimetric;
+        let options = TransformOptions {
+            adaptation_state: AdaptationState::NONE,
+            ..intent_options(absolute)
+        };
+        let check = GamutCheck::new(&src, &proof, options).unwrap();
+        let lab = IccProfile::lab_v4();
+        let input_at = |adaptation| {
+            link_chain(
+                &[&src, &lab],
+                &[absolute, absolute],
+                &[false, false],
+                false,
+                adaptation,
+            )
+            .unwrap()
+        };
+        let lab_of = |pipeline: &Pipeline| {
+            let mut out = [0.0; 3];
+            pipeline.eval(&[0.1, 0.5, 0.9], &mut out).unwrap();
+            out
+        };
+        let got = lab_of(&check.input);
+        assert_eq!(got, lab_of(&input_at(AdaptationState::NONE)));
+        assert_ne!(got, lab_of(&input_at(AdaptationState::FULL)));
     }
 
     #[test]

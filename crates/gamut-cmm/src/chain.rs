@@ -772,6 +772,60 @@ mod tests {
     }
 
     #[test]
+    fn proofing_hands_the_adaptation_state_to_every_hop() {
+        // A source whose `chad` and D65 media white make its ICC-absolute seam depend on the
+        // adaptation state: at state 0 proofing must build the four-hop chain at that state,
+        // not at the FULL default.
+        let mut src = rgb_shaper(Some(D65));
+        src.tags.push(Tag::new(
+            *b"chad",
+            TagData::S15Fixed16Array(
+                [1.1, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.9]
+                    .map(gamut_icc::S15Fixed16::from_f64)
+                    .to_vec(),
+            ),
+        ));
+        let proof = rgb_shaper(None);
+        let dst = rgb_shaper(None);
+        let absolute = RenderingIntent::IccAbsoluteColorimetric;
+        let build = |adaptation_state| {
+            let simulation = TransformOptions {
+                adaptation_state,
+                ..intent_options(absolute)
+            };
+            IccTransform::proofing(
+                &src,
+                &dst,
+                &proof,
+                ProofingOptions::new(simulation, absolute),
+            )
+            .unwrap()
+        };
+        let none = build(AdaptationState::NONE);
+        let chained = IccTransform::from_pipeline(
+            link_chain(
+                &[&src, &proof, &proof, &dst],
+                &[
+                    absolute,
+                    absolute,
+                    RenderingIntent::MediaRelativeColorimetric,
+                    absolute,
+                ],
+                &[false; 4],
+                false,
+                AdaptationState::NONE,
+            )
+            .unwrap(),
+            PipelineOptimization::None,
+        )
+        .unwrap();
+        let full = build(AdaptationState::FULL);
+        let rgb = [0.1, 0.5, 0.9];
+        assert_eq!(eval3(&none, &rgb), eval3(&chained, &rgb));
+        assert_ne!(eval3(&none, &rgb), eval3(&full, &rgb));
+    }
+
+    #[test]
     fn compatible_matches_lcms2s_table() {
         assert!(compatible(ColorSpace::Rgb, ColorSpace::Rgb));
         assert!(compatible(ColorSpace::Cmyk, ColorSpace::NColor4));
