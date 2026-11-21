@@ -46,7 +46,8 @@ gamut-isobmff = { workspace = true, optional = true }
 # - `heif`: the HEIF/MIAF item layer shared by gamut-avif and gamut-heic.
 gamut-heif = { workspace = true, optional = true }
 
-# Optional image-metadata primitives (issue #34), re-exported behind the `metadata` feature.
+# Optional image-metadata primitives (issue #34), re-exported behind the `metadata` feature
+# (gamut-icc also behind `cmm`, whose constructors take its profile types).
 gamut-icc = { workspace = true, optional = true }
 gamut-xmp = { workspace = true, optional = true }
 gamut-exif = { workspace = true, optional = true }
@@ -118,10 +119,12 @@ metadata = [
 # `metadata` plus gamut-exif's `describe` module (the enumerated tags' meanings), forwarded through
 # the gamut-metadata facade rather than straight to gamut-exif.
 exif-describe = ["metadata", "gamut-metadata/exif-describe"]
-# The ICC colour management module (transform engine) over gamut-icc profiles, plus gamut-jpeg's
-# own `cmm` feature (`JpegDecoder::decode_srgb`) when `jpeg` is on — weak, like the `metadata`
-# forwarding above, so `cmm` alone never drags a codec in.
-cmm = ["dep:gamut-cmm", "gamut-jpeg?/cmm"]
+# The ICC colour management module (transform engine) over gamut-icc profiles, plus gamut-icc
+# itself (re-exported as `gamut::icc`: every gamut-cmm constructor takes its `IccProfile` /
+# `RenderingIntent`, and gamut-cmm does not re-export them), plus gamut-jpeg's own `cmm` feature
+# (`JpegDecoder::decode_srgb`) when `jpeg` is on — weak, like the `metadata` forwarding above, so
+# `cmm` alone never drags a codec in.
+cmm = ["dep:gamut-cmm", "dep:gamut-icc", "gamut-jpeg?/cmm"]
 all = [
     "avif",
     "jxl",

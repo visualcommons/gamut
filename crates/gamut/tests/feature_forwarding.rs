@@ -40,8 +40,9 @@
 //! The rest of the umbrella's feature table is pinned here for the same linkage reason: the
 //! container rule (each container primitive re-exported under the feature of its own name, and
 //! pulled in by no other umbrella feature), `avif` enabling `gamut-avif` alone, and `jxl`'s weak
-//! forward of `gamut-dng?/jxl-encode`. Each is an entry in `crates/gamut/Cargo.toml` or a `cfg` in
-//! `crates/gamut/src/lib.rs`, and none is observable from a lower crate.
+//! forward of `gamut-dng?/jxl-encode`, and `cmm` enabling and re-exporting gamut-icc. Each is an
+//! entry in `crates/gamut/Cargo.toml` or a `cfg` in `crates/gamut/src/lib.rs`, and none is
+//! observable from a lower crate.
 
 /// With `metadata` and all three format features on, every forwarded name resolves.
 ///
@@ -217,6 +218,35 @@ fn jxl_forwards_dng_jxl_encode_weakly() {
         MANIFEST.matches(WEAK).count(),
         1,
         "{WEAK} is listed more than once"
+    );
+}
+
+/// `cmm` enables gamut-icc itself, and `gamut::icc` is re-exported under `cmm` as well as
+/// `metadata`: every gamut-cmm constructor takes gamut-icc's `IccProfile` / `RenderingIntent`,
+/// which gamut-cmm does not re-export, so a `features = ["cmm"]` consumer needs both halves.
+///
+/// Under `--all-features` — the only feature set the gates build — `metadata` already supplies
+/// both the dependency and the re-export, so no compiled build there can see either half go
+/// missing; the `cmm`-only doctest in `src/lib.rs` sees it only in a build no gate runs. So both
+/// halves are pinned as text: the feature's entry list, and the `cfg` directly above the
+/// re-export.
+#[test]
+fn cmm_enables_and_reexports_gamut_icc() {
+    const LIB: &str = include_str!("../src/lib.rs");
+
+    assert!(
+        feature_entries(MANIFEST, "cmm")
+            .is_some_and(|entries| entries.contains("\"dep:gamut-icc\"")),
+        "the `cmm` feature no longer lists \"dep:gamut-icc\"; `cmm` alone cannot name the \
+         profiles its transforms are built from"
+    );
+    let Some((before, _)) = LIB.split_once("\npub use gamut_icc as icc;") else {
+        panic!("`pub use gamut_icc as icc;` is not where this pin reads it")
+    };
+    assert_eq!(
+        before.lines().last(),
+        Some("#[cfg(any(feature = \"metadata\", feature = \"cmm\"))]"),
+        "`gamut::icc` is no longer re-exported under `cmm` as well as `metadata`"
     );
 }
 

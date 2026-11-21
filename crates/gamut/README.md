@@ -57,7 +57,7 @@ signatures reach — `gamut::tiff` the tag-value codes (`Compression`, `Predicto
 | `heif`       | HEIF/MIAF item layer shared by AVIF and HEIC (`gamut-heif`)              |
 | `metadata`   | Metadata facade + primitives (`gamut-metadata` + `exif`/`xmp`/`icc`/`iptc`), plus the `metadata` feature of every enabled format crate that has one, and `gamut::capability` (which format crate locates or writes which carrier) |
 | `exif-describe` | `metadata` plus EXIF tag-value descriptions (`gamut_metadata::exif::describe`, via `gamut-metadata/exif-describe`) |
-| `cmm`        | ICC colour management module over `gamut-icc` profiles (`gamut-cmm`); with `jpeg`, also `JpegDecoder::decode_srgb` |
+| `cmm`        | ICC colour management module (`gamut-cmm`) plus the `gamut-icc` profiles its constructors take (`gamut::icc`, also under `metadata`); with `jpeg`, also `JpegDecoder::decode_srgb` |
 | `tonemap`    | Scalar tone-mapping curves for HDR→SDR (`gamut-tonemap`)                 |
 | `primitives` | Re-export `color` / `dsp` / `bitstream` for tooling                      |
 | `codec-abi`  | Shared codestream-backend seam for backend implementors (`gamut-codec-abi`) |
