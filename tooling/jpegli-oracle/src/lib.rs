@@ -33,6 +33,16 @@ unsafe extern "C" {
         out: *mut *mut u8,
         out_len: *mut usize,
     ) -> c_int;
+    fn oracle_jpegli_quality_to_distance(quality: c_int) -> f32;
+    fn oracle_jpegli_distance_tables(
+        space: c_int,
+        h0: c_int,
+        v0: c_int,
+        distance: f32,
+        num_components: *mut c_int,
+        tq: *mut c_int,
+        tables: *mut u16,
+    ) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn oracle_jpegli_decode(
         data: *const u8,
@@ -125,6 +135,80 @@ pub fn encode(
     unsafe { take(out, out_len) }.ok_or_else(|| "jpegli produced no output".to_owned())
 }
 
+/// jpegli's quality → butteraugli distance mapping, `jpegli_quality_to_distance` itself.
+#[must_use]
+pub fn quality_to_distance(quality: i32) -> f32 {
+    // SAFETY: a pure function of its integer argument.
+    unsafe { oracle_jpegli_quality_to_distance(quality) }
+}
+
+/// The frame a [`distance_tables`] query builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableSpace {
+    /// One grayscale component.
+    Gray,
+    /// YCbCr from RGB input.
+    Ycbcr,
+    /// jpegli's XYB mode (RGB input under `jpegli_set_xyb_mode`).
+    Xyb,
+}
+
+/// One frame component's quantization table as jpegli assigns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComponentTable {
+    /// The DQT destination (`Tq`) the component reads.
+    pub tq: u8,
+    /// The table, natural (row-major) order.
+    pub table: [u16; 64],
+}
+
+/// The per-component quantization tables `jpegli_set_distance(distance, TRUE)` — what `cjpegli
+/// --distance` calls — stores for a `space` frame whose component 0 (and, in XYB mode, component 1)
+/// is sampled `h0 × v0` and every other component 1×1, in frame component order.
+///
+/// # Errors
+///
+/// A message when jpegli rejects the configuration.
+pub fn distance_tables(
+    space: TableSpace,
+    (h0, v0): (u8, u8),
+    distance: f32,
+) -> Result<Vec<ComponentTable>, String> {
+    let code = match space {
+        TableSpace::Gray => 0,
+        TableSpace::Ycbcr => 1,
+        TableSpace::Xyb => 2,
+    };
+    let mut n: c_int = 0;
+    let mut tq = [0 as c_int; 3];
+    let mut tables = [0u16; 3 * 64];
+    // SAFETY: `tq` holds three entries and `tables` three 64-entry tables, the most the shim writes.
+    let rc = unsafe {
+        oracle_jpegli_distance_tables(
+            code,
+            c_int::from(h0),
+            c_int::from(v0),
+            distance,
+            &mut n,
+            tq.as_mut_ptr(),
+            tables.as_mut_ptr(),
+        )
+    };
+    if rc != 0 {
+        return Err(format!("jpegli rejected the table query (code {rc})"));
+    }
+    Ok((0..n.clamp(0, 3) as usize)
+        .map(|c| {
+            let mut table = [0u16; 64];
+            table.copy_from_slice(&tables[c * 64..c * 64 + 64]);
+            ComponentTable {
+                tq: tq[c] as u8,
+                table,
+            }
+        })
+        .collect())
+}
+
 /// A JPEG decoded by jpegli.
 #[derive(Debug, Clone)]
 pub struct DecodedImage {
@@ -215,6 +299,27 @@ mod tests {
             assert_eq!((decoded.width, decoded.height, decoded.channels), (w, h, 3));
             assert_eq!(decoded.icc, Some(xyb_icc_profile()));
         }
+    }
+
+    #[test]
+    fn distance_tables_follow_jpeglis_component_assignment() {
+        // `jpegli_set_distance` gives Cr its own table (destination 2) and XYB one table per
+        // channel; grayscale has one component on destination 0.
+        let tq = |space, sampling| -> Vec<u8> {
+            distance_tables(space, sampling, 1.0)
+                .unwrap()
+                .iter()
+                .map(|c| c.tq)
+                .collect()
+        };
+        assert_eq!(tq(TableSpace::Gray, (1, 1)), [0]);
+        assert_eq!(tq(TableSpace::Ycbcr, (2, 2)), [0, 1, 2]);
+        assert_eq!(tq(TableSpace::Xyb, (2, 2)), [0, 1, 2]);
+        // At distance 0 every entry rounds to the floor of 1; quality 100 maps to distance 0.01.
+        let zero = distance_tables(TableSpace::Ycbcr, (1, 1), 0.0).unwrap();
+        assert!(zero.iter().all(|c| c.table == [1; 64]));
+        assert_eq!(quality_to_distance(100), 0.01);
+        assert_eq!(quality_to_distance(90), 0.1 + 10.0 * 0.09);
     }
 
     #[test]
