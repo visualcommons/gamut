@@ -79,29 +79,31 @@ pub fn c2pa_span(data: &[u8]) -> Result<Option<Range<u64>>> {
     for located in located_chunks(data)? {
         let (span, chunk) = located?;
         if WebpChunkId::from(chunk.fourcc) == WebpChunkId::C2pa {
-            // Offsets into an in-memory slice; `usize` never exceeds 64 bits on a supported target.
-            return Ok(Some(span.start as u64..span.end as u64));
+            return Ok(Some(span));
         }
     }
     Ok(None)
 }
 
 /// The chunks of the WebP file in `data`, each with the byte range its whole on-disk span occupies
-/// — identifier, size field and payload, without the pad byte — in file order. The one offset walk
-/// behind [`c2pa_span`] and [`c2pa_summary`], so the two cannot disagree about where a chunk sits.
+/// — identifier, size field and payload, without the pad byte — in file order, in `u64` file
+/// offsets. The one offset walk behind [`c2pa_span`] and [`c2pa_summary`], so the two cannot
+/// disagree about where a chunk sits, and the one place a slice offset becomes a file offset.
 ///
 /// # Errors
 ///
 /// As [`RiffReader::new`] up front, and per item as its iterator.
-fn located_chunks(data: &[u8]) -> Result<impl Iterator<Item = Result<(Range<usize>, Chunk<'_>)>>> {
+fn located_chunks(data: &[u8]) -> Result<impl Iterator<Item = Result<(Range<u64>, Chunk<'_>)>>> {
     let mut offset = RIFF_HEADER_LEN;
     Ok(RiffReader::new(data)?.map(move |chunk| {
         let chunk = chunk?;
-        let span = offset..offset + CHUNK_HEADER_LEN + chunk.payload.len();
+        let start = offset;
+        let end = start + CHUNK_HEADER_LEN + chunk.payload.len();
         // Skip the pad byte too. The reader framed this payload from a `uint32` size field, so the
         // cast is exact.
-        offset = span.end + pad_len(chunk.payload.len() as u32);
-        Ok((span, chunk))
+        offset = end + pad_len(chunk.payload.len() as u32);
+        // Offsets into an in-memory slice; `usize` never exceeds 64 bits on a supported target.
+        Ok((start as u64..end as u64, chunk))
     }))
 }
 
@@ -151,9 +153,10 @@ impl C2paChunkPosition {
 #[non_exhaustive]
 pub struct C2paStoreSummary {
     /// The half-open byte range of the store — the chunk's payload, without its 8-byte header or
-    /// the RIFF pad byte. [`c2pa_span`] reports the first chunk's whole span instead, header
-    /// included; the store is `span.start + 8..span.end`.
-    pub range: Range<usize>,
+    /// the RIFF pad byte — in `u64` file offsets, the unit [`c2pa_span`] reports. [`c2pa_span`]
+    /// reports the first chunk's whole span instead, header included; the store is
+    /// `span.start + 8..span.end`.
+    pub range: Range<u64>,
     /// Where the chunk sits among the file's chunks.
     pub position: C2paChunkPosition,
 }
@@ -162,8 +165,7 @@ impl C2paStoreSummary {
     /// The store's size in bytes, in the `u64` of a file length as [`c2pa_span`] reports offsets.
     #[must_use]
     pub fn size(&self) -> u64 {
-        // A length within an in-memory slice; `usize` never exceeds 64 bits on a supported target.
-        self.range.len() as u64
+        self.range.end - self.range.start
     }
 }
 
@@ -178,8 +180,9 @@ impl C2paStoreSummary {
 #[non_exhaustive]
 pub struct C2paUnreadChunk {
     /// The half-open byte range of the chunk's payload, without its 8-byte header or the RIFF pad
-    /// byte — the bytes a store would occupy.
-    pub range: Range<usize>,
+    /// byte — the bytes a store would occupy — in `u64` file offsets, the unit [`c2pa_span`]
+    /// reports.
+    pub range: Range<u64>,
     /// Where the chunk sits among the file's chunks.
     pub position: C2paChunkPosition,
 }
@@ -215,7 +218,7 @@ enum DetailEntry<'a> {
 }
 
 impl DetailEntry<'_> {
-    fn start(&self) -> usize {
+    fn start(&self) -> u64 {
         match self {
             Self::Store(store) => store.range.start,
             Self::Unread(unread) => unread.range.start,
@@ -239,7 +242,7 @@ impl DetailEntry<'_> {
         };
         format!(
             "  C2PA chunk: {size}-byte {what} at [{start}, {end}) — {verdict}{note}",
-            size = range.len(),
+            size = range.end - range.start,
             start = range.start,
             end = range.end,
             note = position
@@ -342,9 +345,9 @@ pub fn c2pa_summary(data: &[u8]) -> Result<C2paSummary> {
     for located in located_chunks(data)? {
         let (span, chunk) = located?;
         if WebpChunkId::from(chunk.fourcc) == WebpChunkId::C2pa {
-            let range = span.start + CHUNK_HEADER_LEN..span.end;
+            let range = span.start + CHUNK_HEADER_LEN as u64..span.end;
             let position = C2paChunkPosition::BeforeLaterChunks;
-            if range.len() < MIN_STORE_LEN {
+            if chunk.payload.len() < MIN_STORE_LEN {
                 summary.unread.push(C2paUnreadChunk { range, position });
             } else {
                 summary.stores.push(C2paStoreSummary { range, position });
@@ -490,10 +493,10 @@ mod tests {
             ]
         );
         assert!(summary.unread.is_empty());
-        assert_eq!(&file[first..first + 9], b"the first");
-        assert_eq!(&file[second..second + 10], b"the second");
+        assert_eq!(&file[first as usize..first as usize + 9], b"the first");
+        assert_eq!(&file[second as usize..second as usize + 10], b"the second");
         // The store is the span `c2pa_span` reports, less the chunk header.
-        assert_eq!(span_in(&file), Some(first - 8..first + 9));
+        assert_eq!(c2pa_span(&file).unwrap(), Some(first - 8..first + 9));
 
         assert_eq!(summary.detail_line_count(), 2);
         assert_eq!(
