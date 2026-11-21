@@ -7,7 +7,7 @@ with a small set of built-in tone curves and an extension trait so you can plug 
 
 Part of the [gamut](../../README.md) workspace, this crate exists to provide tone-mapping math that is:
 
-- **Memory-safe.** `#![forbid(unsafe_code)]`; pure scalar `f32` math, no I/O.
+- **Memory-safe.** `#![forbid(unsafe_code)]`; pure `f32` math, no I/O.
 - **Clean-slate and self-contained.** Built-in operators are implemented directly from their
   published definitions (Reinhard et al.; ACES/Narkowicz; Hable; Drago et al.), transcribed in
   [`references/tonemap`](../../references/tonemap/README.md), not wrapped from a C library.
@@ -19,6 +19,8 @@ Part of the [gamut](../../README.md) workspace, this crate exists to provide ton
 - **HDR-to-SDR conversion** before encoding to an SDR-only target.
 - **Display adaptation** — mapping mastered content to a display's peak luminance.
 - **Custom operators** — define a curve once, as a closure or a type, and reuse it across a pipeline.
+- **Hue-preserving mapping** — drive a curve from a pixel's luminance or brightest channel, with
+  ffmpeg `tonemap`-style desaturation, between the source's and the display's peaks.
 
 ## Integration with other gamut libraries
 
@@ -31,6 +33,8 @@ Tone curves operate on **non-negative linear-light** values. The end-to-end HDR�
 
 This crate owns step 2 only; linearization and re-encoding live in [`gamut-color`](../gamut-color).
 Keeping the boundary here means a curve is just `f32 -> f32` and reusable outside any colour pipeline.
+Where a scalar curve per channel would shift hue, step 2 is a `ToneMapper` over the whole pixel
+instead.
 
 ## Usage
 
@@ -51,19 +55,40 @@ gamma.map_slice(&mut linear);
 # Ok::<(), gamut_core::Error>(())
 ```
 
+RGB-aware mapping applies any curve to whole pixels. The defaults are ffmpeg `tonemap`'s:
+max-RGB application with `desat = 2`, mapping the source peak onto `1.0`.
+
+```rust
+use gamut_core::luminance::BT2020_LUMA_WEIGHTS;
+use gamut_tonemap::{ApplyMode, CurveToneMapper, Hable, ToneMapper};
+
+// A 1000-nit BT.2020 master (linear, 1.0 = 100 cd/m²) into SDR, driven by luminance.
+let mapper = CurveToneMapper::new(Hable::default(), 10.0)?
+    .with_luma_weights(BT2020_LUMA_WEIGHTS)?
+    .with_mode(ApplyMode::Luminance);
+let sdr = mapper.map_rgb([4.0, 2.0, 0.5]);
+assert!(sdr.iter().all(|c| (0.0..=1.0).contains(c)));
+# Ok::<(), gamut_core::Error>(())
+```
+
 ## Status
 
 The `ToneCurve` trait (with a blanket impl for any `Fn(f32) -> f32`) and eight built-in operators —
 `Linear`, `Clamp`, `Exposure`, `Reinhard`, `ReinhardExtended`, `Aces`, `Hable`, and `Drago` — plus
-their parameter-default constants, every item at the crate root, its one public path. Each is implemented clean-slate from the primary source documented in
-[`references/tonemap`](../../references/tonemap/README.md). Reachable through the umbrella crate's
-`tonemap` feature. The public surface is **frozen at v1** (issue #188); see [STATUS.md](STATUS.md)
+their parameter-default constants; the RGB-aware `ToneMapper` trait with `CurveToneMapper`,
+`ApplyMode` and `DEFAULT_DESAT` (#1236). Every item is at the crate root, its one public path.
+Each is implemented clean-slate from the primary source documented in
+[`references/tonemap`](../../references/tonemap/README.md); `CurveToneMapper`'s desaturation and
+max-RGB application transcribe ffmpeg's `tonemap` filter and are held to it by a golden test.
+Reachable through the umbrella crate's `tonemap` feature. The v1 surface is **frozen** (issue
+#188), and the `ToneMapper` additions extend it without changing it; see [STATUS.md](STATUS.md)
 for the surface table and settled design decisions.
 
 ## Deferred
 
 Planned but not yet implemented: a turnkey HDR→SDR helper pairing curves with `gamut-color` transfer
-functions, and curve-composition combinators. See [STATUS.md](STATUS.md).
+functions, curve-composition combinators, and the BT.2390 EETF (#1254) and BT.2446 Method A (#1255)
+as `ToneMapper`s. See [STATUS.md](STATUS.md).
 
 ## License
 

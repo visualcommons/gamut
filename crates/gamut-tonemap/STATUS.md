@@ -2,8 +2,9 @@
 
 **v1 stabilization: GitHub issue #188.** Tone-mapping math primitives: the `ToneCurve` trait plus
 eight built-in operators, implemented clean-slate from the primary sources transcribed in
-[`references/tonemap`](../../references/tonemap/README.md). Operators take non-negative
-**linear-light** input and are pure `f32 -> f32` maps; the absolute reference luminances they
+[`references/tonemap`](../../references/tonemap/README.md), and the RGB-aware `ToneMapper` trait
+with `CurveToneMapper`, which applies any curve to a whole pixel (#1236). Operators take
+non-negative **linear-light** input and are pure `f32 -> f32` maps; the absolute reference luminances they
 normalize against live in `gamut_core::luminance`. Runtime dependency: `gamut-core` only;
 `#![forbid(unsafe_code)]`.
 
@@ -21,6 +22,10 @@ constructible operator across the full f32 input range.
 | `Linear`, `Reinhard`, `Aces` | parameterless operators (zero-sized) | literal-constructible by design — never `#[non_exhaustive]` |
 | `Clamp`, `Exposure`, `ReinhardExtended`, `Hable`, `Drago` | validated constructors returning `gamut_core::Result`; by-value accessors | private fields — adding fields is non-breaking |
 | `SDR_WHITE_NORMALIZED`, `DEFAULT_REINHARD_WHITE`, `DEFAULT_HABLE_WHITE`, `DEFAULT_DRAGO_BIAS` | `f32` constants | documented literals backing the `Default` impls |
+| `ToneMapper` (#1236) | `map_rgb(&self, [f32; 3]) -> [f32; 3]` + provided `map_rgb_slice(&mut [[f32; 3]])`; dyn-compatible | open trait; no blanket impl, so forwarding impls stay possible |
+| `CurveToneMapper<C: ToneCurve>` (#1236) | `new(curve, source_peak)` + `with_target_peak` / `with_desat` / `with_luma_weights` (validated, `gamut_core::Result`) and `with_mode`; accessors (`curve()` by reference, `mode` / `desat` / `source_peak` / `target_peak` / `luma_weights` by value) | private fields; `Debug + Clone + Copy + PartialEq` where `C` is |
+| `ApplyMode` (#1236) | `PerChannel = 0`, `Luminance = 1`, `MaxRgb = 2` (default) | `#[non_exhaustive]`, `#[repr(u32)]`; discriminants permanent (C ABI, #1103), new variants append |
+| `DEFAULT_DESAT` (#1236) | `f32` constant `2.0` | ffmpeg `tonemap`'s `desat` default |
 
 Every item is public only at the crate root (the modules are private), so each has exactly one
 path. All operators are `Debug + Clone + Copy + PartialEq`. Adding
@@ -40,6 +45,7 @@ any of the above would not.
 | `Aces` — filmic approximation | Narkowicz 2016 (fit to ACES RRT+ODT) | ✅ |
 | `Hable` — Uncharted 2 filmic | Hable 2010 | ✅ |
 | `Drago` — adaptive logarithmic | Drago et al. 2003, Eq. 4 | ✅ |
+| `ToneMapper` trait + `CurveToneMapper` — per-channel / luminance / max-RGB application, peaks, desaturation | ffmpeg `vf_tonemap.c` `tonemap()` (max-RGB + desat); libplacebo (luminance) | ✅ |
 
 ## Settled design decisions (intentional, not gaps)
 
@@ -84,6 +90,24 @@ any of the above would not.
 - **`Default` impls are the API; the root `DEFAULT_*`/`SDR_WHITE_NORMALIZED` constants hold the
   documented literals** (mirroring the `gamut_core::luminance` precedent). No `Default` for
   `Exposure` or `Drago` — there is no canonical exposure, and a scene maximum cannot be guessed.
+- **An RGB-aware trait beside the frozen scalar one (#1236, settled).** `ToneCurve` keeps its
+  scalar definition. Pixel-level operation is a second trait, `ToneMapper`, because desaturation,
+  luminance- or max-RGB-driven application and peak-relative curves all need the pixel. The
+  configured operator is a struct, `CurveToneMapper`, over any `ToneCurve`. Operators that are not
+  a scalar curve in a mode (BT.2390's EETF, BT.2446 Method A) implement the trait directly.
+  - **Peaks.** They enter as one rule, `T(x) = target_peak · f(x) / f(source_peak)`. ffmpeg's
+    `hable`, `reinhard`, `linear` and `clip` curves all have this form, so the source peak maps
+    exactly onto the target peak for any curve. The constructor rejects a curve whose
+    normalization is not a normal, positive `f32`.
+  - **Defaults.** They are ffmpeg's: `MaxRgb`, `desat = 2`, target peak `1`. Desaturation runs
+    before the mode in every mode, and its `1e-6` floors are kept as written.
+  - **Luma weights.** They are `gamut_core`'s fixed-point ones: BT.709 by default, any triple
+    summing to `LUMA_ONE` via `with_luma_weights`. This adds no dependency edge. The BT.709
+    defaults are each within `2⁻¹⁷` of ffmpeg's decimals, which is the one intended difference;
+    `gamut_core`'s other tables are within one unit, `2⁻¹⁶` (BT.2020's green carries the spare
+    unit that makes the sum exact, `0.59` units off).
+  - **Precision.** It stays `f32`. Luma and the gain are capped at `f32::MAX`, so a saturating
+    curve cannot produce `∞/∞` or `0·∞`.
 - **Composition stays a closure.** `|x| b.map(a.map(x))` composes curves today; a `then`
   combinator would be additive if ergonomics ever demand it.
 
@@ -94,15 +118,18 @@ any of the above would not.
 | Turnkey HDR→SDR helper | Pair a curve with `gamut-color` transfer functions (linearize → map → re-encode) behind an optional feature; needs a `gamut-color` runtime dependency. | ☐ |
 | Curve-composition combinators | e.g. `curve.then(other)` as a provided trait method; today compose with a closure: `\|x\| b.map(a.map(x))`. | ☐ |
 | Other filmic fits | The Narkowicz ACES fit ships; the Stephen Hill fit needs RRT/ODT matrices (colour-coupled), so it would be a new, non-scalar API. | ☐ |
+| BT.2390 EETF | The reference HDR-to-display mapping (libplacebo/mpv default), in the PQ domain. A `ToneMapper`, or a `ToneCurve` on PQ-normalized luminance. #1254. | ☐ |
+| BT.2446 Method A | HDR-to-SDR in a perceptually linearized luma domain with chroma correction, so a direct `ToneMapper`. #1255. | ☐ |
 
 ## Out of scope
 
-`gamut-tonemap` is deliberately a scalar tone-curve library. The following are **not** provided here
+`gamut-tonemap` is deliberately a tone-mapping *math* library — scalar curves and their application to a linear RGB pixel. The following are **not** provided here
 — they belong to the surrounding pipeline (`gamut-color`, the codec crates):
 
 - Colour-space conversion, gamut mapping, white-point adaptation.
 - Transfer-function linearization / re-encoding (EOTF/OETF) — see `gamut-color`.
-- Pixel I/O and alpha handling: apply a curve to RGB channels while preserving alpha in the caller.
+- Pixel I/O and alpha handling: apply a curve or a `ToneMapper` to the RGB channels while
+  preserving alpha in the caller.
 - The full ACES RRT+ODT transform (colour-space-coupled).
 
 ## Validation
@@ -113,12 +140,18 @@ primary sources, monotonicity grids, constructor-rejection cases (including para
 `{0, 1e20, f32::MAX}` for all eight operators), the Reinhard ↔ `gamut-color` cross-check, and
 one `*_tracks_f64_oracle` test per operator holding its `f32` `map` to an independent `f64`
 evaluation of the published formula across the whole `f32` input range (bound above, under the
-f32 decision).
+f32 decision). `CurveToneMapper` has inline tests for every mode, builder and rejection. Its
+max-RGB mode with desaturation is held by `tests/ffmpeg_desat_golden.rs` to an `f64`
+transcription of ffmpeg's `tonemap()`. That sweep covers the hable, reinhard, linear and clip
+curves, four peaks, four desat strengths and 11³ pixels, within 32 f32 ULPs of the output scale.
+Five literal goldens were computed independently from the same formula.
 
 There is no external oracle for this crate's *shape* — the `f64` formula pins values, not the
 laws a custom curve must keep — so the `ToneCurve` contract itself is the authority and
 `src/invariants.rs` states it as executable laws — non-negative and never NaN, monotonic
-non-decreasing, and `map_slice` as elementwise order-independent `map`. Those laws are driven by
+non-decreasing, and `map_slice` as elementwise order-independent `map`. For `ToneMapper` the laws
+are never-NaN/non-negative channels, `map_rgb_slice` as pixelwise `map_rgb`, one common gain (hue
+kept) in the luminance and max-RGB modes, and a grey source peak mapping to the target peak. Those laws are driven by
 pinned-seed `proptest` properties here and are the attachment point for the out-of-tree fuzz tier
 (`test-support`); see `docs/testing.md`. The per-operator tests above pin *where* each curve goes,
 the laws pin *what shape* it has everywhere.
@@ -135,6 +168,7 @@ the docs. `Drago::is_monotonic` now states the condition as a predicate
 the curve really is monotonic wherever the predicate says so, and that a decrease really is there
 wherever it says not. At the default bias the ceiling is `world_max ≈ 2.1e5`, against the paper's
 own worked example of 230 cd/m². Derivation and the measured table: `references/tonemap/README.md`.
-Divan benches cover `map_slice` throughput for every operator (`cargo bench -p gamut-tonemap`).
+Divan benches cover `map_slice` throughput for every operator and `map_rgb_slice` for
+`CurveToneMapper` in each mode (`cargo bench -p gamut-tonemap`).
 Gates: `mise run test` / `lint` (`clippy -D warnings`, `missing_docs` fatal) / `fmt-check` /
 `coverage` (≥ 80%) / `mise run mutants-crate gamut-tonemap`.

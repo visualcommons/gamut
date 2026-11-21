@@ -15,6 +15,10 @@
 //! - The built-in curves: [`Reinhard`] / [`ReinhardExtended`], the filmic [`Aces`] and [`Hable`],
 //!   [`Drago`] logarithmic mapping, [`Exposure`] pre-scaling, the [`Linear`] passthrough, and
 //!   [`Clamp`].
+//! - [`ToneMapper`] — the RGB-aware counterpart: a map from a whole linear-light pixel, and
+//!   [`CurveToneMapper`], which applies any [`ToneCurve`] to a pixel per channel, from its
+//!   luminance, or from its brightest channel ([`ApplyMode`]), between explicit source and target
+//!   peaks and with ffmpeg `tonemap`'s desaturation ([`DEFAULT_DESAT`]).
 //! - Per-operator parameter defaults: [`SDR_WHITE_NORMALIZED`], [`DEFAULT_REINHARD_WHITE`],
 //!   [`DEFAULT_HABLE_WHITE`] and [`DEFAULT_DRAGO_BIAS`]. (Absolute reference luminances in nits
 //!   live in [`gamut_core::luminance`].)
@@ -30,7 +34,8 @@
 //! 3. Re-encode through the target SDR transfer function (e.g. `Srgb`).
 //!
 //! Keeping the boundary here means a curve is just `f32 -> f32` and reusable outside any colour
-//! pipeline.
+//! pipeline. Where hue matters more than that simplicity, step 2 is a [`ToneMapper`] instead, which
+//! sees the whole RGB pixel.
 //!
 //! # Precision
 //!
@@ -72,6 +77,7 @@ struct ReadmeDoctests;
 
 mod constants;
 mod curve;
+mod mapper;
 mod operators;
 
 // Executable laws for the `ToneCurve` contract, shared by this crate's property tests and the
@@ -86,4 +92,5 @@ pub use constants::{
     DEFAULT_DRAGO_BIAS, DEFAULT_HABLE_WHITE, DEFAULT_REINHARD_WHITE, SDR_WHITE_NORMALIZED,
 };
 pub use curve::ToneCurve;
+pub use mapper::{ApplyMode, CurveToneMapper, DEFAULT_DESAT, ToneMapper};
 pub use operators::{Aces, Clamp, Drago, Exposure, Hable, Linear, Reinhard, ReinhardExtended};
