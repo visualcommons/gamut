@@ -26,6 +26,9 @@ constructible operator across the full f32 input range.
 | `CurveToneMapper<C: ToneCurve>` (#1236) | `new(curve, source_peak)` + `with_target_peak` / `with_desat` / `with_luma_weights` (validated, `gamut_core::Result`) and `with_mode`; accessors (`curve()` by reference, `mode` / `desat` / `source_peak` / `target_peak` / `luma_weights` by value) | private fields; `Debug + Clone + Copy + PartialEq` where `C` is |
 | `ApplyMode` (#1236) | `PerChannel = 0`, `Luminance = 1`, `MaxRgb = 2` (default) | `#[non_exhaustive]`, `#[repr(u32)]`; discriminants permanent (C ABI, #1103), new variants append |
 | `DEFAULT_DESAT` (#1236) | `f32` constant `2.0` | ffmpeg `tonemap`'s `desat` default |
+| `ToneOperator` (#1103) | `Linear = 0`, `Clamp = 1`, `Exposure = 2`, `Reinhard = 3`, `ReinhardExtended = 4`, `Aces = 5`, `Hable = 6`, `Drago = 7` | `#[non_exhaustive]`, `#[repr(u8)]`; discriminants permanent (C ABI), new operators append |
+| `ToneParams` (#1103) | `new(operator, parameter, source_peak)` + infallible `with_bias` / `with_target_peak` / `with_mode` / `with_desat` / `with_luma_weights`; by-value accessors; `curve()` / `mapper()` validate and build (`gamut_core::Result`) | private fields; `Debug + Clone + Copy + PartialEq` |
+| `BuiltinCurve` (#1103) | one variant per built-in operator, holding it; `ToneCurve` by forwarding; `operator()` | `#[non_exhaustive]`; `Debug + Clone + Copy + PartialEq` |
 
 Every item is public only at the crate root (the modules are private), so each has exactly one
 path. All operators are `Debug + Clone + Copy + PartialEq`. Adding
@@ -108,6 +111,24 @@ any of the above would not.
     unit that makes the sum exact, `0.59` units off).
   - **Precision.** It stays `f32`. Luma and the gain are capped at `f32::MAX`, so a saturating
     curve cannot produce `∞/∞` or `0·∞`.
+- **A plain-data operator selection (#1103, settled).** The operators stay separate types, and a
+  runtime- or C-selected operator goes through a second, flat route to them: the fieldless
+  `#[repr(u8)]` `ToneOperator` plus a `Copy` `ToneParams` record (one curve parameter whose
+  meaning the selector fixes — `Clamp`'s max, `Exposure`'s gain, `ReinhardExtended`'s and
+  `Hable`'s white, `Drago`'s `world_max` — Drago's bias, and every `CurveToneMapper` setting).
+  `ToneParams::mapper` builds a `CurveToneMapper<BuiltinCurve>` through the operators' own
+  constructors and the mapper's own builders, so validation lives once and a selection maps
+  bit-for-bit as the direct construction (tested per operator and mode).
+  - **Setters store, the build validates.** Validating in each setter would restate every
+    operator's and the mapper's rules; the one validation point is the build, which is also the
+    shape a C caller has (fill a struct, call, read a status).
+  - **One curve parameter plus a bias, not a per-operator `repr(C)` union or a `[f32; 2]` pair.**
+    Five of the eight operators take one value and only Drago a second, so a named `parameter`
+    and `bias` cover every operator with no slot whose meaning shifts twice. `Exposure` is
+    selected by its linear gain; stops convert with `2^stops` on the caller's side.
+  - **`#[repr(u8)]` where `ApplyMode` is `#[repr(u32)]`.** The selector is a byte-sized C tag;
+    the discriminants are what is permanent, and both enums pin them by test. The FFI surface
+    itself is `gamut-ffi`'s.
 - **Composition stays a closure.** `|x| b.map(a.map(x))` composes curves today; a `then`
   combinator would be additive if ergonomics ever demand it.
 
@@ -140,7 +161,8 @@ primary sources, monotonicity grids, constructor-rejection cases (including para
 `{0, 1e20, f32::MAX}` for all eight operators), the Reinhard ↔ `gamut-color` cross-check, and
 one `*_tracks_f64_oracle` test per operator holding its `f32` `map` to an independent `f64`
 evaluation of the published formula across the whole `f32` input range (bound above, under the
-f32 decision). `CurveToneMapper` has inline tests for every mode, builder and rejection. Its
+f32 decision). `ToneParams` is held, per operator and in every mode, to bit-identical curves and
+mappers against the direct construction, with every setting off its default. `CurveToneMapper` has inline tests for every mode, builder and rejection. Its
 max-RGB mode with desaturation is held by `tests/ffmpeg_desat_golden.rs` to an `f64`
 transcription of ffmpeg's `tonemap()`. That sweep covers the hable, reinhard, linear and clip
 curves, four peaks, four desat strengths and 11³ pixels, within 32 f32 ULPs of the output scale.
