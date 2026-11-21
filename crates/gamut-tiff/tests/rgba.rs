@@ -195,6 +195,68 @@ fn libtiff_rgba_under_each_extra_samples_code_matches_libtiffs_rgba_read() {
     }
 }
 
+/// Rewrites the first IFD's `ExtraSamples` (338) value — a single `SHORT`, so stored inline in its
+/// entry — to `code`, in a classic TIFF of either byte order.
+fn patch_extra_samples(tiff: &mut [u8], code: u16) {
+    let le = &tiff[..2] == b"II";
+    let u16_at = |b: &[u8], at: usize| {
+        let pair = [b[at], b[at + 1]];
+        if le {
+            u16::from_le_bytes(pair)
+        } else {
+            u16::from_be_bytes(pair)
+        }
+    };
+    let quad = [tiff[4], tiff[5], tiff[6], tiff[7]];
+    let ifd = if le {
+        u32::from_le_bytes(quad)
+    } else {
+        u32::from_be_bytes(quad)
+    } as usize;
+    let entry = (0..usize::from(u16_at(tiff, ifd)))
+        .map(|i| ifd + 2 + 12 * i)
+        .find(|&at| u16_at(tiff, at) == 338)
+        .expect("ExtraSamples entry");
+    assert_eq!(u16_at(tiff, entry + 2), 3, "ExtraSamples is a SHORT");
+    let bytes = if le {
+        code.to_le_bytes()
+    } else {
+        code.to_be_bytes()
+    };
+    tiff[entry + 8..entry + 10].copy_from_slice(&bytes);
+}
+
+/// Corel Draw writes unassociated alpha as `ExtraSamples = 999`, a code §18 does not assign;
+/// libtiff patches it to `2` on read (`setExtraSamples`, `tif_dir.c`), and so does gamut. libtiff
+/// itself cannot write `999` (it patches the value before writing too), so the fixture is its
+/// code-2 page with the tag's value rewritten — and libtiff's RGBA read of that very file is the
+/// oracle the straight decode is checked against.
+#[test]
+fn corel_draw_extra_samples_999_reads_as_unassociated_alpha_as_libtiff_reads_it() {
+    let (w, h) = (17, 13);
+    let straight = rgba_pattern(w, h);
+    let mut tiff = encode_with_alpha(
+        &straight,
+        w,
+        h,
+        AlphaLayout::Rgba,
+        8,
+        Some(2),
+        libtiff_oracle::Compression::Lzw,
+    )
+    .expect("libtiff encode");
+    patch_extra_samples(&mut tiff, 999);
+    let dec = TiffDecoder::new();
+    assert_eq!(
+        dec.info(&tiff).unwrap().extra_sample,
+        Some(ExtraSample::UnassociatedAlpha)
+    );
+    let got: ImageBuf<Rgba8> = dec.decode_image(&tiff).expect("gamut decode");
+    assert_eq!(got.as_samples(), straight.as_slice());
+    let (_, _, libtiff) = libtiff_oracle::decode_rgba(&tiff).expect("libtiff RGBA read");
+    assert_eq!(premultiplied::<Rgba8>(straight, w, h), libtiff);
+}
+
 /// The 16-bit RGBA path un-premultiplies associated alpha and passes unassociated alpha through.
 /// libtiff's RGBA reader narrows to 8 bits, so the check is the law instead: re-premultiplying the
 /// decode reproduces the well-formed associated page exactly.

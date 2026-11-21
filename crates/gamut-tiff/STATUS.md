@@ -301,8 +301,11 @@ The API was frozen after a full-surface review; the additions and breaks:
   declaring `ExtraSamples = 0` or none — which libtiff reads as associated — is now
   un-premultiplied where it used to pass through as straight alpha, and a page whose first
   `ExtraSamples` code is past §18's three is refused as `Unsupported` (by `info` too) where the
-  tag used to be ignored; no conformant file carries such a code. Checked against libtiff-written
-  fixtures for codes 0, 1, 2 and an absent tag (`tests/rgba.rs`). **Breaking:**
+  tag used to be ignored; no conformant file carries such a code. The one exception is Corel
+  Draw's `999`, which libtiff (`tif_dir.c`, `setExtraSamples`) patches to unassociated alpha and
+  gamut reads the same way, so those files still decode as the straight RGBA they always did.
+  Checked against libtiff-written fixtures for codes 0, 1, 2 and an absent tag, and a code-2
+  fixture rewritten to `999` (`tests/rgba.rs`). **Breaking:**
   `TiffEncoder::encode_pages_rgb8` is replaced by the pixel-generic
   `encode_pages<P: TiffPixel>`, where the new sealed `TiffPixel` names every layout the
   `EncodeImage` impls write (all but `Indexed8`, whose colour table has its own entry point); an
