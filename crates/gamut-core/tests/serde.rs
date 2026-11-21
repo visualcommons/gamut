@@ -158,10 +158,11 @@ fn decode_limits_round_trip_by_field_name() {
     let limits = DecodeLimits::new()
         .with_max_width(640)
         .with_max_height(480)
+        .with_max_pixels(640 * 240)
         .with_max_image_bytes(1 << 20);
     assert_json(
         limits,
-        r#"{"max_width":640,"max_height":480,"max_image_bytes":1048576}"#,
+        r#"{"max_width":640,"max_height":480,"max_pixels":153600,"max_image_bytes":1048576}"#,
     );
 }
 

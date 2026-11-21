@@ -337,7 +337,9 @@ The API was frozen after a full-surface review; the additions and breaks:
   `encode_indexed8(&gamut_core::Palette)` (1–256 entries padded with black; an index past the
   palette is `InvalidInput`, a transparent entry `Unsupported`); `TiffDecoder::convert_policy` →
   `with_convert_policy`; `TiffDecoder::with_limits(DecodeLimits)` makes the 64 MiB stored-byte cap
-  configurable, with the same default, and adds the shared per-side caps (unbounded by default).
+  configurable, with the same default, and adds the shared per-side caps (unbounded by default);
+  issue #1226 then made the shared default 32768 per side and 16384² pixels with the byte budget
+  opt-in, bounding each tile by the same caps.
   Removed: `TiffDecoder::{deconstruct, deconstruct_page}` (the free `deconstruct` stays), the
   `read`/`write`/`TiffFile` re-exports (gamut-ifd's to expose), the public `write_image`/
   `write_image_tiled`/`write_multipage` and `Palette8`; `c2pa_exclusions`/`c2pa_summary` are

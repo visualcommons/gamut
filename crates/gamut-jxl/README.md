@@ -203,7 +203,7 @@ alpha is dropped. It refuses to *guess*, returning an `ErrorKind::Unsupported` e
   is invented).
 
 Oversized streams are bounded by the workspace's `DecodeLimits`, set with `JxlDecoder::with_limits`:
-by default 64 MiB of decoded samples and any width and height, checked against the parsed header
+by default 32768 per side and 16384 × 16384 pixels with no byte budget, checked against the parsed header
 before any pixel buffer is sized (and against an added backend's raster), beneath a fixed jxl-rs
 pixel limit of `1 << 28` samples that no setting raises. The header-only `info` / `embedded_icc_profile` /
 `metadata` accessors do not apply them. Truncated or malformed input returns a typed `Error`,

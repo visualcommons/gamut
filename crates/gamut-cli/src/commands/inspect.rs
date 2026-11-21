@@ -87,10 +87,10 @@
 //! payload under a valid CRC is damage only the scan can see, so an unread file is one this
 //! command cannot vouch for, and exiting 0 on it would report this reader's budget as a property
 //! of the file. Such a file exits non-zero saying it was not verified, distinctly from a damaged
-//! one. To keep that rare, the walk's budget here is a gigabyte rather than the decoder's 64 MiB,
-//! which is past any real image — at the decoder's budget every PNG over 4096x4096 RGBA8 would go
+//! one. To keep that rare, the walk's budget here is a gigabyte rather than its default 64 MiB,
+//! which is past any real image — at the default budget every PNG over 4096x4096 RGBA8 would go
 //! unread. That gigabyte bounds the *image*, not what a small file may inflate to: past the
-//! decoder's default budget the walk also refuses, before inflating, a stream that would grow to
+//! walk's default budget the walk also refuses, before inflating, a stream that would grow to
 //! more than sixty-four times its own length, so a megabyte declaring a 16k×16k header over a zlib
 //! stream of zeros is reported as not verified — for the stream's implausible inflation, which is
 //! a distinct reason from the image being over budget, since that image is exactly the gigabyte
