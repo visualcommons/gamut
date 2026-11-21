@@ -47,7 +47,12 @@ pub struct PngHeader {
 /// Decoded pixels in the file's native layout: sub-byte greyscale is scaled exactly to
 /// [`Gray8`] (§13.12), sub-byte palette indices are widened to [`Indexed8`] **unscaled**, and
 /// 16-bit samples are native-endian `u16`.
+///
+/// Non-exhaustive: a native layout this list folds into another today (sub-byte greyscale into
+/// [`Gray8`], with no bilevel variant) may gain its own variant without a breaking change, so a
+/// `match` outside this crate needs a wildcard arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PngImage {
     /// Greyscale, stored at 1–8 bits (sub-byte samples scaled to 8 bits).
     Gray8(ImageBuf<Gray8>),

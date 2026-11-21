@@ -347,7 +347,7 @@ where
 /// The shipped `BruteForce` end to end, returning the IDAT length and the encode's nanoseconds.
 fn bruteforce(input: &Input) -> (usize, u128) {
     let enc = PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .with_filter(FilterStrategy::BruteForce)
         .with_auto_reduce(false);
     let dims = Dimensions::new(input.side, input.side).expect("valid dimensions");
