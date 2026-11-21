@@ -142,15 +142,12 @@ fn the_webp_summary_reports_the_store_c2pa_rs_wrote() {
     let [store] = summary.stores.as_slice() else {
         panic!("one store, as c2pa-rs wrote: {:?}", summary.stores);
     };
-    assert_eq!(
-        store.range,
-        store_span(&asset),
-        "the store's offsets and size"
-    );
+    let range = file_range(store.range.clone());
+    assert_eq!(range, store_span(&asset), "the store's offsets and size");
     // The summary reports the payload; c2pa-rs excludes the chunk with its eight-byte header
     // (`tests/riff_webp.rs` pins that choice), so the exclusion opens eight bytes earlier.
     assert_eq!(
-        vec![store.range.start - 8..store.range.end],
+        vec![range.start - 8..range.end],
         exclusions(WEBP_MIME, &asset),
         "the store's chunk is the one range c2pa-rs's data hash excludes"
     );

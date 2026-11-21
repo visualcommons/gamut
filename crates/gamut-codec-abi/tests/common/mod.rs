@@ -23,7 +23,12 @@ pub const BACKEND_FAILURE: Status = Status(7);
 /// The status the aborting test sink returns.
 pub const SINK_ABORT: Status = Status(9);
 
-/// A decoder that accepts only [`TEST_CODEC`] and writes two derived bytes into plane 0.
+/// The colour signalling [`TestDecoder`] reports: BT.2020 primaries, PQ transfer, BT.2020 NCL
+/// matrix, full range — every field distinct from [`ImageDesc::UNSIGNALLED`].
+pub const REPORTED_CICP: (u16, u16, u16, bool) = (9, 16, 9, true);
+
+/// A decoder that accepts only [`TEST_CODEC`], writes two derived bytes into plane 0, and reports
+/// [`REPORTED_CICP`] when `out` carries the colour group.
 ///
 /// The two bytes are the codestream length and `cfg.width`, so a config or codestream that failed
 /// to cross the vtable is visible in the output rather than merely producing a wrong status.
@@ -36,7 +41,7 @@ impl Decoder for TestDecoder {
         cfg.codec_id == TEST_CODEC
     }
 
-    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &mut ImageDesc) -> Status {
         // Accepted-then-failed: a terminal status the host must propagate, not fall through on.
         if codestream != b"stream" {
             return BACKEND_FAILURE;
@@ -45,6 +50,10 @@ impl Decoder for TestDecoder {
         unsafe {
             *out.planes[0] = codestream.len() as u8;
             *out.planes[0].add(1) = cfg.width as u8;
+        }
+        if out.has_cicp() {
+            let (primaries, transfer, matrix, full) = REPORTED_CICP;
+            *out = out.with_cicp(primaries, transfer, matrix, full);
         }
         Status::OK
     }

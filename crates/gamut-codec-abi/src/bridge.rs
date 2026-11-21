@@ -14,6 +14,17 @@
 //! [`StreamConfig::extradata`], the one raw-pointer read on a descriptor, is defined here too, so
 //! this module is the crate's whole `unsafe` surface.
 //!
+//! # Foreign descriptors
+//!
+//! The Rust → C shims receive descriptors a foreign producer built, perhaps against an older or
+//! newer revision, so they never borrow one in place: a `&StreamConfig` over a shorter foreign
+//! allocation would read past it. Each shim reads `struct_size` first, refuses a descriptor below
+//! its `MIN_SIZE` with [`Status::UNSUPPORTED`] (the fall-through in `supports`, a terminal late
+//! decline in `decode` / `encode`), and hands the twin a full-size copy holding the covered prefix
+//! over the current defaults, `struct_size` still the producer's — so the twin's `covers` /
+//! [`ImageDesc::has_cicp`] answer for the producer. After a decode the shim writes back only the
+//! colour signalling, and only when the producer's `out` covers it.
+//!
 //! Every `unsafe` block below is justified with a `// SAFETY:` comment; the fallible constructors
 //! return `None` rather than trusting a mismatched ABI.
 
@@ -21,9 +32,58 @@ use alloc::boxed::Box;
 use core::ffi::c_void;
 
 use crate::{
-    ABI_VERSION, Decoder, DecoderVTable, EncodeConfig, Encoder, EncoderVTable, ImageDesc, Status,
-    StreamConfig, WriteFn,
+    ABI_VERSION, Decoder, DecoderVTable, EncodeConfig, Encoder, EncoderVTable, ImageDesc,
+    MAX_PLANES, Status, StreamConfig, WriteFn,
 };
+
+/// Copies the prefix of the foreign descriptor at `ptr` that its leading `struct_size` covers
+/// over `base` — a value whose fields past that prefix hold the defaults — or returns `None` when
+/// `struct_size` is below `min`, the descriptor's mandatory prefix.
+///
+/// At most `size_of::<T>()` bytes are copied, so a newer, longer producer is read for the fields
+/// this build knows. Every descriptor field is an integer or a raw pointer, for which every bit
+/// pattern is valid, so even a `struct_size` ending inside a field yields a valid `T`; `covers`
+/// keeps a reader off such a field.
+///
+/// # Safety
+///
+/// `ptr` must point to a descriptor whose first field is a `usize` `struct_size`, aligned for
+/// `T`, and valid for reads of `struct_size` bytes.
+unsafe fn read_prefix<T: Copy>(ptr: *const T, min: usize, mut base: T) -> Option<T> {
+    // SAFETY: per the contract the descriptor starts with an aligned, readable `usize`.
+    let size = unsafe { ptr.cast::<usize>().read() };
+    if size < min {
+        return None;
+    }
+    // SAFETY: the source is readable for `size` bytes per the contract, and `base` is a local `T`,
+    // writable for `size_of::<T>()`; `len` is at most both. The two never overlap.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            ptr.cast::<u8>(),
+            (&raw mut base).cast::<u8>(),
+            size.min(core::mem::size_of::<T>()),
+        );
+    }
+    Some(base)
+}
+
+/// The defaults [`read_prefix`] copies a foreign [`StreamConfig`] over.
+const STREAM_CONFIG_BASE: StreamConfig = StreamConfig::new(0, 0, 0, 0);
+
+/// The defaults [`read_prefix`] copies a foreign [`EncodeConfig`] over.
+const ENCODE_CONFIG_BASE: EncodeConfig = EncodeConfig::new(0, 0);
+
+/// The defaults [`read_prefix`] copies a foreign [`ImageDesc`] over: no planes, and the
+/// [`ImageDesc::UNSIGNALLED`] colour a producer that wrote none means.
+const IMAGE_DESC_BASE: ImageDesc = ImageDesc::new(
+    0,
+    0,
+    0,
+    0,
+    0,
+    [core::ptr::null_mut(); MAX_PLANES],
+    [0; MAX_PLANES],
+);
 
 impl StreamConfig {
     /// Borrows the extradata as a byte slice, or an empty slice when absent.
@@ -124,8 +184,9 @@ impl Decoder for ForeignDecoder {
         }
     }
 
-    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
-        // SAFETY: as above; `codestream` is a live slice, so its pointer/len are valid for the call.
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &mut ImageDesc) -> Status {
+        // SAFETY: as above; `codestream` is a live slice, so its pointer/len are valid for the call,
+        // and `out` is a live, exclusive borrow the backend may write the colour signalling into.
         match unsafe { (*self.vtable).decode } {
             Some(f) => unsafe { f(self.ctx, cfg, codestream.as_ptr(), codestream.len(), out) },
             None => Status::UNSUPPORTED,
@@ -261,10 +322,13 @@ const DECODER_VTABLE: DecoderVTable = DecoderVTable {
 
 unsafe extern "C" fn decoder_supports_shim(ctx: *mut c_void, cfg: *const StreamConfig) -> Status {
     // SAFETY: `ctx` is the `*mut Box<dyn Decoder>` produced by `lower_decoder`; `cfg` points to a
-    // valid StreamConfig for the call.
+    // valid StreamConfig prefix of `struct_size` bytes for the call.
     let decoder = unsafe { &mut *(ctx as *mut Box<dyn Decoder>) };
-    let cfg = unsafe { &*cfg };
-    if decoder.supports(cfg) {
+    let Some(cfg) = (unsafe { read_prefix(cfg, StreamConfig::MIN_SIZE, STREAM_CONFIG_BASE) })
+    else {
+        return Status::UNSUPPORTED;
+    };
+    if decoder.supports(&cfg) {
         Status::OK
     } else {
         Status::UNSUPPORTED
@@ -276,15 +340,33 @@ unsafe extern "C" fn decoder_decode_shim(
     cfg: *const StreamConfig,
     codestream: *const u8,
     codestream_len: usize,
-    out: *const ImageDesc,
+    out: *mut ImageDesc,
 ) -> Status {
     // SAFETY: `ctx` is the `*mut Box<dyn Decoder>` from `lower_decoder`; `cfg`/`out` are valid
-    // descriptors and `codestream`/`codestream_len` a valid slice for the call.
+    // descriptor prefixes of their `struct_size` bytes, `out` writable, and
+    // `codestream`/`codestream_len` a valid slice for the call.
     let decoder = unsafe { &mut *(ctx as *mut Box<dyn Decoder>) };
-    let cfg = unsafe { &*cfg };
+    let cfg = unsafe { read_prefix(cfg, StreamConfig::MIN_SIZE, STREAM_CONFIG_BASE) };
+    let image = unsafe { read_prefix(out, ImageDesc::MIN_SIZE, IMAGE_DESC_BASE) };
+    let (Some(cfg), Some(mut image)) = (cfg, image) else {
+        return Status::UNSUPPORTED;
+    };
     let codestream = unsafe { bytes(codestream, codestream_len) };
-    let out = unsafe { &*out };
-    decoder.decode(cfg, codestream, out)
+    // Decided before the call, from the producer's `struct_size`: the twin holds the copy mutably
+    // and could rewrite that field, which must not widen what is written back.
+    let write_back = image.has_cicp();
+    let status = decoder.decode(&cfg, codestream, &mut image);
+    if write_back {
+        // SAFETY: `out` is writable for its producer's `struct_size` bytes, which `has_cicp` showed
+        // reach past every field written here.
+        unsafe {
+            (&raw mut (*out).color_primaries).write(image.color_primaries);
+            (&raw mut (*out).transfer_characteristics).write(image.transfer_characteristics);
+            (&raw mut (*out).matrix_coefficients).write(image.matrix_coefficients);
+            (&raw mut (*out).full_range).write(image.full_range);
+        }
+    }
+    status
 }
 
 unsafe extern "C" fn decoder_destroy_shim(ctx: *mut c_void) {
@@ -316,10 +398,14 @@ const ENCODER_VTABLE: EncoderVTable = EncoderVTable {
 };
 
 unsafe extern "C" fn encoder_supports_shim(ctx: *mut c_void, cfg: *const EncodeConfig) -> Status {
-    // SAFETY: `ctx` is the `*mut Box<dyn Encoder>` from `lower_encoder`; `cfg` is a valid descriptor.
+    // SAFETY: `ctx` is the `*mut Box<dyn Encoder>` from `lower_encoder`; `cfg` is a valid descriptor
+    // prefix of its `struct_size` bytes.
     let encoder = unsafe { &mut *(ctx as *mut Box<dyn Encoder>) };
-    let cfg = unsafe { &*cfg };
-    if encoder.supports(cfg) {
+    let Some(cfg) = (unsafe { read_prefix(cfg, EncodeConfig::MIN_SIZE, ENCODE_CONFIG_BASE) })
+    else {
+        return Status::UNSUPPORTED;
+    };
+    if encoder.supports(&cfg) {
         Status::OK
     } else {
         Status::UNSUPPORTED
@@ -334,15 +420,19 @@ unsafe extern "C" fn encoder_encode_shim(
     write_ctx: *mut c_void,
 ) -> Status {
     // SAFETY: `ctx` is the `*mut Box<dyn Encoder>` from `lower_encoder`; `cfg`/`image` are valid
-    // descriptors; `write`/`write_ctx` form a valid WriteFn pair.
+    // descriptor prefixes of their `struct_size` bytes; `write`/`write_ctx` form a valid WriteFn
+    // pair.
     let encoder = unsafe { &mut *(ctx as *mut Box<dyn Encoder>) };
-    let cfg = unsafe { &*cfg };
-    let image = unsafe { &*image };
+    let cfg = unsafe { read_prefix(cfg, EncodeConfig::MIN_SIZE, ENCODE_CONFIG_BASE) };
+    let image = unsafe { read_prefix(image, ImageDesc::MIN_SIZE, IMAGE_DESC_BASE) };
+    let (Some(cfg), Some(image)) = (cfg, image) else {
+        return Status::UNSUPPORTED;
+    };
     let mut sink = |chunk: &[u8]| -> Status {
         // SAFETY: `write`/`write_ctx` are a valid WriteFn pair; `chunk` is a live slice.
         unsafe { write(write_ctx, chunk.as_ptr(), chunk.len()) }
     };
-    encoder.encode(cfg, image, &mut sink)
+    encoder.encode(&cfg, &image, &mut sink)
 }
 
 unsafe extern "C" fn encoder_destroy_shim(ctx: *mut c_void) {

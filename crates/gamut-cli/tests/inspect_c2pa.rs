@@ -1107,7 +1107,7 @@ fn json_output_lists_a_webp_chunk_too_short_for_a_store_as_unread() {
         }])
     );
     assert_eq!(summary.unread.len(), 1);
-    assert_eq!(summary.unread[0].range, at + 8..at + 12);
+    assert_eq!(in_memory(&summary.unread[0].range), at + 8..at + 12);
     assert_eq!(doc["c2pa"]["stores"][0]["position"], "last", "{doc}");
 }
 

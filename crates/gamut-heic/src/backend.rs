@@ -96,7 +96,11 @@ pub trait HevcCodestreamDecoder {
 ///   bytes; the [`pixel_format`](ImageDesc::pixel_format) is the classic FourCC of the chroma
 ///   layout — `Y800`, `I420`, `I422` or `I444` — with samples always `u16` in native byte order and
 ///   [`bit_depth`](ImageDesc::bit_depth) carrying the real depth), then rebuilds a
-///   [`DecodedFrame`] through the validating [`DecodedFrame::new`].
+///   [`DecodedFrame`] through the validating [`DecodedFrame::new`]. The descriptor's colour group
+///   is seeded with [`ImageDesc::UNSIGNALLED`] — CICP `2/2/2`, limited range, the HEVC VUI
+///   defaults (ITU-T H.265 §E.3.1) — for the backend to overwrite with the VUI it decoded; what
+///   it reports is not yet carried into the frame, whose colour still comes from `colr` or the
+///   HEIC default (issue #1248).
 ///
 /// # Where the picture size comes from
 ///
@@ -286,7 +290,7 @@ impl<D: Decoder> HevcCodestreamDecoder for AbiHevcDecoder<D> {
             strides[2] = strides[1];
             3
         };
-        let out = ImageDesc::new(
+        let mut out = ImageDesc::new(
             planar_pixel_format(chroma),
             width,
             height,
@@ -298,7 +302,7 @@ impl<D: Decoder> HevcCodestreamDecoder for AbiHevcDecoder<D> {
 
         let extradata = extradata(config);
         let cfg = Self::stream_config(config, (width, height), &extradata);
-        let status = self.backend.decode(&cfg, &codestream, &out);
+        let status = self.backend.decode(&cfg, &codestream, &mut out);
         if !status.is_ok() {
             let error = if status.is_unsupported() {
                 Error::unsupported(env!("CARGO_PKG_NAME"), LATE_DECLINE)

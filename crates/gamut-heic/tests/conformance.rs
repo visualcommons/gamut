@@ -909,7 +909,7 @@ impl Decoder for De265Abi {
         cfg.codec_id == gamut_heic::HEVC_CODEC_ID
     }
 
-    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &mut ImageDesc) -> Status {
         // SAFETY: the adapter keeps `extradata` alive for the duration of the call.
         let extradata = unsafe { cfg.extradata() };
         // Every NAL unit of both buffers is prefixed with a four-byte start code; a NAL unit

@@ -307,6 +307,8 @@ struct AbiProbe {
     seen_cfg: Option<(u32, u32, u32, u32, Vec<u8>)>,
     seen_codestream: Vec<u8>,
     seen_out: Option<(u32, u32, u32, u32, u32, [usize; 4])>,
+    /// The colour group `out` was seeded with: `(primaries, transfer, matrix, full_range)`.
+    seen_cicp: Option<(u16, u16, u16, bool)>,
     supports_calls: usize,
     decode_calls: usize,
 }
@@ -319,6 +321,7 @@ impl AbiProbe {
             seen_cfg: None,
             seen_codestream: Vec::new(),
             seen_out: None,
+            seen_cicp: None,
             supports_calls: 0,
             decode_calls: 0,
         }
@@ -349,7 +352,7 @@ impl Decoder for AbiProbe {
         self.supports
     }
 
-    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &mut ImageDesc) -> Status {
         self.decode_calls += 1;
         self.snapshot(cfg);
         self.seen_codestream = codestream.to_vec();
@@ -364,6 +367,16 @@ impl Decoder for AbiProbe {
             out.bit_depth,
             out.plane_count,
             out.strides,
+        ));
+        assert!(
+            out.has_cicp(),
+            "the adapter's descriptor carries the colour group"
+        );
+        self.seen_cicp = Some((
+            out.color_primaries,
+            out.transfer_characteristics,
+            out.matrix_coefficients,
+            out.is_full_range(),
         ));
         match self.outcome {
             AbiOutcome::LateUnsupported => Status::UNSUPPORTED,
@@ -448,6 +461,8 @@ fn abi_adapter_lowers_config_and_maps_planes() {
         probe.seen_out.expect("out seen"),
         (I420, 5, 3, 10, 3, [10, 6, 6, 0])
     );
+    // The colour group is seeded with the HEVC VUI defaults for the backend to overwrite.
+    assert_eq!(probe.seen_cicp, Some((2, 2, 2, false)));
 }
 
 #[test]

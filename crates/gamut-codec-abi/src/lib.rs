@@ -27,6 +27,25 @@
 //!   [`abi_version`](DecoderVTable::abi_version) equal to [`ABI_VERSION`]; leading each descriptor
 //!   is a [`struct_size`](StreamConfig::struct_size) for forward-compatible field growth.
 //!
+//! # Descriptor growth: the `struct_size` prefix rule
+//!
+//! A descriptor ([`StreamConfig`], [`EncodeConfig`], [`ImageDesc`]) grows only by **appending**
+//! fields, and its producer writes the `size_of` *it* was built with into `struct_size`. A reader
+//! therefore trusts exactly the prefix `struct_size` covers: a field is readable when
+//! `struct_size >= offset_of!(field) + size_of(field)`. Each descriptor answers that through
+//! `covers(end)` and names the end of every field group past its mandatory prefix as an
+//! associated constant ([`ImageDesc::CICP_END`]); its `MIN_SIZE` is the mandatory prefix itself,
+//! the fields every reader needs, and `is_compatible()` tests for it. A shorter, older producer
+//! stays usable for the fields it wrote; a newer, longer one is read for the fields this build
+//! knows. Appending a field therefore never bumps [`ABI_VERSION`]; reordering, retyping or
+//! removing one does.
+//!
+//! The [`bridge`] shims enforce the rule where a foreign producer's bytes enter Rust: they read
+//! `struct_size` first, refuse a descriptor below `MIN_SIZE`, and copy only the covered prefix
+//! into a full-size value whose uncovered tail holds the defaults (so a Rust twin never reads past
+//! the foreign allocation). A Rust twin can therefore rely on every `MIN_SIZE` field and checks
+//! `covers` only for a field past it — [`ImageDesc::has_cicp`] for the colour signalling.
+//!
 //! The [`bridge`] module converts between the two: [`bridge::ForeignDecoder`] /
 //! [`bridge::ForeignEncoder`] adapt a C vtable *into* a Rust twin (C → Rust), and
 //! [`bridge::lower_decoder`] / [`bridge::lower_encoder`] expose a boxed Rust twin *as* a C vtable
@@ -86,8 +105,17 @@ pub use registry::{Registry, RegistryError};
 ///
 /// Every [`DecoderVTable`] / [`EncoderVTable`] leads with an `abi_version` field; a host (and the
 /// [`bridge`] adapters) accept a vtable only when its `abi_version` equals this constant. Bump it
-/// whenever the vtable or descriptor layout changes incompatibly.
-pub const ABI_VERSION: u32 = 1;
+/// whenever the vtable or descriptor layout changes incompatibly — a reorder, a retype, a removal,
+/// or a change to what a call may do with its arguments. Appending a descriptor field is *not*
+/// such a change: the [`struct_size` prefix rule](crate#descriptor-growth-the-struct_size-prefix-rule)
+/// keeps both older and newer peers readable.
+///
+/// Revision `2` replaced revision `1`'s `struct_size` *equality* guard with the prefix rule,
+/// appended the CICP colour signalling to [`ImageDesc`], and made [`DecoderVTable::decode`]'s `out`
+/// writable so a decoder reports that signalling back. A revision-1 backend may still enforce
+/// equality — and so reject every revision-2 descriptor per call — so it is refused at
+/// registration instead, where the refusal asks for a rebuild.
+pub const ABI_VERSION: u32 = 2;
 
 /// The maximum number of image planes a [`ImageDesc`] carries.
 ///
@@ -137,12 +165,13 @@ impl Status {
 /// out-of-band configuration (parameter sets, `hvcC`/`av1C` records, …).
 ///
 /// Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth: a reader
-/// trusts only the fields covered by `struct_size`.
+/// trusts only the fields covered by `struct_size` (the
+/// [prefix rule](crate#descriptor-growth-the-struct_size-prefix-rule)).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
-    /// `size_of::<StreamConfig>()` as written by the producer; the ABI version guard for this
-    /// descriptor. See [`StreamConfig::is_abi_current`].
+    /// `size_of::<StreamConfig>()` as the producer was built; the prefix of this descriptor a
+    /// reader may trust. See [`StreamConfig::covers`].
     pub struct_size: usize,
     /// Codec identifier: a FourCC built by [`codec_id`] (big-endian).
     pub codec_id: u32,
@@ -176,7 +205,28 @@ impl StreamConfig {
         }
     }
 
-    /// Returns `true` iff [`struct_size`](Self::struct_size) matches this build's layout.
+    /// The mandatory prefix: the end of [`extradata_len`](Self::extradata_len), the last field
+    /// every reader needs. A descriptor shorter than this is unreadable.
+    pub const MIN_SIZE: usize =
+        core::mem::offset_of!(Self, extradata_len) + core::mem::size_of::<usize>();
+
+    /// Returns `true` iff [`struct_size`](Self::struct_size) covers the first `end` bytes, i.e.
+    /// every field ending at or before `end` was written by the producer.
+    #[must_use]
+    pub const fn covers(&self, end: usize) -> bool {
+        self.struct_size >= end
+    }
+
+    /// Returns `true` iff the producer wrote at least the mandatory prefix
+    /// ([`MIN_SIZE`](Self::MIN_SIZE)) — the test a reader applies, older and newer producers alike.
+    #[must_use]
+    pub const fn is_compatible(&self) -> bool {
+        self.covers(Self::MIN_SIZE)
+    }
+
+    /// Returns `true` iff [`struct_size`](Self::struct_size) is exactly this build's layout, i.e.
+    /// the producer was built against this revision. Informational only: a reader accepts any
+    /// [compatible](Self::is_compatible) prefix, not just the current one.
     #[must_use]
     pub const fn is_abi_current(&self) -> bool {
         self.struct_size == core::mem::size_of::<Self>()
@@ -186,12 +236,13 @@ impl StreamConfig {
 /// Describes an encode job to an encoder backend: the target codec, a quality knob, and an opaque
 /// codec-specific options blob.
 ///
-/// Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth.
+/// Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth (the
+/// [prefix rule](crate#descriptor-growth-the-struct_size-prefix-rule)).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct EncodeConfig {
-    /// `size_of::<EncodeConfig>()` as written by the producer; the ABI version guard for this
-    /// descriptor. See [`EncodeConfig::is_abi_current`].
+    /// `size_of::<EncodeConfig>()` as the producer was built; the prefix of this descriptor a
+    /// reader may trust. See [`EncodeConfig::covers`].
     pub struct_size: usize,
     /// Codec identifier: a FourCC built by [`codec_id`] (big-endian).
     pub codec_id: u32,
@@ -219,7 +270,27 @@ impl EncodeConfig {
         }
     }
 
-    /// Returns `true` iff [`struct_size`](Self::struct_size) matches this build's layout.
+    /// The mandatory prefix: the end of [`extra_len`](Self::extra_len), the last field every
+    /// reader needs. A descriptor shorter than this is unreadable.
+    pub const MIN_SIZE: usize =
+        core::mem::offset_of!(Self, extra_len) + core::mem::size_of::<usize>();
+
+    /// Returns `true` iff [`struct_size`](Self::struct_size) covers the first `end` bytes, i.e.
+    /// every field ending at or before `end` was written by the producer.
+    #[must_use]
+    pub const fn covers(&self, end: usize) -> bool {
+        self.struct_size >= end
+    }
+
+    /// Returns `true` iff the producer wrote at least the mandatory prefix
+    /// ([`MIN_SIZE`](Self::MIN_SIZE)).
+    #[must_use]
+    pub const fn is_compatible(&self) -> bool {
+        self.covers(Self::MIN_SIZE)
+    }
+
+    /// Returns `true` iff [`struct_size`](Self::struct_size) is exactly this build's layout.
+    /// Informational only: a reader accepts any [compatible](Self::is_compatible) prefix.
     #[must_use]
     pub const fn is_abi_current(&self) -> bool {
         self.struct_size == core::mem::size_of::<Self>()
@@ -232,12 +303,26 @@ impl EncodeConfig {
 /// output** (`out` in [`Decoder::decode`]) the decoder writes reconstructed samples through the
 /// plane pointers. In both directions the buffer is caller-allocated and borrowed for the call.
 ///
-/// Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth.
+/// # Colour signalling
+///
+/// The trailing [`color_primaries`](Self::color_primaries) /
+/// [`transfer_characteristics`](Self::transfer_characteristics) /
+/// [`matrix_coefficients`](Self::matrix_coefficients) / [`full_range`](Self::full_range) group is
+/// the planes' CICP signalling (ITU-T H.273). As an encode input it is what the host asks the
+/// stream to declare; as a decode output the host seeds it and the decoder overwrites it with what
+/// the codestream declares — only when [`struct_size`](Self::struct_size) covers it, since a
+/// decoder writes no field past the prefix the host allocated. [`ImageDesc::new`] fills it with
+/// [`UNSIGNALLED`](Self::UNSIGNALLED), the value every codec defaults to when its stream carries no
+/// colour description. It lies past [`MIN_SIZE`](Self::MIN_SIZE): read or write it only when
+/// [`has_cicp`](Self::has_cicp) holds.
+///
+/// Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth (the
+/// [prefix rule](crate#descriptor-growth-the-struct_size-prefix-rule)).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ImageDesc {
-    /// `size_of::<ImageDesc>()` as written by the producer; the ABI version guard for this
-    /// descriptor. See [`ImageDesc::is_abi_current`].
+    /// `size_of::<ImageDesc>()` as the producer was built; the prefix of this descriptor a reader
+    /// may trust. See [`ImageDesc::covers`].
     pub struct_size: usize,
     /// Pixel-format tag from the [`pixel_format`] namespace.
     pub pixel_format: u32,
@@ -255,10 +340,42 @@ pub struct ImageDesc {
     pub planes: [*mut u8; MAX_PLANES],
     /// Per-plane row stride in bytes; only the first [`plane_count`](Self::plane_count) are valid.
     pub strides: [usize; MAX_PLANES],
+    /// CICP `ColourPrimaries` (ITU-T H.273 §8.1); `2` is unspecified. Valid only when
+    /// [`has_cicp`](Self::has_cicp) holds.
+    pub color_primaries: u16,
+    /// CICP `TransferCharacteristics` (ITU-T H.273 §8.2); `2` is unspecified. Valid only when
+    /// [`has_cicp`](Self::has_cicp) holds.
+    pub transfer_characteristics: u16,
+    /// CICP `MatrixCoefficients` (ITU-T H.273 §8.3); `2` is unspecified. Valid only when
+    /// [`has_cicp`](Self::has_cicp) holds.
+    pub matrix_coefficients: u16,
+    /// CICP `VideoFullRangeFlag` (ITU-T H.273 §8.3): `0` limited ("studio") range, any other value
+    /// full range — read it through [`is_full_range`](Self::is_full_range). A `u8` rather than a
+    /// `bool` so every byte a foreign producer writes is a valid value. Valid only when
+    /// [`has_cicp`](Self::has_cicp) holds.
+    pub full_range: u8,
 }
 
 impl ImageDesc {
-    /// Builds an [`ImageDesc`], filling in the [`struct_size`](Self::struct_size) guard.
+    /// The mandatory prefix: the end of [`strides`](Self::strides), the last field every reader
+    /// needs. A descriptor shorter than this is unreadable.
+    pub const MIN_SIZE: usize =
+        core::mem::offset_of!(Self, strides) + core::mem::size_of::<[usize; MAX_PLANES]>();
+
+    /// The end of the colour-signalling group ([`full_range`](Self::full_range) is its last
+    /// field): a descriptor whose [`struct_size`](Self::struct_size) reaches it carries CICP.
+    pub const CICP_END: usize =
+        core::mem::offset_of!(Self, full_range) + core::mem::size_of::<u8>();
+
+    /// The colour signalling of a stream that declares none, as `(color_primaries,
+    /// transfer_characteristics, matrix_coefficients, full_range)`: CICP `2/2/2` (unspecified) at
+    /// limited range — the HEVC VUI defaults (ITU-T H.265 §E.3.1) and the AV1 `color_config()`
+    /// defaults (AV1 §6.4.2) alike.
+    pub const UNSIGNALLED: (u16, u16, u16, bool) = (2, 2, 2, false);
+
+    /// Builds an [`ImageDesc`], filling in the [`struct_size`](Self::struct_size) guard and the
+    /// [`UNSIGNALLED`](Self::UNSIGNALLED) colour signalling; set the latter with
+    /// [`with_cicp`](Self::with_cicp).
     ///
     /// `planes` / `strides` are fixed [`MAX_PLANES`]-entry arrays; entries beyond `plane_count`
     /// should be null / `0`.
@@ -281,10 +398,61 @@ impl ImageDesc {
             plane_count,
             planes,
             strides,
+            color_primaries: Self::UNSIGNALLED.0,
+            transfer_characteristics: Self::UNSIGNALLED.1,
+            matrix_coefficients: Self::UNSIGNALLED.2,
+            full_range: Self::UNSIGNALLED.3 as u8,
         }
     }
 
-    /// Returns `true` iff [`struct_size`](Self::struct_size) matches this build's layout.
+    /// Returns this descriptor with its colour signalling set to the CICP triple
+    /// `color_primaries` / `transfer_characteristics` / `matrix_coefficients` and the range flag
+    /// `full_range`.
+    #[must_use]
+    pub const fn with_cicp(
+        mut self,
+        color_primaries: u16,
+        transfer_characteristics: u16,
+        matrix_coefficients: u16,
+        full_range: bool,
+    ) -> Self {
+        self.color_primaries = color_primaries;
+        self.transfer_characteristics = transfer_characteristics;
+        self.matrix_coefficients = matrix_coefficients;
+        self.full_range = full_range as u8;
+        self
+    }
+
+    /// Returns `true` iff [`full_range`](Self::full_range) is non-zero: the samples are full range.
+    #[must_use]
+    pub const fn is_full_range(&self) -> bool {
+        self.full_range != 0
+    }
+
+    /// Returns `true` iff [`struct_size`](Self::struct_size) covers the first `end` bytes, i.e.
+    /// every field ending at or before `end` was written by the producer.
+    #[must_use]
+    pub const fn covers(&self, end: usize) -> bool {
+        self.struct_size >= end
+    }
+
+    /// Returns `true` iff the producer wrote at least the mandatory prefix
+    /// ([`MIN_SIZE`](Self::MIN_SIZE)).
+    #[must_use]
+    pub const fn is_compatible(&self) -> bool {
+        self.covers(Self::MIN_SIZE)
+    }
+
+    /// Returns `true` iff the producer wrote the colour-signalling group
+    /// ([`CICP_END`](Self::CICP_END)). When it did not, the stream's signalling is unknown and a
+    /// reader treats it as [`UNSIGNALLED`](Self::UNSIGNALLED).
+    #[must_use]
+    pub const fn has_cicp(&self) -> bool {
+        self.covers(Self::CICP_END)
+    }
+
+    /// Returns `true` iff [`struct_size`](Self::struct_size) is exactly this build's layout.
+    /// Informational only: a reader accepts any [compatible](Self::is_compatible) prefix.
     #[must_use]
     pub const fn is_abi_current(&self) -> bool {
         self.struct_size == core::mem::size_of::<Self>()
@@ -317,14 +485,18 @@ pub struct DecoderVTable {
     /// Reports whether the backend can decode the given stream. `ctx` is the backend context.
     pub supports:
         Option<unsafe extern "C" fn(ctx: *mut c_void, cfg: *const StreamConfig) -> Status>,
-    /// Decodes `codestream` into the caller-allocated `out` planes. `ctx` is the backend context.
+    /// Decodes `codestream` into the caller-allocated `out` planes and, when `out`'s
+    /// `struct_size` covers it ([`ImageDesc::CICP_END`]), overwrites `out`'s colour signalling with
+    /// the codestream's (see [`ImageDesc`]). The backend writes no `out` field its `struct_size`
+    /// does not cover, so it never writes past an older host's shorter descriptor; every other
+    /// `out` field is the host's and stays as it was. `ctx` is the backend context.
     pub decode: Option<
         unsafe extern "C" fn(
             ctx: *mut c_void,
             cfg: *const StreamConfig,
             codestream: *const u8,
             codestream_len: usize,
-            out: *const ImageDesc,
+            out: *mut ImageDesc,
         ) -> Status,
     >,
     /// Releases the backend context. Called exactly once, when the host drops the backend.
@@ -361,12 +533,12 @@ pub struct EncoderVTable {
 
 // Compile-time ABI pins. These are the layout facts the C side of the seam is built on; an edit
 // that moves them is an ABI break and must fail the build here, in the defining crate, together
-// with an [`ABI_VERSION`] bump. Field *append* (guarded by `struct_size`) leaves every pinned
+// with an [`ABI_VERSION`] bump. Field *append* (the `struct_size` prefix rule) leaves every pinned
 // offset unchanged and stays friction-free — deliberately, no `size_of` pins on the descriptors.
 const _: () = {
     use core::mem::{offset_of, size_of};
 
-    assert!(ABI_VERSION == 1);
+    assert!(ABI_VERSION == 2);
     assert!(MAX_PLANES == 4);
 
     // `Status` round-trips a C `int`, and its two contractual values are permanent.
@@ -394,6 +566,36 @@ const _: () = {
     assert!(offset_of!(StreamConfig, struct_size) == 0);
     assert!(offset_of!(EncodeConfig, struct_size) == 0);
     assert!(offset_of!(ImageDesc, struct_size) == 0);
+
+    // Every field's offset is permanent under the prefix rule: a reader decides what it may read
+    // from these ends alone, so a moved field would be read from another revision's bytes.
+    assert!(offset_of!(StreamConfig, codec_id) == PTR);
+    assert!(offset_of!(StreamConfig, width) == PTR + 4);
+    assert!(offset_of!(StreamConfig, height) == PTR + 8);
+    assert!(offset_of!(StreamConfig, bit_depth) == PTR + 12);
+    assert!(offset_of!(StreamConfig, extradata) == PTR + 16);
+    assert!(offset_of!(StreamConfig, extradata_len) == 2 * PTR + 16);
+    assert!(StreamConfig::MIN_SIZE == 3 * PTR + 16);
+    assert!(offset_of!(EncodeConfig, codec_id) == PTR);
+    assert!(offset_of!(EncodeConfig, quality) == PTR + 4);
+    assert!(offset_of!(EncodeConfig, extra) == PTR + 8);
+    assert!(offset_of!(EncodeConfig, extra_len) == 2 * PTR + 8);
+    assert!(EncodeConfig::MIN_SIZE == 3 * PTR + 8);
+    assert!(offset_of!(ImageDesc, pixel_format) == PTR);
+    assert!(offset_of!(ImageDesc, width) == PTR + 4);
+    assert!(offset_of!(ImageDesc, height) == PTR + 8);
+    assert!(offset_of!(ImageDesc, bit_depth) == PTR + 12);
+    assert!(offset_of!(ImageDesc, plane_count) == PTR + 16);
+    const PLANES: usize = (PTR + 20).next_multiple_of(PTR);
+    assert!(offset_of!(ImageDesc, planes) == PLANES);
+    assert!(offset_of!(ImageDesc, strides) == PLANES + MAX_PLANES * PTR);
+    assert!(ImageDesc::MIN_SIZE == PLANES + 2 * MAX_PLANES * PTR);
+    // The colour group is the first append past the mandatory prefix.
+    assert!(offset_of!(ImageDesc, color_primaries) == ImageDesc::MIN_SIZE);
+    assert!(offset_of!(ImageDesc, transfer_characteristics) == ImageDesc::MIN_SIZE + 2);
+    assert!(offset_of!(ImageDesc, matrix_coefficients) == ImageDesc::MIN_SIZE + 4);
+    assert!(offset_of!(ImageDesc, full_range) == ImageDesc::MIN_SIZE + 6);
+    assert!(ImageDesc::CICP_END == ImageDesc::MIN_SIZE + 7);
 };
 
 /// The object-safe Rust twin of [`DecoderVTable`]: a pluggable decode backend.
@@ -410,7 +612,11 @@ pub trait Decoder {
     /// Decodes `codestream` into the caller-allocated `out` planes, returning [`Status::OK`] on
     /// success. A backend that returns `true` from [`supports`](Self::supports) and then fails
     /// returns a non-OK, non-[`Status::UNSUPPORTED`] status, which the host propagates.
-    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status;
+    ///
+    /// The host seeds `out`'s colour signalling (normally [`ImageDesc::UNSIGNALLED`]); a backend
+    /// that knows the codestream's overwrites it, when [`ImageDesc::has_cicp`] holds. Every other
+    /// `out` field is the host's and the backend leaves it as it was.
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &mut ImageDesc) -> Status;
 }
 
 /// The object-safe Rust twin of [`EncoderVTable`]: a pluggable encode backend.
@@ -442,7 +648,7 @@ impl<D: Decoder + ?Sized> Decoder for &mut D {
         (**self).supports(cfg)
     }
 
-    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &mut ImageDesc) -> Status {
         (**self).decode(cfg, codestream, out)
     }
 }
