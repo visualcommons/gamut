@@ -4,7 +4,7 @@
 /// deliberately delegate to the shared mise tasks (`mise run fmt`, `lint`, …) so the
 /// exact fmt/clippy commands have a single source of truth with CI.
 ///
-/// Hook layout (see README "Git Hooks"):
+/// Hook layout:
 ///   pre-commit  auto-fix formatting + lint on the staged snapshot, then re-stage
 ///   commit-msg  enforce Conventional Commits AT COMMIT TIME (policy in .convco)
 ///   pre-push    fast static gate (format + fast lint); heavy checks live in CI

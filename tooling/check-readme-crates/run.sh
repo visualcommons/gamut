@@ -104,8 +104,8 @@
 #   * The header row's own text. Its *presence* directly above the delimiter and its *column
 #     count* are asserted; what the three column headings are called is prose like any other cell.
 #   * Anything that needs the network. Whether crates.io serves the version a manifest declares
-#     cannot be decided here; the table states no version, and [Releases](#releases) states the
-#     known gaps.
+#     cannot be decided here, and the table states no version (issue #546 tracks the known
+#     manifest-versus-registry gaps).
 #   * A row whose crate cell is written in legal Markdown this pattern does not recognise -- an
 #     omitted leading OR trailing pipe, a linked or annotated crate cell, prose after the code
 #     span. Each is reported as a *missing crate*, and the failure message says so, because

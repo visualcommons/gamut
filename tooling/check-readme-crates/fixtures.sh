@@ -173,16 +173,16 @@ check "the underscore spelling of a real crate"           1 "do not exist"     s
 # The precondition the name checks rest on, and the section prose they now reach.
 # ---------------------------------------------------------------------------------------------
 check "a crate name in a cell without a code span"        1 "without a code span" sedx 's/built on `gamut-ifd`/built on gamut-ifd/'
-check "a crate name in section prose without a code span" 1 "without a code span" sedx 's/^Each crate manifest sets/Each gamut-png crate manifest sets/'
-check "the bare word gamut in prose (legal)"              0 "lists every"         sedx 's/^Each crate manifest sets/Each gamut crate manifest sets/'
+check "a crate name in section prose without a code span" 1 "without a code span" sedx 's/^Rows describe each crate/Rows describe each gamut-png crate/'
+check "the bare word gamut in prose (legal)"              0 "lists every"         sedx 's/^Rows describe each crate/Rows describe each gamut crate/'
 check "a crate name inside a fence in the section (legal)" 0 "lists every"        awkx '/^## Prerequisites/{print "```rust"; print "use gamut_png::Encoder;"; print "```"; print ""} {print}'
-check "a phantom crate named in section prose"            1 "do not exist"        sedx 's/^Each crate manifest sets/Each `gamut-ifdd` crate manifest sets/'
-check "a feature claim in section prose cargo refutes"    1 "feature claims"      sedx 's/^Each crate manifest sets/The `gamut-png` Cargo feature `nope` is gone; each crate manifest sets/'
-check "a consumed-by list outside a crate row"            1 "no crate to be about" sedx 's/^Each crate manifest sets/Each is consumed by `gamut-png`; each crate manifest sets/'
-check "an always-on list outside a crate row"             1 "no crate to be about" sedx 's/^Each crate manifest sets/Each has an always-on dependency: `gamut-core`; each crate manifest sets/'
-check "a version token in section prose"                 1 "must not write"      sedx 's/^Each crate manifest sets/Each v9 crate manifest sets/'
-check "a phantom crate named in a sub-heading"            1 "do not exist"        awkx '/^Each crate manifest sets/{print "### The `gamut-ifdd` note"; print ""} {print}'
-check "a claim in a sub-heading cargo refutes"            1 "feature claims"      awkx '/^Each crate manifest sets/{print "### The `gamut-png` Cargo feature `nope`"; print ""} {print}'
+check "a phantom crate named in section prose"            1 "do not exist"        sedx 's/^Rows describe each crate/Rows describe each `gamut-ifdd` crate/'
+check "a feature claim in section prose cargo refutes"    1 "feature claims"      sedx 's/^Rows describe/The `gamut-png` Cargo feature `nope` is gone; rows describe/'
+check "a consumed-by list outside a crate row"            1 "no crate to be about" sedx 's/^Rows describe/Each is consumed by `gamut-png`; rows describe/'
+check "an always-on list outside a crate row"             1 "no crate to be about" sedx 's/^Rows describe/Each has an always-on dependency: `gamut-core`; rows describe/'
+check "a version token in section prose"                 1 "must not write"      sedx 's/^Rows describe each crate/Rows describe each v9 crate/'
+check "a phantom crate named in a sub-heading"            1 "do not exist"        awkx '/^Rows describe/{print "### The `gamut-ifdd` note"; print ""} {print}'
+check "a claim in a sub-heading cargo refutes"            1 "feature claims"      awkx '/^Rows describe/{print "### The `gamut-png` Cargo feature `nope`"; print ""} {print}'
 
 # ---------------------------------------------------------------------------------------------
 # The Usage snippet (#559, #954): a `cargo add gamut` line in a fence, and no pinned `gamut = ...`

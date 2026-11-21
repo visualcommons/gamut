@@ -139,11 +139,9 @@ additionally re-exports the shared building blocks (`gamut::color` / `gamut::dsp
 
 ## Crates
 
-Every row describes the crate **in this tree** — what a workspace `path` dependency builds — not
-what crates.io currently serves. Rows state no version: a crate's version is its own `Cargo.toml`'s
-(`mise run versions` prints them all) and moves on every release, so the table leaves it there
-rather than restating it. A status of **stable** means the crate is at 1.0 or later, so under
-[SemVer](#versioning) it changes its public surface incompatibly only in a new major release; a
+Rows describe each crate as it stands in this tree, not what crates.io currently serves, and state
+no version (`mise run versions` lists them). **Stable** means 1.0 or later: under
+[SemVer](#versioning) the public surface changes incompatibly only in a new major release, while a
 0.x crate may break on any minor.
 
 | Crate             | Purpose                                                                | Status                                 |
@@ -182,94 +180,32 @@ rather than restating it. A status of **stable** means the crate is at 1.0 or la
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
 | `gamut-ffi`       | C-compatible FFI bindings                                              | provider boundary shipped (#280); consumer boundary shipped for AVIF encode and container parse (#666), the other formats pending (#242) |
 
-Each crate manifest sets its own `name`, `version`, `description` and `readme` — the root
-manifest says why `description` is per-crate: crates.io discoverability — and `links` where it
-drives a native build. Everything else (`edition`, `rust-version`, `authors`, `license`,
-`repository`, `homepage`, `keywords`, `categories`, and the shared dependency versions) is
-centralized in the root `[workspace.package]` / `[workspace.dependencies]` and inherited via
-`.workspace = true` (see [Versioning](#versioning)).
-
 ## Prerequisites
 
 Install [rustup](https://rustup.rs) and [mise](https://mise.jdx.dev). After cloning, run
 `mise trust && mise install` to provision the rest of the dev tooling; `mise tasks` lists what
 you can run.
 
-## Development
-
-| Command          | Description                              |
-| ---------------- | ---------------------------------------- |
-| `cargo build --workspace` | Build all crates                |
-| `mise run test`      | Run tests (workspace, all features)      |
-| `mise run fmt`       | Format code (nightly rustfmt, auto-installed) |
-| `mise run lint`      | Lint with Clippy (warnings as errors)    |
-| `mise run lint-fix`  | Lint and auto-fix                        |
-| `mise run check-commits` | Check commits are Conventional Commits |
-| `mise run check-readme-crates` | Check this README's crates table names every workspace crate, no phantom or duplicate ones, stands under its delimiter row, and gives each crate a three-cell row |
-| `mise run coverage`  | Run tests with coverage (min 80%)        |
-| `mise run bench`     | Run performance benchmarks (Divan; see [docs/benchmarking.md](docs/benchmarking.md)) |
-| `mise run bench-test` | Run every bench once to prove it still executes (no timings) |
-| `mise run check-cross <triple>` | Cross-compile-check the libs for a target (extended CI; master/manual) |
-| `mise run check-msrv` | Check the libs compile on the documented MSRV (extended CI; master/manual) |
-| `mise run versions`  | List every crate's version               |
-| `mise run bump <crate> <level>` | Bump one crate (`major`\|`minor`\|`patch`) |
-
 ## Minimum Supported Rust Version (MSRV)
 
-The MSRV is **Rust 1.92** (stable), built against **edition 2024**. This is the lowest version we
-support, declared once as the machine value in the root `[workspace.package]`
-(`rust-version = "1.92"`) and inherited by every crate via `rust-version.workspace = true`; this
-section is its authoritative documentation. CI enforces both: the
-[Extended workflow](.github/workflows/extended.yml)'s MSRV job compiles the libraries on that
-toolchain and fails unless this README documents the version declared in `Cargo.toml`, so the
-field and the docs can never drift.
+The MSRV is **Rust 1.92** (stable), on **edition 2024**, declared once as `rust-version` in the
+root `[workspace.package]` and inherited by every crate; CI compiles the libraries on it.
+Day-to-day development tracks the latest stable. Raising the MSRV is a deliberate,
+SemVer-relevant change, and a 0.x crate takes it in a minor release.
 
-Policy:
+## Versioning
 
-- The MSRV is the floor we test and publish against, not necessarily the newest toolchain.
-  Day-to-day development tracks the latest `stable` (pinned to the `stable` channel in
-  `rust-toolchain.toml`).
-- Formatting is the one exception: `mise run fmt` runs **nightly** rustfmt for the
-  merge-resilient import options (`imports_granularity`/`group_imports`), auto-installing the
-  nightly toolchain on first use. Nothing is *compiled* on nightly — only formatted — so it
-  never affects the MSRV, Clippy, tests, or the shipped build, which all stay on stable.
-- Raising the MSRV is a deliberate, semver-relevant change: bump `rust-version` in the root
-  `Cargo.toml` and note it here. Pre-1.0, an MSRV bump rides a minor release.
-- Edition (`2024`) is likewise centralized in `[workspace.package]` and inherited by every
-  crate; it changes only alongside an MSRV bump that allows it.
+Every crate is versioned **independently** under [SemVer](https://semver.org), from its own
+changes alone, so versions drift apart across the workspace; the umbrella `gamut` crate's version
+serves as the headline project version.
 
-## Git Hooks
-
-This project uses [hk](https://hk.jdx.dev) (provisioned by mise); run `hk install` once after
-`mise install` to register the hooks (config in `hk.pkl`). The `commit-msg` hook rejects
-messages that aren't [Conventional Commits](https://www.conventionalcommits.org) (policy in
-`.convco`) — enforcement happens when the commit is created, so a bad message can't slip through
-to a `--no-verify` push. The `pre-commit` hook auto-fixes formatting and linting on the staged
-snapshot (unstaged work is stashed first, then restored). The `pre-push` hook is a deliberately
-fast static gate — a formatting check and a quick Clippy pass — while the heavier full-feature
-Clippy, tests, and coverage run in CI, so the local hooks stay fast enough not to be bypassed.
-The hook steps delegate to the shared `mise run` tasks, so keep mise activated in your shell.
-
-## CI/CD
-
-GitHub Actions provisions tooling via [mise](https://mise.jdx.dev). Pull requests gate on the
-fast lanes only: format and metadata checks, Clippy, doctests and rustdoc, plus a check of every
-commit message against Conventional Commits with convco. Tests, coverage and the incremental
-mutation survey run after the merge, once `master` has gone an hour without a push, against the
-head it settled on; and on release PRs, which re-verify what will be published.
-
-## Code Coverage
-
-This project uses [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) for
-LLVM-based code coverage. CI enforces a minimum of 80% line coverage.
-
-```bash
-mise run coverage
-```
-
-The bindings/binary crates (`gamut-cli`, `gamut-wasm`, `gamut-ffi`) and the declarations-only
-`gamut-jxl-sys` are excluded from the gate — their entry points are not meaningfully
-unit-testable, and `gamut-jxl-sys` has no function bodies at all.
+The lifecycle runs off commit history. Commits are
+[Conventional Commits](https://www.conventionalcommits.org), enforced by the git hooks and on every
+pull request. Pull requests gate on fast static checks; the full test suite, the 80% coverage gate
+and mutation testing run on `master` after merge. Once CI passes there,
+[release-plz](https://release-plz.dev) opens a release pull request with each changed crate's
+version bump and `CHANGELOG.md`, and merging it publishes those crates to crates.io in dependency
+order, tagged `<crate>-v<version>`.
 
 ## AI Policy
 
@@ -278,63 +214,6 @@ personally vouch for the work — you've read it, you understand it, and you sta
 as if you'd written every line — and it matches the project's existing code style and
 requirements. The CI and git hooks loosely enforce the bare minimum; meeting that bar is
 necessary but not sufficient. Review your output before opening a PR.
-
-## Versioning
-
-Every crate is versioned **independently** following [SemVer](https://semver.org), based on
-its own changes. There is **no** guarantee that versions line up across the workspace — a
-change to one codec bumps only that crate (and anything that depends on it), so version
-numbers drift apart over time. `version` is one of the few keys each crate manifest sets
-itself ([Crates](#crates) lists them all); shared metadata such as the edition and
-[MSRV](#minimum-supported-rust-version) stays workspace-owned.
-
-Bumps are automated: [release-plz](https://release-plz.dev) reads each crate's
-conventional-commit history, computes its next version, and updates dependents' requirements
-as needed. Each crate keeps its own `CHANGELOG.md` and is tagged and GitHub-released as
-`<crate>-v<version>` (e.g. `gamut-core-v0.2.0`) — there is no single repo-wide version tag,
-so the umbrella `gamut` crate's version serves as the headline "project" version. Run
-`mise run versions` to see every crate's current version at a glance.
-
-Because release-plz keys versions and changelogs off commit messages, those messages are
-enforced as [Conventional Commits](https://www.conventionalcommits.org) — by the git hooks
-locally and the CI PR check (see [Git Hooks](#git-hooks)) — to keep the changelogs clean.
-
-## Releases
-
-Publishing to crates.io is automated with [release-plz](https://release-plz.dev). The
-Release workflow runs only after a CI run on `master` succeeds (a `push` event in this
-repository), and works from the commit that CI run passed rather than `master`'s current tip,
-so a red build never publishes. Each such run opens a release PR (per-crate version bumps + changelogs); merging that PR
-publishes every changed crate in dependency order, then creates the per-crate tags and GitHub
-releases. Publishing authenticates via crates.io
-[Trusted Publishing](https://crates.io/docs/trusted-publishing) (OIDC) — no
-`CARGO_REGISTRY_TOKEN` secret is stored.
-
-That automation has two prerequisites that live outside this repository's files, and the
-pipeline stalls silently when either is missing (issue #377):
-
-1. **The release PR needs permission to exist.** The default `GITHUB_TOKEN` cannot open a pull
-   request unless *Settings → Actions → "Allow GitHub Actions to create and approve pull
-   requests"* is enabled. Without it, release-plz pushes the version-bump branch and then fails
-   with `"GitHub Actions is not permitted to create or approve pull requests." 403`, so no bump
-   ever merges — and the release job keeps verifying crates against stale *published*
-   dependencies rather than the versions on `master`. Setting a `RELEASE_PLZ_TOKEN` secret (a PAT
-   with `contents:write` + `pull-requests:write`) is the alternative;
-   [`release.yml`](.github/workflows/release.yml) prefers it over `GITHUB_TOKEN` when present.
-2. **A brand-new crate needs one manual first publish.** Trusted Publishing mints a token *for a
-   crate that already exists*, so the very first version of a new crate must be published once
-   with an owner-scoped token, after which OIDC takes over. As of 2026-10-24 every crate under `crates/`
-   is on crates.io (each name checked against the sparse index), so this applies only to a
-   crate added after that.
-
-A missing `<crate>-v<version>` tag is **not** evidence of a missing publish, and this section
-previously read it that way. `gamut-dng`, `gamut-jpeg` and `gamut-png` carry no release tag and
-are nonetheless on crates.io, each at the version its `Cargo.toml` declares. That is the stall above showing itself in the tag-and-release half of the
-pipeline rather than in the publish half.
-
-The opposite skew exists too: `gamut-riff`'s manifest declares `1.0.0` while the newest
-published release is `0.1.3`. Whether that 1.0 is real is a release decision rather than a
-documentation one, so this note states the gap (issue #546).
 
 ## License
 
