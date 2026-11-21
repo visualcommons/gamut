@@ -191,65 +191,9 @@ centralized in the root `[workspace.package]` / `[workspace.dependencies]` and i
 
 ## Prerequisites
 
-- [Rust (rustup)](https://rustup.rs) -- toolchain (channel pinned via `rust-toolchain.toml`);
-  see [Minimum Supported Rust Version](#minimum-supported-rust-version) for the lower bound
-- [mise](https://mise.jdx.dev) -- provisions the rest of the dev tooling from `mise.toml`
-  (and the dev tasks — run `mise tasks` to list them, `mise run <task>` to invoke):
-  [hk](https://hk.jdx.dev) (git hooks),
-  [convco](https://convco.github.io) (conventional-commit linter),
-  [jq](https://jqlang.github.io/jq/),
-  [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (coverage),
-  [cargo-edit](https://github.com/killercup/cargo-edit) (`cargo set-version` for `mise run bump`),
-  and the C build tools [CMake](https://cmake.org), [Ninja](https://ninja-build.org) and
-  [Meson](https://mesonbuild.com). After cloning, run `mise trust && mise install`, then
-  activate mise in your shell (e.g. `eval "$(mise activate zsh)"`) so these land on `PATH` —
-  the git hooks and mise tasks invoke them directly.
-
-Building the **shipped crates** needs only the Rust toolchain — they are pure Rust with no C
-dependencies, with one deliberate exception: `gamut-jxl`'s optional `encode` feature statically
-builds the libjxl reference encoder via `gamut-jxl-sys`, which needs **cmake and a C++ toolchain**
-at build time (a maintainer-approved departure for JPEG XL; its `decode` feature stays pure Rust;
-`wasm32-unknown-emscripten` gets the full encoder via the emsdk toolchain, while
-`wasm32-unknown-unknown` gets a decode-only JXL — no C++ toolchain targets that ABI). Building the
-**cross-check tests** additionally needs a C
-toolchain plus
-pkg-config — the one build dep that stays a system package (CMake, Ninja and Meson come from
-mise; [nasm](https://www.nasm.us), needed to assemble the aom/dav1d x86 SIMD, is built from a
-vendored source tarball by the oracle build scripts, so it is not a system dependency). Those
-tests link reference codecs (libaom, dav1d, libavif) built from the git submodules under
-`third_party/` via the dev-only oracle crates in `tooling/`; nothing is taken from
-system-installed codecs. The `aom` and `dav1d` submodules are marked `update = none`, so a
-recursive submodule update skips them and taking any gamut crate as a git dependency does not
-drag in ~440 MiB of codecs Cargo never builds; `mise run fetch-av1-oracles` pulls them when you
-want the AV1/AVIF oracle tests. libaom — the AV1 reference codec — is the definitive AVIF/AV1
-oracle (see [`references/av1`](references/av1/README.md)). Install pkg-config on Debian/Ubuntu
-with `sudo apt-get install pkg-config` (macOS: `brew install pkg-config`).
-
-Those native builds are **hermetic to exactly what they configure**, including the toolchain: if
-your shell exports a compiler cache (`CC="sccache gcc"`, `CMAKE_C_COMPILER_LAUNCHER=ccache`, a
-`ccache` shim directory on `PATH`, …), the build scripts normalise it rather than inherit it —
-the compiler is passed bare and the launcher is placed in the single position CMake defines for
-it. Compiler caching keeps working; you do not need to special-case this repo in your shell
-profile. Set `GAMUT_BUILD_KEEP_ENV=1` to opt out and use the ambient environment verbatim. See
-[`tooling/build-env`](tooling/build-env/src/lib.rs) for what is normalised and why.
-
-## Quick Start
-
-```bash
-# The cross-check tests link vendored libaom/dav1d/libavif from third_party/ submodules.
-git submodule update --init --recursive
-
-# Dev tooling + git hooks (see Prerequisites; also needs system pkg-config).
-mise trust && mise install
-hk install
-
-# aom and dav1d are `update = none`, so the checkout above skips them (~440 MiB a consumer taking
-# gamut as a git dependency would otherwise pay for). Fetch them for the AV1/AVIF oracle tests:
-mise run fetch-av1-oracles
-
-cargo build --workspace
-cargo test --workspace
-```
+Install [rustup](https://rustup.rs) and [mise](https://mise.jdx.dev). After cloning, run
+`mise trust && mise install` to provision the rest of the dev tooling; `mise tasks` lists what
+you can run.
 
 ## Development
 
