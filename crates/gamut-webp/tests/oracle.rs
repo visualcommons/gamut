@@ -804,7 +804,9 @@ fn cleaned_lossy_keeps_visible_pixels_in_both_decoders_and_shrinks() {
     // Lossy cleans by default. Both decoders read the cleaned file identically, its visible pixels
     // stay as close to the source as the uncleaned file's (cleaning moves only samples under
     // transparency, though VP8's transform and loop filter let that reach the visible edge
-    // slightly), and the invisible noise stops costing bits.
+    // slightly), and the invisible noise stops costing bits. #1207 asks for "the same visible
+    // pixels"; for lossy that is not attainable bit for bit, so the bound here is a visible MAE
+    // within 0.5 of the uncleaned file's — the lossless test above stays exact.
     let (rgba, w, h) = noisy_transparent_rgba();
     let [exact, exact_gamut, exact_lib] = encode_and_decode_both(
         &WebpEncoder::lossy(75).with_exact(Exact::Preserve),
