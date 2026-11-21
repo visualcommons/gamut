@@ -163,9 +163,8 @@ enum Mode {
 
 fn read_mode(r: &mut BitReader) -> Result<Mode> {
     let mut bit = || {
-        r.read_bit().ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "CCITT: truncated mode code")
-        })
+        r.get_bits(1)
+            .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "CCITT: truncated mode code"))
     };
     if bit()? == 1 {
         return Ok(Mode::Vertical(0));

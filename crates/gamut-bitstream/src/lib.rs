@@ -16,6 +16,9 @@
 //!
 //! It also carries codec-agnostic bit-packing primitives:
 //!
+//! - [`LsbBitReader`] — the least-significant-bit-first counterpart of [`BitReader`], for the
+//!   formats that pack fields from the low bit of each byte upward: VP8L's `ReadBits(n)`
+//!   (RFC 9649 §3.3).
 //! - [`pack_msb_rows`] / [`unpack_msb_rows`] — MSB-first packing of fixed-width integer samples into
 //!   byte-aligned rows, the sub-byte sample layout shared by the TIFF-family raw formats.
 //!
@@ -48,6 +51,7 @@ mod bitreader;
 mod bitwriter;
 mod huffman;
 mod leb128;
+mod lsb_reader;
 mod samplepack;
 mod symbol;
 
@@ -58,5 +62,6 @@ pub use huffman::{
     canonical_codes,
 };
 pub use leb128::{leb128_len, write_leb128};
+pub use lsb_reader::LsbBitReader;
 pub use samplepack::{pack_msb_rows, row_bytes, unpack_msb_rows};
 pub use symbol::{SymbolDecoder, SymbolEncoder};

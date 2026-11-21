@@ -21,6 +21,10 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
     the encoder is derived by inverting the normative decoder.
   - [`pack_msb_rows`] / [`unpack_msb_rows`] / [`row_bytes`] — MSB-first packing of fixed-width
     samples into byte-aligned rows, the sub-byte layout the TIFF-family raw formats share.
+- **Read both bit orders.** Beside the MSB-first [`BitReader`], [`LsbBitReader`] reads the
+  least-significant-bit-first order of VP8L's `ReadBits(n)` (RFC 9649 §3.3,
+  [`../../references/webp/`](../../references/webp)), bounds-checked with the failing byte offset
+  on every error.
 - **Own the Huffman table construction the JPEG family shares.** [`build_optimal_table`] is the
   ITU-T T.81 Annex K.2 optimal 16-bit length-limited table over measured symbol frequencies, for
   any alphabet of at most 256 symbols (JPEG DC/AC symbols, the lossless-JPEG difference categories
@@ -55,8 +59,8 @@ assert_eq!(leb128_len(300), 2);
 Ships both directions of the AV1 primitives — [`BitReader`] / [`BitWriter`], LEB128
 ([`write_leb128`] / [`leb128_len`]), and the [`SymbolDecoder`] / [`SymbolEncoder`] range coder.
 `gamut-av1` uses [`BitReader`], [`BitWriter`], [`write_leb128`] and [`SymbolEncoder`];
-[`SymbolDecoder`] has no workspace consumer yet. [`BitWriter`] also backs `gamut-tiff`'s CCITT
-coders. The crate further ships the MSB-first sample packing used by `gamut-dng`, and the T.81
+[`SymbolDecoder`] has no workspace consumer yet. [`BitWriter`] and [`BitReader`] also back
+`gamut-tiff`'s LZW and CCITT coders, and [`LsbBitReader`] is `gamut-webp`'s VP8L reader. The crate further ships the MSB-first sample packing used by `gamut-dng`, and the T.81
 Huffman table side ([`build_optimal_table`], [`CanonicalCodes`]) behind `gamut-jpeg`'s optimized
 tables and `gamut-dng`'s lossless JPEG, and the length-limited builder
 ([`build_length_limited_lengths`], [`canonical_codes`]) behind `gamut-webp`'s VP8L prefix codes.

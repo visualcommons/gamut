@@ -87,8 +87,8 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   software encode tail), heif (the shared item model, derivation walk and RGBA presentation),
   metadata (optional, `metadata` feature).
 - **gamut-webp** — WebP codec. ← core, bitstream (the length-limited Huffman builder and canonical
-  codes of the VP8L prefix coder), codec-abi, color, dsp, riff, metadata (optional, `metadata`
-  feature). Like gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw
+  codes of the VP8L prefix coder, and the LSB-first reader VP8L reads through), codec-abi, color,
+  dsp, riff, metadata (optional, `metadata` feature). Like gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw
   `MetadataBlock`-ready payloads, and wires them to the facade's typed models only behind that
   feature.
 - **gamut-heic** — decode-only HEIC: the HEVC binding over gamut-heif (`Hevc` + a `HeifDecoder`
