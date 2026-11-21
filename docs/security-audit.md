@@ -18,8 +18,8 @@ still the writer's choice. `docs/testing.md`'s per-crate table names the entry p
 "Fuzz entry point" column.
 
 1. **Limits on every untrusted-input entry point.** A decoder that sizes an output from a header
-   takes a caller-set `DecodeLimits` (`gamut_core::DecodeLimits`; gamut-heif's own type until
-   #1226 folds it in). Its default is bounded, and it is checked **against the header before any
+   takes a caller-set `DecodeLimits` (`gamut_core::DecodeLimits`; gamut-heif still defines its
+   own, until #1232 adopts the core type). Its default is bounded, and it is checked **against the header before any
    buffer is sized from it**. A parser whose output only borrows from the input, or is bounded
    by the input's length, needs no limit, and its row says why. Structural recursion (IFD trees,
    HEIF derivations, XML nesting) has a fixed depth cap.
@@ -76,7 +76,8 @@ reading.
 
 ## Where each crate stands
 
-The survey ran at `master@a0727765`. The full survey for each crate, with its allocation-site
+The survey ran at `master@a0727765`; the limits column and the defects below were restated at
+`master@eb3cd469`, after #1226 moved every decoder onto the workspace's default caps. The full survey for each crate, with its allocation-site
 list, is in its issue. "Index", "arith" and "cast" are the `indexing_slicing`,
 `arithmetic_side_effects` and `cast_possible_truncation` counts. `unwrap`, `expect`, `panic!` and
 `unreachable!` counted **zero** in every crate below, and every crate holds item 5.
@@ -93,7 +94,7 @@ list, is in its issue. "Index", "arith" and "cast" are the `indexing_slicing`,
 | `gamut-heif` | #1269 | Pass, with its own type | 32 | 84 | 17 | 3 | `heif_decode_limits` clean |
 | `gamut-heic` | #1270 | Pass | 8 | 11 | 0 | 2 | `heic_container` clean, `heic_hvcc` clean |
 | `gamut-isobmff` | #1271 | Not applicable | 29 | 15 | 25 | 13 | `isobmff_boxes` clean |
-| `gamut-tiff` | #1272 | Partial | 45 | 105 | 32 | 16 | `tiff_decode` clean, `ifd_read` clean |
+| `gamut-tiff` | #1272 | Pass (item 3 open: #1261) | 45 | 105 | 32 | 16 | `tiff_decode` clean, `ifd_read` clean |
 | `gamut-dng` | #1273 | Fail | 85 | 88 | 42 | 32 | `dng_decode` clean, `ifd_read` clean |
 | `gamut-ifd` | #1274 | Pass | 92 | 73 | 21 | 18 | `ifd_read` clean, `ifd_read_ledger` clean, `ifd_one_store` clean |
 | `gamut-deflate` | #1275 | Pass | 79 | 99 | 20 | 10 | `deflate_inflate_zlib` clean |
@@ -109,12 +110,14 @@ list, is in its issue. "Index", "arith" and "cast" are the `indexing_slicing`,
 - **#1260** — `gamut-xmp`: element nesting is unbounded. A 180 KB packet of 5 000 nested
   `rdf:parseType="Resource"` levels overflows the stack. Past 65 535 levels, quick-xml's `u16`
   nesting counter overflows.
-- `gamut-tiff`: `decode_strips` and `decode_tiles` reserve the whole page from header tags before
-  any strip is read. #1226 is repairing it, and #1272 tracks that it lands with a test.
+- `gamut-tiff`: the CCITT strip decoders (`compression/ccitt/mod.rs`, `compression/ccitt/g4.rs`)
+  size their output as `width.div_ceil(8) * rows` from the header before decoding a byte, so a
+  tiny strip can reserve a zeroed buffer of up to 32 MiB under the default caps. That is bounded
+  by item 1's limit but not by what the data can deliver, so it fails item 3; #1261 tracks it.
+  The page-level reservation the survey found in `decode_strips` and `decode_tiles` is fixed: a
+  page now grows as its strips and tiles decompress, and the header is checked against the limits
+  first.
 - `gamut-dng`: no caller-set limits, tracked by #1107.
-- A stale document: `tooling/gamut-fuzz/README.md` still says the WebP decoder has no caller-set
-  limit, although `WebpDecoder::with_limits` landed for #1025. #1226 is editing that row, so
-  #1264 records the correction and this branch leaves the row alone.
 
 **Out of the audit's scope.** `gamut-core`, `gamut-color`, `gamut-dsp`, `gamut-bitstream` and
 `gamut-tonemap` are shared primitives. They take caller-built values, and hostile bytes reach them
