@@ -229,13 +229,21 @@ pub(crate) fn quantize_levels(plane: &mut [u8], num_levels: usize) {
     for _ in 0..MAX_ITER {
         let mut q_sum = [0f64; 256];
         let mut q_count = [0f64; 256];
+        // Twice the midpoint between each pair of neighbouring centroids, summed exactly as the C
+        // original sums them inside its scan.
+        let bounds: Vec<f64> = inv_q_level[..num_levels]
+            .windows(2)
+            .map(|pair| pair[0] + pair[1])
+            .collect();
         let mut slot = 0;
         for s in min_s..=max_s {
-            while slot < num_levels - 1
-                && (2 * s) as f64 > inv_q_level[slot] + inv_q_level[slot + 1]
-            {
-                slot += 1;
-            }
+            // Move up past every boundary `s` lies above. The C original's `while (…) ++slot;`
+            // becomes a count over the remaining boundaries, so the scan is bounded by the slice
+            // it walks: a mutated step cannot spin it forever.
+            slot += bounds[slot..]
+                .iter()
+                .take_while(|&&bound| (2 * s) as f64 > bound)
+                .count();
             q_sum[slot] += (s * freq[s] as usize) as f64;
             q_count[slot] += f64::from(freq[s]);
             q_level[s] = slot;
@@ -623,6 +631,16 @@ mod tests {
             .collect()
     }
 
+    /// [`soft_alpha`] with ±16 of sensor-like grain on every pixel.
+    fn grainy_alpha(width: usize, height: usize) -> Vec<u8> {
+        let noise = pseudo_random_bytes(0x0a1f, width * height);
+        soft_alpha(width, height)
+            .iter()
+            .zip(&noise)
+            .map(|(&a, &n)| (i32::from(a) + i32::from(n % 33) - 16).clamp(0, 255) as u8)
+            .collect()
+    }
+
     /// The distinct values of `plane`, ascending.
     fn levels_of(plane: &[u8]) -> Vec<u8> {
         let mut levels = plane.to_vec();
@@ -681,6 +699,17 @@ mod tests {
         assert!(empty.is_empty());
     }
 
+    /// A value exactly on the boundary between two centroids stays with the lower one, as the C
+    /// original's strict `2 * s > c[k] + c[k + 1]` decides: over `0..=4` at three levels the
+    /// starting centroids `0`, `2`, `4` put `1` and `3` on boundaries, so they join `0` and `2`
+    /// and the middle centroid settles at `2.5`, which rounds to `3`.
+    #[test]
+    fn quantize_levels_keeps_a_tie_with_the_lower_centroid() {
+        let mut plane = vec![0u8, 1, 2, 3, 4];
+        quantize_levels(&mut plane, 3);
+        assert_eq!(plane, [0, 0, 3, 3, 4]);
+    }
+
     /// An inner centroid no value is nearest to keeps its position rather than becoming `0 / 0`:
     /// with three levels over `{0, 1, 2, 255}` the middle one (127.5) attracts nothing, and a NaN
     /// there would stop every value from reaching the top centroid.
@@ -730,12 +759,7 @@ mod tests {
     #[test]
     fn alph_size_is_non_increasing_as_alpha_quality_falls() {
         let (w, h) = (64, 48);
-        let noise = pseudo_random_bytes(0x0a1f, w * h);
-        let plane: Vec<u8> = soft_alpha(w, h)
-            .iter()
-            .zip(&noise)
-            .map(|(&a, &n)| (i32::from(a) + i32::from(n % 33) - 16).clamp(0, 255) as u8)
-            .collect();
+        let plane = grainy_alpha(w, h);
         let sizes: Vec<usize> = [100u8, 75, 74, 73, 72, 71]
             .into_iter()
             .chain((0..=70u8).rev().step_by(5))
@@ -764,9 +788,10 @@ mod tests {
     fn quantize_levels_matches_libwebp() {
         use libwebp_oracle::{libwebp_decode_rgba, libwebp_encode_lossy_rgba_alpha_quality};
         let (w, h) = (40usize, 32usize);
-        for (label, plane) in [
-            ("soft", soft_alpha(w, h)),
-            ("noise", pseudo_random_bytes(0x1206, w * h)),
+        for (label, w, h, plane) in [
+            ("soft", w, h, soft_alpha(w, h)),
+            ("noise", w, h, pseudo_random_bytes(0x1206, w * h)),
+            ("grainy", 160, 120, grainy_alpha(160, 120)),
         ] {
             let rgba: Vec<u8> = plane.iter().flat_map(|&a| [90, 140, 200, a]).collect();
             for quality in [0u8, 3, 22, 37, 69, 70, 71, 85, 99] {
