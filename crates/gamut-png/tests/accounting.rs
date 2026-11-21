@@ -623,7 +623,7 @@ fn the_chunk_ceiling_admits_exactly_its_own_count_and_refuses_one_more() {
 
 #[test]
 fn the_image_budget_is_the_callers_to_set() {
-    // `with_max_image_bytes` has to be observable, or the walk silently keeps the decoder's
+    // `with_max_image_bytes` has to be observable, or the walk silently keeps its own
     // default and `deconstruct_with_limits` is `deconstruct` with extra steps. A one-byte budget
     // turns an ordinary small file -- comfortably scanned under the default -- into a refusal.
     let png = common::minimal_png();
@@ -637,7 +637,7 @@ fn the_image_budget_is_the_callers_to_set() {
     assert_eq!(
         report.filters,
         FilterScan::Skipped(SkippedFilterScan::OverBudget),
-        "the caller's budget decides, not the decoder's default"
+        "the caller's budget decides, not the walk's default"
     );
 }
 
@@ -664,7 +664,7 @@ fn a_sound_file_is_both_read_and_verified() {
 #[test]
 fn an_over_budget_image_reports_everything_but_the_histogram() {
     // A hand-built IHDR claiming 2^30 x 2^30 with a tiny IDAT: the image it implies is far past
-    // the decoder's byte budget, so the walk must decline to inflate rather than try. Without
+    // the walk's default byte budget, so the walk must decline to inflate rather than try. Without
     // this the budget comparison is never exercised.
     let png = common::png_with_huge_ihdr();
     let report = deconstruct(&png).expect("an oversized header is reported, not an error");
@@ -673,7 +673,7 @@ fn an_over_budget_image_reports_everything_but_the_histogram() {
     assert_eq!(
         report.filters,
         FilterScan::Skipped(SkippedFilterScan::OverBudget),
-        "declined: over the decoder's byte budget"
+        "declined: over the walk's default byte budget"
     );
     assert!(
         report.native_bytes().expect("representable") > (64 << 20),
@@ -687,16 +687,16 @@ fn an_over_budget_image_reports_everything_but_the_histogram() {
     assert!(report.is_intact(), "{report:?}");
 }
 
-/// An image exactly at the decoder's byte budget must still be scanned.
+/// An image exactly at the walk's default byte budget must still be scanned.
 ///
 /// 4096x4096 RGBA8 is 67 108 864 native bytes — the default budget to the byte — but 67 112 960
 /// *filtered*, one more per scanline. A budget stated over the filtered stream therefore declined
-/// it, and `is_intact` reported an image the decoder decodes as damaged. Cheap despite the
+/// it, and `is_intact` reported an image within the budget as damaged. Cheap despite the
 /// dimensions: nothing allocates `filtered_len`, and the 16-byte IDAT stops the scan at the
 /// length check, so the reason is `LengthMismatch` — the file was scanned — and never
 /// `OverBudget`.
 #[test]
-fn an_image_at_the_decoders_byte_budget_is_still_scanned() {
+fn an_image_at_the_default_byte_budget_is_still_scanned() {
     let png = common::png_from_chunks(&[
         common::chunk(b"IHDR", &common::ihdr_payload(4096, 4096, 8, 6, 0)),
         common::chunk(b"IDAT", &common::zlib(&[0u8; 16])),
@@ -707,7 +707,7 @@ fn an_image_at_the_decoders_byte_budget_is_still_scanned() {
     assert_eq!(
         report.native_bytes(),
         Some(64 << 20),
-        "exactly the decoder's default budget"
+        "exactly the walk's default budget"
     );
     assert!(
         report.filtered_len > 64 << 20,

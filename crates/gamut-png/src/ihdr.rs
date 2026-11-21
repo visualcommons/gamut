@@ -178,8 +178,8 @@ mod tests {
 
     #[test]
     fn native_bytes_counts_unpacked_samples() {
-        // 4096x4096 RGBA8 is exactly the decoder's 64 MiB default budget — the image the two
-        // budgets used to disagree about.
+        // 4096x4096 RGBA8 is exactly the report walk's 64 MiB default budget — the image the
+        // decoder's and the walk's budgets used to disagree about.
         assert_eq!(native_bytes(4096, 4096, 4, 8), Some(64 << 20));
         // Depth 16 is the only depth that costs two bytes per sample...
         assert_eq!(native_bytes(4096, 4096, 4, 16), Some(128 << 20));

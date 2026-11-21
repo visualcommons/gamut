@@ -61,6 +61,15 @@
 //! [`NearLossless::max_deviation`]; alpha is never touched. Turning it on can never make a file
 //! larger, because the encoder codes both ways and keeps the smaller.
 //!
+//! # Alpha quality
+//!
+//! A transparent lossy image stores its alpha losslessly at the default alpha quality `100`.
+//! [`WebpEncoder::with_alpha_quality`] — libwebp's `alpha_quality` — trades that away below it:
+//! the `ALPH` plane is reduced to fewer levels before it is filtered and coded, by a port of
+//! libwebp's own level quantizer, so the decoded alpha is byte for byte the plane libwebp would
+//! produce. See [`WebpConfig::alpha_quality`] for the level mapping and the size trade-off. A
+//! lossless encode carries alpha inside its VP8L bitstream and keeps it bit-exact regardless.
+//!
 //! # Embedded metadata
 //!
 //! The three metadata chunks the container defines round-trip **verbatim**: an ICC colour profile

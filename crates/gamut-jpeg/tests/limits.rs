@@ -121,69 +121,81 @@ fn synthetic_pathological_sof_is_rejected_by_the_cap_first() {
     );
     assert_eq!(
         gray_error(
-            &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(64 << 20)),
+            &JpegDecoder::new().with_limits(
+                DecodeLimits::new()
+                    .with_max_width(u32::from(u16::MAX))
+                    .with_max_height(u32::from(u16::MAX))
+                    .with_max_pixels(u64::MAX)
+                    .with_max_image_bytes(64 << 20)
+            ),
             &jpeg
         ),
         "JPEG: image exceeds the size limit"
     );
 }
 
-#[test]
-fn default_budget_refuses_the_pathological_sof_and_usize_max_lifts_it() {
-    // SOI + three-component SOF0 declaring 65535×65535 (~12.9 GB native raster) + EOI. Both
-    // `new()` and `default()` refuse it at the SOF with no limit configured by the caller.
-    let jpeg = [
+/// SOI + a one-component SOF0 declaring `x` × `y` + EOI: no tables and no scan, so a limit error
+/// proves the geometry was refused at the SOF, and any other error that it got past the limits.
+fn gray_sof(x: u16, y: u16) -> [u8; 17] {
+    let [xh, xl] = x.to_be_bytes();
+    let [yh, yl] = y.to_be_bytes();
+    [
         0xFF, 0xD8, // SOI
-        0xFF, 0xC0, 0, 17, // SOF0, length 17
-        8, 0xFF, 0xFF, 0xFF, 0xFF, // P=8, Y=65535, X=65535
-        3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, // three components
+        0xFF, 0xC0, 0, 11, // SOF0, length 11
+        8, yh, yl, xh, xl, // P=8, Y, X
+        1, 1, 0x11, 0, // one component
         0xFF, 0xD9, // EOI
-    ];
-    let rgb_error = |decoder: &JpegDecoder| {
-        DecodeImage::<Rgb8>::decode_image(decoder, &jpeg)
-            .unwrap_err()
-            .static_message()
-            .unwrap()
-            .to_owned()
-    };
-    assert_eq!(
-        rgb_error(&JpegDecoder::new()),
-        "JPEG: image exceeds the size limit"
-    );
-    assert_eq!(
-        rgb_error(&JpegDecoder::default()),
-        "JPEG: image exceeds the size limit"
-    );
-    // Lifting the budget gets past the limit check, so the stream fails later for its missing scan.
+    ]
+}
+
+#[test]
+fn default_refuses_a_side_over_32768_that_t81_permits_and_widened_limits_lift_it() {
+    // T.81 Table B.2 lets X reach 65535; the workspace default stops at 32768 per side.
+    const DIMENSION: &str = "JPEG: image exceeds the dimension limit";
     assert_ne!(
-        rgb_error(
-            &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(usize::MAX))
-        ),
-        "JPEG: image exceeds the size limit"
+        gray_error(&JpegDecoder::new(), &gray_sof(32768, 1)),
+        DIMENSION
+    );
+    assert_eq!(
+        gray_error(&JpegDecoder::new(), &gray_sof(32769, 1)),
+        DIMENSION
+    );
+    assert_eq!(
+        gray_error(&JpegDecoder::default(), &gray_sof(1, 32769)),
+        DIMENSION
+    );
+    let widened = JpegDecoder::new().with_limits(
+        DecodeLimits::new()
+            .with_max_width(u32::from(u16::MAX))
+            .with_max_height(u32::from(u16::MAX))
+            .with_max_pixels(u64::MAX),
+    );
+    assert_ne!(
+        gray_error(&widened, &gray_sof(u16::MAX, u16::MAX)),
+        DIMENSION
     );
 }
 
 #[test]
-fn default_budget_is_exactly_64_mib_of_native_raster() {
-    // One-component 8192 × 8192 is exactly 64 MiB; one more row is over. The SOF alone decides it.
-    let sof = |height: u16| {
-        let [hi, lo] = height.to_be_bytes();
-        [
-            0xFF, 0xD8, // SOI
-            0xFF, 0xC0, 0, 11, // SOF0, length 11
-            8, hi, lo, 0x20, 0x00, // P=8, Y=height, X=8192
-            1, 1, 0x11, 0, // one component
-            0xFF, 0xD9, // EOI
-        ]
-    };
+fn default_pixel_cap_is_exactly_16384_squared() {
+    const DIMENSION: &str = "JPEG: image exceeds the dimension limit";
     assert_ne!(
-        gray_error(&JpegDecoder::new(), &sof(8192)),
-        "JPEG: image exceeds the size limit"
+        gray_error(&JpegDecoder::new(), &gray_sof(16384, 16384)),
+        DIMENSION
     );
     assert_eq!(
-        gray_error(&JpegDecoder::new(), &sof(8193)),
-        "JPEG: image exceeds the size limit"
+        gray_error(&JpegDecoder::new(), &gray_sof(16384, 16385)),
+        DIMENSION
     );
+}
+
+#[test]
+fn default_has_no_byte_budget_so_a_6000_by_4000_photograph_decodes() {
+    // 72 MB of RGB8, past the 64 MiB the default used to budget; libjpeg-turbo has no cap at all.
+    let decoded: ImageBuf<Rgb8> = JpegDecoder::new()
+        .decode_image(&rgb_jpeg(6000, 4000))
+        .unwrap();
+    assert_eq!(decoded.dimensions(), Dimensions::new(6000, 4000).unwrap());
 }
 
 #[test]

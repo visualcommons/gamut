@@ -8,9 +8,9 @@ use crate::error::CliError;
 /// Deconstructs a PNG and prints where its bytes went, then its C2PA section, exiting non-zero when
 /// the file is not a complete, undamaged datastream. The C2PA section never moves that verdict.
 pub(super) fn inspect_png(to: Target<'_>, data: &[u8]) -> Result<(), CliError> {
-    // Inspection budgets differently from decoding. `gamut::png::deconstruct`'s default matches
-    // the *decoder*'s, which guards a decode against hostile input; but a file this command
-    // declines to inflate is a file it cannot verify, and at the decoder's 64 MiB that is every
+    // Inspection budgets differently from the report walk's default. `gamut::png::deconstruct`
+    // keeps a 64 MiB budget, which guards a statistic against hostile input; but a file this
+    // command declines to inflate is a file it cannot verify, and at 64 MiB that is every
     // PNG past 4096x4096 RGBA8 -- an ordinary photograph. Reading it is the whole job, so the
     // ceiling is raised to a gigabyte: past any real image, short of unbounded.
     let limits = gamut::png::DeconstructLimits::default().with_max_image_bytes(1 << 30);

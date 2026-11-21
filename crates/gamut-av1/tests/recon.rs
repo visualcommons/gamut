@@ -697,12 +697,15 @@ fn rectangular_partitions_match_dav1d() {
 
 #[test]
 fn multi_tile_matches_dav1d() {
-    // Frames ≥ 2 superblocks wide are coded as two tile columns (§5.9.15). Each tile decodes
-    // independently: a block at the tile's left edge has no left neighbour, and a block at the
-    // tile's right edge must not treat the (not-yet-decoded) adjacent tile as an available
-    // above-right. Strong directional structure makes the mode search pick angles that read those
-    // edges, so dav1d byte-equality proves the per-tile reset, the tile-boundary neighbour
-    // availability, and the tile-group framing across every coefficient-CDF quantizer context.
+    // At `Tiling::new(1, 0)` — the pre-#1227 default, asked for explicitly now that the default is
+    // one tile — frames ≥ 2 superblocks wide are coded as two tile columns (§5.9.15), the second
+    // one narrow at 72 × 16 and 100 × 70, layouts `every_tile_layout_matches_both_decoders` does
+    // not reach. Each tile decodes independently: a block at the tile's left edge has no left
+    // neighbour, and a block at the tile's right edge must not treat the (not-yet-decoded)
+    // adjacent tile as an available above-right. Strong directional structure makes the mode
+    // search pick angles that read those edges, so dav1d byte-equality proves the per-tile reset,
+    // the tile-boundary neighbour availability, and the tile-group framing across every
+    // coefficient-CDF quantizer context.
     let directional = |x: u32, y: u32| {
         let vert = if (x / 2).is_multiple_of(2) { 210 } else { 30 } as u8;
         let horiz = if (y / 2).is_multiple_of(2) { 200 } else { 40 } as u8;
@@ -711,9 +714,29 @@ fn multi_tile_matches_dav1d() {
     };
     for &q in &[2u8, 20, 21, 90, 121, 255] {
         for &(w, h) in &[(72, 16), (100, 70), (130, 96)] {
-            check(&planes(w, h, directional), q);
+            let config = Av1EncodeConfig::new(q).with_tiling(Tiling::new(1, 0));
+            check_with(
+                encode_still_with_recon(&planes(w, h, directional), &config).unwrap(),
+                q,
+            );
         }
     }
+}
+
+#[test]
+fn a_default_config_codes_one_tile_that_both_decoders_reproduce() {
+    // #1227: the default layout is libaom's, one tile. A 200 × 150 frame is four superblocks wide
+    // and three high, so any multi-tile default would split it; the stream must carry exactly one
+    // tile, and libaom and dav1d must reconstruct it to the encoder's own reconstruction.
+    let p = planes(200, 150, |x, y| {
+        [(x * 3) as u8, (y * 5) as u8, (x ^ y) as u8]
+    });
+    let encoded = encode_still_with_recon(&p, &Av1EncodeConfig::new(40)).unwrap();
+    let info = gamut_av1::Av1Decoder::new()
+        .inspect(&encoded.still.obus)
+        .unwrap();
+    assert_eq!(info.tile_count, 1);
+    check_with(encoded, 40);
 }
 
 #[test]
@@ -1077,7 +1100,8 @@ fn subsampled_420_reconstruction_matches_both_decoders() {
         (33, 17),
         (64, 64),
         (40, 24),
-        // Wide enough for two tile columns, where the tile's left edge is a *luma* position that
+        // Wide enough for two tile columns at the `Tiling::new(1, 0)` this test asks for (the
+        // default is one tile since #1227), where the tile's left edge is a *luma* position that
         // prediction availability must compare against in each plane's own coordinates. A frame
         // narrower than this either has one tile or a second tile just one chroma block wide, and
         // passes either way.
@@ -1096,6 +1120,7 @@ fn subsampled_420_reconstruction_matches_both_decoders() {
             encode_still_with_recon(
                 &p,
                 &Av1EncodeConfig::new(40)
+                    .with_tiling(Tiling::new(1, 0))
                     .with_color(colour_for(MatrixCoefficients::Bt709, ColorRange::Full)),
             )
             .unwrap(),

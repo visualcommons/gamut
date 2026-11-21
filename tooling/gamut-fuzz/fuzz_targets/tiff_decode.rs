@@ -2,9 +2,11 @@
 //!
 //! `docs/testing.md`'s per-crate table names `TiffDecoder` as this crate's untrusted-input
 //! surface. The decoder is `#![forbid(unsafe_code)]` and refuses any page or tile past its
-//! default `DecodeLimits` byte budget (`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`, 64 MiB) before
-//! allocating for it, so a hostile file must end in a typed error rather than a panic, a hang or a
-//! runaway allocation — the three things libFuzzer itself detects.
+//! `DecodeLimits` before allocating for it. The default (32768 per side, 16384² pixels, no byte
+//! budget, #1226) admits a header-sized reservation past libFuzzer's malloc limit, so the target
+//! sets the 64 MiB byte budget a malloc-limited caller sets, and a hostile file must end in a
+//! typed error rather than a panic, a hang or a runaway allocation — the three things libFuzzer
+//! itself detects.
 //!
 //! ## The check beyond the crash oracle
 //!
@@ -81,8 +83,11 @@
 
 use gamut_core::convert::ConvertPolicy;
 use gamut_core::{Pixel, Rgb8};
-use gamut_tiff::TiffDecoder;
+use gamut_tiff::{DecodeLimits, TiffDecoder};
 use libfuzzer_sys::fuzz_target;
+
+/// The stored-sample budget the target sets: 64 MiB, the decoder's default before #1226.
+const MAX_IMAGE_BYTES: usize = 64 << 20;
 
 /// How many pages of a multi-page file one execution decodes.
 ///
@@ -92,7 +97,9 @@ use libfuzzer_sys::fuzz_target;
 const MAX_PAGES: usize = 4;
 
 fuzz_target!(|data: &[u8]| {
-    let decoder = TiffDecoder::new().with_convert_policy(ConvertPolicy::permissive());
+    let decoder = TiffDecoder::new()
+        .with_limits(DecodeLimits::new().with_max_image_bytes(MAX_IMAGE_BYTES))
+        .with_convert_policy(ConvertPolicy::permissive());
 
     // A file whose chain does not parse is simply refused. The other entry points are not driven
     // for it: `page_count` is `read(data)?.ifds.len()`, and `info`/`decode_page` both begin with

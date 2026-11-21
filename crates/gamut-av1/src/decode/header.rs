@@ -470,6 +470,9 @@ mod tests {
 
     /// The headers the encoder writes for a frame whose in-loop filters are `filters`, with luma
     /// restoration signalled when `luma_lr` and the block variation `variation`.
+    ///
+    /// The frame is laid out at `Tiling::new(1, 0)` (two tile columns from two superblocks wide),
+    /// not the one-tile default, so the parser also reads the multi-tile `tile_info()` fields.
     pub(super) fn parse_encoder_headers_with(
         width: u32,
         height: u32,
@@ -488,7 +491,7 @@ mod tests {
             crate::filter::superres_downscaled_width(width as usize, usize::from(cd) + 9)
         });
         let layout = crate::headers::TileLayout::resolve(
-            crate::headers::Tiling::default(),
+            crate::headers::Tiling::new(1, 0),
             coded_width,
             height as usize,
             cfg.seq_level_idx_0,
@@ -644,7 +647,7 @@ mod tests {
 
     #[test]
     fn tile_grid_matches_the_encoders_split() {
-        // 128 px wide is 2 superblocks, so the encoder emits two tile columns.
+        // 128 px wide is 2 superblocks, so the helper's `Tiling::new(1, 0)` codes two tile columns.
         let (_, fh) = parse_encoder_headers(128, 64, 100, None);
         assert_eq!(fh.tile_info.tile_cols, 2);
         assert_eq!(fh.tile_info.tile_rows, 1);

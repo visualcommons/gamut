@@ -32,7 +32,8 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
   robustness corpus. Rate/entropy tuning under the `Effort` ladder landed with issue #32.
 - **M3** — ✅ **done**: Extended container (encode + decode) — `VP8X` feature header + alpha (`ALPH`,
   raw and lossless), simple→extended promotion, RGBA API (`encode_rgba8` / `decode_to_rgba8`).
-  libwebp recovers gamut's exact alpha and gamut recovers libwebp's. Alpha is a flagship still-image
+  libwebp recovers gamut's exact alpha (at the default alpha quality `100`; below it, the
+  level-reduced plane libwebp itself would produce — issue #1206) and gamut recovers libwebp's. Alpha is a flagship still-image
   feature; `VP8X` is its enabler.
 - **M4** — Color & metadata (**in scope**, embed on encode + preserve on decode): `ICCP` ICC
   profiles and `EXIF` / `XMP ` metadata are ✅ **done** (issue #302) — `WebpEncoder::with_icc_profile`
@@ -303,10 +304,11 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | `gamut-codec-abi` adapters (`AbiWebpDecoder` / `AbiWebpEncoder`, big-endian `VP8_CODEC_ID` / `VP8L_CODEC_ID`) | issue #241 | ✅ | M6 |
 | `Vp8Planes`: the seam's VP8 raster, 4:2:0 by construction (`from_planes` builds it from samples; `TryFrom<Planar8>` refuses any other layout), carried by `DecodedWebp::Yuv420` / `WebpRasterRef::Yuv420`, whose `dimensions()` are therefore infallible (breaking: they returned `Result<Dimensions>`) | issue #1128 | ✅ | M6 |
 | `Effort` compression ladder (libwebp `method` `0..=6`) on both codestreams | issue #261 | ✅ | M4 |
-| decoder resource limits (`with_limits(DecodeLimits)`, 64 MiB default at 4 B/px, sides at 16384), checked on the `VP8 `/`VP8L` header before allocation and backend dispatch | issue #1025 | ✅ | M6 |
+| decoder resource limits (`with_limits(DecodeLimits)`: the workspace default of 32768 per side and 16384² pixels, issue #1226; an opt-in byte budget at 4 B/px), checked on the `VP8 `/`VP8L` header before allocation and backend dispatch | issue #1025 | ✅ | M6 |
 | VP8L candidate-plan search: transform chain, palette order, cache size, grouping, LZ77 depth | issue #31 | ✅ | M4 |
 | VP8 two-pass entropy: derived coefficient probabilities + measured skip probability | issue #32 | ✅ | M4 |
 | VP8 dead-zone quantizer (AC only; DC stays round-to-nearest) | issue #32 | ✅ | M4 |
 | lossy `quality` → base quantizer along libwebp's `QualityToCompression` curve, libwebp-differential at every `0..=100` (SNS off, one segment) | issue #1204 | ✅ | M4 |
 | near-lossless preprocessing (`NearLossless`, host-side RGB quantization before VP8L) | issue #261 | ✅ | M4 |
+| lossy alpha quality (`WebpConfig::alpha_quality` / `with_alpha_quality`, libwebp `alpha_quality`): below `100` the `ALPH` plane is level-reduced by a port of libwebp's `QuantizeLevels` (`P = 1`) before filtering; byte-identical to libwebp's quantized plane (inline differential + `tests/oracle.rs`). CLI exposure ☐, with the wasm / ffi row below | issue #1206 | ✅ | M4 |
 | wasm / ffi bindings for WebP | gamut-{wasm,ffi} | ☐ | future |
