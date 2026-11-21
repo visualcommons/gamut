@@ -290,7 +290,7 @@ impl AvifConfig {
 const MIN_TILE_AREA: u64 = 512 * 512;
 /// The most tiles [`auto_tiling`] asks for: the fixed `threads = 8` libavif's `autoTiling` passes
 /// to `avifSetTileConfiguration`, whatever its `maxThreads`. libavif's own `kMaxTiles = 32` cap
-/// is below this one's reach, so it is not restated.
+/// lies above this one and never binds, so it is not restated.
 const AUTO_TILES: u64 = 8;
 
 /// libavif's `autoTiling` rule for a frame of `dims` (`avifSetTileConfiguration` and
