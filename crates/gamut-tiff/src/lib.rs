@@ -101,7 +101,7 @@ mod writer;
 
 pub use decoder::TiffDecoder;
 pub use deconstruct::deconstruct;
-pub use encoder::{TiffEncodeReport, TiffEncoder};
+pub use encoder::{TiffEncodeReport, TiffEncoder, TiffPixel};
 // The core types this crate's own signatures take (`TiffDecoder::with_limits`,
 // `TiffDecoder::with_convert_policy`, `TiffEncoder::encode_indexed8`), so a caller needs no direct
 // gamut-core dependency.

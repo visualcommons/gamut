@@ -56,7 +56,8 @@ compression schemes land additively on this frozen surface (see Status).
 
 **Implemented and conformance-checked against libtiff** (issue #107):
 
-- **Structure** — byte-order header, IFD/tag read & write, strips and tiles, multi-page documents.
+- **Structure** — byte-order header, IFD/tag read & write, strips and tiles, multi-page documents
+  of any encodable pixel layout (`TiffEncoder::encode_pages`).
 - **Colour modes** — grayscale, grey + alpha, RGB and RGBA at 8 and 16 bits;
   CMYK (8-bit encode, 8- or 16-bit decode); 8-bit palette; 1-bit bilevel. Alpha is
   read by its `ExtraSamples` code and presented unassociated: premultiplied alpha is

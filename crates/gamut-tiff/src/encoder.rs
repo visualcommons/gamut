@@ -4,8 +4,8 @@ use std::borrow::Cow;
 
 use gamut_core::c2pa::MIN_STORE_LEN;
 use gamut_core::{
-    Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
-    ImageRef, Indexed8, Palette, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Bilevel, Cmyk8, ColorModel, Dimensions, EncodeImage, Error, Gray8, Gray16, GrayAlpha8,
+    GrayAlpha16, ImageRef, Indexed8, Palette, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_exif::Exif;
 use gamut_ifd::{
@@ -15,6 +15,7 @@ use gamut_ifd::{
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
+use crate::info::ExtraSample;
 use crate::metadata::{MetadataNotice, TiffMetadata};
 use crate::palette::Palette8;
 use crate::{tags, writer};
@@ -23,12 +24,149 @@ use crate::{tags, writer};
 /// entry, which would select a colour the caller never gave.
 pub(crate) const INDEX_OUT_OF_RANGE: &str = "TIFF: palette index out of range";
 
-/// The on-disk sample layout of an image, shared by the 8-bit and bilevel encode paths.
+/// The on-disk sample layout of an image, shared by every encode path.
 struct SampleLayout {
     spp: usize,
     bits_per_sample: u16,
     stored_row_bytes: usize,
     photometric: PhotometricInterpretation,
+    /// Whether the last sample is alpha, written as unassociated (`ExtraSamples = 2`, §18).
+    alpha: bool,
+}
+
+impl SampleLayout {
+    /// The layout pixel type `P` is stored in, at `width` pixels a row.
+    fn of<P: TiffPixel>(width: u32) -> Self {
+        let spp = P::CHANNELS;
+        let bits = usize::from(P::BITS_PER_SAMPLE);
+        Self {
+            spp,
+            bits_per_sample: P::BITS_PER_SAMPLE,
+            // Sub-byte samples pack across the row and pad it to a byte (§3); whole-byte ones
+            // divide exactly.
+            stored_row_bytes: (width as usize * spp * bits).div_ceil(8),
+            photometric: P::PHOTOMETRIC,
+            alpha: matches!(P::MODEL, ColorModel::GrayAlpha | ColorModel::Rgba),
+        }
+    }
+}
+
+/// A pixel layout [`TiffEncoder`] writes, and so one [`TiffEncoder::encode_pages`] takes.
+///
+/// Sealed: implemented for exactly the layouts [`EncodeImage`] is implemented for, each stored
+/// chunky (`PlanarConfiguration = 1`) as:
+///
+/// | Pixel | `PhotometricInterpretation` | `BitsPerSample` | `ExtraSamples` |
+/// |---|---|---|---|
+/// | [`Gray8`], [`Gray16`] | `BlackIsZero` (1) | 8, 16 | — |
+/// | [`GrayAlpha8`], [`GrayAlpha16`] | `BlackIsZero` (1) | 8, 16 | 2 (unassociated alpha) |
+/// | [`Rgb8`], [`Rgb16`] | `RGB` (2) | 8, 16 | — |
+/// | [`Rgba8`], [`Rgba16`] | `RGB` (2) | 8, 16 | 2 (unassociated alpha) |
+/// | [`Cmyk8`] | `Separated` (5) | 8 | — |
+/// | [`Bilevel`] | `BlackIsZero` (1), `0` = black | 1 | — |
+///
+/// 16-bit samples are written in the encoder's byte order. [`Indexed8`] is not one: palette
+/// colour needs its colour table beside the pixels, so it has its own entry point,
+/// [`TiffEncoder::encode_indexed8`].
+pub trait TiffPixel: Pixel + sealed::Stored {}
+
+impl TiffPixel for Gray8 {}
+impl TiffPixel for GrayAlpha8 {}
+impl TiffPixel for Rgb8 {}
+impl TiffPixel for Rgba8 {}
+impl TiffPixel for Cmyk8 {}
+impl TiffPixel for Bilevel {}
+impl TiffPixel for Gray16 {}
+impl TiffPixel for GrayAlpha16 {}
+impl TiffPixel for Rgb16 {}
+impl TiffPixel for Rgba16 {}
+
+mod sealed {
+    use std::borrow::Cow;
+
+    use gamut_core::{
+        Bilevel, Cmyk8, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Pixel, Rgb8, Rgb16,
+        Rgba8, Rgba16,
+    };
+    use gamut_ifd::ByteOrder;
+
+    use crate::ifd::PhotometricInterpretation;
+
+    /// How a [`TiffPixel`](super::TiffPixel) is stored; the seal on it.
+    pub trait Stored: Pixel {
+        /// The `PhotometricInterpretation` (262) the layout is written under.
+        const PHOTOMETRIC: PhotometricInterpretation;
+        /// The `BitsPerSample` (258) of every sample.
+        const BITS_PER_SAMPLE: u16;
+
+        /// The image's samples as the file stores them, rows packed back to back in `order`.
+        fn packed(image: ImageRef<'_, Self>, order: ByteOrder) -> Cow<'_, [u8]>;
+    }
+
+    /// 8-bit layouts are stored as they are held: the samples are the bytes.
+    macro_rules! stored_8bit {
+        ($($pixel:ty => $photometric:ident;)*) => {$(
+            impl Stored for $pixel {
+                const PHOTOMETRIC: PhotometricInterpretation = PhotometricInterpretation::$photometric;
+                const BITS_PER_SAMPLE: u16 = 8;
+
+                fn packed(image: ImageRef<'_, Self>, _: ByteOrder) -> Cow<'_, [u8]> {
+                    Cow::Borrowed(image.as_samples())
+                }
+            }
+        )*};
+    }
+
+    /// 16-bit layouts are serialised into the file's byte order: one allocation is the format's
+    /// unavoidable cost, and the buffer is owned so the predictor can difference it in place.
+    macro_rules! stored_16bit {
+        ($($pixel:ty => $photometric:ident;)*) => {$(
+            impl Stored for $pixel {
+                const PHOTOMETRIC: PhotometricInterpretation = PhotometricInterpretation::$photometric;
+                const BITS_PER_SAMPLE: u16 = 16;
+
+                fn packed(image: ImageRef<'_, Self>, order: ByteOrder) -> Cow<'_, [u8]> {
+                    Cow::Owned(image.as_samples().iter().flat_map(|&s| order.pack_u16(s)).collect())
+                }
+            }
+        )*};
+    }
+
+    stored_8bit! {
+        Gray8 => BlackIsZero;
+        GrayAlpha8 => BlackIsZero;
+        Rgb8 => Rgb;
+        Rgba8 => Rgb;
+        Cmyk8 => Cmyk;
+    }
+
+    stored_16bit! {
+        Gray16 => BlackIsZero;
+        GrayAlpha16 => BlackIsZero;
+        Rgb16 => Rgb;
+        Rgba16 => Rgb;
+    }
+
+    impl Stored for Bilevel {
+        const PHOTOMETRIC: PhotometricInterpretation = PhotometricInterpretation::BlackIsZero;
+        const BITS_PER_SAMPLE: u16 = 1;
+
+        /// Packs one byte per pixel (`0` = black, non-zero = white) MSB-first into bits, each row
+        /// padded to a byte.
+        fn packed(image: ImageRef<'_, Self>, _: ByteOrder) -> Cow<'_, [u8]> {
+            let w = image.width() as usize;
+            let stored_row_bytes = w.div_ceil(8);
+            let mut packed = vec![0u8; stored_row_bytes * image.height() as usize];
+            for (row, dst) in image.rows().zip(packed.chunks_exact_mut(stored_row_bytes)) {
+                for (x, &p) in row.iter().enumerate() {
+                    if p != 0 {
+                        dst[x / 8] |= 0x80 >> (x % 8);
+                    }
+                }
+            }
+            Cow::Owned(packed)
+        }
+    }
 }
 
 /// Encoder for baseline TIFF images.
@@ -250,7 +388,7 @@ impl TiffEncoder {
     ///
     /// The store's entry goes in the **last IFD of the main chain** and its bytes at the **end of
     /// the file**, as C2PA 2.4 §A.3.6 requires — for a single-image encode IFD 0, for
-    /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) the last page — and
+    /// [`encode_pages`](Self::encode_pages) the last page — and
     /// [`encode_with_report`](Self::encode_with_report) (or [`c2pa_exclusions`] over the produced
     /// bytes) reports its two exclusion ranges (§18.5.5).
     ///
@@ -403,14 +541,14 @@ impl TiffEncoder {
     /// a non-empty `out` rebases them by `out.len()` before the call. They are read back out of
     /// the bytes just written by [`c2pa_exclusions`], the same locator a verifier uses — which is
     /// also how the entry points this method cannot reach (`encode_indexed8`,
-    /// `encode_pages_rgb8`) report their store.
+    /// `encode_pages`) report their store.
     ///
     /// # Errors
     ///
     /// As [`encode_image`](EncodeImage::encode_image). The configuration refusals below are
     /// shared by every entry point of this encoder — `encode_image`,
     /// [`encode_indexed8`](Self::encode_indexed8) and
-    /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) alike — and each is an
+    /// [`encode_pages`](Self::encode_pages) alike — and each is an
     /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error. These are raised **before any pixel work**:
     ///
     /// * the Exif or GPS sub-IFD supplied through [`with_tiff_metadata`](Self::with_tiff_metadata)
@@ -513,6 +651,7 @@ impl TiffEncoder {
                 bits_per_sample: 8,
                 stored_row_bytes: w,
                 photometric: PhotometricInterpretation::Palette,
+                alpha: false,
             },
             &[(tags::COLOR_MAP, Value::Short(colormap))],
             store,
@@ -520,70 +659,18 @@ impl TiffEncoder {
         )
     }
 
-    fn encode_8bit(
-        &self,
-        pixels: &[u8],
-        dims: Dimensions,
-        spp: usize,
-        photometric: PhotometricInterpretation,
-        out: &mut Vec<u8>,
-    ) -> Result<usize> {
-        // The caller is an EncodeImage impl handing us an ImageRef-validated buffer, so
-        // pixels.len() == width * height * spp holds and the product cannot overflow.
-        let store = self.checked_store()?;
-        let row_bytes = dims.width() as usize * spp;
-        debug_assert_eq!(pixels.len(), row_bytes * dims.height() as usize);
-        self.encode_packed(
-            pixels,
-            dims,
-            &SampleLayout {
-                spp,
-                bits_per_sample: 8,
-                stored_row_bytes: row_bytes,
-                photometric,
-            },
-            &[],
-            store,
-            out,
-        )
-    }
-
-    /// Serialises 16-bit samples into this encoder's byte order and lays them out like
-    /// [`Self::encode_8bit`].
+    /// Encodes one image of a [`TiffPixel`] layout: every [`EncodeImage`] impl.
     ///
     /// No `SampleFormat` tag is written: unsigned integer is the TIFF 6.0 default and the only
     /// format these impls emit, so writing it would be redundant.
-    fn encode_16bit(
-        &self,
-        samples: &[u16],
-        dims: Dimensions,
-        spp: usize,
-        photometric: PhotometricInterpretation,
-        extra_fields: &[(u16, Value)],
-        out: &mut Vec<u8>,
-    ) -> Result<usize> {
-        // Before the serialisation buffer below, so a bad C2PA configuration costs no allocation.
+    fn encode_one<P: TiffPixel>(&self, image: ImageRef<'_, P>, out: &mut Vec<u8>) -> Result<usize> {
+        // Before the packing pass below, so a bad C2PA configuration costs no pixel work.
         let store = self.checked_store()?;
-        // As in `encode_8bit`, the caller hands us an ImageRef-validated buffer.
-        let row_bytes = dims.width() as usize * spp * 2;
-        debug_assert_eq!(samples.len() * 2, row_bytes * dims.height() as usize);
-        // The packed buffer must exist in *file* order, and must be owned so the predictor can
-        // difference it in place — one allocation is the format's unavoidable serialisation cost.
-        let order = self.order;
-        let mut packed = Vec::with_capacity(samples.len() * 2);
-        for &sample in samples {
-            packed.extend_from_slice(&order.pack_u16(sample));
-        }
         self.encode_packed(
-            &packed,
-            dims,
-            &SampleLayout {
-                spp,
-                bits_per_sample: 16,
-                stored_row_bytes: row_bytes,
-                photometric,
-            },
-            extra_fields,
+            &P::packed(image, self.order),
+            image.dimensions(),
+            &SampleLayout::of::<P>(image.width()),
+            &[],
             store,
             out,
         )
@@ -595,12 +682,11 @@ impl TiffEncoder {
     /// `store` is the already-resolved C2PA manifest store (or reservation) to place at the end of
     /// the file. It is a parameter rather than something resolved here so that every entry point
     /// has to call [`c2pa_store`](Self::c2pa_store) — and so take its refusal — *before* whatever
-    /// pixel work it does to produce `packed`, which for
-    /// [`encode_16bit`](Self::encode_16bit) is a byte-order-corrected copy of the samples and for
-    /// the [`Bilevel`] impl a whole bit-packing pass. That is what makes
-    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved)'s promise to fail before any pixel work
-    /// true on every path rather than on most of them, and it is the same shape
-    /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) already uses.
+    /// pixel work it does to produce `packed`, which for a 16-bit layout is a
+    /// byte-order-corrected copy of the samples and for [`Bilevel`] a whole bit-packing pass.
+    /// That is what makes [`with_c2pa_reserved`](Self::with_c2pa_reserved)'s promise to fail
+    /// before any pixel work true on every path rather than on most of them, and it is the same
+    /// shape [`encode_pages`](Self::encode_pages) uses.
     fn encode_packed(
         &self,
         packed: &[u8],
@@ -690,6 +776,7 @@ impl TiffEncoder {
         ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
+        set_extra_samples(&mut ifd, layout);
         if predicting {
             ifd.set(
                 tags::PREDICTOR,
@@ -702,18 +789,45 @@ impl TiffEncoder {
         Ok((ifd, strips))
     }
 
-    /// Encodes several 8-bit [`Rgb8`] images as the pages of one multi-page TIFF.
+    /// Encodes several images of one [`TiffPixel`] layout as the pages of one multi-page TIFF.
     ///
-    /// Each page is a validated [`ImageRef`]. Returns the number of bytes written.
+    /// Each page is a validated [`ImageRef`] and may have its own dimensions; each is stored as
+    /// [`encode_image`](EncodeImage::encode_image) stores that layout, and marked a page of a
+    /// multi-page document (`NewSubfileType` bit 1, `PageNumber` `i` of `pages.len()`). Pages are
+    /// always written as strips: [`with_tiling`](Self::with_tiling) applies only to single-image
+    /// entry points. Metadata goes in the first page's IFD and the C2PA store's entry in the last
+    /// (C2PA 2.4 §A.3.6). Returns the number of bytes written.
+    ///
+    /// ```
+    /// use gamut_core::{DecodeImage, Dimensions, GrayAlpha16, ImageBuf, ImageRef};
+    /// use gamut_tiff::{TiffDecoder, TiffEncoder};
+    ///
+    /// let first = [100u16, 65535, 200, 0];
+    /// let second = [7u16, 32768];
+    /// let pages = [
+    ///     ImageRef::<GrayAlpha16>::new(&first, Dimensions::new(2, 1)?)?,
+    ///     ImageRef::<GrayAlpha16>::new(&second, Dimensions::new(1, 1)?)?,
+    /// ];
+    /// let mut tiff = Vec::new();
+    /// TiffEncoder::new().encode_pages(&pages, &mut tiff)?;
+    ///
+    /// let decoder = TiffDecoder::new();
+    /// assert_eq!(decoder.page_count(&tiff)?, 2);
+    /// let page: ImageBuf<GrayAlpha16> = decoder.decode_page_as(&tiff, 1)?;
+    /// assert_eq!(page.as_samples(), &second);
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if `pages`
-    /// is empty, and on any of the configuration
-    /// refusals [`encode_with_report`](Self::encode_with_report) lists.
-    pub fn encode_pages_rgb8(
+    /// is empty, on any of the configuration refusals
+    /// [`encode_with_report`](Self::encode_with_report) lists, and otherwise as
+    /// [`encode_image`](EncodeImage::encode_image) fails for the same layout and compression in
+    /// strips.
+    pub fn encode_pages<P: TiffPixel>(
         &self,
-        pages: &[ImageRef<'_, Rgb8>],
+        pages: &[ImageRef<'_, P>],
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         if pages.is_empty() {
@@ -725,21 +839,15 @@ impl TiffEncoder {
         let store = self.checked_store()?;
         let total = pages.len() as u16;
         let mut images: Vec<(Ifd, Vec<Vec<u8>>)> = Vec::with_capacity(pages.len());
-        for (i, page) in pages.iter().enumerate() {
-            let row_bytes = page.width() as usize * 3;
+        for (i, &page) in pages.iter().enumerate() {
             let extra = [
                 (tags::NEW_SUBFILE_TYPE, Value::Long(vec![2])), // bit 1: page of a multi-page image
                 (tags::PAGE_NUMBER, Value::Short(vec![i as u16, total])),
             ];
             images.push(self.build_strip_image(
-                page.as_samples(),
+                &P::packed(page, self.order),
                 page.dimensions(),
-                &SampleLayout {
-                    spp: 3,
-                    bits_per_sample: 8,
-                    stored_row_bytes: row_bytes,
-                    photometric: PhotometricInterpretation::Rgb,
-                },
+                &SampleLayout::of::<P>(page.width()),
                 &extra,
             )?);
         }
@@ -898,6 +1006,7 @@ impl TiffEncoder {
         ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
+        set_extra_samples(&mut ifd, layout);
         if predicting {
             ifd.set(
                 tags::PREDICTOR,
@@ -917,179 +1026,29 @@ impl TiffEncoder {
     }
 }
 
-impl EncodeImage<Gray8> for TiffEncoder {
-    fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_8bit(
-            image.as_samples(),
-            image.dimensions(),
-            1,
-            PhotometricInterpretation::BlackIsZero,
-            out,
-        )
-    }
-}
-
-impl EncodeImage<Rgb8> for TiffEncoder {
-    fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_8bit(
-            image.as_samples(),
-            image.dimensions(),
-            3,
-            PhotometricInterpretation::Rgb,
-            out,
-        )
-    }
-}
-
-impl EncodeImage<Cmyk8> for TiffEncoder {
-    /// `PhotometricInterpretation = Separated` (5); each sample is ink coverage (0 = 0 %, 255 = 100 %).
-    fn encode_image(&self, image: ImageRef<'_, Cmyk8>, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_8bit(
-            image.as_samples(),
-            image.dimensions(),
-            4,
-            PhotometricInterpretation::Cmyk,
-            out,
-        )
-    }
-}
-
-impl EncodeImage<Rgba8> for TiffEncoder {
-    /// Stores the fourth sample as *unassociated* alpha (`ExtraSamples = 2`, not premultiplied).
-    fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
-        let store = self.checked_store()?;
-        let row_bytes = image.width() as usize * 4;
-        self.encode_packed(
-            image.as_samples(),
-            image.dimensions(),
-            &SampleLayout {
-                spp: 4,
-                bits_per_sample: 8,
-                stored_row_bytes: row_bytes,
-                photometric: PhotometricInterpretation::Rgb,
-            },
-            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
-            store,
-            out,
-        )
-    }
-}
-
-impl EncodeImage<GrayAlpha8> for TiffEncoder {
-    /// `PhotometricInterpretation = BlackIsZero` (1) with the second sample stored as
-    /// *unassociated* alpha (`ExtraSamples = 2`), matching the [`Rgba8`] impl.
-    fn encode_image(&self, image: ImageRef<'_, GrayAlpha8>, out: &mut Vec<u8>) -> Result<usize> {
-        let store = self.checked_store()?;
-        let row_bytes = image.width() as usize * 2;
-        self.encode_packed(
-            image.as_samples(),
-            image.dimensions(),
-            &SampleLayout {
-                spp: 2,
-                bits_per_sample: 8,
-                stored_row_bytes: row_bytes,
-                photometric: PhotometricInterpretation::BlackIsZero,
-            },
-            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
-            store,
-            out,
-        )
-    }
-}
-
-impl EncodeImage<GrayAlpha16> for TiffEncoder {
-    /// As the [`GrayAlpha8`] impl, with two 16-bit samples per pixel written in the encoder's
-    /// byte order.
-    fn encode_image(&self, image: ImageRef<'_, GrayAlpha16>, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_16bit(
-            image.as_samples(),
-            image.dimensions(),
-            2,
-            PhotometricInterpretation::BlackIsZero,
-            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
-            out,
-        )
-    }
-}
-
-impl EncodeImage<Gray16> for TiffEncoder {
-    /// `PhotometricInterpretation = BlackIsZero` (1), one 16-bit sample per pixel written in the
-    /// encoder's byte order.
-    fn encode_image(&self, image: ImageRef<'_, Gray16>, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_16bit(
-            image.as_samples(),
-            image.dimensions(),
-            1,
-            PhotometricInterpretation::BlackIsZero,
-            &[],
-            out,
-        )
-    }
-}
-
-impl EncodeImage<Rgb16> for TiffEncoder {
-    /// `PhotometricInterpretation = RGB` (2), three 16-bit samples per pixel written in the
-    /// encoder's byte order.
-    fn encode_image(&self, image: ImageRef<'_, Rgb16>, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_16bit(
-            image.as_samples(),
-            image.dimensions(),
-            3,
-            PhotometricInterpretation::Rgb,
-            &[],
-            out,
-        )
-    }
-}
-
-impl EncodeImage<Rgba16> for TiffEncoder {
-    /// Stores the fourth sample as *unassociated* alpha (`ExtraSamples = 2`, not premultiplied),
-    /// matching the 8-bit [`Rgba8`] impl.
-    fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_16bit(
-            image.as_samples(),
-            image.dimensions(),
-            4,
-            PhotometricInterpretation::Rgb,
-            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
-            out,
-        )
-    }
-}
-
-impl EncodeImage<Bilevel> for TiffEncoder {
-    /// Packs one byte per pixel (`0` = black, non-zero = white) MSB-first into bits, `BlackIsZero`.
-    fn encode_image(&self, image: ImageRef<'_, Bilevel>, out: &mut Vec<u8>) -> Result<usize> {
-        // Before the bit-packing pass below, so a bad C2PA configuration costs no pixel work.
-        let store = self.checked_store()?;
-        let (w, h) = (image.width() as usize, image.height() as usize);
-        let pixels = image.as_samples();
-        let stored_row_bytes = w.div_ceil(8);
-        let mut packed = vec![0u8; stored_row_bytes * h];
-        for y in 0..h {
-            let row = &pixels[y * w..(y + 1) * w];
-            let dst = &mut packed[y * stored_row_bytes..(y + 1) * stored_row_bytes];
-            for (x, &p) in row.iter().enumerate() {
-                if p != 0 {
-                    dst[x / 8] |= 0x80 >> (x % 8);
-                }
+/// One [`EncodeImage`] impl per [`TiffPixel`] layout, each storing it as that trait's table says.
+macro_rules! encode_image {
+    ($($pixel:ty),*) => {$(
+        impl EncodeImage<$pixel> for TiffEncoder {
+            fn encode_image(&self, image: ImageRef<'_, $pixel>, out: &mut Vec<u8>) -> Result<usize> {
+                self.encode_one(image, out)
             }
         }
-        self.encode_packed(
-            &packed,
-            image.dimensions(),
-            &SampleLayout {
-                spp: 1,
-                bits_per_sample: 1,
-                stored_row_bytes,
-                photometric: PhotometricInterpretation::BlackIsZero,
-            },
-            &[],
-            store,
-            out,
-        )
-    }
+    )*};
 }
+
+encode_image!(
+    Gray8,
+    GrayAlpha8,
+    Rgb8,
+    Rgba8,
+    Cmyk8,
+    Bilevel,
+    Gray16,
+    GrayAlpha16,
+    Rgb16,
+    Rgba16
+);
 
 /// Whether `variant`'s count word is too narrow to describe a `len`-byte C2PA manifest store.
 ///
@@ -1135,6 +1094,17 @@ fn zeroed(len: usize) -> Result<Vec<u8>> {
     })?;
     store.resize(len, 0);
     Ok(store)
+}
+
+/// Declares `layout`'s alpha sample, when it has one, as unassociated (`ExtraSamples = 2`, §18):
+/// the only alpha layout gamut's pixel types hold.
+fn set_extra_samples(ifd: &mut Ifd, layout: &SampleLayout) {
+    if layout.alpha {
+        ifd.set(
+            tags::EXTRA_SAMPLES,
+            Value::Short(vec![u16::from(ExtraSample::UnassociatedAlpha)]),
+        );
+    }
 }
 
 /// Stores a dimension/count as `SHORT` when it fits, else `LONG` (both are valid per §2).
@@ -1313,9 +1283,9 @@ mod tests {
     fn every_encode_path_resolves_the_c2pa_store_before_it_lays_out_pixels() {
         // `with_c2pa_reserved` promises a contradictory configuration is refused before any pixel
         // work. `encode_packed` takes the already-resolved store as a parameter, so every entry
-        // point has to resolve it before whatever pass produces the packed bytes — `encode_16bit`
-        // a byte-order-corrected copy of the samples, the `Bilevel` impl a whole bit-packing pass,
-        // nothing at all for the 8-bit impls.
+        // point has to resolve it before whatever pass produces the packed bytes — a 16-bit
+        // layout's byte-order-corrected copy of the samples, `Bilevel`'s whole bit-packing pass,
+        // nothing at all for the 8-bit layouts.
         //
         // Ordering leaves no trace in a successful encode, so it is read off the *message* of the
         // refusal instead: each case is also given a tile size that is not a multiple of 16, which
@@ -1325,10 +1295,11 @@ mod tests {
         // remaining step, resolving it before the pixel pass *within* an entry point, changes no
         // output at all and so is held by `encode_packed`'s signature rather than by a test.
         //
-        // Every entry point that resolves a store of its own is here — the four `encode_packed`
-        // callers plus `encode_indexed8`, which reaches it through the same layout stage. Only
-        // `encode_pages_rgb8` is absent, and not by choice: it builds strip images directly, so
-        // there is no second refusal for the C2PA one to be told apart from.
+        // Every entry point that resolves a store of its own is here — `encode_one`, which every
+        // `EncodeImage` impl is, at one layout of each packing pass, plus `encode_indexed8`, which
+        // reaches the same layout stage. Only `encode_pages` is absent, and not by choice: it
+        // always builds strip images, so there is no second refusal for the C2PA one to be told
+        // apart from.
         let dims = Dimensions::new(2, 2).unwrap();
         let palette = Palette::new(&[[0u8; 3]]).expect("palette");
         let bad = TiffEncoder::new()

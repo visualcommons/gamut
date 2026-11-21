@@ -162,7 +162,7 @@ stays `gamut_ifd::append_c2pa_store`'s, refused once the file exists. What stays
 crate's reach is the allocator's: a reservation the machine has no memory for aborts, as any
 oversized allocation in Rust does. `encode_with_report` reports the ranges, and `c2pa_exclusions`
 recovers them from any TIFF's bytes — including files written through `encode_indexed8` or
-`encode_pages_rgb8`, which the object-safe `EncodeImage` seam cannot report through. The store's
+`encode_pages`, which the object-safe `EncodeImage` seam cannot report through. The store's
 bytes are never byte-swapped: the header's `ByteOrder` does not govern them (§A.3.6). Tag 52545
 joins `is_known_tag`, so the v1 zero-tolerance byte accounting claims the store as its entry's typed
 value span rather than reporting an unknown private tag and an unaccounted trailer. Evidence:
@@ -302,7 +302,11 @@ The API was frozen after a full-surface review; the additions and breaks:
   un-premultiplied where it used to pass through as straight alpha, and a page whose first
   `ExtraSamples` code is past §18's three is refused as `Unsupported` (by `info` too) where the
   tag used to be ignored; no conformant file carries such a code. Checked against libtiff-written
-  fixtures for codes 0, 1, 2 and an absent tag (`tests/rgba.rs`).
+  fixtures for codes 0, 1, 2 and an absent tag (`tests/rgba.rs`). **Breaking:**
+  `TiffEncoder::encode_pages_rgb8` is replaced by the pixel-generic
+  `encode_pages<P: TiffPixel>`, where the new sealed `TiffPixel` names every layout the
+  `EncodeImage` impls write (all but `Indexed8`, whose colour table has its own entry point); an
+  `Rgb8` caller changes only the method name (`tests/multipage.rs`).
 - **The workspace shapes (#1082). Breaking.** `TiffMetadata::exif` is gamut-exif's `Exif` model
   (a new normal `gamut-exif` edge, re-exported with `ExifTag`), replacing the raw `exif`/`ifd0`/
   `gps` directories and `exif_byte_order`: the model carries all three and its byte order, as
