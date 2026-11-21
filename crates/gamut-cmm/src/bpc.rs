@@ -418,7 +418,9 @@ fn perceptual_black_round_trip(profile: &IccProfile) -> Option<[f64; 3]> {
 /// The Lab→device→Lab round trip of one profile — lcms2's `CreateRoundtripXForm`
 /// (`cmssamp.c:39-59`), whose 4-profile chain collapses to: PCS→device at `intent`, then
 /// device→PCS at **media-relative** (the return leg is always relative), bridged to Lab with
-/// the rounded D50 when the profile's PCS is XYZ. Adaptation state 1.0.
+/// the rounded D50 when the profile's PCS is XYZ. Adaptation state 1.0 whatever the transform
+/// being compensated asks for: lcms2 hard-codes `States[4] = { 1.0, … }` here, and neither leg
+/// is ICC-absolute, so the state would be inert anyway.
 ///
 /// **The hidden forced-BPC layer:** `CreateRoundtripXForm` passes `BPC = {FALSE, …}`, but the
 /// chain still runs through `_cmsLinkProfiles` (`cmscnvrt.c:1119-1135`), which *forces*

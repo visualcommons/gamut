@@ -82,9 +82,12 @@ impl GamutCheck {
     /// # Options
     ///
     /// Only [`intent`](TransformOptions::intent),
-    /// [`optimization`](TransformOptions::optimization) and
-    /// [`prefer_cicp_transfer`](TransformOptions::prefer_cicp_transfer) are consumed — the
-    /// latter two applied to all three sub-pipelines.
+    /// [`optimization`](TransformOptions::optimization),
+    /// [`prefer_cicp_transfer`](TransformOptions::prefer_cicp_transfer) and
+    /// [`adaptation_state`](TransformOptions::adaptation_state) are consumed — the middle two
+    /// applied to all three sub-pipelines, and the adaptation state to the `src` → Lab one when
+    /// `intent` is ICC-absolute (lcms2 passes its `AdaptationStates` to `hInput`; the two
+    /// media-relative legs never read it).
     /// [`black_point_compensation`](TransformOptions::black_point_compensation) is
     /// **ignored**: lcms2's gamut sampler compensates on none of its three legs
     /// (`cmsgmt.c`'s `BPCList` is all-false), and a compensated round trip would not be the
@@ -105,12 +108,31 @@ impl GamutCheck {
         let relative = RenderingIntent::MediaRelativeColorimetric;
         let optimization = options.optimization;
         let cicp = options.prefer_cicp_transfer;
-        let input = link_chain(&[src, &lab], &[intent, intent], &[false, false], cicp)?
-            .optimized(optimization)?;
-        let forward = link_chain(&[&lab, proof], &[relative, relative], &[false, false], cicp)?
-            .optimized(optimization)?;
-        let reverse = link_chain(&[proof, &lab], &[relative, relative], &[false, false], cicp)?
-            .optimized(optimization)?;
+        let adaptation = options.adaptation_state;
+        let input = link_chain(
+            &[src, &lab],
+            &[intent, intent],
+            &[false, false],
+            cicp,
+            adaptation,
+        )?
+        .optimized(optimization)?;
+        let forward = link_chain(
+            &[&lab, proof],
+            &[relative, relative],
+            &[false, false],
+            cicp,
+            adaptation,
+        )?
+        .optimized(optimization)?;
+        let reverse = link_chain(
+            &[proof, &lab],
+            &[relative, relative],
+            &[false, false],
+            cicp,
+            adaptation,
+        )?
+        .optimized(optimization)?;
         let threshold = if bpc::is_matrix_shaper(proof) {
             SHAPER_THRESHOLD
         } else {

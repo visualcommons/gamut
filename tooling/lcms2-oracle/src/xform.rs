@@ -188,6 +188,51 @@ impl Transform {
         })
     }
 
+    /// A chained transform with an explicit **adaptation state** (`cmsCreateExtendedTransform`),
+    /// applying `intent` at every hop with black-point compensation requested nowhere (lcms2
+    /// still forces it on v4 perceptual/saturation hops), and `adaptation_state` (lcms2's
+    /// `cmsSetAdaptationState` value, `0..=1`) at every absolute-intent seam — what
+    /// [`Transform::multiprofile`] builds without `FLAGS_BLACKPOINTCOMPENSATION`, at a state
+    /// other than the global default.
+    ///
+    /// Passing the state per transform, rather than through `cmsSetAdaptationState`, keeps it
+    /// off lcms2's process-global default context, which tests running in parallel threads
+    /// would otherwise race on.
+    #[must_use]
+    pub fn with_adaptation_state(
+        profiles: &[&Profile],
+        in_format: u32,
+        out_format: u32,
+        intent: u32,
+        adaptation_state: f64,
+        flags: u32,
+    ) -> Transform {
+        assert!(profiles.len() >= 2, "a transform chain needs ≥ 2 profiles");
+        let mut handles: Vec<sys::cmsHPROFILE> = profiles.iter().map(|p| p.raw).collect();
+        let n = u32::try_from(handles.len()).expect("profile count fits u32");
+        let mut bpc: Vec<sys::cmsBool> = vec![0; handles.len()];
+        let mut intents = vec![intent; handles.len()];
+        let mut states = vec![adaptation_state; handles.len()];
+        // SAFETY: the four arrays each hold `n` elements and outlive the call, which only reads
+        // them; the profile handles are live and not taken over. A NULL gamut profile with
+        // position 0 disables the gamut check, as `cmsCreateMultiprofileTransform` passes.
+        wrap_transform(unsafe {
+            sys::cmsCreateExtendedTransform(
+                ptr::null_mut(),
+                n,
+                handles.as_mut_ptr(),
+                bpc.as_mut_ptr(),
+                intents.as_mut_ptr(),
+                states.as_mut_ptr(),
+                ptr::null_mut(),
+                0,
+                in_format,
+                out_format,
+                flags,
+            )
+        })
+    }
+
     /// A proofing transform (`cmsCreateProofingTransform`): `src` → `dst` while simulating
     /// `proof` at `proofing_intent`. Pass [`FLAGS_SOFTPROOFING`] and/or [`FLAGS_GAMUTCHECK`] in
     /// `flags`, otherwise lcms degenerates this to a plain two-profile transform.

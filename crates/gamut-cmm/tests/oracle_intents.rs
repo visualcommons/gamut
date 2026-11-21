@@ -24,7 +24,7 @@
 mod common;
 
 use common::Lcg;
-use gamut_cmm::{IccTransform, Transform as _, TransformOptions, bpc};
+use gamut_cmm::{AdaptationState, IccTransform, Transform as _, TransformOptions, bpc};
 use gamut_icc::{IccProfile, RenderingIntent};
 use lcms2_oracle::{
     FLAGS_BLACKPOINTCOMPENSATION, FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, INTENT_ABSOLUTE_COLORIMETRIC,
@@ -224,6 +224,87 @@ fn absolute_between_d50_wtpt_profiles_is_exactly_relative() {
     .unwrap();
     for point in rgb_sweep(67).into_iter().take(60) {
         assert_eq!(eval3(&absolute, &point), eval3(&relative, &point));
+    }
+}
+
+/// D55, the second non-D50 white for the adaptation-state pairs: a destination whose `chad`
+/// adapts from a different temperature than the D65 source's, so the partial state's mixed
+/// temperature is neither end.
+const D55_XY: [f64; 2] = [0.3324, 0.3474];
+
+#[test]
+fn absolute_at_every_adaptation_state_matches_lcms2() {
+    set_quiet_log_handler();
+    // Source: a D65 shaper whose wtpt is D65 and whose chad (from cmsCreateRGBProfile) adapts
+    // D65 → D50. Destinations: lcms2's sRGB (wtpt D50, chad D65 → D50 — the same temperature
+    // as the source) and a D55 shaper (wtpt D55, chad D55 → D50 — a different one).
+    let (src, src_oracle) = reopen(&rgb_matrix_shaper_d65_wtpt(
+        D65_XY,
+        SRGB_PRIMARIES,
+        [2.2, 2.2, 2.2],
+    ));
+    let destinations = [
+        ("sRGB", reopen(&srgb())),
+        (
+            "D55 shaper",
+            reopen(&rgb_matrix_shaper_d65_wtpt(
+                D55_XY,
+                SRGB_PRIMARIES,
+                [2.2, 2.2, 2.2],
+            )),
+        ),
+    ];
+    let lens = Transform::new(
+        &srgb(),
+        TYPE_RGB_DBL,
+        &lab4(),
+        TYPE_Lab_DBL,
+        INTENT_RELATIVE_COLORIMETRIC,
+        FLAGS_NOCACHE,
+    );
+    for (label, (dst, dst_oracle)) in &destinations {
+        let mut whites = Vec::new();
+        for state in [0.0, 0.5, 1.0] {
+            let adaptation = AdaptationState::new(state).expect("in [0, 1]");
+            let ours = IccTransform::between(
+                &src,
+                dst,
+                TransformOptions::default()
+                    .with_intent(RenderingIntent::IccAbsoluteColorimetric)
+                    .with_adaptation_state(adaptation),
+            )
+            .unwrap();
+            let lcms = Transform::with_adaptation_state(
+                &[&src_oracle, dst_oracle],
+                TYPE_RGB_DBL,
+                TYPE_RGB_DBL,
+                INTENT_ABSOLUTE_COLORIMETRIC,
+                state,
+                FLAGS_NOOPTIMIZE | FLAGS_NOCACHE,
+            );
+            let (worst_dev, worst_de) = rgb_worst(&ours, &lcms, &lens, 71);
+            // The tolerances of `absolute_on_a_non_d50_white_matches_lcms2`. The `chad`
+            // inversions, Robertson temperatures and daylight Bradford are closed-form f64 on
+            // both sides, so the residual stays lcms2's float evaluation noise. Measured over
+            // both pairs and all three states: worst device |Δ| 5.6e-7, worst ΔE₀₀ 2.1e-5.
+            assert!(
+                worst_dev < 5e-6,
+                "{label} @ {state}: worst device |Δ| = {worst_dev:e}"
+            );
+            assert!(
+                worst_de < 5e-4,
+                "{label} @ {state}: worst ΔE₀₀ = {worst_de:e}"
+            );
+            whites.push(eval3(&ours, &[1.0; 3]));
+        }
+        // The state is not inert: each one renders the source white somewhere else.
+        for (a, b) in [(0, 1), (1, 2), (0, 2)] {
+            let gap: f64 = (0..3).map(|ch| (whites[a][ch] - whites[b][ch]).abs()).sum();
+            assert!(
+                gap > 1e-3,
+                "{label}: states {a} and {b} agree on white ({gap:e})"
+            );
+        }
     }
 }
 

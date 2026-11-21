@@ -142,4 +142,4 @@ pub use optimize::PipelineOptimization;
 #[doc(inline)]
 pub use pipeline::{MAX_CHANNELS, Pipeline, Stage};
 #[doc(inline)]
-pub use transform::{IccTransform, Transform, TransformOptions};
+pub use transform::{AdaptationState, IccTransform, Transform, TransformOptions};

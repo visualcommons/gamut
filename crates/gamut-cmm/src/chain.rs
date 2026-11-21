@@ -36,7 +36,7 @@ use gamut_icc::{ColorSpace, DeviceClass, IccProfile, RenderingIntent};
 
 use crate::error::{CmmError, Result};
 use crate::pipeline::{Pipeline, Stage};
-use crate::transform::{IccTransform, TransformOptions, is_empty_layer};
+use crate::transform::{AdaptationState, IccTransform, TransformOptions, is_empty_layer};
 use crate::{bpc, intent, link};
 
 /// The identity adjustment layer (skipped by the empty-layer test).
@@ -46,20 +46,26 @@ const IDENTITY: ([[f64; 3]; 3], [f64; 3]) = (
 );
 
 /// The PCS-seam adjustment for one output-direction (or abstract) hop — lcms2's
-/// `ComputeConversion` (`cmscnvrt.c:352-418`) at adaptation state 1.0, in the decoded domain
-/// (no `MAX_ENCODEABLE_XYZ` division of the offset — the pipelines here carry decoded XYZ):
-/// absolute → the white scaling; otherwise BPC when requested **or forced** (the v4
-/// perceptual/saturation rule, keyed on the hop's own profile `dst` — lcms2's
-/// `_cmsLinkProfiles` forcing consumed at the output-direction slot); else identity.
+/// `ComputeConversion` (`cmscnvrt.c:352-418`), in the decoded domain (no
+/// `MAX_ENCODEABLE_XYZ` division of the offset — the pipelines here carry decoded XYZ):
+/// absolute → the white conversion at `adaptation` ([`intent::absolute_conversion`]);
+/// otherwise BPC when requested **or forced** (the v4 perceptual/saturation rule, keyed on the
+/// hop's own profile `dst` — lcms2's `_cmsLinkProfiles` forcing consumed at the
+/// output-direction slot); else identity.
+///
+/// # Errors
+///
+/// Whatever [`intent::absolute_conversion`] raises below full adaptation.
 pub(crate) fn conversion_layer(
     src: &IccProfile,
     dst: &IccProfile,
     hop_intent: RenderingIntent,
     black_point_compensation: bool,
-) -> ([[f64; 3]; 3], [f64; 3]) {
+    adaptation: AdaptationState,
+) -> Result<([[f64; 3]; 3], [f64; 3])> {
     if hop_intent == RenderingIntent::IccAbsoluteColorimetric {
         // BPC and absolute are mutually exclusive: the flag is ignored here.
-        return (intent::absolute_scaling(src, dst), [0.0; 3]);
+        return Ok((intent::absolute_conversion(src, dst, adaptation)?, [0.0; 3]));
     }
     // The v4 forcing rule (_cmsLinkProfiles, cmscnvrt.c:1119-1135): BPC "applies always on
     // V4 perceptual and saturation", keyed per profile slot — and only the slot whose hop
@@ -73,10 +79,10 @@ pub(crate) fn conversion_layer(
         let black_in = bpc::detect_black_point(src, hop_intent);
         let black_out = bpc::detect_destination_black_point(dst, hop_intent);
         if let Some((m, off)) = bpc::compensation(black_in, black_out) {
-            return (m, off);
+            return Ok((m, off));
         }
     }
-    IDENTITY
+    Ok(IDENTITY)
 }
 
 /// lcms2's `ColorSpaceIsCompatible` (`cmscnvrt.c:492-507`): equal spaces, the `4CLR`≡`CMYK`
@@ -159,7 +165,9 @@ fn pcs_seam(
 /// The chain engine: composes `profiles` into one pipeline with per-hop `intents` and
 /// `bpc_flags` (all three slices share their length; the crate-internal callers guarantee
 /// it). See the module docs for the transcribed algorithm. `prefer_cicp` applies to every
-/// hop's shaper tone curves ([`TransformOptions::prefer_cicp_transfer`]).
+/// hop's shaper tone curves ([`TransformOptions::prefer_cicp_transfer`]), and `adaptation` to
+/// every absolute-intent seam ([`TransformOptions::adaptation_state`] — one state for the
+/// whole chain, as lcms2's transform constructors other than `cmsCreateExtendedTransform` use).
 ///
 /// # Errors
 ///
@@ -171,6 +179,7 @@ pub(crate) fn link_chain(
     intents: &[RenderingIntent],
     bpc_flags: &[bool],
     prefer_cicp: bool,
+    adaptation: AdaptationState,
 ) -> Result<Pipeline> {
     debug_assert_eq!(profiles.len(), intents.len());
     debug_assert_eq!(profiles.len(), bpc_flags.len());
@@ -207,7 +216,13 @@ pub(crate) fn link_chain(
             // Abstract profiles after the first slot get the conversion layer; device links
             // (and any first-slot profile) do not (DefaultICCintents, cmscnvrt.c:583-594).
             let (m, off) = if class == DeviceClass::Abstract && i > 0 {
-                conversion_layer(profiles[i - 1], profile, hop_intent, bpc_flags[i])
+                conversion_layer(
+                    profiles[i - 1],
+                    profile,
+                    hop_intent,
+                    bpc_flags[i],
+                    adaptation,
+                )?
             } else {
                 IDENTITY
             };
@@ -216,7 +231,13 @@ pub(crate) fn link_chain(
             link::hop_device_to_pcs(profile, hop_intent, prefer_cicp)?
         } else {
             let lut = link::hop_pcs_to_device(profile, hop_intent, prefer_cicp)?;
-            let (m, off) = conversion_layer(profiles[i - 1], profile, hop_intent, bpc_flags[i]);
+            let (m, off) = conversion_layer(
+                profiles[i - 1],
+                profile,
+                hop_intent,
+                bpc_flags[i],
+                adaptation,
+            )?;
             with_seam(pcs_seam(current_space, entry_space, m, off)?, lut)?
         };
         result = Some(match result {
@@ -271,7 +292,10 @@ pub struct ProofingOptions {
     /// - [`optimization`](TransformOptions::optimization) — how far to collapse the
     ///   assembled four-hop pipeline before evaluating it;
     /// - [`prefer_cicp_transfer`](TransformOptions::prefer_cicp_transfer) — evaluate the
-    ///   shaper profiles' tone curves from their `cicp` tags, on every hop.
+    ///   shaper profiles' tone curves from their `cicp` tags, on every hop;
+    /// - [`adaptation_state`](TransformOptions::adaptation_state) — the observer's adaptation
+    ///   at every ICC-absolute seam, on every hop (lcms2's `cmsCreateProofingTransform` hands
+    ///   its one global state to all four).
     pub transform: TransformOptions,
     /// The rendering intent for bringing the simulated colours to the destination device
     /// (lcms2's `ProofingIntent`; typically media-relative or ICC-absolute for a faithful
@@ -325,7 +349,13 @@ impl IccTransform {
         let intents = vec![options.intent; profiles.len()];
         let bpc_flags = vec![options.black_point_compensation; profiles.len()];
         Self::from_pipeline(
-            link_chain(profiles, &intents, &bpc_flags, options.prefer_cicp_transfer)?,
+            link_chain(
+                profiles,
+                &intents,
+                &bpc_flags,
+                options.prefer_cicp_transfer,
+                options.adaptation_state,
+            )?,
             options.optimization,
         )
     }
@@ -414,6 +444,7 @@ impl IccTransform {
                 &intents,
                 &bpc_flags,
                 simulation.prefer_cicp_transfer,
+                simulation.adaptation_state,
             )?,
             simulation.optimization,
         )
@@ -510,7 +541,8 @@ mod tests {
     /// caller that would have rejected the input anyway.
     #[test]
     fn an_empty_chain_is_reported_not_panicked() {
-        let err = link_chain(&[], &[], &[], false).expect_err("an empty chain has nothing to link");
+        let err = link_chain(&[], &[], &[], false, AdaptationState::FULL)
+            .expect_err("an empty chain has nothing to link");
         assert!(
             matches!(err, CmmError::ChainMismatch(m) if m.contains("at least two profiles")),
             "unexpected error: {err}"
@@ -559,6 +591,7 @@ mod tests {
                     black_point_compensation,
                     optimization: PipelineOptimization::None,
                     prefer_cicp_transfer: false,
+                    adaptation_state: AdaptationState::FULL,
                 };
                 let between = IccTransform::between(&src, &dst, options).unwrap();
                 let chain = IccTransform::chain(&[&src, &dst], options).unwrap();
@@ -586,6 +619,7 @@ mod tests {
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
             prefer_cicp_transfer: false,
+            adaptation_state: AdaptationState::FULL,
         };
         let pair = IccTransform::between(&src, &dst, options).unwrap();
         let chained = IccTransform::chain(&[&src, &lab, &dst], options).unwrap();
@@ -713,6 +747,7 @@ mod tests {
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
             prefer_cicp_transfer: false,
+            adaptation_state: AdaptationState::FULL,
         };
         let options = ProofingOptions::new(relative, RenderingIntent::MediaRelativeColorimetric);
         let proofed = IccTransform::proofing(&src, &dst, &src, options).unwrap();
@@ -809,6 +844,7 @@ mod tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer,
+                adaptation_state: AdaptationState::FULL,
             };
             let options =
                 ProofingOptions::new(simulation, RenderingIntent::MediaRelativeColorimetric);
