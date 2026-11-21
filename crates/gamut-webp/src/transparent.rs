@@ -140,7 +140,7 @@ mod tests {
                 alpha[y * width + x] = match kinds[(y / BLOCK) * tiles_x + x / BLOCK] {
                     0 | 1 => 0,
                     2 => 1 + rng.byte() % 255,
-                    _ if rng.next() % 3 == 0 => 0,
+                    _ if rng.next().is_multiple_of(3) => 0,
                     _ => rng.byte(),
                 };
             }
