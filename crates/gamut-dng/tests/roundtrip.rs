@@ -194,13 +194,13 @@ fn adobe_in_memory_decode_reports_the_same_extent_as_the_file_decode() {
 
 #[test]
 fn tiled_roundtrips_through_gamut() {
-    use gamut_dng::DngCompression;
+    use gamut_dng::{DngCompression, LosslessPredictor};
     // 48x40 with 32x32 tiles: a 2x2 grid whose right/bottom tiles carry 16 padding columns and
     // 24 padding rows — the edge-crop path. Sub-byte depths exercise per-tile row alignment.
     for compression in [
         DngCompression::Uncompressed,
         DngCompression::Deflate,
-        DngCompression::LosslessJpeg,
+        DngCompression::LosslessJpeg(LosslessPredictor::Left),
     ] {
         for bits in [8u16, 10, 12, 16] {
             // Deflate is limited to whole-byte depths (the SDK reader's constraint, enforced at
@@ -489,34 +489,39 @@ fn deflate_roundtrips_and_validates() {
     }
 }
 
+/// Every T.81 Table H.1 predictor the encoder accepts, on CFA (even and odd width) and LinearRaw:
+/// gamut round-trips it and the Adobe SDK validates and decodes it to the same samples.
 #[test]
 fn lossless_jpeg_roundtrips_and_validates() {
-    use gamut_dng::DngCompression;
+    use gamut_dng::{DngCompression, LosslessPredictor};
     let cases = [
         common::sample_raw(64, 48, 16),
         common::sample_raw(33, 21, 12), // odd width, 12-bit
         common::sample_linear_raw(48, 36, 16),
     ];
     for raw in cases {
-        let mut dng = Vec::new();
-        DngEncoder::new()
-            .with_compression(DngCompression::LosslessJpeg)
-            .encode(&raw, &common::sample_profile(), &mut dng)
-            .expect("encode");
-        // gamut round-trips its own lossless JPEG...
-        let decoded = DngDecoder::new()
-            .decode(&dng)
-            .expect("decode lossless JPEG");
-        assert_eq!(decoded.raw, raw);
-        // ...and the Adobe SDK validates and decodes it to the same samples.
-        gamut_dng_oracle::validate_dng(&dng)
-            .expect("Adobe DNG SDK must accept a lossless-JPEG DNG");
-        let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
-        assert_eq!(
-            adobe.samples,
-            raw.samples(),
-            "Adobe must decode gamut's lossless JPEG pixel-for-pixel"
-        );
+        for predictor in LosslessPredictor::ALL {
+            let mut dng = Vec::new();
+            DngEncoder::new()
+                .with_compression(DngCompression::LosslessJpeg(predictor))
+                .encode(&raw, &common::sample_profile(), &mut dng)
+                .expect("encode");
+            // gamut round-trips its own lossless JPEG...
+            let decoded = DngDecoder::new()
+                .decode(&dng)
+                .expect("decode lossless JPEG");
+            assert_eq!(decoded.raw, raw, "{predictor:?}");
+            // ...and the Adobe SDK validates and decodes it to the same samples.
+            gamut_dng_oracle::validate_dng(&dng).unwrap_or_else(|e| {
+                panic!("Adobe DNG SDK must accept a {predictor:?} lossless-JPEG DNG: {e}")
+            });
+            let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+            assert_eq!(
+                adobe.samples,
+                raw.samples(),
+                "Adobe must decode gamut's {predictor:?} lossless JPEG pixel-for-pixel"
+            );
+        }
     }
 }
 

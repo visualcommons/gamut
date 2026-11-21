@@ -88,10 +88,11 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
 - **Lossless JPEG (`Compression = 7`)** through `gamut-jpeg`'s `lossless` module, which owns
   all of T.81: decode covers the full process-14 reader envelope (predictors 1–7, point
   transform, per-component tables, restart markers; SDK-differential), and the DNG writer
-  encodes with `gamut_jpeg::lossless::LosslessEncoder`'s default — predictor 1, no point
-  transform, no restarts — the subset every reader accepts. Callers who want the SOF3 coder itself
-  (with its other predictors, point transform and restart intervals) use `gamut_jpeg::lossless`
-  directly.
+  encodes with `gamut_jpeg::lossless::LosslessEncoder` at the predictor
+  `DngCompression::LosslessJpeg(LosslessPredictor)` names (any of T.81 Table H.1's seven, each
+  accepted and decoded exactly by the Adobe SDK; `Left`, predictor 1, is the SDK's own choice),
+  no point transform and no restarts. Callers who want the SOF3 coder itself (with its point
+  transform and restart intervals) use `gamut_jpeg::lossless` directly.
 - **Deferred** (ledger in `STATUS.md`): lossy JPEG (34892), floating-point samples (fp16 JXL
   rejects with a typed error), the standard opcode *processing* library, 4-colour CFA encoding,
   and writing mask/depth sub-images.

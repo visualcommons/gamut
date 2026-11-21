@@ -18,7 +18,7 @@ use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
 use crate::values::{CalibrationIlluminant, Compression, PhotometricInterpretation};
 use crate::writer::{ImageBlocks, write_cfa_dng};
-use crate::{bitpack, compression, preview, tags};
+use crate::{LosslessPredictor, bitpack, compression, preview, tags};
 
 /// Encoder for DNG (Adobe Digital Negative) raw images.
 ///
@@ -47,22 +47,38 @@ pub struct DngEncoder {
 /// [`code`](Self::code) is the `Compression` (tag 259) value written. Unlike gamut-ifd's plain
 /// [`Compression`] code list, this is the encoder's choice, so a scheme it cannot write (lossy
 /// JPEG, the TIFF-only codes) is not representable, and JPEG XL's [`JxlSettings`] cannot be set
-/// without selecting JPEG XL. The payload is reachable through [`jxl`](Self::jxl).
+/// without selecting JPEG XL, nor a lossless-JPEG predictor without selecting lossless JPEG. The
+/// payloads are reachable through [`jxl`](Self::jxl) and
+/// [`lossless_predictor`](Self::lossless_predictor).
 ///
 /// `#[non_exhaustive]`: a scheme the encoder learns later is added without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum DngCompression {
-    /// Uncompressed (`Compression = 1`), the default.
-    #[default]
+    /// Uncompressed (`Compression = 1`).
     Uncompressed,
     /// Deflate (`Compression = 8`, zlib; DNG 1.4), 8/16-bit samples only.
     Deflate,
-    /// Lossless JPEG (`Compression = 7`, ITU-T T.81 SOF3), DNG's standard raw compression.
-    LosslessJpeg,
+    /// Lossless JPEG (`Compression = 7`, ITU-T T.81 SOF3), DNG's standard raw compression, coded
+    /// with the given T.81 Table H.1 predictor.
+    ///
+    /// [`LosslessPredictor::Left`] (`Ss = 1`) is what the DNG SDK writes and pairs with the
+    /// encoder's like-colour frame geometry: a Bayer chunk is declared as interleaved
+    /// components, so the left neighbour is the same colour (DNG 1.7.1.0 p. 20). A predictor
+    /// that reads the line above (`Rb`/`Rc`) differences against the mosaic row above, which
+    /// is a different colour on a 2-row repeat — valid and exactly decodable, but usually
+    /// larger on CFA data. Every predictor is lossless: no point transform is applied.
+    LosslessJpeg(LosslessPredictor),
     /// JPEG XL (`Compression = 52546`, DNG 1.7) with the given settings: full-range 16-bit
     /// samples, and the `jxl-encode` cargo feature (non-wasm) to encode.
     Jxl(JxlSettings),
+}
+
+/// [`Uncompressed`](DngCompression::Uncompressed), the scheme [`DngEncoder::new`] writes.
+impl Default for DngCompression {
+    fn default() -> Self {
+        Self::Uncompressed
+    }
 }
 
 impl DngCompression {
@@ -72,7 +88,7 @@ impl DngCompression {
         match self {
             Self::Uncompressed => Compression::None,
             Self::Deflate => Compression::Deflate,
-            Self::LosslessJpeg => Compression::Jpeg,
+            Self::LosslessJpeg(_) => Compression::Jpeg,
             Self::Jxl(_) => Compression::JpegXl,
         }
     }
@@ -82,6 +98,16 @@ impl DngCompression {
     pub fn jxl(&self) -> Option<JxlSettings> {
         match self {
             Self::Jxl(settings) => Some(*settings),
+            _ => None,
+        }
+    }
+
+    /// The lossless-JPEG predictor, for [`LosslessJpeg`](Self::LosslessJpeg); `None` for every
+    /// other scheme.
+    #[must_use]
+    pub fn lossless_predictor(&self) -> Option<LosslessPredictor> {
+        match self {
+            Self::LosslessJpeg(predictor) => Some(*predictor),
             _ => None,
         }
     }
@@ -640,7 +666,7 @@ fn backward_version_for(encoder: &DngEncoder, raw: &RawImage, profile: &CameraPr
     match encoder.compression {
         DngCompression::Jxl(_) => raise([1, 7, 0, 0], &mut version),
         DngCompression::Deflate => raise([1, 4, 0, 0], &mut version),
-        DngCompression::Uncompressed | DngCompression::LosslessJpeg => {}
+        DngCompression::Uncompressed | DngCompression::LosslessJpeg(_) => {}
     }
     if uses_spectral_illuminant(profile) {
         raise([1, 6, 0, 0], &mut version);
@@ -704,9 +730,10 @@ impl DngEncoder {
         bits: u16,
     ) -> Result<Vec<u8>> {
         match self.compression {
-            DngCompression::LosslessJpeg => {
+            DngCompression::LosslessJpeg(predictor) => {
                 let (width, components) = lossless_jpeg_geometry(cols, spp, period);
                 gamut_jpeg::lossless::LosslessEncoder::new()
+                    .with_predictor(predictor)
                     .encode(samples, width, rows, components, bits)
             }
             DngCompression::Jxl(settings) => {
@@ -1346,7 +1373,7 @@ mod tests {
         let raw = sample_raw(8, 6, 16);
         let mut out = Vec::new();
         DngEncoder::new()
-            .with_compression(DngCompression::LosslessJpeg)
+            .with_compression(DngCompression::LosslessJpeg(LosslessPredictor::Left))
             .encode(&raw, &sample_profile(), &mut out)
             .expect("encode");
         let file = gamut_ifd::read(&out).expect("parse DNG");
@@ -1373,7 +1400,7 @@ mod tests {
         let encode = |w: u32| {
             let mut out = Vec::new();
             DngEncoder::new()
-                .with_compression(DngCompression::LosslessJpeg)
+                .with_compression(DngCompression::LosslessJpeg(LosslessPredictor::Left))
                 .encode(&sample_raw(w, 2, 16), &sample_profile(), &mut out)
                 .map(|_| out)
         };
@@ -1586,7 +1613,10 @@ mod tests {
     fn dng_compression_code_is_the_written_tag_value() {
         assert_eq!(DngCompression::Uncompressed.code(), Compression::None);
         assert_eq!(DngCompression::Deflate.code(), Compression::Deflate);
-        assert_eq!(DngCompression::LosslessJpeg.code(), Compression::Jpeg);
+        assert_eq!(
+            DngCompression::LosslessJpeg(LosslessPredictor::Left).code(),
+            Compression::Jpeg
+        );
         assert_eq!(
             DngCompression::Jxl(JxlSettings::lossless()).code(),
             Compression::JpegXl
@@ -1601,9 +1631,66 @@ mod tests {
         for scheme in [
             DngCompression::Uncompressed,
             DngCompression::Deflate,
-            DngCompression::LosslessJpeg,
+            DngCompression::LosslessJpeg(LosslessPredictor::Left),
         ] {
             assert_eq!(scheme.jxl(), None, "{scheme:?}");
+        }
+    }
+
+    /// Only the lossless-JPEG scheme carries a predictor, and it hands back the one it holds —
+    /// a non-default one, so a body returning the default cannot pass.
+    #[test]
+    fn dng_compression_lossless_predictor_is_the_lossless_payload_only() {
+        assert_eq!(
+            DngCompression::LosslessJpeg(LosslessPredictor::Average).lossless_predictor(),
+            Some(LosslessPredictor::Average)
+        );
+        for scheme in [
+            DngCompression::Uncompressed,
+            DngCompression::Deflate,
+            DngCompression::Jxl(JxlSettings::lossless()),
+        ] {
+            assert_eq!(scheme.lossless_predictor(), None, "{scheme:?}");
+        }
+    }
+
+    /// The selection value `Ss` of the first scan in a lossless-JPEG strip (T.81 B.2.3: the SOS
+    /// header is `FF DA`, `Ls`, `Ns`, `Ns` component pairs, then `Ss`).
+    fn scan_predictor(strip: &[u8]) -> u8 {
+        let sos = strip
+            .windows(2)
+            .position(|w| w == [0xFF, 0xDA])
+            .expect("SOS marker");
+        let ns = usize::from(strip[sos + 4]);
+        strip[sos + 5 + 2 * ns]
+    }
+
+    /// Every Table H.1 predictor reaches the raw strip's scan header as its own `Ss`, and the
+    /// file decodes back to the mosaic exactly, so the choice is carried and stays lossless.
+    #[test]
+    fn each_lossless_predictor_is_written_and_decodes_exactly() {
+        let raw = sample_raw(8, 6, 12);
+        for predictor in LosslessPredictor::ALL {
+            let mut out = Vec::new();
+            DngEncoder::new()
+                .with_compression(DngCompression::LosslessJpeg(predictor))
+                .encode(&raw, &sample_profile(), &mut out)
+                .expect("encode");
+            let file = gamut_ifd::read(&out).expect("parse DNG");
+            let raw_off = file.ifds[0].get_u32(tags::SUB_IFDS).expect("SubIFDs");
+            let raw_ifd =
+                read_ifd_at(&out, raw_off.into(), file.order, Variant::Classic).expect("raw");
+            let off = raw_ifd.get_u32_vec(tags::STRIP_OFFSETS).expect("offsets")[0] as usize;
+            let len = raw_ifd
+                .get_u32_vec(tags::STRIP_BYTE_COUNTS)
+                .expect("counts")[0] as usize;
+            assert_eq!(
+                scan_predictor(&out[off..off + len]),
+                predictor as u8,
+                "{predictor:?}"
+            );
+            let decoded = crate::DngDecoder::new().decode(&out).expect("decode");
+            assert_eq!(decoded.raw.samples(), raw.samples(), "{predictor:?}");
         }
     }
 

@@ -141,6 +141,10 @@ pub use gamut_ifd::{
     C2PA_MANIFEST_STORE, C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary,
     C2paUnreadEntry, C2paUnreadReason, c2pa_summary,
 };
+// The lossless-JPEG predictor `DngCompression::LosslessJpeg` carries is gamut-jpeg's own T.81
+// Table H.1 type, re-exported as `LosslessPredictor` so it does not collide with the TIFF
+// `Predictor` tag value this crate also exports.
+pub use gamut_jpeg::lossless::Predictor as LosslessPredictor;
 // The JPEG XL encoder knobs are gamut-jxl's own validated types, re-exported because
 // `JxlSettings` takes them; the effort as `JxlEffort`, so it does not collide with another
 // codec's `Effort` (gamut-png's is a different type) in a caller using both.

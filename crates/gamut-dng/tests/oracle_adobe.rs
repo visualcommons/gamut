@@ -99,11 +99,11 @@ fn adobe_decodes_linear_raw_samples_exactly() {
 /// padding columns and rows on the edge tiles).
 #[test]
 fn adobe_validates_and_decodes_tiled_dngs_exactly() {
-    use gamut_dng::DngCompression;
+    use gamut_dng::{DngCompression, LosslessPredictor};
     for compression in [
         DngCompression::Uncompressed,
         DngCompression::Deflate,
-        DngCompression::LosslessJpeg,
+        DngCompression::LosslessJpeg(LosslessPredictor::Left),
     ] {
         // 12-bit exercises per-tile sub-byte packing where the scheme allows it; Deflate is
         // limited to whole-byte depths (the SDK reader's constraint, enforced at encode).
