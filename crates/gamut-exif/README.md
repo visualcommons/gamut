@@ -177,7 +177,9 @@ the catalogue and vendor enums are `#[non_exhaustive]`):
   #980; the headerless `Sony2` dialect only, staked in `references/exif/sony/`; a `SONY DSC`
   note has no view until issue #1033), and Fujifilm's into a `FujifilmMakerNote` view
   (`MakerNote::fujifilm`, issue #981; Leica's Fujifilm-built bodies included, staked in
-  `references/exif/fujifilm/`); every other vendor's are not yet — that is the rest of the per-vendor
+  `references/exif/fujifilm/`), and Apple's into an `AppleMakerNote` view (`MakerNote::apple`,
+  issue #976; after ExifTool's `Apple.pm`, staked in `references/exif/apple/`); every other
+  vendor's are not yet — that is the rest of the per-vendor
   work of issue #418. Since issue #263 a parsed model records the
   note's absolute source offset and the writer **pins** the byte range there on a rewrite, so
   vendor TIFF-absolute internal offsets stay valid; only an unsatisfiable pin (the directory
