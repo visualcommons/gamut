@@ -11,7 +11,7 @@
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
 #![allow(clippy::needless_range_loop)]
 
-use gamut_color::{ChromaSubsampling, Planar8};
+use gamut_color::ChromaSubsampling;
 use gamut_core::{Error, Result};
 
 use super::bool_coder::BoolEncoder;
@@ -33,6 +33,7 @@ use super::reconstruct::{
 };
 use super::tokens::{self, CoeffProbs};
 use super::transform::{fdct4x4, fwht4x4, idct4x4};
+use crate::backend::Vp8Planes;
 use crate::config::Effort;
 
 /// The whole-block prediction modes the encoder considers, in signaling order.
@@ -591,7 +592,7 @@ fn encode_chroma_tokens(
     }
 }
 
-/// Encodes 4:2:0 [`Planar8`] planes as a VP8 key-frame bitstream (the `VP8 ` chunk payload), returning the
+/// Encodes 4:2:0 [`Vp8Planes`] as a VP8 key-frame bitstream (the `VP8 ` chunk payload), returning the
 /// bitstream and the encoder's reconstruction (the tier-2 oracle: it must equal any decoder's output).
 /// Uses the normal loop filter. Test-only: the crate's own encoder always passes explicit
 /// [`EncodeOptions`] to [`encode_frame_filtered`].
@@ -600,7 +601,7 @@ fn encode_chroma_tokens(
 ///
 /// As [`encode_frame_filtered`].
 #[cfg(test)]
-pub fn encode_frame(yuv: &Planar8, quant_index: u8) -> Result<(Vec<u8>, FrameBuffers)> {
+pub fn encode_frame(yuv: &Vp8Planes, quant_index: u8) -> Result<(Vec<u8>, FrameBuffers)> {
     encode_frame_filtered(yuv, quant_index, EncodeOptions::default())
 }
 
@@ -622,20 +623,15 @@ pub fn encode_frame(yuv: &Planar8, quant_index: u8) -> Result<(Vec<u8>, FrameBuf
 /// fills partition 0, so [`Effort::Fastest`] (which never emits it) encodes the whole WebP canvas
 /// range, up to 16383x16383, at any detail level.
 ///
-/// Also returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when
-/// `yuv` is not laid out [`ChromaSubsampling::Cs420`], the only layout VP8 codes (RFC 6386 §9.2).
+/// `yuv` is 4:2:0, the only layout VP8 codes (RFC 6386 §9.2), by the construction of
+/// [`Vp8Planes`], so its chroma planes are read at that geometry without a check here.
 pub fn encode_frame_filtered(
-    yuv: &Planar8,
+    yuv: &Vp8Planes,
     quant_index: u8,
     opts: EncodeOptions,
 ) -> Result<(Vec<u8>, FrameBuffers)> {
-    if yuv.subsampling() != ChromaSubsampling::Cs420 {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "VP8: only 4:2:0 planes are coded",
-        ));
-    }
-    let mut header = frame_header(yuv.width(), yuv.height(), quant_index, opts.simple_filter);
+    let (width, height) = (yuv.dimensions().width(), yuv.dimensions().height());
+    let mut header = frame_header(width, height, quant_index, opts.simple_filter);
     if opts.segmented {
         header.segmentation = Segmentation {
             enabled: true,
@@ -651,13 +647,13 @@ pub fn encode_frame_filtered(
     header.loop_filter.deltas = opts.loop_filter_deltas;
     let n = header.token_partitions as usize;
     let seg_qf = segment_quant_factors(&header);
-    let mut recon = FrameBuffers::new(yuv.width(), yuv.height());
+    let mut recon = FrameBuffers::new(width, height);
 
     let (yw, yh) = (recon.y_stride(), recon.mb_rows * 16);
     let (cw, ch) = (recon.c_stride(), recon.mb_rows * 8);
     let [y_plane, u_plane, v_plane] = yuv.planes();
-    let src_y = pad_plane(y_plane, yuv.width() as usize, yuv.height() as usize, yw, yh);
-    let (vcw, vch) = ChromaSubsampling::Cs420.chroma_dimensions(yuv.width(), yuv.height());
+    let src_y = pad_plane(y_plane, width as usize, height as usize, yw, yh);
+    let (vcw, vch) = ChromaSubsampling::Cs420.chroma_dimensions(width, height);
     let (vcw, vch) = (vcw as usize, vch as usize);
     let src_u = pad_plane(u_plane, vcw, vch, cw, ch);
     let src_v = pad_plane(v_plane, vcw, vch, cw, ch);
@@ -896,49 +892,9 @@ fn token_partition_size(len: usize) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use gamut_core::Dimensions;
-
     use super::*;
     use crate::vp8::decoder::decode_frame;
     use crate::vp8::frame::fixtures::{banded, chroma_dims, yuv420};
-
-    #[test]
-    fn encode_refuses_planes_that_are_not_four_two_zero() {
-        // VP8 codes 4:2:0 only (RFC 6386 §9.2); a `Planar8` can carry any layout, so the encoder
-        // checks it rather than reading the chroma planes at the wrong geometry.
-        let dims = Dimensions::new(16, 16).unwrap();
-        for subsampling in [
-            ChromaSubsampling::Cs444,
-            ChromaSubsampling::Cs422,
-            ChromaSubsampling::Cs440,
-            ChromaSubsampling::Cs400,
-        ] {
-            let (cw, ch) = subsampling.chroma_dimensions(16, 16);
-            let chroma = vec![128; (cw * ch) as usize];
-            let planes = Planar8::from_planes_subsampled(
-                dims,
-                subsampling,
-                [vec![0; 256], chroma.clone(), chroma],
-            )
-            .unwrap();
-            let Err(err) = encode_frame(&planes, 40) else {
-                panic!("VP8 is 4:2:0 only, but {subsampling:?} encoded");
-            };
-            assert_eq!(
-                err.kind(),
-                gamut_core::ErrorKind::InvalidInput,
-                "{subsampling:?}"
-            );
-        }
-        // The same image at 4:2:0 encodes, so the refusal is the layout and nothing else.
-        assert!(
-            encode_frame(
-                &yuv420(16, 16, vec![0; 256], vec![128; 64], vec![128; 64]),
-                40
-            )
-            .is_ok()
-        );
-    }
 
     /// The segmented stream is pinned byte for byte, because nothing else can see the segment
     /// each macroblock was assigned.

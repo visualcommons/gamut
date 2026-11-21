@@ -88,7 +88,10 @@ fall-through, and a backend that accepts and then fails returns its error unchan
 own `vp8`/`vp8l` codecs are the implicit tails, so the default output is unchanged. Backends
 written against the shared [`gamut-codec-abi`](../gamut-codec-abi) seam plug in through
 `AbiWebpDecoder` / `AbiWebpEncoder`, under the big-endian codec ids `VP8_CODEC_ID` /
-`VP8L_CODEC_ID`. `ALPH` alpha stays container-side and never crosses the seam.
+`VP8L_CODEC_ID`. `ALPH` alpha stays container-side and never crosses the seam. A VP8 raster
+crosses it as `Vp8Planes`, BT.601 planes that are 4:2:0 by construction: a backend builds one from
+its samples with `Vp8Planes::from_planes`, or admits a `Planar8` with `Vp8Planes::try_from`, which
+refuses any other chroma layout, so the rasters' `dimensions()` accessors are infallible.
 
 ## Status
 

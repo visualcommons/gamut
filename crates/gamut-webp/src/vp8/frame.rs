@@ -128,8 +128,10 @@ pub(super) fn bmode_propagation(
 pub(super) mod fixtures {
     //! Synthetic 4:2:0 frames shared by the encoder, decoder and round-trip suites.
 
-    use gamut_color::{ChromaSubsampling, Planar8};
+    use gamut_color::ChromaSubsampling;
     use gamut_core::Dimensions;
+
+    use crate::backend::Vp8Planes;
 
     /// 4:2:0 chroma plane dimensions for a `width`×`height` luma plane, as `usize`.
     pub(in crate::vp8) fn chroma_dims(width: u32, height: u32) -> (usize, usize) {
@@ -137,24 +139,19 @@ pub(super) mod fixtures {
         (cw as usize, ch as usize)
     }
 
-    /// Assembles a 4:2:0 `Planar8` from its three planes.
+    /// Assembles 4:2:0 `Vp8Planes` from its three planes.
     pub(in crate::vp8) fn yuv420(
         width: u32,
         height: u32,
         y: Vec<u8>,
         u: Vec<u8>,
         v: Vec<u8>,
-    ) -> Planar8 {
-        Planar8::from_planes_subsampled(
-            Dimensions::new(width, height).unwrap(),
-            ChromaSubsampling::Cs420,
-            [y, u, v],
-        )
-        .unwrap()
+    ) -> Vp8Planes {
+        Vp8Planes::from_planes(Dimensions::new(width, height).unwrap(), [y, u, v]).unwrap()
     }
 
-    /// Builds a 4:2:0 `Planar8` from a deterministic synthetic pattern.
-    pub(in crate::vp8) fn pattern(width: u32, height: u32) -> Planar8 {
+    /// Builds 4:2:0 `Vp8Planes` from a deterministic synthetic pattern.
+    pub(in crate::vp8) fn pattern(width: u32, height: u32) -> Vp8Planes {
         let (w, h) = (width as usize, height as usize);
         let (cw, ch) = chroma_dims(width, height);
         let y = (0..w * h)
@@ -182,7 +179,7 @@ pub(super) mod fixtures {
     /// flat enough to skip entirely.
     ///
     /// `height` should cover four macroblock rows (64) so every band gets one.
-    pub(in crate::vp8) fn banded(width: u32, height: u32) -> Planar8 {
+    pub(in crate::vp8) fn banded(width: u32, height: u32) -> Vp8Planes {
         let (w, h) = (width as usize, height as usize);
         let (cw, ch) = chroma_dims(width, height);
         let y = (0..w * h)
@@ -206,7 +203,7 @@ pub(super) mod fixtures {
     /// a coarse quantizer. `detailed` is too contrasty (its residual survives even at q=127) and
     /// flat content is too plain (a whole-block mode wins, so B_PRED is never chosen). Stepping
     /// the value every four pixels sits between the two.
-    pub(in crate::vp8) fn stepped(width: u32, height: u32) -> Planar8 {
+    pub(in crate::vp8) fn stepped(width: u32, height: u32) -> Vp8Planes {
         let (w, h) = (width as usize, height as usize);
         let (cw, ch) = chroma_dims(width, height);
         let y = (0..w * h)
@@ -220,7 +217,7 @@ pub(super) mod fixtures {
 
     /// Builds B_PRED-favorable content: each 4×4 region carries a different gradient direction, so a
     /// single whole-block mode predicts the macroblock poorly but per-subblock modes do not.
-    pub(in crate::vp8) fn detailed(width: u32, height: u32) -> Planar8 {
+    pub(in crate::vp8) fn detailed(width: u32, height: u32) -> Vp8Planes {
         let (w, h) = (width as usize, height as usize);
         let (cw, ch) = chroma_dims(width, height);
         let y = (0..w * h)
@@ -241,7 +238,7 @@ pub(super) mod fixtures {
     }
 
     /// A structured ramp with real residuals in every plane, to exercise the transforms and tokens.
-    pub(in crate::vp8) fn synthetic(width: u32, height: u32) -> Planar8 {
+    pub(in crate::vp8) fn synthetic(width: u32, height: u32) -> Vp8Planes {
         let (w, h) = (width as usize, height as usize);
         let (cw, ch) = chroma_dims(width, height);
         let y = (0..w * h)
@@ -256,7 +253,7 @@ pub(super) mod fixtures {
     /// bit-exact YUV conformance gate stays independent of the RGB↔YCbCr layer: a smooth luma
     /// gradient plus low-amplitude detail and hard region edges, with gently varying chroma.
     /// RNG-free and `seed`-parameterised, like `libwebp_oracle::fixtures::photo_like_rgba`.
-    pub(in crate::vp8) fn photo_like(width: u32, height: u32, seed: u32) -> Planar8 {
+    pub(in crate::vp8) fn photo_like(width: u32, height: u32, seed: u32) -> Vp8Planes {
         let (w, h) = (width as usize, height as usize);
         let (cw, ch) = chroma_dims(width, height);
         let hash = |x: i64, y: i64, k: i64| -> i64 {
