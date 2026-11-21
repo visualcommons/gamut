@@ -17,7 +17,8 @@ workspace = true
 
 [dependencies]
 # The length-limited Huffman builder and canonical-code assignment the VP8L prefix coder emits
-# with (#1104): format-neutral, so it lives in the shared bitstream crate.
+# with (#1104), and the LSB-first `LsbBitReader` VP8L reads through (#1110): format-neutral, so
+# they live in the shared bitstream crate.
 gamut-bitstream.workspace = true
 gamut-codec-abi = { workspace = true, features = ["std"] }
 gamut-core.workspace = true

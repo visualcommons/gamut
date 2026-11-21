@@ -399,7 +399,7 @@ exclude_re = [
     # BitWriter::write_bits `if n == 0 || n > 32`: real callers always pass n in 1..=32, where both
     # operands are false; n == 0 is itself a no-op (zero mask), so `||`->`&&` cannot change output.
     # (gamut-webp's `BitWriter` only: the bare name used to reach gamut-deflate's as well.)
-    '^crates/gamut-webp/src/vp8l/bit_io\.rs:142:19: replace \|\| with && in BitWriter::write_bits$',
+    '^crates/gamut-webp/src/vp8l/bit_io\.rs:45:19: replace \|\| with && in BitWriter::write_bits$',
     # GroupAssignment::group_at `if num_groups <= 1 || width == 0`: for a single group the function
     # returns 0 anyway (the only group), so skipping the early return via `&&` yields the same 0.
     '^crates/gamut-webp/src/vp8l/encoder\.rs:489:33: replace \|\| with && in GroupAssignment::group_at$',

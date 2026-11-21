@@ -168,11 +168,13 @@ Owner: `gamut-webp/src/vp8l/transform.rs`. Transforms are emitted in order and i
 ## F. VP8L bit I/O (RFC 9649 §3.3)
 
 Owner: `gamut-webp/src/vp8l/bit_io.rs`. **LSB-first**, the opposite order to the MSB-first `f(n)`
-fields used by the AV1-family codecs — which is why it is implemented in-crate rather than shared.
+fields used by the AV1-family codecs. The reader is the shared `gamut_bitstream::LsbBitReader`
+(#1110), re-exported as `bit_io::BitReader`; the writer, used only by this crate's encoder, stays
+in-crate.
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| LSB-first `ReadBits(n)` reader | RFC 9649 §3.3 | ✅ | M0 |
+| LSB-first `ReadBits(n)` reader (`gamut_bitstream::LsbBitReader`) | RFC 9649 §3.3 | ✅ | M0 |
 | LSB-first bit writer (encoder side) | §3.3 | ✅ | M0 |
 
 ---
