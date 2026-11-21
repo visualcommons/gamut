@@ -6,6 +6,8 @@
 //! through CRC — is what keeps those bytes out of the digest, and both directions below put that
 //! range in front of c2pa-rs rather than taking it on trust.
 
+use std::ops::Range;
+
 use c2pa::ValidationState;
 use c2pa_oracle::{
     OracleError, PNG_MIME, Result, data_hash_exclusions, embed, jumbf_superbox_span, read,
@@ -57,14 +59,21 @@ fn reserve_png(len: usize) -> Result<(Vec<u8>, C2paSpan)> {
     Ok((png, span))
 }
 
+/// A file-offset range gamut-png reports (`Range<u64>`) as the in-memory `Range<usize>` the
+/// oracle compares and excludes in.
+fn file_range(range: &Range<u64>) -> Range<usize> {
+    let index = |offset: u64| usize::try_from(offset).expect("an in-memory offset fits usize");
+    index(range.start)..index(range.end)
+}
+
 /// Reserve, sign around `exclude(span)`, and fill through `fill_c2pa` — direction 1 with the
 /// exclusion chosen by the caller, so the chunk span and the payload alone can be compared.
-fn sign_excluding(exclude: fn(&C2paSpan) -> std::ops::Range<usize>) -> Vec<u8> {
+fn sign_excluding(exclude: fn(&C2paSpan) -> &Range<u64>) -> Vec<u8> {
     let filled = reserve_then_fill_data_hashed(
         PNG_MIME,
         |len| {
             let (png, span) = reserve_png(len)?;
-            Ok((png, vec![exclude(&span)], span))
+            Ok((png, vec![file_range(exclude(&span))], span))
         },
         |mut png, span, store| {
             fill_c2pa(&mut png, &span, store)
@@ -78,7 +87,7 @@ fn sign_excluding(exclude: fn(&C2paSpan) -> std::ops::Range<usize>) -> Vec<u8> {
 
 #[test]
 fn a_store_signed_around_the_reported_chunk_span_validates_once_filled() {
-    let png = sign_excluding(|span| span.chunk.clone());
+    let png = sign_excluding(|span| &span.chunk);
 
     assert_eq!(
         read(PNG_MIME, &png).expect("the filled PNG carries a store"),
@@ -93,7 +102,7 @@ fn excluding_the_payload_alone_leaves_the_rewritten_crc_digested() {
     // The reason `C2paSpan::chunk` and not `C2paSpan::payload` is the exclusion: `fill_c2pa`
     // rewrites the chunk CRC, which lies outside the payload. Signing around the payload alone
     // digests the reservation's CRC, and the fill then changes it.
-    let png = sign_excluding(|span| span.payload.clone());
+    let png = sign_excluding(|span| &span.payload);
 
     assert_ne!(
         read(PNG_MIME, &png).ok(),
@@ -117,8 +126,8 @@ fn a_signed_store_longer_than_the_placeholder_is_refused_before_it_is_filled() {
             let (png, span) = reserve_png(len)?;
             // Sixteen one-byte ranges inside the reserved payload: legal, disjoint, and more
             // than the placeholder made room for.
-            let exclusions =
-                (0..16).map(|i| span.payload.start + 2 * i..span.payload.start + 2 * i + 1);
+            let start = file_range(&span.payload).start;
+            let exclusions = (0..16).map(|i| start + 2 * i..start + 2 * i + 1);
             Ok((png, exclusions.collect(), ()))
         },
         |png, (), _| {
@@ -142,13 +151,14 @@ fn gamut_png_locates_the_store_c2pa_rs_embedded_at_its_own_superbox_span() {
         .c2pa()
         .expect("gamut-png finds the `caBX` chunk c2pa-rs wrote");
 
+    let payload = file_range(&span.payload);
     assert_eq!(
-        span.payload,
+        payload,
         jumbf_superbox_span(&asset).expect("the store's own JUMBF header"),
         "the payload gamut-png reports must be exactly the span the store's own `LBox` declares"
     );
     assert_eq!(
-        read_with_external_store(PNG_MIME, &asset[span.payload], &asset)
+        read_with_external_store(PNG_MIME, &asset[payload], &asset)
             .expect("c2pa-rs reads the bytes gamut-png located"),
         ValidationState::Valid,
         "the bytes at the payload gamut-png reported must be the store c2pa-rs embedded"
@@ -165,7 +175,7 @@ fn the_chunk_span_gamut_png_reports_is_the_exclusion_c2pa_rs_wrote() {
 
     assert_eq!(
         data_hash_exclusions(PNG_MIME, &asset).expect("c2pa-rs's own data hash"),
-        vec![span.chunk],
+        vec![file_range(&span.chunk)],
         "c2pa-rs's own embedder must exclude exactly the whole `caBX` chunk gamut-png reports"
     );
 }

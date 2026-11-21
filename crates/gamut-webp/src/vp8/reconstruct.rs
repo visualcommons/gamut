@@ -10,7 +10,7 @@
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
 #![allow(clippy::needless_range_loop)]
 
-use gamut_color::{ChromaSubsampling, Planar8};
+use gamut_color::ChromaSubsampling;
 use gamut_core::{Dimensions, Result};
 use gamut_dsp::math::clip_pixel8;
 
@@ -19,6 +19,7 @@ use super::header::{LoopFilterParams, Segmentation, Vp8FrameHeader};
 use super::quant::{self, QuantFactors};
 use super::transform::{idct4x4, iwht4x4};
 use super::{loop_filter, prediction};
+use crate::backend::Vp8Planes;
 
 /// The clamped base quantizer index for segment `s` (RFC 6386 §9.3/§10): the absolute or
 /// delta-adjusted value when segmentation is enabled, else the frame base.
@@ -76,14 +77,14 @@ impl FrameBuffers {
         self.mb_cols * 8
     }
 
-    /// Crops the reconstruction to visible-resolution 4:2:0 [`Planar8`] planes.
+    /// Crops the reconstruction to visible-resolution 4:2:0 [`Vp8Planes`].
     ///
     /// # Errors
     ///
     /// None in practice: a frame is non-empty (its header's 14-bit sides are checked when it is
     /// built) and its cropped planes match its dimensions by construction. The `Result` carries
-    /// [`Planar8`]'s own validation out instead of panicking on it.
-    pub fn to_yuv420(&self) -> Result<Planar8> {
+    /// the plane validation out instead of panicking on it.
+    pub fn to_yuv420(&self) -> Result<Vp8Planes> {
         let (w, h) = (self.width as usize, self.height as usize);
         let (cw, ch) = ChromaSubsampling::Cs420.chroma_dimensions(self.width, self.height);
         let (cw, ch) = (cw as usize, ch as usize);
@@ -98,11 +99,7 @@ impl FrameBuffers {
         let y = crop(&self.y, self.y_stride(), w, h);
         let u = crop(&self.u, self.c_stride(), cw, ch);
         let v = crop(&self.v, self.c_stride(), cw, ch);
-        Planar8::from_planes_subsampled(
-            Dimensions::new(self.width, self.height)?,
-            ChromaSubsampling::Cs420,
-            [y, u, v],
-        )
+        Vp8Planes::from_planes(Dimensions::new(self.width, self.height)?, [y, u, v])
     }
 }
 

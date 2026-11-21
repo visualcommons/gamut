@@ -19,8 +19,8 @@ use gamut_riff::{
 
 use crate::alpha;
 use crate::backend::{
-    EncoderRegistry, WebpCodestream, WebpCodestreamEncoder, WebpEncodeRequest, WebpRasterRef,
-    encode_with_backends,
+    EncoderRegistry, Vp8Planes, WebpCodestream, WebpCodestreamEncoder, WebpEncodeRequest,
+    WebpRasterRef, encode_with_backends,
 };
 use crate::config::{Effort, NearLossless, WebpConfig, WebpMode};
 use crate::vp8::frame::{EncodeOptions, encode_frame_filtered};
@@ -364,11 +364,18 @@ impl WebpEncoder {
         }
     }
 
-    /// Encodes the lossy codestream for `yuv`, via a backend when one accepts, else the built-in
-    /// VP8 encoder.
-    fn encode_vp8_codestream(&self, yuv: &Planar8, dims: Dimensions) -> Result<Vec<u8>> {
-        let req = WebpEncodeRequest::new(WebpCodestream::Vp8, dims, self.config.quality)
-            .with_effort(self.config.effort);
+    /// Encodes the lossy codestream for the RGB image `rgb`, via a backend when one accepts, else
+    /// the built-in VP8 encoder.
+    ///
+    /// WebP/VP8 is limited-range BT.601 4:2:0 (what libwebp and browsers decode; see
+    /// [`ColorRange`]), so this is the one place the colour conversion happens for both RGB and
+    /// RGBA input.
+    fn encode_vp8_codestream(&self, rgb: ImageRef<'_, Rgb8>) -> Result<Vec<u8>> {
+        // `from_rgb8_bt601` builds 4:2:0 planes by contract, which `try_from` re-checks.
+        let yuv = &Vp8Planes::try_from(Planar8::from_rgb8_bt601(rgb, ColorRange::Limited))?;
+        let req =
+            WebpEncodeRequest::new(WebpCodestream::Vp8, rgb.dimensions(), self.config.quality)
+                .with_effort(self.config.effort);
         let raster = WebpRasterRef::Yuv420(yuv);
         match encode_with_backends(&self.backends, &req, &raster)? {
             Some(payload) => Ok(payload),
@@ -479,10 +486,7 @@ impl WebpEncoder {
                 self.wrap(dims, WebpCodestream::Vp8l, &bitstream, None, false)
             }
             WebpMode::Lossy => {
-                // WebP/VP8 is limited-range BT.601 (what libwebp + browsers decode); see ColorRange.
-                let yuv =
-                    Planar8::from_rgb8_bt601(ImageRef::new(pixels, dims)?, ColorRange::Limited);
-                let payload = self.encode_vp8_codestream(&yuv, dims)?;
+                let payload = self.encode_vp8_codestream(ImageRef::new(pixels, dims)?)?;
                 self.wrap(dims, WebpCodestream::Vp8, &payload, None, false)
             }
         }?;
@@ -523,8 +527,7 @@ impl WebpEncoder {
                     .iter()
                     .flat_map(|p| [p[0], p[1], p[2]])
                     .collect();
-                let yuv = Planar8::from_rgb8_bt601(ImageRef::new(&rgb, dims)?, ColorRange::Limited);
-                let vp8 = self.encode_vp8_codestream(&yuv, dims)?;
+                let vp8 = self.encode_vp8_codestream(ImageRef::new(&rgb, dims)?)?;
                 if transparent {
                     let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
                     let alph =

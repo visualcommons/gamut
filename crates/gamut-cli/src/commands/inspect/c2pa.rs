@@ -278,7 +278,7 @@ pub(super) fn png_c2pa_json(summary: &gamut::png::C2paSummary) -> Json {
     };
     let store = summary.store.as_ref().map_or(Json::Null, |s| {
         Json::Object(vec![
-            ("size", Json::from(s.payload.len())),
+            ("size", Json::from(s.payload.end - s.payload.start)),
             ("range", span(s.payload.start, s.payload.end)),
             ("chunk", span(s.chunk.start, s.chunk.end)),
         ])
@@ -294,7 +294,10 @@ pub(super) fn png_c2pa_json(summary: &gamut::png::C2paSummary) -> Json {
                     .iter()
                     .map(|u| {
                         Json::Object(vec![
-                            ("size", Json::from(u.span.payload.len())),
+                            (
+                                "size",
+                                Json::from(u.span.payload.end - u.span.payload.start),
+                            ),
                             ("chunk", span(u.span.chunk.start, u.span.chunk.end)),
                             ("reason", Json::from(reason(u.reason))),
                             ("description", Json::from(u.reason.describe())),

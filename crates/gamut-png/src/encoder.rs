@@ -136,7 +136,7 @@ fn run_trials(trial: &(impl Fn(FilterStrategy) -> Result<Vec<u8>> + Sync)) -> Re
 pub struct PngEncodeReport {
     /// The number of bytes appended to the output — the whole PNG.
     pub len: usize,
-    /// Where the C2PA manifest-store chunk landed, as offsets from the first byte of this PNG
+    /// Where the C2PA manifest-store chunk landed, as `u64` offsets from the first byte of this PNG
     /// (not of the output buffer it was appended to) — the whole `caBX` span a `c2pa.hash.data`
     /// exclusion must cover, and the payload a signer fills — when [`with_c2pa`] or
     /// [`with_c2pa_reserved`] was set; `None` when neither was.

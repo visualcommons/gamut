@@ -9,6 +9,8 @@
 
 mod common;
 
+use std::ops::Range;
+
 use common::{
     chunk, ihdr_payload, libpng_with_extra_chunks, png_from_chunks, sample_bytes, tiny_exif,
     tiny_icc_profile, zlib,
@@ -18,6 +20,11 @@ use gamut_png::{
     Background, ModificationTime, Palette, PhysicalDimensions, PhysicalUnit, PngDecoder,
     PngEncodeReport, PngEncoder, SegmentKind, SrgbIntent, deconstruct, fill_c2pa,
 };
+
+/// A span's `u64` file offsets as indices into this test's in-memory PNG.
+fn at(range: &Range<u64>) -> Range<usize> {
+    usize::try_from(range.start).expect("in memory")..usize::try_from(range.end).expect("in memory")
+}
 
 /// [`PngEncoder::encode_with_report`] into a fresh buffer, returning the PNG beside its report.
 trait Reported {
@@ -169,7 +176,7 @@ fn cabx_is_the_chunk_immediately_before_idat_after_every_other_chunk() {
         .expect("deconstruct")
         .c2pa()
         .expect("span");
-    assert_eq!(&png[span.payload], &store(16)[..]);
+    assert_eq!(&png[at(&span.payload)], &store(16)[..]);
 }
 
 /// A reservation is a `caBX` whose payload is exactly `len` zero bytes — no slack — and it is
@@ -183,14 +190,12 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
         .expect("a reservable length")
         .reported(image);
     let span = report.c2pa.expect("a reservation is reported");
-    assert_eq!(span.payload.len(), 40);
-    assert_eq!(span.chunk.len(), 40 + 12);
-    assert!(png[span.payload.clone()].iter().all(|&b| b == 0));
-    assert_eq!(
-        &png[span.chunk.start..span.chunk.start + 4],
-        &40u32.to_be_bytes()
-    );
-    assert_eq!(&png[span.chunk.start + 4..span.chunk.start + 8], b"caBX");
+    let (chunk, payload) = (at(&span.chunk), at(&span.payload));
+    assert_eq!(payload.len(), 40);
+    assert_eq!(chunk.len(), 40 + 12);
+    assert!(png[payload].iter().all(|&b| b == 0));
+    assert_eq!(&png[chunk.start..chunk.start + 4], &40u32.to_be_bytes());
+    assert_eq!(&png[chunk.start + 4..chunk.start + 8], b"caBX");
 
     let explicit = PngEncoder::new()
         .with_c2pa(&[0; 40])
@@ -203,8 +208,8 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
         .expect("a reservable length")
         .reported(image);
     let span = report.c2pa.expect("an empty reservation is still a chunk");
-    assert_eq!(span.payload.len(), 0);
-    assert_eq!(&empty[span.chunk.clone()][..8], b"\0\0\0\0caBX");
+    assert!(span.payload.is_empty());
+    assert_eq!(&empty[at(&span.chunk)][..8], b"\0\0\0\0caBX");
 }
 
 /// A reservation past PNG §5.3's 2^31 − 1-byte payload bound is refused at the setter with the
@@ -241,6 +246,7 @@ fn filling_a_reservation_changes_only_the_chunk_span() {
         .expect("a reservable length")
         .reported(image);
     let span = report.c2pa.expect("span");
+    let (chunk, payload) = (at(&span.chunk), at(&span.payload));
     let first = store(64);
     let second: Vec<u8> = first.iter().map(|b| !b).collect();
     let filled = everything_else()
@@ -260,26 +266,26 @@ fn filling_a_reservation_changes_only_the_chunk_span() {
         let differing: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
         assert!(!differing.is_empty(), "{label}: the stores differ");
         assert!(
-            differing.iter().all(|i| span.chunk.contains(i)),
+            differing.iter().all(|i| chunk.contains(i)),
             "{label}: bytes outside the caBX span changed at {:?}",
             differing
                 .iter()
-                .filter(|i| !span.chunk.contains(i))
+                .filter(|i| !chunk.contains(i))
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            a[span.chunk.start..span.chunk.start + 8],
-            b[span.chunk.start..span.chunk.start + 8],
+            a[chunk.start..chunk.start + 8],
+            b[chunk.start..chunk.start + 8],
             "{label}: length and type are unchanged"
         );
         assert_ne!(
-            a[span.chunk.end - 4..span.chunk.end],
-            b[span.chunk.end - 4..span.chunk.end],
+            a[chunk.end - 4..chunk.end],
+            b[chunk.end - 4..chunk.end],
             "{label}: the CRC follows the payload"
         );
     }
-    assert_eq!(&filled[span.payload.clone()], &first[..]);
-    assert_eq!(&refilled[span.payload.clone()], &second[..]);
+    assert_eq!(&filled[payload.clone()], &first[..]);
+    assert_eq!(&refilled[payload], &second[..]);
     // The filled file's own report names the very same span.
     assert_eq!(
         deconstruct(&filled).expect("deconstruct").c2pa(),
@@ -303,14 +309,12 @@ fn the_exclusion_span_is_the_whole_chunk_at_known_offsets() {
     let span = report.c2pa().expect("caBX");
     assert_eq!(span.chunk, 33..52);
     assert_eq!(span.payload, 41..48);
-    assert_eq!(
-        &png[span.chunk.start..span.chunk.start + 4],
-        &7u32.to_be_bytes()
-    );
-    assert_eq!(&png[span.chunk.start + 4..span.chunk.start + 8], b"caBX");
-    assert_eq!(&png[span.payload.clone()], b"jumbf!!");
+    let chunk = at(&span.chunk);
+    assert_eq!(&png[chunk.start..chunk.start + 4], &7u32.to_be_bytes());
+    assert_eq!(&png[chunk.start + 4..chunk.start + 8], b"caBX");
+    assert_eq!(&png[at(&span.payload)], b"jumbf!!");
     assert!(
-        report.segments.iter().any(|s| s.range == span.chunk
+        report.segments.iter().any(|s| s.range == chunk
             && matches!(
                 s.kind,
                 SegmentKind::Chunk {
@@ -403,7 +407,7 @@ fn the_first_store_wins_and_a_second_is_counted_not_merged() {
     let report = deconstruct(&png).expect("deconstruct");
     let span = report.c2pa().expect("span");
     assert_eq!(span.chunk, 33..50, "the first chunk, 5 + 12 bytes");
-    assert_eq!(&png[span.payload], b"first");
+    assert_eq!(&png[at(&span.payload)], b"first");
     assert_eq!(report.chunk(b"caBX").expect("stats").count, 2);
 }
 
@@ -447,7 +451,7 @@ fn a_cabx_after_idat_is_never_the_store_but_is_still_visible() {
         .expect("deconstruct")
         .c2pa()
         .expect("span");
-    assert_eq!(&both[span.payload], b"real store");
+    assert_eq!(&both[at(&span.payload)], b"real store");
 }
 
 /// The two ignore-reasons add up rather than replacing one another: a duplicate before `IDAT`
@@ -489,7 +493,7 @@ fn a_reserved_store_is_filled_in_place_to_the_same_bytes_as_a_second_encode() {
         .reported(image);
     let span = report.c2pa.expect("span");
     let outside_before: Vec<u8> = (0..reserved.len())
-        .filter(|i| !span.chunk.contains(i))
+        .filter(|i| !at(&span.chunk).contains(i))
         .map(|i| reserved[i])
         .collect();
 
@@ -505,7 +509,7 @@ fn a_reserved_store_is_filled_in_place_to_the_same_bytes_as_a_second_encode() {
     );
 
     let outside_after: Vec<u8> = (0..reserved.len())
-        .filter(|i| !span.chunk.contains(i))
+        .filter(|i| !at(&span.chunk).contains(i))
         .map(|i| reserved[i])
         .collect();
     assert_eq!(
@@ -631,7 +635,7 @@ fn a_cabx_with_a_bad_crc_is_neither_the_store_nor_the_exclusion_span() {
 
     let report = deconstruct(&png).expect("deconstruct");
     let span = report.c2pa().expect("the valid store");
-    assert_eq!(&png[span.payload], b"valid");
+    assert_eq!(&png[at(&span.payload)], b"valid");
     assert_eq!(span.chunk.start, 33 + 12 + 7, "after the damaged chunk");
     assert_eq!(report.chunk(b"caBX").expect("stats").count, 2);
     assert!(!report.is_intact());

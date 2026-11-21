@@ -135,8 +135,9 @@ mod vp8;
 mod vp8l;
 
 pub use backend::{
-    AbiWebpDecoder, AbiWebpEncoder, DecodedWebp, VP8_CODEC_ID, VP8L_CODEC_ID, WebpCodestream,
-    WebpCodestreamDecoder, WebpCodestreamEncoder, WebpEncodeRequest, WebpRasterRef, WebpStreamInfo,
+    AbiWebpDecoder, AbiWebpEncoder, DecodedWebp, VP8_CODEC_ID, VP8L_CODEC_ID, Vp8Planes,
+    WebpCodestream, WebpCodestreamDecoder, WebpCodestreamEncoder, WebpEncodeRequest, WebpRasterRef,
+    WebpStreamInfo,
 };
 pub use config::{Effort, NearLossless, WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;

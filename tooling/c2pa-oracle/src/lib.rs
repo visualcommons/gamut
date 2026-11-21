@@ -529,8 +529,10 @@ pub struct DataHashFilled {
 ///
 /// 1. `Builder::placeholder` under [`RAW_JUMBF_FORMAT`] pins the store length;
 /// 2. `reserve` is handed that length and returns the finished asset, the exclusion ranges the
-///    gamut encoder reported for its reservation, and whatever `fill` will need to find the
-///    reservation again (`T`: the PNG `C2paSpan`, the TIFF store range, nothing for WebP);
+///    gamut encoder reported for its reservation (the PNG, WebP and TIFF/DNG encoders report
+///    `Range<u64>` file offsets; `reserve` converts them to the in-memory `Range<usize>` indices
+///    this crate compares in), and whatever `fill` will need to find the reservation again (`T`:
+///    the PNG `C2paSpan`, the TIFF store range, nothing for WebP);
 /// 3. those ranges become the binding's exclusions, and `Builder::update_hash_from_stream`
 ///    digests the asset *as reserved* under `format`;
 /// 4. `Builder::sign_embeddable` signs and zero-pads back to the pinned length;

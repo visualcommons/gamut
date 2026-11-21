@@ -4,16 +4,15 @@
 //! that no input drives it to *panic* either, which would be a denial of service on a server
 //! decoding user uploads. The container-level half stays in `tests/robustness.rs`.
 
-use gamut_color::{ChromaSubsampling, Planar8};
 use gamut_core::Dimensions;
 
 use super::{decode_frame, encode_frame};
+use crate::backend::Vp8Planes;
 
 /// A valid VP8 key-frame payload to mutate.
 fn valid_payload() -> Vec<u8> {
-    let yuv = Planar8::from_planes_subsampled(
+    let yuv = Vp8Planes::from_planes(
         Dimensions::new(48, 32).unwrap(),
-        ChromaSubsampling::Cs420,
         [
             (0..48 * 32).map(|i| (i % 251) as u8).collect(),
             vec![110u8; 24 * 16],
