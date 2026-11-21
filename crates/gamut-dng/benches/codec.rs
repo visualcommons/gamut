@@ -143,8 +143,11 @@ use std::sync::LazyLock;
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
 use gamut_core::Dimensions;
+#[cfg(feature = "jxl-encode")]
+use gamut_dng::JxlSettings;
 use gamut_dng::{
-    CalibrationIlluminant, CameraProfile, Compression, DngDecoder, DngEncoder, RawImage, cfa_color,
+    CalibrationIlluminant, CameraProfile, DngCompression, DngDecoder, DngEncoder, RawImage,
+    cfa_color,
 };
 
 fn main() {
@@ -224,7 +227,7 @@ impl std::fmt::Display for Photometry {
 #[derive(Clone, Copy)]
 struct Case {
     photometry: Photometry,
-    compression: Compression,
+    compression: DngCompression,
 }
 
 impl Case {
@@ -280,17 +283,17 @@ impl Case {
     /// does not,
     /// so the same arithmetic would over-credit gamut and the correction is suppressed.
     fn preview_correction_is_measured(self) -> bool {
-        matches!(self.compression, Compression::None)
+        matches!(self.compression, DngCompression::Uncompressed)
     }
 }
 
 impl std::fmt::Display for Case {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let scheme = match self.compression {
-            Compression::None => "uncompressed".to_string(),
-            Compression::Deflate => "deflate".to_string(),
-            Compression::Jpeg => "lossless-jpeg".to_string(),
-            Compression::JpegXl => "jpeg-xl".to_string(),
+            DngCompression::Uncompressed => "uncompressed".to_string(),
+            DngCompression::Deflate => "deflate".to_string(),
+            DngCompression::LosslessJpeg => "lossless-jpeg".to_string(),
+            DngCompression::Jxl(_) => "jpeg-xl".to_string(),
             other => format!("{other:?}"),
         };
         // `pad`, not `write!`: `write!` writes through to the buffer and ignores the formatter's
@@ -314,37 +317,37 @@ const PHOTOMETRIES: [Photometry; 2] = [Photometry::Cfa, Photometry::LinearRaw];
 const CASES: &[Case] = &[
     Case {
         photometry: Photometry::Cfa,
-        compression: Compression::None,
+        compression: DngCompression::Uncompressed,
     },
     Case {
         photometry: Photometry::Cfa,
-        compression: Compression::Deflate,
+        compression: DngCompression::Deflate,
     },
     Case {
         photometry: Photometry::Cfa,
-        compression: Compression::Jpeg,
+        compression: DngCompression::LosslessJpeg,
     },
     #[cfg(feature = "jxl-encode")]
     Case {
         photometry: Photometry::Cfa,
-        compression: Compression::JpegXl,
+        compression: DngCompression::Jxl(JxlSettings::lossless()),
     },
     Case {
         photometry: Photometry::LinearRaw,
-        compression: Compression::None,
+        compression: DngCompression::Uncompressed,
     },
     Case {
         photometry: Photometry::LinearRaw,
-        compression: Compression::Deflate,
+        compression: DngCompression::Deflate,
     },
     Case {
         photometry: Photometry::LinearRaw,
-        compression: Compression::Jpeg,
+        compression: DngCompression::LosslessJpeg,
     },
     #[cfg(feature = "jxl-encode")]
     Case {
         photometry: Photometry::LinearRaw,
-        compression: Compression::JpegXl,
+        compression: DngCompression::Jxl(JxlSettings::lossless()),
     },
 ];
 
@@ -688,7 +691,7 @@ fn profile() -> CameraProfile {
 }
 
 /// The encoder under test, at one compression scheme. Everything else is the encoder's default.
-fn encoder(compression: Compression) -> DngEncoder {
+fn encoder(compression: DngCompression) -> DngEncoder {
     DngEncoder::new().with_compression(compression)
 }
 

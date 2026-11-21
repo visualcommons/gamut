@@ -16,7 +16,87 @@
 //! typed error — float sample support is deferred crate-wide (see `STATUS.md`).
 
 use gamut_core::{DecodeImage, Error, Gray16, Result, Rgb16};
-use gamut_jxl::{DecodeLimits, JxlDecoder};
+use gamut_jxl::{DecodeLimits, Distance, Effort, JxlDecoder};
+
+/// The JPEG XL encode parameters of a DNG raw image: the payload of
+/// [`DngCompression::Jxl`](crate::DngCompression::Jxl), so they can only be set where they take
+/// effect.
+///
+/// Plain `Copy` data over gamut-jxl's own validated [`Distance`] and
+/// [`JxlEffort`](crate::JxlEffort): [`lossless`](Self::lossless) (the [`Default`]) or
+/// [`lossy`](Self::lossy) at a Butteraugli distance, at libjxl's default effort
+/// ([`JxlEffort::Squirrel`](crate::JxlEffort::Squirrel), level 7) unless
+/// [`with_effort`](Self::with_effort) picks another. The written raw IFD records both in the
+/// `JXLDistance` (`0.0` for lossless) and `JXLEffort` tags (DNG 1.7.1 pp. 97-98).
+///
+/// ```
+/// use gamut_dng::{Distance, DngCompression, DngEncoder, JxlEffort, JxlSettings};
+///
+/// const LOSSLESS: DngCompression = DngCompression::Jxl(JxlSettings::lossless());
+/// let lossy = JxlSettings::lossy(Distance::new(1.0)?).with_effort(JxlEffort::Hare);
+/// let encoder = DngEncoder::new().with_compression(DngCompression::Jxl(lossy));
+/// # let _ = (LOSSLESS, encoder);
+/// # Ok::<(), gamut_core::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JxlSettings {
+    /// `None` is lossless (the default); `Some` is lossy at that Butteraugli distance.
+    distance: Option<Distance>,
+    effort: Effort,
+}
+
+impl Default for JxlSettings {
+    /// [`JxlSettings::lossless`].
+    fn default() -> Self {
+        Self::lossless()
+    }
+}
+
+impl JxlSettings {
+    /// Lossless JPEG XL at libjxl's default effort
+    /// ([`JxlEffort::Squirrel`](crate::JxlEffort::Squirrel)).
+    #[must_use]
+    pub const fn lossless() -> Self {
+        Self {
+            distance: None,
+            effort: Effort::Squirrel,
+        }
+    }
+
+    /// Lossy JPEG XL at the Butteraugli `distance` (1.0 ≈ visually lossless), at the default
+    /// effort. `distance` is already validated by [`Distance::new`], so this cannot fail.
+    #[must_use]
+    pub const fn lossy(distance: Distance) -> Self {
+        Self {
+            distance: Some(distance),
+            ..Self::lossless()
+        }
+    }
+
+    /// Returns these settings at the given libjxl effort.
+    #[must_use]
+    pub const fn with_effort(self, effort: Effort) -> Self {
+        Self { effort, ..self }
+    }
+
+    /// The Butteraugli distance: `None` for lossless.
+    #[must_use]
+    pub fn distance(&self) -> Option<Distance> {
+        self.distance
+    }
+
+    /// The libjxl effort.
+    #[must_use]
+    pub fn effort(&self) -> Effort {
+        self.effort
+    }
+
+    /// The `JXLDistance` tag value: the distance, or `0.0` — libjxl's own lossless sentinel —
+    /// when lossless.
+    pub(crate) fn distance_tag(&self) -> f32 {
+        self.distance.map_or(0.0, Distance::get)
+    }
+}
 
 /// Decodes one JPEG XL chunk of `cols × rows` pixels at `spp` samples each, returning exactly
 /// `cols * rows * spp` full-range 16-bit code values (see the module docs).
@@ -67,8 +147,8 @@ pub(crate) fn decode_chunk(bytes: &[u8], cols: usize, rows: usize, spp: usize) -
 }
 
 /// Encodes one chunk of `cols × rows` pixels at `spp` full-range 16-bit samples each as a bare
-/// JPEG XL codestream (the spec's recommendation for tiled image data). `distance` `None` is
-/// lossless (the default), `Some` lossy at that distance.
+/// JPEG XL codestream (the spec's recommendation for tiled image data), lossless or lossy and at
+/// the effort `settings` carries.
 #[cfg(all(
     feature = "jxl-encode",
     any(not(target_arch = "wasm32"), target_os = "emscripten")
@@ -78,15 +158,15 @@ pub(crate) fn encode_chunk(
     cols: usize,
     rows: usize,
     spp: usize,
-    distance: Option<gamut_jxl::Distance>,
-    effort: gamut_jxl::Effort,
+    settings: JxlSettings,
 ) -> Result<Vec<u8>> {
     use gamut_core::{Dimensions, EncodeImage, ImageRef};
     use gamut_jxl::JxlEncoder;
 
-    let encoder = distance
+    let encoder = settings
+        .distance()
         .map_or_else(JxlEncoder::lossless, JxlEncoder::lossy)
-        .with_effort(effort);
+        .with_effort(settings.effort());
     let dims = Dimensions::new(cols as u32, rows as u32)?;
     let mut out = Vec::new();
     match spp {
@@ -104,6 +184,40 @@ pub(crate) fn encode_chunk(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    /// Lossless — the default — is at libjxl's default effort, recorded as `JXLDistance` 0.0.
+    #[test]
+    fn default_settings_are_lossless_at_squirrel() {
+        let settings = JxlSettings::lossless();
+        assert_eq!(JxlSettings::default(), settings);
+        assert_eq!(settings.distance(), None);
+        assert_eq!(settings.effort(), Effort::Squirrel);
+        assert_eq!(settings.distance_tag().to_bits(), 0.0f32.to_bits());
+    }
+
+    /// `lossy` keeps its distance, and the tag records exactly that distance.
+    #[test]
+    fn lossy_settings_carry_their_distance() {
+        let distance = Distance::new(2.5).expect("a valid distance");
+        let settings = JxlSettings::lossy(distance);
+        assert_eq!(settings.distance(), Some(distance));
+        assert_eq!(settings.effort(), Effort::Squirrel);
+        assert_eq!(settings.distance_tag().to_bits(), 2.5f32.to_bits());
+    }
+
+    /// `with_effort` replaces the effort and keeps the distance.
+    #[test]
+    fn with_effort_keeps_the_distance() {
+        let distance = Distance::new(1.5).expect("a valid distance");
+        let settings = JxlSettings::lossy(distance).with_effort(Effort::Hare);
+        assert_eq!(settings.effort(), Effort::Hare);
+        assert_eq!(settings.distance(), Some(distance));
+    }
 }
 
 #[cfg(all(

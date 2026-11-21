@@ -194,14 +194,18 @@ fn adobe_in_memory_decode_reports_the_same_extent_as_the_file_decode() {
 
 #[test]
 fn tiled_roundtrips_through_gamut() {
-    use gamut_dng::Compression;
+    use gamut_dng::DngCompression;
     // 48x40 with 32x32 tiles: a 2x2 grid whose right/bottom tiles carry 16 padding columns and
     // 24 padding rows — the edge-crop path. Sub-byte depths exercise per-tile row alignment.
-    for compression in [Compression::None, Compression::Deflate, Compression::Jpeg] {
+    for compression in [
+        DngCompression::Uncompressed,
+        DngCompression::Deflate,
+        DngCompression::LosslessJpeg,
+    ] {
         for bits in [8u16, 10, 12, 16] {
             // Deflate is limited to whole-byte depths (the SDK reader's constraint, enforced at
             // encode).
-            if compression == Compression::Deflate && !matches!(bits, 8 | 16) {
+            if compression == DngCompression::Deflate && !matches!(bits, 8 | 16) {
                 continue;
             }
             for raw in [
@@ -230,14 +234,14 @@ fn tiled_roundtrips_through_gamut() {
 /// semantics), so the fixtures are 16-bit.
 #[test]
 fn jxl_roundtrips_and_validates() {
-    use gamut_dng::Compression;
+    use gamut_dng::{DngCompression, JxlSettings};
     for raw in [
         common::sample_raw(48, 40, 16),
         common::sample_linear_raw(40, 24, 16),
     ] {
         for tiled in [false, true] {
             let mut enc = DngEncoder::new()
-                .with_compression(Compression::JpegXl)
+                .with_compression(DngCompression::Jxl(JxlSettings::lossless()))
                 .with_dng_version([1, 7, 0, 0])
                 .with_backward_version([1, 7, 0, 0]);
             if tiled {
@@ -267,10 +271,10 @@ fn jxl_roundtrips_and_validates() {
 /// at full 16-bit range, so an N-bit-code-value file would misrender against its own levels.
 #[test]
 fn jxl_rejects_sub_16bit_samples() {
-    use gamut_dng::Compression;
+    use gamut_dng::{DngCompression, JxlSettings};
     let raw = common::sample_raw(32, 32, 12);
     let err = DngEncoder::new()
-        .with_compression(Compression::JpegXl)
+        .with_compression(DngCompression::Jxl(JxlSettings::lossless()))
         .encode(&raw, &common::sample_profile(), &mut Vec::new())
         .unwrap_err();
     assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
@@ -286,13 +290,13 @@ fn jxl_rejects_sub_16bit_samples() {
 /// independently), and the JXLDistance/JXLEffort tags record the configured parameters.
 #[test]
 fn lossy_jxl_validates_and_decoders_agree() {
-    use gamut_dng::Compression;
+    use gamut_dng::{Distance, DngCompression, JxlEffort, JxlSettings};
     let raw = common::sample_linear_raw(64, 48, 16);
+    let settings = JxlSettings::lossy(Distance::new(1.0).expect("a valid distance"))
+        .with_effort(JxlEffort::Hare);
     let mut dng = Vec::new();
     DngEncoder::new()
-        .with_compression(Compression::JpegXl)
-        .with_jxl_distance(gamut_dng::Distance::new(1.0).expect("a valid distance"))
-        .with_jxl_effort(gamut_dng::Effort::Hare)
+        .with_compression(DngCompression::Jxl(settings))
         .with_dng_version([1, 7, 0, 0])
         .with_backward_version([1, 7, 0, 0])
         .with_tiling(32, 32)
@@ -365,7 +369,7 @@ fn gain_table_maps_roundtrip_and_validate() {
 /// identical pixels, and agree on the raw digest.
 #[test]
 fn proraw_shaped_dng_roundtrips_and_validates() {
-    use gamut_dng::{Compression, GainValues, ProfileGainTableMap, RawLevels};
+    use gamut_dng::{DngCompression, GainValues, JxlSettings, ProfileGainTableMap, RawLevels};
     let table: Vec<u16> = (0..4096u32).map(|v| (v * 16).min(65535) as u16).collect();
     let levels = RawLevels::new(
         3,
@@ -395,7 +399,7 @@ fn proraw_shaped_dng_roundtrips_and_validates() {
 
     let mut dng = Vec::new();
     DngEncoder::new()
-        .with_compression(Compression::JpegXl)
+        .with_compression(DngCompression::Jxl(JxlSettings::lossless()))
         .with_tiling(32, 32)
         .with_gain_table_map2(map2.clone())
         .encode(&raw, &common::sample_profile(), &mut dng)
@@ -456,7 +460,7 @@ fn bigtiff_roundtrips_and_validates() {
 
 #[test]
 fn deflate_roundtrips_and_validates() {
-    use gamut_dng::Compression;
+    use gamut_dng::DngCompression;
     // `(image, the SDK reads its samples back)`. Deflate is limited to whole-byte depths (the SDK
     // reader's constraint, enforced at encode), so 16- and 8-bit CFA cover the encodable range.
     // The SDK's stage-1 *reader* is 16-bit-only for CFA — an 8-bit CFA DNG fails it under every
@@ -470,7 +474,7 @@ fn deflate_roundtrips_and_validates() {
     for (raw, sdk_reads_samples) in cases {
         let mut dng = Vec::new();
         DngEncoder::new()
-            .with_compression(Compression::Deflate)
+            .with_compression(DngCompression::Deflate)
             .encode(&raw, &common::sample_profile(), &mut dng)
             .expect("encode");
         // gamut decodes its own Deflate output...
@@ -487,7 +491,7 @@ fn deflate_roundtrips_and_validates() {
 
 #[test]
 fn lossless_jpeg_roundtrips_and_validates() {
-    use gamut_dng::Compression;
+    use gamut_dng::DngCompression;
     let cases = [
         common::sample_raw(64, 48, 16),
         common::sample_raw(33, 21, 12), // odd width, 12-bit
@@ -496,7 +500,7 @@ fn lossless_jpeg_roundtrips_and_validates() {
     for raw in cases {
         let mut dng = Vec::new();
         DngEncoder::new()
-            .with_compression(Compression::Jpeg)
+            .with_compression(DngCompression::LosslessJpeg)
             .encode(&raw, &common::sample_profile(), &mut dng)
             .expect("encode");
         // gamut round-trips its own lossless JPEG...

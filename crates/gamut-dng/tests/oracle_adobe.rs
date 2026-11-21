@@ -99,11 +99,15 @@ fn adobe_decodes_linear_raw_samples_exactly() {
 /// padding columns and rows on the edge tiles).
 #[test]
 fn adobe_validates_and_decodes_tiled_dngs_exactly() {
-    use gamut_dng::Compression;
-    for compression in [Compression::None, Compression::Deflate, Compression::Jpeg] {
+    use gamut_dng::DngCompression;
+    for compression in [
+        DngCompression::Uncompressed,
+        DngCompression::Deflate,
+        DngCompression::LosslessJpeg,
+    ] {
         // 12-bit exercises per-tile sub-byte packing where the scheme allows it; Deflate is
         // limited to whole-byte depths (the SDK reader's constraint, enforced at encode).
-        let cfa_bits = if compression == Compression::Deflate {
+        let cfa_bits = if compression == DngCompression::Deflate {
             16
         } else {
             12

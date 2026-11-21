@@ -107,7 +107,7 @@ pub use color_profile::{ColorProfileInfo, HsvDelta, HsvTable, NoiseModel, NoiseP
 pub use compression::{is_decodable, is_lossy};
 pub use decoder::{DecodedDng, DigestCheck, DngDecoder, PageExtra, RawTag, SubIfdExtra};
 pub use deconstruct::deconstruct;
-pub use encoder::{DngEncodeReport, DngEncoder};
+pub use encoder::{DngCompression, DngEncodeReport, DngEncoder};
 pub use gain_map::{GainValues, ProfileGainTableMap};
 // The C2PA surface (C2PA 2.4 §A.3.6, §18.5.5) is `gamut-ifd`'s — the placement and exclusion
 // rules are stated once there for every TIFF-based codec — re-exported whole so a signer
@@ -142,13 +142,15 @@ pub use gamut_ifd::{
     C2paUnreadEntry, C2paUnreadReason, c2pa_summary,
 };
 // The JPEG XL encoder knobs are gamut-jxl's own validated types, re-exported because
-// `DngEncoder::with_jxl_distance` / `with_jxl_effort` take them.
-pub use gamut_jxl::{Distance, Effort};
+// `JxlSettings` takes them; the effort as `JxlEffort`, so it does not collide with another
+// codec's `Effort` (gamut-png's is a different type) in a caller using both.
+pub use gamut_jxl::{Distance, Effort as JxlEffort};
 // The facade types named in the `metadata`-feature signatures — `DngMetadata`'s `TypedMetadata`
 // impl and `DngEncoder`'s `MetadataSink` impl — so a caller can spell them without a direct
 // gamut-metadata dependency.
 #[cfg(feature = "metadata")]
 pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataSink, TypedMetadata};
+pub use jxl::JxlSettings;
 pub use levels::{MAX_BLACK_REPEAT, RawLevels};
 pub use linearize::LinearImage;
 pub use metadata::DngMetadata;
