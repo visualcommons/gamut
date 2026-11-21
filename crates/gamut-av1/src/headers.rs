@@ -213,6 +213,38 @@ impl Av1Color {
         }
     }
 
+    /// This signalling with the colour primaries replaced.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_av1::Av1Color;
+    /// use gamut_color::cicp::ColorPrimaries;
+    /// let p3 = Av1Color::default().with_primaries(ColorPrimaries::DisplayP3);
+    /// assert_eq!(p3.primaries, ColorPrimaries::DisplayP3);
+    /// ```
+    #[must_use]
+    pub const fn with_primaries(mut self, primaries: ColorPrimaries) -> Self {
+        self.primaries = primaries;
+        self
+    }
+
+    /// This signalling with the transfer characteristics replaced.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_av1::Av1Color;
+    /// use gamut_color::cicp::TransferCharacteristics;
+    /// let pq = Av1Color::default().with_transfer(TransferCharacteristics::Pq);
+    /// assert_eq!(pq.transfer, TransferCharacteristics::Pq);
+    /// ```
+    #[must_use]
+    pub const fn with_transfer(mut self, transfer: TransferCharacteristics) -> Self {
+        self.transfer = transfer;
+        self
+    }
+
     /// This signalling with the matrix coefficients replaced.
     #[must_use]
     pub const fn with_matrix(mut self, matrix: MatrixCoefficients) -> Self {
@@ -896,6 +928,34 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn with_primaries_replaces_only_the_primaries() {
+        // The default carries BT.709 primaries, so Display P3 is a value the setter must write.
+        assert_eq!(
+            Av1Color::DEFAULT.with_primaries(ColorPrimaries::DisplayP3),
+            Av1Color::new(
+                ColorPrimaries::DisplayP3,
+                TransferCharacteristics::Srgb,
+                MatrixCoefficients::Identity,
+                ColorRange::Full,
+            )
+        );
+    }
+
+    #[test]
+    fn with_transfer_replaces_only_the_transfer() {
+        // The default carries the sRGB transfer, so PQ is a value the setter must write.
+        assert_eq!(
+            Av1Color::DEFAULT.with_transfer(TransferCharacteristics::Pq),
+            Av1Color::new(
+                ColorPrimaries::Bt709,
+                TransferCharacteristics::Pq,
+                MatrixCoefficients::Identity,
+                ColorRange::Full,
+            )
+        );
+    }
 
     /// A config in `chroma` with a non-identity matrix (so `color_config()` leaves the sRGB
     /// shortcut and actually codes the range and position bits).
