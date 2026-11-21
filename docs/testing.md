@@ -245,8 +245,10 @@ entry point" names the untrusted-input surface a fuzz target takes; ☑ marks on
 `tooling/gamut-fuzz` drives today, ☐ one not yet wired (#264). Every entry point #311 found is
 wired; a crate that gains one adds it here as ☐ until its target lands, as `gamut-deflate`'s
 `inflate_zlib` (zlib bytes from PNG, TIFF and DNG files) did until #1144. A "—" is a crate with
-no untrusted-input surface: they take caller-built values, or a model another row's parser built,
-rather than file bytes. The binary, binding
+no untrusted-input surface: they take caller-built values rather than file bytes. A model another
+row's parser built is **not** caller-built — every value in a profile or metadata block that parses
+is still the file writer's choice — so `gamut-cmm` and `gamut-metadata`, which consume such models,
+carry entry points (#311's audit, `docs/security-audit.md`). The binary, binding
 and stub crates (`gamut`, `gamut-cli`, `gamut-wasm`, `gamut-ffi`, `gamut-jxl-sys`, `gamut-av2`,
 `gamut-vvc`) have no row: they are excluded from the coverage and mutation gates, and the stubs
 carry no function bodies.
@@ -261,7 +263,7 @@ carry no function bodies.
 | gamut-codec-abi | *none* | exact-byte + compile-time assertion | — |
 | gamut-color | Little-CMS | differential | — |
 | gamut-icc | Little-CMS | differential | `IccProfile::parse` ☑ |
-| gamut-cmm | Little-CMS | differential | — |
+| gamut-cmm | Little-CMS | differential | `IccTransform` constructors over a parsed embedded profile ☑ |
 | gamut-deflate | zlib | differential | `inflate_zlib` (`inflate` feature) ☑ law |
 | gamut-png | libpng (both directions) | differential + conformance + size contract | `PngDecoder` ☑ |
 | gamut-jpeg | libjpeg-turbo; jpegli (XYB mode, with Little-CMS applying the profile, and the `with_distance` tables); the Adobe DNG SDK's lossless-JPEG codec (`lossless`, SOF3) | differential + exact-byte | `JpegDecoder` ☑ |
@@ -278,7 +280,7 @@ carry no function bodies.
 | gamut-exif | exiv2 | differential + golden | `parse` ☑ |
 | gamut-xmp | exiv2 XMPCore | differential + golden | `parse` ☑ |
 | gamut-iptc | exiv2; IPTC tech reference | differential + drift guard | `read_irb` ☑ |
-| gamut-metadata | exiv2 `copyExifToXmp`/`copyXmpToExif` for the EXIF ↔ XMP mapping; otherwise *facade* | differential + law (round-trip through the facade) | — |
+| gamut-metadata | exiv2 `copyExifToXmp`/`copyXmpToExif` for the EXIF ↔ XMP mapping; otherwise *facade* | differential + law (round-trip through the facade) | `MetadataExtractor::extract` ☑ |
 
 Eight crates hold no oracle dev-dependency of their own: `gamut-core`, `gamut-ifd`,
 `gamut-tonemap`, `gamut-bitstream`, `gamut-dsp`, `gamut-codec-abi`, `gamut-isobmff` and
