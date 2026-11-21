@@ -63,6 +63,75 @@ pub struct TiffInfo {
     pub tiled: bool,
     /// The byte order of the file the page belongs to (`II` or `MM`).
     pub byte_order: ByteOrder,
+    /// The first value of `ExtraSamples` (338): what the first component past the photometric
+    /// interpretation's own carries, or `None` when the tag is absent (or empty).
+    ///
+    /// The first is the one component this crate presents as alpha; a page with more extra
+    /// samples than one is described here but refused by the decoder. Use
+    /// [`deconstruct`](crate::deconstruct) to read the whole list.
+    pub extra_sample: Option<ExtraSample>,
+}
+
+/// What an extra component carries, stored in the `ExtraSamples` tag (338, TIFF 6.0 §18).
+///
+/// The discriminant is the on-disk code; it converts back with `u16::from` and parses with
+/// `TryFrom<u16>`, which refuses a code §18 does not assign — save `999`, the value Corel Draw
+/// writes for unassociated alpha, which it reads as [`UnassociatedAlpha`](Self::UnassociatedAlpha)
+/// as libtiff does.
+///
+/// How [`TiffDecoder`](crate::TiffDecoder) presents each code follows libtiff's RGBA reader
+/// (`tif_getimage.c`), the crate's oracle: associated alpha is un-premultiplied into the
+/// unassociated `Rgba*`/`GrayAlpha*` layouts and unassociated alpha passes through. On a
+/// four-sample RGB page, [`Unspecified`](Self::Unspecified) — like an absent `ExtraSamples` tag —
+/// is read as associated alpha, the reading libtiff gives such files; on a two-sample grey page,
+/// where libtiff gives it no alpha reading, it is refused.
+///
+/// `#[non_exhaustive]`: later specifications may assign further codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+#[non_exhaustive]
+pub enum ExtraSample {
+    /// `0` — unspecified data.
+    Unspecified = 0,
+    /// `1` — associated alpha: every colour sample is already multiplied by it (premultiplied).
+    AssociatedAlpha = 1,
+    /// `2` — unassociated alpha: the colour samples are independent of it (straight).
+    UnassociatedAlpha = 2,
+}
+
+impl TryFrom<u16> for ExtraSample {
+    type Error = Error;
+
+    /// Maps an on-disk `ExtraSamples` code to its meaning.
+    ///
+    /// # Errors
+    ///
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a code past
+    /// §18's three, other than Corel Draw's `999`.
+    fn try_from(code: u16) -> Result<Self> {
+        Ok(match code {
+            0 => ExtraSample::Unspecified,
+            1 => ExtraSample::AssociatedAlpha,
+            // `999` is no §18 code but Corel Draw's known mis-write of unassociated alpha, which
+            // libtiff, the crate's oracle, patches to `2` when it reads the tag
+            // (`setExtraSamples`, `tif_dir.c`, `EXTRASAMPLE_COREL_UNASSALPHA`). Reading it the
+            // same way keeps those files decoding as the straight RGBA they hold.
+            2 | 999 => ExtraSample::UnassociatedAlpha,
+            _ => {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: unrecognised ExtraSamples tag value",
+                ));
+            }
+        })
+    }
+}
+
+impl From<ExtraSample> for u16 {
+    /// The on-disk code, the `SHORT` written to tag 338.
+    fn from(sample: ExtraSample) -> Self {
+        sample as u16
+    }
 }
 
 /// Reads one page's pixel-layout tags, applying TIFF's defaults for the absent ones.
@@ -141,6 +210,18 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
         "TIFF: missing PhotometricInterpretation",
     )?)?;
     let predictor = tiff_predictor(ifd.get_u32(tags::PREDICTOR).unwrap_or(1))?;
+    // ExtraSamples (338) is one value per extra component; only the first is ever presented, so
+    // only the first is read. A code past §18's three is refused like every other unrecognised
+    // code here — no conformant file carries one, and guessing would choose a colour reading —
+    // save Corel Draw's `999`, which `ExtraSample::try_from` reads as libtiff does.
+    let extra_sample = match ifd.get_u32_vec(tags::EXTRA_SAMPLES).as_deref() {
+        Some([first, ..]) => Some(crate::ifd::read(
+            *first,
+            |_: &ExtraSample| true,
+            "TIFF: unrecognised ExtraSamples tag value",
+        )?),
+        _ => None,
+    };
 
     Ok(TiffInfo {
         width,
@@ -153,6 +234,7 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
         predictor,
         tiled: ifd.get(tags::TILE_WIDTH).is_some(),
         byte_order,
+        extra_sample,
     })
 }
 
@@ -190,6 +272,62 @@ mod tests {
                 "{width}x{height}"
             );
         }
+    }
+
+    /// Every code §18 assigns writes and reads back as itself; the next one, and those beside
+    /// Corel Draw's `999`, are refused.
+    #[test]
+    fn extra_sample_codes_are_section_18s_three() {
+        for (sample, code) in [
+            (ExtraSample::Unspecified, 0),
+            (ExtraSample::AssociatedAlpha, 1),
+            (ExtraSample::UnassociatedAlpha, 2),
+        ] {
+            assert_eq!(u16::from(sample), code);
+            assert_eq!(ExtraSample::try_from(code).unwrap(), sample);
+        }
+        for code in [3, 998, 1000] {
+            let err = ExtraSample::try_from(code).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported, "{code}");
+        }
+    }
+
+    /// Corel Draw's `999`, the one unassigned code libtiff reads (`tif_dir.c`'s
+    /// `EXTRASAMPLE_COREL_UNASSALPHA`), parses as unassociated alpha — the or-pattern's second
+    /// alternative, asserted on its own — and writes back as §18's `2`.
+    #[test]
+    fn extra_sample_reads_corel_draws_999_as_unassociated_alpha() {
+        let sample = ExtraSample::try_from(999).unwrap();
+        assert_eq!(sample, ExtraSample::UnassociatedAlpha);
+        assert_eq!(u16::from(sample), 2);
+    }
+
+    /// A 1x1 RGB page carrying `extra` as its `ExtraSamples` field.
+    fn extra_samples_ifd(extra: Vec<u16>) -> Ifd {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![1]));
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![2]));
+        ifd.set(tags::EXTRA_SAMPLES, Value::Short(extra));
+        ifd
+    }
+
+    /// Only the first `ExtraSamples` value is read — so an unassigned code after it goes unread —
+    /// an empty list reads as no tag, and an unassigned first code is refused.
+    #[test]
+    fn page_info_reports_the_first_extra_sample() {
+        let info = |extra| page_info(&extra_samples_ifd(extra), ByteOrder::LittleEndian);
+        assert_eq!(
+            info(vec![1, 3]).unwrap().extra_sample,
+            Some(ExtraSample::AssociatedAlpha)
+        );
+        assert_eq!(info(vec![]).unwrap().extra_sample, None);
+        let err = info(vec![3]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            err.static_message(),
+            Some("TIFF: unrecognised ExtraSamples tag value")
+        );
     }
 
     #[test]

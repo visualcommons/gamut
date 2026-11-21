@@ -36,7 +36,8 @@
 //! ICC.1:2022 §8.3.4 requires them to be already D50-adapted, and the `chad` tag is **never
 //! read** on this relative-colorimetric path — matching lcms2, whose only `chad` consumer is
 //! the absolute-intent white-point scaling (`cmscnvrt.c`), itself inert at the default
-//! adaptation state. A strict reading of some v2 profiles (colorants relative to the actual
+//! adaptation state (below it, `crate::intent` reads `chad` there, and only there). A strict
+//! reading of some v2 profiles (colorants relative to the actual
 //! white, `chad` meant to adapt them) would disagree; this crate deliberately follows lcms2.
 //! The `wtpt` tag is likewise reserved to absolute intent (#329). The full audit and the
 //! differential tests pinning it live in `STATUS.md` ("Settled decisions (P4)") and

@@ -43,6 +43,29 @@ fn every_builtin_space_is_buildable() {
     }
 }
 
+/// The identity built-ins satisfy §8.8's abstract-class tag set and survive the writer: what
+/// serializes parses back equal, header and every tag. Their values are lcms2's, pinned by
+/// `oracle_identity_builtins_match_lcms_tag_for_tag` in `tests/oracle.rs`; this pins that the
+/// crate's own writer and reader carry them (the v2 text and `lut16Type` encodings included).
+#[test]
+fn identity_builtins_validate_and_round_trip() {
+    for (label, profile) in [
+        ("lab_v4", IccProfile::lab_v4()),
+        ("lab_v2", IccProfile::lab_v2()),
+        ("xyz", IccProfile::xyz()),
+    ] {
+        assert_eq!(profile.validate(), vec![], "{label}: §8.8 conformance");
+        let bytes = profile.to_bytes().expect("serializes");
+        let parsed = IccProfile::parse(&bytes).expect("parses");
+        assert_eq!(parsed.tags, profile.tags, "{label}: tags");
+        assert_eq!(
+            parsed.header.version, profile.header.version,
+            "{label}: version"
+        );
+        assert_eq!(parsed.header.pcs, profile.header.pcs, "{label}: pcs");
+    }
+}
+
 /// The `parametricCurveType` type 3 parameters this module writes for sRGB reproduce
 /// `gamut-color`'s own `srgb_eotf`. Without this the coefficients would be a second,
 /// unguarded copy of the IEC 61966-2-1 curve that could drift from the crate that owns it.

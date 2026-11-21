@@ -110,7 +110,7 @@ fn a_multipage_document_carries_the_metadata_on_page_0_only() {
     let mut bytes = Vec::new();
     TiffEncoder::new()
         .with_tiff_metadata(metadata())
-        .encode_pages_rgb8(&[page, page], &mut bytes)
+        .encode_pages(&[page, page], &mut bytes)
         .expect("encode");
     let file = read(&bytes).expect("read");
     assert_eq!(file.ifds.len(), 2);
@@ -410,8 +410,8 @@ fn every_public_encode_surface_refuses_an_exif_tree_its_own_decoder_could_not_re
             .map(|_| ()),
         ),
         (
-            "encode_pages_rgb8",
-            enc.encode_pages_rgb8(&[rgb8], &mut out).map(|_| ()),
+            "encode_pages",
+            enc.encode_pages(&[rgb8], &mut out).map(|_| ()),
         ),
         ("encode_to_vec", enc.encode_to_vec(rgb8).map(|_| ())),
         (

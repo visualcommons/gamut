@@ -156,6 +156,16 @@
 //! # Ok::<(), gamut_metadata::MetadataError>(())
 //! ```
 //!
+//! # EXIF ↔ XMP
+//!
+//! EXIF and XMP overlap: most EXIF tags have an XMP property in the `tiff:`/`exif:` namespaces,
+//! and the descriptive ones map to `dc:`/`xmp:`/`photoshop:` properties under the Metadata Working
+//! Group guidelines. [`exif_to_xmp`] and [`xmp_to_exif`] derive one carrier from the other over
+//! exiv2's conversion table, in the value forms CIPA DC-010 gives, with an [`ExifConflictPolicy`]
+//! (shaped like [`iptc::ConflictPolicy`]) deciding where both carriers hold a tag. They act on
+//! [`Metadata::exif`]/[`Metadata::xmp`] on request; extraction does not run them, so the two
+//! carriers stay as the file stored them.
+//!
 //! # Format crates: one shape in, one shape out
 //!
 //! The facade names no format crate. A format crate wires itself in through two traits defined
@@ -207,6 +217,7 @@ struct ReadmeDoctests;
 
 mod embed;
 mod error;
+mod exif_xmp;
 mod extension;
 mod extract;
 mod metadata;
@@ -217,6 +228,7 @@ mod typed;
 
 pub use embed::{C2paPolicy, EncodedMetadata, ExtensionPolicy, MetadataEmbedder};
 pub use error::{MetadataError, Result};
+pub use exif_xmp::{ExifConflictPolicy, exif_to_xmp, xmp_to_exif};
 pub use extension::{MetadataExtension, RESERVED_NAMESPACE_PREFIX};
 pub use extract::MetadataExtractor;
 // The per-format crates, re-exported whole because the model holds their types by value: one

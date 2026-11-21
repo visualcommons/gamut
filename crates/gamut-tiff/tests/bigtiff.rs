@@ -219,7 +219,7 @@ fn bigtiff_multipage_is_decoded_by_libtiff() {
     let mut tiff = Vec::new();
     TiffEncoder::new()
         .with_variant(Variant::Big)
-        .encode_pages_rgb8(&pages, &mut tiff)
+        .encode_pages(&pages, &mut tiff)
         .expect("encode");
     assert_is_bigtiff(&tiff);
 

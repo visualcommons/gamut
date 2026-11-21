@@ -169,6 +169,52 @@ over HTTP — is out of scope: a header is a property of a transfer, not of the 
 file-format library cannot observe it. A caller that fetched the asset holds the header and may
 consult it before this lens.
 
+## EXIF ↔ XMP
+
+A file can say the same thing twice: `Make` in EXIF and `tiff:Make` in XMP, `DateTimeOriginal` and
+`photoshop:DateCreated`. `exif_to_xmp` and `xmp_to_exif` derive one carrier from the other over one
+table — exiv2's `copyExifToXmp`/`copyXmpToExif` table (its date and descriptive rows follow the
+Metadata Working Group guidelines), with values in the forms CIPA DC-010 gives — and
+`ExifConflictPolicy` (shaped like `iptc::ConflictPolicy`) decides which carrier wins where both
+hold a tag. They act on `Metadata::exif`/`Metadata::xmp` on request; extraction never runs them.
+
+```rust
+use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
+use gamut_metadata::{ExifConflictPolicy, exif_to_xmp, xmp_to_exif};
+
+let mut exif = Exif::new(ByteOrder::LittleEndian);
+exif.set_tag(ExifTag::Make, Value::Ascii("gamut".into()));
+exif.set_tag(ExifTag::BitsPerSample, Value::Short(vec![8, 8, 8]));
+exif.set_tag(ExifTag::DateTimeOriginal, Value::Ascii("2024:05:06 07:08:09".into()));
+
+// The XMP already names a camera: under the default policy XMP wins, so only absent
+// properties are filled in.
+let mut xmp = XmpMeta::new();
+xmp.set_text(WellKnownNs::Tiff.uri(), "Make", "other");
+exif_to_xmp(&exif, &mut xmp, ExifConflictPolicy::XmpWins);
+assert_eq!(xmp.get_text(WellKnownNs::Tiff.uri(), "Make"), Some("other"));
+assert_eq!(
+    xmp.get_text(WellKnownNs::Photoshop.uri(), "DateCreated"),
+    Some("2024-05-06T07:08:09")
+);
+// One array entry per value (DC-010 §4).
+let bits = xmp.get_array(WellKnownNs::Tiff.uri(), "BitsPerSample").unwrap();
+assert_eq!(bits.texts().collect::<Vec<_>>(), ["8", "8", "8"]);
+
+// ...and back into an empty EXIF.
+let mut back = Exif::new(ByteOrder::LittleEndian);
+xmp_to_exif(&xmp, &mut back, ExifConflictPolicy::XmpWins);
+assert_eq!(back.make(), Some("other"));
+assert_eq!(back.datetime_original(), Some("2024:05:06 07:08:09"));
+```
+
+Where gamut and exiv2 part ways, and why, is listed in the `exif_xmp` module docs and pinned by the
+exiv2 differential in `tests/oracle.rs`. Not yet mapped: the `exifEX:` (Exif 2.21+) properties of
+DC-010 beyond exiv2's table, the four DC-010 structures exiv2 flattens to byte lists (`OECF`,
+`SpatialFrequencyResponse`, `CFAPattern`, `DeviceSettingDescription`), `GPSProcessingMethod` /
+`GPSAreaInformation`, and the `OffsetTime*` zones.
+
 ## Usage
 
 ```rust

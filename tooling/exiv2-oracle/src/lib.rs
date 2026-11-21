@@ -11,7 +11,11 @@
 //! opening a whole image file (PNG, WebP, TIFF, AVIF/HEIF via BMFF, …) from memory:
 //! [`image_exif_get`], [`image_xmp_get`] and [`image_icc`] check that exiv2 reads what a gamut
 //! format crate embeds, and [`image_set`] has exiv2 embed EXIF/XMP so gamut can read it back
-//! (exiv2's BMFF handler is read-only, so AVIF/HEIF is read-side only).
+//! (exiv2's BMFF handler is read-only, so AVIF/HEIF is read-side only); [`image_exif`] and
+//! [`image_xmp_packet`] hand a file's whole EXIF and XMP back for a corpus test to feed gamut.
+//!
+//! [`copy_exif_to_xmp`] and [`copy_xmp_to_exif`] run exiv2's own EXIF↔XMP conversion table
+//! (`copyExifToXmp` / `copyXmpToExif`), the oracle for gamut-metadata's `exif_xmp` mapping.
 //!
 //! All `unsafe` FFI is confined to this crate; inputs are length-delimited byte slices, so no
 //! temporary files are used.
@@ -106,6 +110,30 @@ unsafe extern "C" {
         exif_value: *const c_char,
         xmp_key: *const c_char,
         xmp_value: *const c_char,
+        out_buf: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn exiv2_image_exif(
+        data: *const c_char,
+        len: usize,
+        out_buf: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn exiv2_image_xmp_packet(
+        data: *const c_char,
+        len: usize,
+        out_buf: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn exiv2_copy_exif_to_xmp(
+        data: *const c_char,
+        len: usize,
+        out_buf: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn exiv2_copy_xmp_to_exif(
+        xmp: *const c_char,
+        len: usize,
         out_buf: *mut *mut c_char,
         out_len: *mut usize,
     ) -> c_int;
@@ -450,6 +478,108 @@ pub fn image_set(
     Ok(unsafe { take_owned(buf, len) })
 }
 
+/// The signature shared by the shim's unkeyed buffer-to-buffer calls.
+type BufferFn = unsafe extern "C" fn(*const c_char, usize, *mut *mut c_char, *mut usize) -> c_int;
+
+/// The shim's return code for a container-level call whose image lacks the requested metadata.
+const ABSENT: c_int = 4;
+
+/// Calls one unkeyed buffer-to-buffer entry point of the shim under the exiv2 lock, returning the
+/// shim's code on failure. `image` selects whether a failure carries the recorded message.
+fn buffer_call(
+    call: BufferFn,
+    data: &[u8],
+    what: &str,
+    image: bool,
+) -> Result<Vec<u8>, (c_int, String)> {
+    let _guard = lock();
+    let mut buf: *mut c_char = std::ptr::null_mut();
+    let mut len: usize = 0;
+    // SAFETY: `call` is one of the shim's buffer entry points; `data` is valid; `buf`/`len` are
+    // written only on success.
+    let code = unsafe { call(data.as_ptr().cast(), data.len(), &mut buf, &mut len) };
+    if code != 0 || buf.is_null() {
+        let message = if image {
+            image_error(what, code)
+        } else {
+            format!("{what} (code {code})")
+        };
+        return Err((code, message));
+    }
+    // SAFETY: on success the shim returned an owned buffer of `len` bytes.
+    Ok(unsafe { take_owned(buf, len) })
+}
+
+/// Returns a whole image file's EXIF as exiv2 read it, re-encoded by exiv2 as a bare TIFF stream
+/// (the container's byte order), or `Ok(None)` when the image carries no EXIF.
+///
+/// # Errors
+///
+/// Returns a message if exiv2 does not recognise or cannot read the container.
+pub fn image_exif(data: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    match buffer_call(
+        exiv2_image_exif,
+        data,
+        "exiv2 could not read the Exif",
+        true,
+    ) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err((ABSENT, _)) => Ok(None),
+        Err((_, message)) => Err(message),
+    }
+}
+
+/// Returns a whole image file's raw XMP packet as exiv2 read it, or `Ok(None)` when the image
+/// carries none.
+///
+/// # Errors
+///
+/// Returns a message if exiv2 does not recognise or cannot read the container.
+pub fn image_xmp_packet(data: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    match buffer_call(
+        exiv2_image_xmp_packet,
+        data,
+        "exiv2 could not read the XMP",
+        true,
+    ) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err((ABSENT, _)) => Ok(None),
+        Err((_, message)) => Err(message),
+    }
+}
+
+/// Runs exiv2's `copyExifToXmp` over a bare TIFF EXIF stream into an empty XMP graph and returns
+/// the serialized packet.
+///
+/// # Errors
+///
+/// Returns a message if exiv2 cannot decode the stream or serialize the packet.
+pub fn copy_exif_to_xmp(tiff: &[u8]) -> Result<Vec<u8>, String> {
+    buffer_call(
+        exiv2_copy_exif_to_xmp,
+        tiff,
+        "exiv2 copyExifToXmp failed",
+        false,
+    )
+    .map_err(|(_, message)| message)
+}
+
+/// Runs exiv2's `copyXmpToExif` over an XMP packet into an empty EXIF set and returns it encoded
+/// as a little-endian bare TIFF stream.
+///
+/// # Errors
+///
+/// Returns a message if exiv2 cannot parse the packet or encode the EXIF.
+pub fn copy_xmp_to_exif(xmp: &[u8]) -> Result<Vec<u8>, String> {
+    buffer_call(
+        exiv2_copy_xmp_to_exif,
+        xmp,
+        "exiv2 copyXmpToExif failed",
+        false,
+    )
+    .map_err(|(_, message)| message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,6 +714,36 @@ mod tests {
             "gamut"
         );
         assert_eq!(image_icc(&written).unwrap(), None);
+    }
+
+    #[test]
+    fn copy_exif_to_xmp_then_back_carries_a_tiff_tag() {
+        let packet = copy_exif_to_xmp(&tiny_tiff()).unwrap();
+        assert_eq!(get_property(&packet, "Xmp.tiff.ImageWidth").unwrap(), "1");
+        let tiff = copy_xmp_to_exif(&packet).unwrap();
+        assert_eq!(exif_get(&tiff, "Exif.Image.ImageWidth").unwrap(), "1");
+    }
+
+    #[test]
+    fn image_exif_and_xmp_packet_read_what_image_set_wrote() {
+        assert_eq!(image_exif(&tiny_png()).unwrap(), None);
+        assert_eq!(image_xmp_packet(&tiny_png()).unwrap(), None);
+        let written = image_set(
+            &tiny_png(),
+            Some(("Exif.Photo.ISOSpeedRatings", "400")),
+            Some(("Xmp.xmp.CreatorTool", "gamut")),
+        )
+        .unwrap();
+        let exif = image_exif(&written).unwrap().unwrap();
+        assert_eq!(
+            exif_get(&exif, "Exif.Photo.ISOSpeedRatings").unwrap(),
+            "400"
+        );
+        let packet = image_xmp_packet(&written).unwrap().unwrap();
+        assert_eq!(
+            get_property(&packet, "Xmp.xmp.CreatorTool").unwrap(),
+            "gamut"
+        );
     }
 
     #[test]

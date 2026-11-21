@@ -1,8 +1,10 @@
 //! Built-in profile constructors: a spec-valid [`IccProfile`] for a named colour space, for a
-//! [`SourceProfile`], or for a CICP signalling triple.
+//! [`SourceProfile`], or for a CICP signalling triple — and the three PCS identity profiles.
 //!
-//! Every profile built here is a **v4 three-component matrix/TRC display profile** (ICC.1:2022
-//! §8.4) — or, for [`IccProfile::gray_with_gamma`], the monochrome model of the same class.
+//! Every colour-space profile built here is a **v4 three-component matrix/TRC display profile**
+//! (ICC.1:2022 §8.4) — or, for [`IccProfile::gray_with_gamma`], the monochrome model of the same
+//! class. The identity built-ins are abstract profiles, documented apart under *The identity
+//! built-ins* below; the rest of these docs are about the colour-space ones.
 //!
 //! **Colorimetry `gamut-color` can supply is never retyped here**: the primaries and white point
 //! come from [`gamut_color::cicp::ColorPrimaries::chromaticities`] for a CICP code point and from
@@ -219,12 +221,34 @@
 //! an ID with [`IccWriter::with_recompute_profile_id`](crate::IccWriter::with_recompute_profile_id)
 //! if one is wanted.
 //!
+//! # The identity built-ins
+//!
+//! [`IccProfile::lab_v4`], [`IccProfile::lab_v2`] and [`IccProfile::xyz`] are the endpoints a
+//! CMM chains a device profile to when it wants colorimetry out (or in) rather than another
+//! device: abstract-class profiles (§8.8) whose `A2B0` maps the PCS to itself unchanged. They are
+//! Little-CMS's `cmsCreateLab4Profile(NULL)`, `cmsCreateLab2Profile(NULL)` and
+//! `cmsCreateXYZProfile()` reproduced **tag for tag**, every value included —
+//! `oracle_identity_builtins_match_lcms_tag_for_tag` in `tests/oracle.rs` decodes lcms2's own
+//! profiles and asserts each tag equal:
+//!
+//! | | header | `desc` | `cprt` | `wtpt` | `chad` | `A2B0` |
+//! | --- | --- | --- | --- | --- | --- | --- |
+//! | `lab_v4` | 4.4, Lab → Lab | `mluc` | `mluc` | D50 | — | `mAB `, three `para` `g = 1` B curves |
+//! | `lab_v2` | 2.1, Lab → Lab | `desc` (v2) | `text` | D50 | identity | `mft2`, 2-point identity grid |
+//! | `xyz` | 4.4, XYZ → XYZ | `mluc` | `mluc` | D50 | identity | `mAB `, as `lab_v4` |
+//!
+//! That parity is why they differ from the colour-space built-ins in one convention: the
+//! description and copyright are lcms2's text (`Lab identity built-in`, `No copyright, use
+//! freely`), not this module's. The header fields lcms2 stamps per run — creation date, creator,
+//! platform — stay this module's deterministic ones. `lab_v4` has no `chad` because lcms2's has
+//! none: its white is the PCS D50 and §9.2.15 asks for the tag only when the media white is not.
+//!
 //! # Layout
 //!
 //! This module names the spaces ([`BuiltinProfile`]) and builds them by name. The mapping from a
 //! CICP triple to a profile — which fields are read, rewritten or declined — is
 //! `cicp_mapping`; the ICC encoding every constructor shares — tone curves, D50 colorants, the
-//! matrix/TRC tag set — is `synthesis`.
+//! matrix/TRC tag set, the identity LUTs — is `synthesis`.
 
 mod cicp_mapping;
 mod synthesis;
@@ -237,8 +261,12 @@ use gamut_core::Cicp;
 
 pub use self::cicp_mapping::CicpTransferReading;
 use self::cicp_mapping::cicp_of;
-use self::synthesis::{COPYRIGHT, Trc, encodable_gamma, mluc, rgb_matrix_trc};
-use crate::header::{ColorSpace, DeviceClass, ProfileHeader};
+use self::synthesis::{
+    COPYRIGHT, LCMS_COPYRIGHT, Trc, encodable_gamma, identity_chad, identity_lut_a_to_b,
+    identity_lut16, mluc, rgb_matrix_trc,
+};
+use crate::header::{ColorSpace, DeviceClass, ProfileHeader, ProfileVersion};
+use crate::mluc::TextDescription;
 use crate::primitives::XyzNumber;
 use crate::profile::{IccProfile, Tag};
 use crate::tag_types::TagData;
@@ -518,4 +546,139 @@ impl IccProfile {
             ],
         })
     }
+
+    /// The v4 CIELAB identity: an abstract profile (§8.8) whose `A2B0` maps PCSLAB to PCSLAB
+    /// unchanged — Little-CMS's `cmsCreateLab4Profile(NULL)`, tag for tag.
+    ///
+    /// Use it as the Lab end of a transform chain: a device profile chained to it yields
+    /// CIELAB (D50) at the chain's rendering intent, and it chained to a device profile renders
+    /// CIELAB onto that device. Like lcms2's, it carries no `chad` tag; see the module
+    /// documentation's *The identity built-ins* for every tag and the one place it departs
+    /// from the matrix/TRC built-ins' conventions.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_icc::{ColorSpace, DeviceClass, IccProfile, KnownTag};
+    ///
+    /// let lab = IccProfile::lab_v4();
+    /// assert_eq!(lab.header.device_class, DeviceClass::Abstract);
+    /// assert_eq!((lab.header.data_color_space, lab.header.pcs), (ColorSpace::Lab, ColorSpace::Lab));
+    /// assert!(lab.get(KnownTag::AToB0).is_some());
+    /// assert!(lab.validate().is_empty());
+    /// ```
+    #[must_use]
+    pub fn lab_v4() -> Self {
+        abstract_identity(
+            ColorSpace::Lab,
+            vec![
+                Tag::new(KnownTag::ProfileDescription, mluc(LAB_IDENTITY_DESCRIPTION)),
+                Tag::new(KnownTag::Copyright, mluc(LCMS_COPYRIGHT)),
+                Tag::new(
+                    KnownTag::MediaWhitePoint,
+                    TagData::Xyz(vec![XyzNumber::D50]),
+                ),
+                Tag::new(KnownTag::AToB0, identity_lut_a_to_b()),
+            ],
+        )
+    }
+
+    /// The v2 CIELAB identity: the version 2.1 abstract profile Little-CMS's
+    /// `cmsCreateLab2Profile(NULL)` builds, tag for tag — an `A2B0` `lut16Type` identity, so
+    /// PCSLAB passes through in the **legacy v2** 16-bit Lab encoding, plus v2 text types for
+    /// the description and copyright, and an identity `chad`.
+    ///
+    /// Prefer [`IccProfile::lab_v4`] unless a consumer needs a v2 profile: the two describe the
+    /// same identity, and the v4 one carries no CLUT.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_icc::{IccProfile, KnownTag, TagData};
+    ///
+    /// let lab = IccProfile::lab_v2();
+    /// assert_eq!((lab.header.version.major, lab.header.version.minor), (2, 1));
+    /// assert!(matches!(lab.get(KnownTag::AToB0), Some(TagData::Lut16(_))));
+    /// ```
+    #[must_use]
+    pub fn lab_v2() -> Self {
+        let mut profile = abstract_identity(
+            ColorSpace::Lab,
+            vec![
+                Tag::new(
+                    KnownTag::ProfileDescription,
+                    TagData::TextDescription(TextDescription {
+                        ascii: LAB_IDENTITY_DESCRIPTION.to_owned(),
+                        unicode_language: 0,
+                        unicode: LAB_IDENTITY_DESCRIPTION.to_owned(),
+                        script_code: 0,
+                        macintosh: Vec::new(),
+                    }),
+                ),
+                Tag::new(
+                    KnownTag::Copyright,
+                    TagData::Text(LCMS_COPYRIGHT.to_owned()),
+                ),
+                Tag::new(
+                    KnownTag::MediaWhitePoint,
+                    TagData::Xyz(vec![XyzNumber::D50]),
+                ),
+                Tag::new(KnownTag::ChromaticAdaptation, identity_chad()),
+                Tag::new(KnownTag::AToB0, identity_lut16()),
+            ],
+        );
+        profile.header.version = ProfileVersion {
+            major: 2,
+            minor: 1,
+            bugfix: 0,
+        };
+        profile
+    }
+
+    /// The CIE XYZ identity: an abstract profile whose `A2B0` maps PCSXYZ to PCSXYZ unchanged —
+    /// Little-CMS's `cmsCreateXYZProfile()`, tag for tag, including its identity `chad`.
+    ///
+    /// Use it as the XYZ end of a transform chain, as [`IccProfile::lab_v4`] is the Lab one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_icc::{ColorSpace, IccProfile};
+    ///
+    /// let xyz = IccProfile::xyz();
+    /// assert_eq!((xyz.header.data_color_space, xyz.header.pcs), (ColorSpace::Xyz, ColorSpace::Xyz));
+    /// assert!(xyz.validate().is_empty());
+    /// ```
+    #[must_use]
+    pub fn xyz() -> Self {
+        abstract_identity(
+            ColorSpace::Xyz,
+            vec![
+                Tag::new(KnownTag::ProfileDescription, mluc(XYZ_IDENTITY_DESCRIPTION)),
+                Tag::new(KnownTag::Copyright, mluc(LCMS_COPYRIGHT)),
+                Tag::new(
+                    KnownTag::MediaWhitePoint,
+                    TagData::Xyz(vec![XyzNumber::D50]),
+                ),
+                Tag::new(KnownTag::ChromaticAdaptation, identity_chad()),
+                Tag::new(KnownTag::AToB0, identity_lut_a_to_b()),
+            ],
+        )
+    }
+}
+
+/// The `profileDescriptionTag` text of both Lab identity built-ins — lcms2's own
+/// (`cmsCreateLab2Profile`/`cmsCreateLab4Profile`, `cmsvirt.c`).
+const LAB_IDENTITY_DESCRIPTION: &str = "Lab identity built-in";
+
+/// The `profileDescriptionTag` text of the XYZ identity built-in — lcms2's own
+/// (`cmsCreateXYZProfile`, `cmsvirt.c`).
+const XYZ_IDENTITY_DESCRIPTION: &str = "XYZ identity built-in";
+
+/// An abstract-class (§8.8) profile from `space` to the same `space` as its PCS, with `tags`, in
+/// the header [`ProfileHeader::new`] gives every built-in (version 4.4, perceptual intent).
+fn abstract_identity(space: ColorSpace, tags: Vec<Tag>) -> IccProfile {
+    let mut header = ProfileHeader::new(DeviceClass::Abstract, space);
+    header.pcs = space;
+    IccProfile { header, tags }
 }

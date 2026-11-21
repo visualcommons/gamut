@@ -26,6 +26,14 @@ gamut-icc.workspace = true
 gamut-iptc.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# Differential oracle for the EXIF<->XMP mapping: a vendored, statically-linked exiv2 (with its
+# bundled Adobe XMP Toolkit) built from the `third_party/exiv2` + `third_party/expat` submodules,
+# whose `copyExifToXmp` / `copyXmpToExif` the `exif_xmp` tests compare against. Dev-only,
+# unpublished and excluded from the workspace, so it adds no release-ordering edge; needs the
+# submodules and a C++ toolchain.
+exiv2-oracle = { path = "../../tooling/exiv2-oracle" }
+
 [features]
 default = []
 # Forward gamut-exif's `describe` (the enumerated tags' meanings, in CIPA DC-008's wording), so a

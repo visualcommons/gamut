@@ -10,17 +10,24 @@ use gamut_color::transfer::{BT709_ALPHA, BT709_BETA, BT1886_GAMMA, pq_eotf};
 use gamut_core::Cicp;
 
 use super::cicp_mapping::CicpTransferReading;
-use crate::curve::{Curve, ParametricCurve};
+use crate::curve::{Curve, CurveOrParametric, ParametricCurve};
 use crate::header::{ColorSpace, DeviceClass, ProfileHeader};
+use crate::lut::{Lut16, LutAToB, Matrix3x3};
 use crate::mluc::{Mluc, MlucRecord};
 use crate::primitives::{S15Fixed16, XyzNumber};
 use crate::profile::{IccProfile, Tag};
 use crate::tag_types::TagData;
 use crate::tags::KnownTag;
 
-/// The `copyrightTag` text every built-in profile carries. The profiles encode published
-/// colorimetry and carry no rights of their own.
+/// The `copyrightTag` text every matrix/TRC built-in profile carries. The profiles encode
+/// published colorimetry and carry no rights of their own.
 pub(super) const COPYRIGHT: &str = "Public domain — no rights reserved.";
+
+/// The `copyrightTag` text Little-CMS writes into its own built-in profiles (`SetTextTags`,
+/// `cmsvirt.c`). The identity built-ins reproduce lcms2's tag values exactly, this one included;
+/// it is also plain 7-bit ASCII, which the `textType` the Lab v2 identity's copyright is stored
+/// in requires, and [`COPYRIGHT`]'s em dash is not.
+pub(super) const LCMS_COPYRIGHT: &str = "No copyright, use freely";
 
 /// Samples in a `curveType` TRC for a transfer with no `parametricCurveType` closed form.
 ///
@@ -254,6 +261,77 @@ pub(super) fn mluc(text: &str) -> TagData {
     })
 }
 
+/// A `chromaticAdaptationTag` (§9.2.15) holding `m`, row-major, as the `s15Fixed16ArrayType` it
+/// is stored in.
+fn chad_tag(m: &Matrix3) -> TagData {
+    TagData::S15Fixed16Array(
+        m.iter()
+            .flatten()
+            .map(|&v| S15Fixed16::from_f64(v))
+            .collect(),
+    )
+}
+
+/// The 3×3 identity.
+const IDENTITY: Matrix3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// The `chad` tag of an identity built-in whose white is already the PCS D50: the identity
+/// matrix. lcms2 computes it as the Bradford adaptation from its D50 chromaticity to its D50
+/// tristimulus, which differs from the identity by less than half an `s15Fixed16` quantum and so
+/// encodes to exactly this.
+pub(super) fn identity_chad() -> TagData {
+    chad_tag(&IDENTITY)
+}
+
+/// A v4 `lutAToBType` (§10.12) identity on three channels: B curves only, each a
+/// `parametricCurveType` function type 0 with `g = 1` — the form lcms2 writes for its identity
+/// curve stage (`_cmsStageAllocIdentityCurves` builds `cmsBuildGamma(1.0)`).
+pub(super) fn identity_lut_a_to_b() -> TagData {
+    let gamma_one = CurveOrParametric::Parametric(ParametricCurve {
+        function_type: 0,
+        params: vec![S15Fixed16::from_f64(1.0)],
+    });
+    TagData::LutAToB(LutAToB {
+        input_channels: 3,
+        output_channels: 3,
+        a_curves: None,
+        clut: None,
+        m_curves: None,
+        matrix: None,
+        b_curves: vec![gamma_one; 3],
+    })
+}
+
+/// A v2 `lut16Type` (§10.10) identity on three channels — what lcms2 writes for its identity
+/// CLUT stage (`_cmsStageAllocIdentityCLut`) in a v2 profile: the identity matrix, two-entry
+/// identity input and output tables, and a two-point grid whose node `(i, j, k)` holds
+/// `(i, j, k)` at full scale (the last input channel varying fastest).
+pub(super) fn identity_lut16() -> TagData {
+    let ramp = [0, u16::MAX];
+    let mut clut = Vec::with_capacity(8 * 3);
+    for i in ramp {
+        for j in ramp {
+            for k in ramp {
+                clut.extend([i, j, k]);
+            }
+        }
+    }
+    let elements = IDENTITY.as_flattened();
+    TagData::Lut16(Lut16 {
+        input_channels: 3,
+        output_channels: 3,
+        grid_points: 2,
+        matrix: Matrix3x3 {
+            elements: core::array::from_fn(|i| S15Fixed16::from_f64(elements[i])),
+        },
+        input_table_entries: 2,
+        output_table_entries: 2,
+        input_table: ramp.repeat(3),
+        clut,
+        output_table: ramp.repeat(3),
+    })
+}
+
 /// The three-component matrix/TRC display profile for a set of chromaticities and a tone curve
 /// (ICC.1:2022 §8.4).
 ///
@@ -275,12 +353,6 @@ pub(super) fn rgb_matrix_trc(
             colorants[2][j],
         ])])
     };
-    let chad_tag = TagData::S15Fixed16Array(
-        chad.iter()
-            .flatten()
-            .map(|&v| S15Fixed16::from_f64(v))
-            .collect(),
-    );
     let curve = trc.tag();
     let mut tags = vec![
         Tag::new(KnownTag::ProfileDescription, mluc(description)),
@@ -289,7 +361,7 @@ pub(super) fn rgb_matrix_trc(
             KnownTag::MediaWhitePoint,
             TagData::Xyz(vec![XyzNumber::D50]),
         ),
-        Tag::new(KnownTag::ChromaticAdaptation, chad_tag),
+        Tag::new(KnownTag::ChromaticAdaptation, chad_tag(&chad)),
         Tag::new(KnownTag::RedColorant, column(0)),
         Tag::new(KnownTag::GreenColorant, column(1)),
         Tag::new(KnownTag::BlueColorant, column(2)),

@@ -146,5 +146,6 @@ therefore **tolerance-based**, with the fixed-black and gate paths exact
 adaptation state 1.0 the adjustment is exactly `diag(WhiteIn/WhiteOut)` in XYZ, with the
 media whites read through `_cmsReadMediaWhitePoint`'s quirks (`src/cmsio1.c:64-90`: missing
 tag → D50; **v2 display-class profiles → forced D50**, tag ignored). The `chad` tag is
-consumed *only* by the non-default adaptation-state branches, which `gamut-cmm` does not
-implement.
+consumed *only* by the non-default adaptation-state branches (`_cmsReadCHAD`,
+`src/cmsio1.c:94-128`; `CHAD2Temp`/`Temp2CHAD`, `src/cmscnvrt.c:205-245`), which
+`gamut-cmm` reaches through `TransformOptions::adaptation_state`.

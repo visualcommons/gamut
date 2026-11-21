@@ -31,10 +31,7 @@
 //! lcms2 away from the decision boundary; magnitudes are deliberately not quantized
 //! (documented in STATUS.md).
 
-use gamut_icc::{
-    ColorSpace, Curve, CurveOrParametric, DeviceClass, IccProfile, LutAToB, ProfileHeader,
-    RenderingIntent, Tag, TagData,
-};
+use gamut_icc::{IccProfile, RenderingIntent};
 
 use crate::bpc;
 use crate::chain::link_chain;
@@ -57,29 +54,6 @@ fn delta_e76(a: [f64; 3], b: [f64; 3]) -> f64 {
     (dl * dl + da * da + db * db).sqrt()
 }
 
-/// The Lab-identity abstract profile lcms2's gamut/proofing machinery uses as its Lab
-/// endpoint (`cmsCreateLab4Profile`: v4, abstract class, Lab↔Lab, `A2B0` = identity
-/// curves). Hand-built here so the sub-transforms can run through the one chain engine.
-fn lab_connection_profile() -> IccProfile {
-    let mut header = ProfileHeader::new(DeviceClass::Abstract, ColorSpace::Lab);
-    header.pcs = ColorSpace::Lab;
-    IccProfile {
-        header,
-        tags: vec![Tag::new(
-            *b"A2B0",
-            TagData::LutAToB(LutAToB {
-                input_channels: 3,
-                output_channels: 3,
-                a_curves: None,
-                clut: None,
-                m_curves: None,
-                matrix: None,
-                b_curves: vec![CurveOrParametric::Curve(Curve::Identity); 3],
-            }),
-        )],
-    }
-}
-
 /// A gamut check for one source/proof profile pair: a [`Transform`] taking `src` device
 /// pixels and emitting **one channel per pixel** — `0.0` for in-gamut colours, else the
 /// ΔE₇₆ excess above the threshold (module docs). Built by [`GamutCheck::new`].
@@ -99,7 +73,7 @@ pub struct GamutCheck {
 
 impl GamutCheck {
     /// Builds the gamut check: `src`'s colours are converted to Lab at `options.intent`
-    /// (through the same chain machinery a `[src, Lab-identity]` transform would use,
+    /// (through the same chain machinery a `[src, IccProfile::lab_v4()]` transform would use,
     /// forced-BPC rule included — lcms2's `hInput`), then round-tripped twice through
     /// `proof` at media-relative (`hForward`/`hReverse`) and judged by the ΔE table in the
     /// module docs. The threshold is 5.0, tightened to 1.0 when `proof` is a matrix-shaper
@@ -108,9 +82,12 @@ impl GamutCheck {
     /// # Options
     ///
     /// Only [`intent`](TransformOptions::intent),
-    /// [`optimization`](TransformOptions::optimization) and
-    /// [`prefer_cicp_transfer`](TransformOptions::prefer_cicp_transfer) are consumed — the
-    /// latter two applied to all three sub-pipelines.
+    /// [`optimization`](TransformOptions::optimization),
+    /// [`prefer_cicp_transfer`](TransformOptions::prefer_cicp_transfer) and
+    /// [`adaptation_state`](TransformOptions::adaptation_state) are consumed — the middle two
+    /// applied to all three sub-pipelines, and the adaptation state to the `src` → Lab one when
+    /// `intent` is ICC-absolute (lcms2 passes its `AdaptationStates` to `hInput`; the two
+    /// media-relative legs never read it).
     /// [`black_point_compensation`](TransformOptions::black_point_compensation) is
     /// **ignored**: lcms2's gamut sampler compensates on none of its three legs
     /// (`cmsgmt.c`'s `BPCList` is all-false), and a compensated round trip would not be the
@@ -124,17 +101,38 @@ impl GamutCheck {
     /// ([`CmmError::MissingTag`] and friends otherwise); plus whatever
     /// [`Pipeline::optimized`] reports for the requested level.
     pub fn new(src: &IccProfile, proof: &IccProfile, options: TransformOptions) -> Result<Self> {
-        let lab = lab_connection_profile();
+        // lcms2's gamut/proofing machinery uses its built-in Lab v4 identity as the Lab
+        // endpoint (`cmsCreateLab4Profile(NULL)`); `gamut-icc` builds the same profile.
+        let lab = IccProfile::lab_v4();
         let intent = options.intent;
         let relative = RenderingIntent::MediaRelativeColorimetric;
         let optimization = options.optimization;
         let cicp = options.prefer_cicp_transfer;
-        let input = link_chain(&[src, &lab], &[intent, intent], &[false, false], cicp)?
-            .optimized(optimization)?;
-        let forward = link_chain(&[&lab, proof], &[relative, relative], &[false, false], cicp)?
-            .optimized(optimization)?;
-        let reverse = link_chain(&[proof, &lab], &[relative, relative], &[false, false], cicp)?
-            .optimized(optimization)?;
+        let adaptation = options.adaptation_state;
+        let input = link_chain(
+            &[src, &lab],
+            &[intent, intent],
+            &[false, false],
+            cicp,
+            adaptation,
+        )?
+        .optimized(optimization)?;
+        let forward = link_chain(
+            &[&lab, proof],
+            &[relative, relative],
+            &[false, false],
+            cicp,
+            adaptation,
+        )?
+        .optimized(optimization)?;
+        let reverse = link_chain(
+            &[proof, &lab],
+            &[relative, relative],
+            &[false, false],
+            cicp,
+            adaptation,
+        )?
+        .optimized(optimization)?;
         let threshold = if bpc::is_matrix_shaper(proof) {
             SHAPER_THRESHOLD
         } else {
@@ -226,9 +224,13 @@ impl Transform for GamutCheck {
 
 #[cfg(test)]
 mod tests {
-    use gamut_icc::{U8Fixed8, XyzNumber};
+    use gamut_icc::{
+        ColorSpace, Curve, CurveOrParametric, DeviceClass, LutAToB, ProfileHeader, Tag, TagData,
+        U8Fixed8, XyzNumber,
+    };
 
     use super::*;
+    use crate::transform::AdaptationState;
 
     /// [`TransformOptions`] at `intent` with every other knob at its default (BPC off,
     /// optimization off) — the shape the intent-only constructors take.
@@ -397,6 +399,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(check.threshold, ERR_THRESHOLD);
+    }
+
+    #[test]
+    fn the_input_leg_runs_at_the_requested_adaptation_state() {
+        // A source whose `chad` and D65 media white make its ICC-absolute seam to the Lab
+        // identity depend on the adaptation state: at state 0 the `src` → Lab leg must be
+        // linked at that state, not at the FULL default.
+        let mut src = scaled_shaper(1.0);
+        src.tags.push(Tag::new(
+            *b"wtpt",
+            TagData::Xyz(vec![XyzNumber::from_f64([0.9504, 1.0, 1.0889])]),
+        ));
+        src.tags.push(Tag::new(
+            *b"chad",
+            TagData::S15Fixed16Array(
+                [1.1, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.9]
+                    .map(gamut_icc::S15Fixed16::from_f64)
+                    .to_vec(),
+            ),
+        ));
+        let proof = scaled_shaper(0.5);
+        let absolute = RenderingIntent::IccAbsoluteColorimetric;
+        let options = TransformOptions {
+            adaptation_state: AdaptationState::NONE,
+            ..intent_options(absolute)
+        };
+        let check = GamutCheck::new(&src, &proof, options).unwrap();
+        let lab = IccProfile::lab_v4();
+        let input_at = |adaptation| {
+            link_chain(
+                &[&src, &lab],
+                &[absolute, absolute],
+                &[false, false],
+                false,
+                adaptation,
+            )
+            .unwrap()
+        };
+        let lab_of = |pipeline: &Pipeline| {
+            let mut out = [0.0; 3];
+            pipeline.eval(&[0.1, 0.5, 0.9], &mut out).unwrap();
+            out
+        };
+        let got = lab_of(&check.input);
+        assert_eq!(got, lab_of(&input_at(AdaptationState::NONE)));
+        assert_ne!(got, lab_of(&input_at(AdaptationState::FULL)));
     }
 
     #[test]
