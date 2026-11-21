@@ -426,8 +426,10 @@ impl DngDecoder {
     /// The result equals [`decode`](Self::decode)'s [`DecodedDng::metadata`] for every file
     /// `decode` accepts, and it is read by the same code. It is also available for files `decode`
     /// refuses because of their *image*: a compression this crate cannot decode (lossy JPEG), a
-    /// raw IFD it cannot select, or corrupt sample data. Only IFD 0 and the directories it points
-    /// at are read; the `SubIFDs` tree is not walked and no strip or tile is touched.
+    /// raw IFD it cannot select, or corrupt sample data. The whole main IFD chain is parsed (as
+    /// `decode` parses it), so a malformed later main-chain IFD fails the probe; the metadata is
+    /// taken from IFD 0 and the directories it points at, the `SubIFDs` tree is not walked, and
+    /// no strip or tile is touched.
     ///
     /// The metadata read degrades as `decode`'s does rather than failing: an `ExifIFD` (or a
     /// pointer inside it) whose target cannot be read is left out, never an error. That is the
