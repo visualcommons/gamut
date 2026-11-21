@@ -17,15 +17,16 @@ use crate::metadata::DngMetadata;
 use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
 use crate::values::{CalibrationIlluminant, Compression, PhotometricInterpretation};
-use crate::writer::{ImageBlocks, write_cfa_dng};
-use crate::{bitpack, compression, preview, tags};
+use crate::writer::{ImageBlocks, write_cfa_dng, write_raw_ifd0_dng};
+use crate::{DngPreview, LosslessPredictor, bitpack, compression, preview, tags};
 
 /// Encoder for DNG (Adobe Digital Negative) raw images.
 ///
 /// [`encode`](Self::encode) writes a raw image — a CFA mosaic or a demosaiced `LinearRaw` — as a
 /// DNG: an IFD 0 holding a small RGB preview plus the camera/colour-profile tags, and a raw
-/// sub-IFD holding the full-resolution image. Defaults to little-endian (`II`) classic TIFF;
-/// richer compression and metadata are added in later phases (see `STATUS.md`).
+/// sub-IFD holding the full-resolution image — or, with [`DngPreview::None`], an IFD 0 that is
+/// the raw image itself ([`with_preview`](Self::with_preview)). Defaults to little-endian (`II`)
+/// classic TIFF.
 #[derive(Debug, Clone)]
 pub struct DngEncoder {
     order: ByteOrder,
@@ -33,6 +34,7 @@ pub struct DngEncoder {
     backward_version: [u8; 4],
     variant: Variant,
     compression: DngCompression,
+    preview: DngPreview,
     tiling: Option<(u32, u32)>,
     gain_table_map: Option<ProfileGainTableMap>,
     gain_table_map2: Option<ProfileGainTableMap>,
@@ -47,22 +49,39 @@ pub struct DngEncoder {
 /// [`code`](Self::code) is the `Compression` (tag 259) value written. Unlike gamut-ifd's plain
 /// [`Compression`] code list, this is the encoder's choice, so a scheme it cannot write (lossy
 /// JPEG, the TIFF-only codes) is not representable, and JPEG XL's [`JxlSettings`] cannot be set
-/// without selecting JPEG XL. The payload is reachable through [`jxl`](Self::jxl).
+/// without selecting JPEG XL, nor a lossless-JPEG predictor without selecting lossless JPEG. The
+/// payloads are reachable through [`jxl`](Self::jxl) and
+/// [`lossless_predictor`](Self::lossless_predictor).
 ///
 /// `#[non_exhaustive]`: a scheme the encoder learns later is added without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum DngCompression {
-    /// Uncompressed (`Compression = 1`), the default.
-    #[default]
+    /// Uncompressed (`Compression = 1`).
     Uncompressed,
     /// Deflate (`Compression = 8`, zlib; DNG 1.4), 8/16-bit samples only.
     Deflate,
-    /// Lossless JPEG (`Compression = 7`, ITU-T T.81 SOF3), DNG's standard raw compression.
-    LosslessJpeg,
+    /// Lossless JPEG (`Compression = 7`, ITU-T T.81 SOF3), DNG's standard raw compression, coded
+    /// with the given T.81 Table H.1 predictor.
+    ///
+    /// [`LosslessPredictor::Left`] (`Ss = 1`) is what the DNG SDK writes and pairs with the
+    /// encoder's like-colour frame geometry: a Bayer chunk is declared as interleaved
+    /// components, so the left neighbour is the same colour (DNG 1.7.1.0 p. 20). A predictor
+    /// that reads the line above (`Rb`/`Rc`) differences against the mosaic row above, which
+    /// is a different colour on a 2-row repeat — valid and exactly decodable, but usually
+    /// larger on CFA data. Every predictor is lossless: no point transform is applied.
+    LosslessJpeg(LosslessPredictor),
     /// JPEG XL (`Compression = 52546`, DNG 1.7) with the given settings: full-range 16-bit
     /// samples, and the `jxl-encode` cargo feature (non-wasm) to encode.
     Jxl(JxlSettings),
+}
+
+/// Lossless JPEG with [`LosslessPredictor::Left`], the scheme [`DngEncoder::new`] writes — the
+/// DNG SDK's own default raw compression (`Compression = 7`, predictor 1).
+impl Default for DngCompression {
+    fn default() -> Self {
+        Self::LosslessJpeg(LosslessPredictor::Left)
+    }
 }
 
 impl DngCompression {
@@ -72,7 +91,7 @@ impl DngCompression {
         match self {
             Self::Uncompressed => Compression::None,
             Self::Deflate => Compression::Deflate,
-            Self::LosslessJpeg => Compression::Jpeg,
+            Self::LosslessJpeg(_) => Compression::Jpeg,
             Self::Jxl(_) => Compression::JpegXl,
         }
     }
@@ -82,6 +101,16 @@ impl DngCompression {
     pub fn jxl(&self) -> Option<JxlSettings> {
         match self {
             Self::Jxl(settings) => Some(*settings),
+            _ => None,
+        }
+    }
+
+    /// The lossless-JPEG predictor, for [`LosslessJpeg`](Self::LosslessJpeg); `None` for every
+    /// other scheme.
+    #[must_use]
+    pub fn lossless_predictor(&self) -> Option<LosslessPredictor> {
+        match self {
+            Self::LosslessJpeg(predictor) => Some(*predictor),
             _ => None,
         }
     }
@@ -117,7 +146,10 @@ impl Default for DngEncoder {
             dng_version: None,
             backward_version: [1, 1, 0, 0],
             variant: Variant::Classic,
-            compression: DngCompression::Uncompressed,
+            // Lossless JPEG, as the DNG SDK writes by default: the raw stays exact, every DNG
+            // reader decodes it (it needs no newer backward version), and any bit depth codes.
+            compression: DngCompression::default(),
+            preview: DngPreview::default(),
             tiling: None,
             gain_table_map: None,
             gain_table_map2: None,
@@ -129,7 +161,9 @@ impl Default for DngEncoder {
 }
 
 impl DngEncoder {
-    /// Creates an encoder that writes little-endian (`II`) DNG.
+    /// Creates an encoder that writes little-endian (`II`) classic-TIFF DNG with a lossless-JPEG
+    /// raw image (`Compression = 7`, predictor 1 — what the DNG SDK writes by default) and an
+    /// uncapped uncompressed RGB preview in IFD 0.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -179,16 +213,32 @@ impl DngEncoder {
     }
 
     /// Returns a copy of this encoder that compresses the raw image with `compression` (default
-    /// [`DngCompression::Uncompressed`]).
+    /// lossless JPEG with predictor 1, `DngCompression::LosslessJpeg(LosslessPredictor::Left)`,
+    /// the DNG SDK's own default; [`DngCompression::Uncompressed`] writes the packed samples
+    /// verbatim).
     ///
     /// Each [`DngCompression`] is a scheme the encoder writes, with two encode-time limits:
     /// [`Deflate`](DngCompression::Deflate) needs 8/16-bit samples, and
     /// [`Jxl`](DngCompression::Jxl) needs the `jxl-encode` cargo feature and full-range 16-bit
-    /// samples. JPEG XL's distance and effort travel in that variant's [`JxlSettings`]. The
-    /// preview is always stored uncompressed.
+    /// samples. JPEG XL's distance and effort travel in that variant's [`JxlSettings`], the
+    /// lossless-JPEG predictor in [`LosslessJpeg`](DngCompression::LosslessJpeg)'s payload. The
+    /// raw image alone is compressed: the preview is [`with_preview`](Self::with_preview)'s.
     #[must_use]
     pub fn with_compression(mut self, compression: DngCompression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Returns a copy of this encoder that writes the given IFD 0 preview (default: an uncapped
+    /// [`DngPreview::Uncompressed`]).
+    ///
+    /// [`DngPreview::None`] writes no preview: IFD 0 is then the raw image itself, which the DNG
+    /// spec permits. [`DngPreview::Uncompressed`] with a `max_dimension` bounds the preview's
+    /// longer side, so its uncompressed size no longer grows with the raw's; a zero cap is a typed
+    /// error at encode time.
+    #[must_use]
+    pub fn with_preview(mut self, preview: DngPreview) -> Self {
+        self.preview = preview;
         self
     }
 
@@ -200,6 +250,9 @@ impl DngEncoder {
     /// large raws (e.g. Apple ProRAW) are stored, and it bounds a reader's per-chunk working
     /// set; for small images the per-tile padding overhead usually outweighs that. The preview
     /// stays stripped.
+    ///
+    /// Without this the raw is one strip, except a lossless-JPEG raw too large for one T.81 frame
+    /// (a frame width or height past 65535), which is tiled automatically at up to 256 × 256.
     #[must_use]
     pub fn with_tiling(mut self, tile_width: u32, tile_height: u32) -> Self {
         self.tiling = Some((tile_width, tile_height));
@@ -280,7 +333,8 @@ impl DngEncoder {
     ///
     /// `raw` supplies the sensor samples plus the photometry and levels; `profile` supplies the
     /// colour calibration and as-shot white balance. The output is an IFD 0 holding an RGB preview
-    /// plus the DNG/profile tags, with the full-resolution image in a `SubIFDs` sub-IFD.
+    /// plus the DNG/profile tags, with the full-resolution image in a `SubIFDs` sub-IFD — or, with
+    /// [`DngPreview::None`], an IFD 0 holding the full-resolution image beside those tags.
     ///
     /// The store is written last in the file and its entry lives in IFD 0 — the last (and only)
     /// IFD of this encoder's main chain — as C2PA 2.4 §A.3.6 requires. The report's ranges are
@@ -305,7 +359,9 @@ impl DngEncoder {
     /// `MIN_STORE_LEN` (8) bytes — BigTIFF packs a value that short inline in its entry, so it
     /// could not be the out-of-line run at the end of the file §A.3.6 wants; or if, without
     /// BigTIFF, it is longer than a 32-bit `LONG` count describes, or a reservation is longer
-    /// than a buffer can hold. Propagates buffer/validation errors.
+    /// than a buffer can hold. Also an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error, before any pixel
+    /// work, if the [`DngPreview`] size cap is `0`. Propagates buffer/validation errors.
     pub fn encode(
         &self,
         raw: &RawImage,
@@ -314,6 +370,7 @@ impl DngEncoder {
     ) -> Result<DngEncodeReport> {
         let store = self.c2pa_store()?;
         self.metadata.check()?;
+        self.preview.check()?;
         if color_plane_count(raw) != 3 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -347,8 +404,9 @@ impl DngEncoder {
         );
         let spp = usize::from(raw.samples_per_pixel());
         let period = horizontal_cfa_period(raw);
+        let tiling = self.raw_tiling(raw.dimensions(), spp, period);
 
-        let raw_data = match self.tiling {
+        let raw_data = match tiling {
             None => vec![self.encode_chunk(raw.samples(), width, height, spp, period, bits)?],
             Some((tile_width, tile_height)) => {
                 if tile_width == 0
@@ -369,7 +427,12 @@ impl DngEncoder {
             }
         };
 
-        let (preview_dims, preview_rgb) = preview::raw_preview(raw)?;
+        let preview = match self.preview {
+            DngPreview::None => None,
+            DngPreview::Uncompressed { max_dimension } => {
+                Some(preview::raw_preview(raw, max_dimension)?)
+            }
+        };
         // Effective versions: the backward version per the compatibility rules, and (unless
         // overridden) the minimal DNGVersion covering the features used — never below the
         // backward version, which a reader is entitled to assume.
@@ -382,7 +445,10 @@ impl DngEncoder {
                 required
             }
         });
-        let mut ifd0 = self.build_ifd0(profile, preview_dims, dng_version, backward_version)?;
+        let mut ifd0 = self.build_ifd0(profile, dng_version, backward_version)?;
+        if let Some((preview_dims, _)) = &preview {
+            set_preview_image_tags(&mut ifd0, *preview_dims);
+        }
         // The raw-data integrity digest (P17). `gdng_validate` runs ValidateRawImageDigest, so
         // every oracle-gated test enforces this value against the SDK's own computation. For
         // lossy-compressed storage (JPEG XL) the digest covers the compressed chunks; for
@@ -405,14 +471,9 @@ impl DngEncoder {
         if store.is_some() {
             reserve_c2pa_entry(&mut ifd0);
         }
-        let raw_ifd = build_raw_ifd(self, raw)?;
+        let raw_ifd = build_raw_ifd(self, raw, tiling)?;
 
-        let preview_blocks = ImageBlocks {
-            offset_tag: tags::STRIP_OFFSETS,
-            bytecount_tag: tags::STRIP_BYTE_COUNTS,
-            blocks: vec![preview_rgb],
-        };
-        let raw_blocks = match self.tiling {
+        let raw_blocks = match tiling {
             None => ImageBlocks {
                 offset_tag: tags::STRIP_OFFSETS,
                 bytecount_tag: tags::STRIP_BYTE_COUNTS,
@@ -425,14 +486,31 @@ impl DngEncoder {
             },
         };
 
-        let mut bytes = write_cfa_dng(
-            self.order,
-            self.variant(),
-            ifd0,
-            &preview_blocks,
-            raw_ifd,
-            &raw_blocks,
-        )?;
+        let mut bytes = match preview {
+            Some((_, preview_rgb)) => {
+                let preview_blocks = ImageBlocks {
+                    offset_tag: tags::STRIP_OFFSETS,
+                    bytecount_tag: tags::STRIP_BYTE_COUNTS,
+                    blocks: vec![preview_rgb],
+                };
+                write_cfa_dng(
+                    self.order,
+                    self.variant(),
+                    ifd0,
+                    &preview_blocks,
+                    raw_ifd,
+                    &raw_blocks,
+                )?
+            }
+            // No preview: IFD 0 is the raw image, so the raw IFD's image and level tags join the
+            // DNG/profile tags there (none of them is set on both).
+            None => {
+                for field in raw_ifd.fields() {
+                    ifd0.set(field.tag, field.value.clone());
+                }
+                write_raw_ifd0_dng(self.order, self.variant(), ifd0, &raw_blocks)?
+            }
+        };
         let c2pa = match store {
             Some(store) => Some(append_c2pa_store(&mut bytes, &store)?),
             None => None,
@@ -444,36 +522,18 @@ impl DngEncoder {
         })
     }
 
-    /// Builds IFD 0: the RGB preview's image tags plus the DNG version, camera identity, and the
-    /// colour-calibration profile. The `SubIFDs` pointer and strip offsets are filled in by the
+    /// Builds IFD 0's own tags: the DNG version, camera identity, and the colour-calibration
+    /// profile — no image tags, which are the preview's ([`set_preview_image_tags`]) or, with no
+    /// preview, the raw IFD's. The `SubIFDs` pointer and strip offsets are filled in by the
     /// writer. `backward_version` is the effective (possibly opcode-raised) `DNGBackwardVersion`.
     fn build_ifd0(
         &self,
         profile: &CameraProfile,
-        preview_dims: gamut_core::Dimensions,
         dng_version: [u8; 4],
         backward_version: [u8; 4],
     ) -> Result<Ifd> {
         let mut ifd = Ifd::new();
-        // Preview image (a reduced-resolution RGB thumbnail).
-        ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
-        ifd.set(tags::IMAGE_WIDTH, count_value(preview_dims.width()));
-        ifd.set(tags::IMAGE_LENGTH, count_value(preview_dims.height()));
-        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8, 8, 8]));
-        ifd.set(
-            tags::COMPRESSION,
-            Value::Short(vec![u16::from(Compression::None)]),
-        );
-        ifd.set(
-            tags::PHOTOMETRIC_INTERPRETATION,
-            Value::Short(vec![u16::from(PhotometricInterpretation::Rgb)]),
-        );
         ifd.set(tags::ORIENTATION, Value::Short(vec![1]));
-        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
-        ifd.set(tags::ROWS_PER_STRIP, count_value(preview_dims.height()));
-        ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
-        ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
-        ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
         ifd.set(tags::SOFTWARE, Value::Ascii("gamut-dng".to_owned()));
         ifd.set(
             tags::MODEL,
@@ -640,7 +700,7 @@ fn backward_version_for(encoder: &DngEncoder, raw: &RawImage, profile: &CameraPr
     match encoder.compression {
         DngCompression::Jxl(_) => raise([1, 7, 0, 0], &mut version),
         DngCompression::Deflate => raise([1, 4, 0, 0], &mut version),
-        DngCompression::Uncompressed | DngCompression::LosslessJpeg => {}
+        DngCompression::Uncompressed | DngCompression::LosslessJpeg(_) => {}
     }
     if uses_spectral_illuminant(profile) {
         raise([1, 6, 0, 0], &mut version);
@@ -689,6 +749,26 @@ fn uses_spectral_illuminant(profile: &CameraProfile) -> bool {
 }
 
 impl DngEncoder {
+    /// The raw image's chunk layout: the [`with_tiling`](Self::with_tiling) grid when one was set,
+    /// otherwise one strip — unless the raw is lossless JPEG and that strip's frame (its
+    /// [`lossless_jpeg_geometry`] width, or its height) exceeds the 65535 that a T.81 B.2.2 frame
+    /// header's 16-bit `X`/`Y` can carry. Such a raw is tiled instead, at
+    /// [`AUTO_TILE`]-capped tiles, so lossless JPEG writes every raw that uncompressed writes
+    /// (the DNG SDK likewise writes its own lossless-JPEG raws tiled, `dng_ifd::FindTileSize`).
+    fn raw_tiling(
+        &self,
+        dims: gamut_core::Dimensions,
+        spp: usize,
+        period: usize,
+    ) -> Option<(u32, u32)> {
+        if self.tiling.is_some() || !matches!(self.compression, DngCompression::LosslessJpeg(_)) {
+            return self.tiling;
+        }
+        let (frame_width, _) = lossless_jpeg_geometry(dims.width() as usize, spp, period);
+        (frame_width > LOSSLESS_JPEG_MAX_DIM || dims.height() as usize > LOSSLESS_JPEG_MAX_DIM)
+            .then(|| (auto_tile_side(dims.width()), auto_tile_side(dims.height())))
+    }
+
     /// Encodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each.
     /// Lossless JPEG and JPEG XL code samples directly; the byte-oriented schemes pack then
     /// compress. Rows are byte-aligned per chunk (each chunk is an independent sample stream),
@@ -704,10 +784,14 @@ impl DngEncoder {
         bits: u16,
     ) -> Result<Vec<u8>> {
         match self.compression {
-            DngCompression::LosslessJpeg => {
+            DngCompression::LosslessJpeg(predictor) => {
                 let (width, components) = lossless_jpeg_geometry(cols, spp, period);
+                // T.81 B.2.2 floors a lossless frame's precision at 2 bits; a 1-bit raw (which
+                // `RawImage` accepts) codes exactly in a 2-bit frame, and readers take the
+                // samples from the frame, not from `BitsPerSample`.
                 gamut_jpeg::lossless::LosslessEncoder::new()
-                    .encode(samples, width, rows, components, bits)
+                    .with_predictor(predictor)
+                    .encode(samples, width, rows, components, bits.max(2))
             }
             DngCompression::Jxl(settings) => {
                 #[cfg(all(
@@ -774,6 +858,22 @@ fn lossless_jpeg_geometry(cols: usize, spp: usize, period: usize) -> (usize, usi
     }
 }
 
+/// The largest lossless-JPEG frame width or height: T.81 B.2.2's `X` and `Y` are 16-bit (`Y = 0`
+/// defers the height to a DNL marker, which this encoder does not write).
+const LOSSLESS_JPEG_MAX_DIM: usize = 65535;
+
+/// The side of a tile [`DngEncoder::raw_tiling`] picks for a raw no single lossless-JPEG frame
+/// holds: 256 — a square far inside T.81's 65535 frame limit whose zero-padded edge tiles stay
+/// small — or, for a side shorter than that, the side rounded up to TIFF 6.0 §15's multiple of
+/// 16, so a thin raw is not zero-padded to 256. (The DNG SDK sizes its tiles from a byte budget
+/// instead; any multiple of 16 is conformant, so the side is this encoder's choice.)
+const AUTO_TILE: u32 = 256;
+
+/// One side of [`DngEncoder::raw_tiling`]'s automatic tile for an image `extent` pixels long.
+fn auto_tile_side(extent: u32) -> u32 {
+    extent.min(AUTO_TILE).next_multiple_of(16)
+}
+
 /// Splits an image into full-size `tw × th` sample tiles in row-major tile order, zero-padding
 /// edge tiles (TIFF 6.0 §15: every stored tile has the same dimensions).
 fn tile_samples(
@@ -803,6 +903,28 @@ fn tile_samples(
     tiles
 }
 
+/// Sets IFD 0's image tags for a `dims` uncompressed 8-bit RGB preview in one strip (the
+/// reduced-resolution primary preview, `NewSubFileType = 1`).
+fn set_preview_image_tags(ifd: &mut Ifd, dims: gamut_core::Dimensions) {
+    ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
+    ifd.set(tags::IMAGE_WIDTH, count_value(dims.width()));
+    ifd.set(tags::IMAGE_LENGTH, count_value(dims.height()));
+    ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8, 8, 8]));
+    ifd.set(
+        tags::COMPRESSION,
+        Value::Short(vec![u16::from(Compression::None)]),
+    );
+    ifd.set(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        Value::Short(vec![u16::from(PhotometricInterpretation::Rgb)]),
+    );
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
+    ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height()));
+    ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
+    ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
+    ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
+}
+
 /// Builds an `SRATIONAL` value from a row-major `3 × 3` colour/calibration matrix.
 fn srational_matrix(m: &[f64; 9]) -> Value {
     Value::SRational(m.iter().map(|&x| srational(x)).collect())
@@ -819,6 +941,7 @@ fn color_plane_count(raw: &RawImage) -> usize {
 
 /// Builds the raw sub-IFD: the image-data tags, the photometry-specific tags (CFA pattern, or
 /// `LinearRaw` planes), and the level model. The strip offsets are filled in by the writer.
+/// `tiling` is the layout [`DngEncoder::raw_tiling`] chose, `None` for one strip.
 ///
 /// # Errors
 ///
@@ -826,7 +949,7 @@ fn color_plane_count(raw: &RawImage) -> usize {
 /// model cannot be stored: a delta vector whose
 /// length doesn't match the active area, a non-integral white level, or a level outside the
 /// tag's representable range.
-fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
+fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage, tiling: Option<(u32, u32)>) -> Result<Ifd> {
     let compression = encoder.compression.code();
     let mut ifd = Ifd::new();
     let dims = raw.dimensions();
@@ -845,7 +968,7 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
     // A tiled image carries the tile geometry; a stripped one carries RowsPerStrip (a strip/tile
     // IFD must not mix the two families).
-    match encoder.tiling {
+    match tiling {
         Some((tile_width, tile_height)) => {
             ifd.set(tags::TILE_WIDTH, count_value(tile_width));
             ifd.set(tags::TILE_LENGTH, count_value(tile_height));
@@ -1194,8 +1317,10 @@ mod tests {
         let raw = sample_raw(8, 6, bits);
         let profile = sample_profile();
         let mut out = Vec::new();
+        // Uncompressed, so the raw strip is the packed samples this unpacks directly.
         let report = DngEncoder::new()
             .with_byte_order(order)
+            .with_compression(DngCompression::Uncompressed)
             .encode(&raw, &profile, &mut out)
             .expect("encode");
         assert_eq!(report.len, out.len());
@@ -1346,7 +1471,7 @@ mod tests {
         let raw = sample_raw(8, 6, 16);
         let mut out = Vec::new();
         DngEncoder::new()
-            .with_compression(DngCompression::LosslessJpeg)
+            .with_compression(DngCompression::LosslessJpeg(LosslessPredictor::Left))
             .encode(&raw, &sample_profile(), &mut out)
             .expect("encode");
         let file = gamut_ifd::read(&out).expect("parse DNG");
@@ -1363,29 +1488,58 @@ mod tests {
         assert_eq!(frame.samples, raw.samples());
     }
 
-    /// The reshape moves the T.81 65535-sample-line ceiling from the strip's width to its
-    /// *frame* width: an untiled Bayer strip is now writable up to `2 × 65535` photosites wide
-    /// (the TIFF `ImageWidth` is a LONG, and DNG 1.7.1.0 p. 20 lets the JPEG geometry differ
-    /// from the strip's), and our own decoder reads it back exactly. One past that, the frame
-    /// would be 65536 wide and the encoder still refuses it rather than writing an invalid SOF3.
-    #[test]
-    fn cfa_lossless_jpeg_width_ceiling_is_twice_the_frame_limit() {
-        let encode = |w: u32| {
-            let mut out = Vec::new();
-            DngEncoder::new()
-                .with_compression(DngCompression::LosslessJpeg)
-                .encode(&sample_raw(w, 2, 16), &sample_profile(), &mut out)
-                .map(|_| out)
-        };
-        let widest = 2 * 65535;
-        let out = encode(widest).expect("a 131070-wide Bayer strip fits a 65535-wide frame");
+    /// Encodes `raw` with `compression` and no explicit tiling; returns the raw IFD's
+    /// `(TileWidth, TileLength)` (`None` when stripped) after checking the file decodes back to
+    /// `raw` exactly.
+    fn untiled_layout(raw: &RawImage, compression: DngCompression) -> Option<(u32, u32)> {
+        let mut out = Vec::new();
+        DngEncoder::new()
+            .with_compression(compression)
+            .encode(raw, &sample_profile(), &mut out)
+            .expect("encode");
         let decoded = crate::DngDecoder::new().decode(&out).expect("decode");
-        assert_eq!(decoded.raw.samples(), sample_raw(widest, 2, 16).samples());
-        let err = encode(widest + 2).expect_err("a 65536-wide frame is not encodable");
-        assert!(
-            err.to_string()
-                .contains("lossless-JPEG dimensions must be 1..=65535"),
-            "{err}"
+        assert_eq!(decoded.raw.samples(), raw.samples());
+        let file = gamut_ifd::read(&out).expect("parse");
+        let raw_off = file.ifds[0].get_u32(tags::SUB_IFDS).expect("SubIFDs");
+        let raw_ifd = read_ifd_at(&out, raw_off.into(), file.order, Variant::Classic).expect("raw");
+        let tile = raw_ifd
+            .get_u32(tags::TILE_WIDTH)
+            .zip(raw_ifd.get_u32(tags::TILE_LENGTH));
+        assert_eq!(tile.is_none(), raw_ifd.get(tags::ROWS_PER_STRIP).is_some());
+        tile
+    }
+
+    /// The reshape moves the T.81 65535-sample-line ceiling from the strip's width to its
+    /// *frame* width: an untiled Bayer strip stays one strip up to `2 × 65535` photosites wide
+    /// (the TIFF `ImageWidth` is a LONG, and DNG 1.7.1.0 p. 20 lets the JPEG geometry differ
+    /// from the strip's). One past that the frame would be 65536 wide, so the raw is tiled
+    /// instead — 256-wide tiles, and only 16 rows tall for this 2-row raw — rather than refused:
+    /// lossless JPEG writes every raw uncompressed writes.
+    #[test]
+    fn lossless_jpeg_tiles_a_raw_wider_than_one_frame() {
+        let lj = DngCompression::LosslessJpeg(LosslessPredictor::Left);
+        let widest = 2 * 65535;
+        assert_eq!(untiled_layout(&sample_raw(widest, 2, 16), lj), None);
+        assert_eq!(
+            untiled_layout(&sample_raw(widest + 2, 2, 16), lj),
+            Some((256, 16))
+        );
+    }
+
+    /// A lossless-JPEG raw taller than a frame's 65535 lines is tiled too (16-wide tiles for this
+    /// 2-column raw, 256 tall); at 65535 rows it is still one strip, and an uncompressed raw is
+    /// never tiled on its own, whatever its height.
+    #[test]
+    fn lossless_jpeg_tiles_a_raw_taller_than_one_frame() {
+        let lj = DngCompression::LosslessJpeg(LosslessPredictor::Left);
+        assert_eq!(untiled_layout(&sample_raw(2, 65535, 16), lj), None);
+        assert_eq!(
+            untiled_layout(&sample_raw(2, 65536, 16), lj),
+            Some((16, 256))
+        );
+        assert_eq!(
+            untiled_layout(&sample_raw(2, 65536, 16), DngCompression::Uncompressed),
+            None
         );
     }
 
@@ -1586,7 +1740,10 @@ mod tests {
     fn dng_compression_code_is_the_written_tag_value() {
         assert_eq!(DngCompression::Uncompressed.code(), Compression::None);
         assert_eq!(DngCompression::Deflate.code(), Compression::Deflate);
-        assert_eq!(DngCompression::LosslessJpeg.code(), Compression::Jpeg);
+        assert_eq!(
+            DngCompression::LosslessJpeg(LosslessPredictor::Left).code(),
+            Compression::Jpeg
+        );
         assert_eq!(
             DngCompression::Jxl(JxlSettings::lossless()).code(),
             Compression::JpegXl
@@ -1601,10 +1758,97 @@ mod tests {
         for scheme in [
             DngCompression::Uncompressed,
             DngCompression::Deflate,
-            DngCompression::LosslessJpeg,
+            DngCompression::LosslessJpeg(LosslessPredictor::Left),
         ] {
             assert_eq!(scheme.jxl(), None, "{scheme:?}");
         }
+    }
+
+    /// Only the lossless-JPEG scheme carries a predictor, and it hands back the one it holds —
+    /// a non-default one, so a body returning the default cannot pass.
+    #[test]
+    fn dng_compression_lossless_predictor_is_the_lossless_payload_only() {
+        assert_eq!(
+            DngCompression::LosslessJpeg(LosslessPredictor::Average).lossless_predictor(),
+            Some(LosslessPredictor::Average)
+        );
+        for scheme in [
+            DngCompression::Uncompressed,
+            DngCompression::Deflate,
+            DngCompression::Jxl(JxlSettings::lossless()),
+        ] {
+            assert_eq!(scheme.lossless_predictor(), None, "{scheme:?}");
+        }
+    }
+
+    /// The selection value `Ss` of the first scan in a lossless-JPEG strip (T.81 B.2.3: the SOS
+    /// header is `FF DA`, `Ls`, `Ns`, `Ns` component pairs, then `Ss`).
+    fn scan_predictor(strip: &[u8]) -> u8 {
+        let sos = strip
+            .windows(2)
+            .position(|w| w == [0xFF, 0xDA])
+            .expect("SOS marker");
+        let ns = usize::from(strip[sos + 4]);
+        strip[sos + 5 + 2 * ns]
+    }
+
+    /// Every Table H.1 predictor reaches the raw strip's scan header as its own `Ss`, and the
+    /// file decodes back to the mosaic exactly, so the choice is carried and stays lossless.
+    #[test]
+    fn each_lossless_predictor_is_written_and_decodes_exactly() {
+        let raw = sample_raw(8, 6, 12);
+        for predictor in LosslessPredictor::ALL {
+            let mut out = Vec::new();
+            DngEncoder::new()
+                .with_compression(DngCompression::LosslessJpeg(predictor))
+                .encode(&raw, &sample_profile(), &mut out)
+                .expect("encode");
+            let file = gamut_ifd::read(&out).expect("parse DNG");
+            let raw_off = file.ifds[0].get_u32(tags::SUB_IFDS).expect("SubIFDs");
+            let raw_ifd =
+                read_ifd_at(&out, raw_off.into(), file.order, Variant::Classic).expect("raw");
+            let off = raw_ifd.get_u32_vec(tags::STRIP_OFFSETS).expect("offsets")[0] as usize;
+            let len = raw_ifd
+                .get_u32_vec(tags::STRIP_BYTE_COUNTS)
+                .expect("counts")[0] as usize;
+            assert_eq!(
+                scan_predictor(&out[off..off + len]),
+                predictor as u8,
+                "{predictor:?}"
+            );
+            let decoded = crate::DngDecoder::new().decode(&out).expect("decode");
+            assert_eq!(decoded.raw.samples(), raw.samples(), "{predictor:?}");
+        }
+    }
+
+    /// Lossless JPEG's 2-bit precision floor does not refuse a 1-bit raw under the default
+    /// scheme: it codes in a 2-bit frame and decodes back to the same samples.
+    #[test]
+    fn a_one_bit_raw_codes_as_lossless_jpeg() {
+        let pattern = vec![
+            cfa_color::RED,
+            cfa_color::GREEN,
+            cfa_color::GREEN,
+            cfa_color::BLUE,
+        ];
+        let samples: Vec<u16> = (0..8 * 6).map(|i| (i % 3 % 2) as u16).collect();
+        let raw =
+            RawImage::new_cfa(Dimensions::new(8, 6).unwrap(), 1, (2, 2), pattern, samples).unwrap();
+        let mut out = Vec::new();
+        DngEncoder::new()
+            .encode(&raw, &sample_profile(), &mut out)
+            .expect("a 1-bit raw encodes");
+        let decoded = crate::DngDecoder::new().decode(&out).expect("decode");
+        assert_eq!(decoded.raw.samples(), raw.samples());
+    }
+
+    /// The default scheme is the DNG SDK's: lossless JPEG at predictor 1, on both the enum's
+    /// `Default` and the encoder a caller gets from `new`.
+    #[test]
+    fn the_default_compression_is_predictor_1_lossless_jpeg() {
+        let sdk_default = DngCompression::LosslessJpeg(LosslessPredictor::Left);
+        assert_eq!(DngCompression::default(), sdk_default);
+        assert_eq!(DngEncoder::new().compression, sdk_default);
     }
 
     #[test]

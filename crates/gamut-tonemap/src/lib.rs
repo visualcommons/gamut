@@ -19,6 +19,11 @@
 //!   [`CurveToneMapper`], which applies any [`ToneCurve`] to a pixel per channel, from its
 //!   luminance, or from its brightest channel ([`ApplyMode`]), between explicit source and target
 //!   peaks and with ffmpeg `tonemap`'s desaturation ([`DEFAULT_DESAT`]).
+//! - [`ToneOperator`] / [`ToneParams`] — the plain-data route to the same operators for a caller
+//!   that selects one at run time (a C caller, a config file): a fieldless `#[repr(u8)]` selector
+//!   plus a `Copy` record of every operator's parameters and the [`CurveToneMapper`] settings,
+//!   built by [`ToneParams::mapper`] into a mapper over [`BuiltinCurve`], which maps exactly as the
+//!   direct construction does.
 //! - Per-operator parameter defaults: [`SDR_WHITE_NORMALIZED`], [`DEFAULT_REINHARD_WHITE`],
 //!   [`DEFAULT_HABLE_WHITE`] and [`DEFAULT_DRAGO_BIAS`]. (Absolute reference luminances in nits
 //!   live in [`gamut_core::luminance`].)
@@ -79,6 +84,7 @@ mod constants;
 mod curve;
 mod mapper;
 mod operators;
+mod selector;
 
 // Executable laws for the `ToneCurve` contract, shared by this crate's property tests and the
 // out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
@@ -94,3 +100,4 @@ pub use constants::{
 pub use curve::ToneCurve;
 pub use mapper::{ApplyMode, CurveToneMapper, DEFAULT_DESAT, ToneMapper};
 pub use operators::{Aces, Clamp, Drago, Exposure, Hable, Linear, Reinhard, ReinhardExtended};
+pub use selector::{BuiltinCurve, ToneOperator, ToneParams};

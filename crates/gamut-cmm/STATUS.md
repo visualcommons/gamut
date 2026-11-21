@@ -7,7 +7,7 @@ codes in fixed point). Data layouts follow **ICC.1:2022**
 ([`references/icc`](../../references/icc)); scope is the ICC v2/v4 still-image profile set.
 Runtime dependencies: `gamut-icc`, `gamut-color`, `gamut-core`; `#![deny(unsafe_code)]` — a
 hot-path crate, so a benchmarked exception may be taken (AGENTS.md, `## Conventions`), and none
-is: the crate is 100% safe Rust.
+is: the crate is 100% safe Rust, and its SIMD route (#993, settled decisions below) takes none.
 
 **Keystone:** the **pipeline/stage model** — a colour transform as a validated chain of `Stage`s.
 `Pipeline::new` is the validity boundary: every channel count (declared ends, per-stage
@@ -438,13 +438,31 @@ and 0.22 MB).
   code, so the fast path is a speed choice only (its one selection mutant is excluded in
   `.cargo/mutants.toml` on that argument). The `f64` entry point over a `Fixed16` table
   quantizes its input with the same encoding, so all three entry points agree.
-- **SIMD: no `unsafe`, and the `unsafe`/portable-SIMD trade is a maintainer decision.** #423
-  asks for that decision to be recorded *before* any SIMD lands. This change takes none of it:
-  the tiers are scalar safe Rust (the fixed-point inner loop is shaped for autovectorization —
+- **SIMD: safe SIMD only, and only where profiling shows the hottest site (#993).** #423
+  asked for the `unsafe`/portable-SIMD trade to be recorded *before* any SIMD lands; its tiers
+  shipped as scalar safe Rust (the fixed-point inner loop is shaped for autovectorization —
   corner offsets resolved once per pixel, a branch-free per-channel loop — but nothing relies
-  on it), and `#![deny(unsafe_code)]` is untouched. Whether `std::simd` or explicit
-  `#[target_feature]` intrinsics are worth an `#[expect(unsafe_code)]` exception is handed to
-  the maintainers as its own issue (deferred table).
+  on it). The maintainers settled the route in #993:
+  - **No `unsafe`, no x86 runtime dispatch.** `#![deny(unsafe_code)]` stays (it is `deny`,
+    the hot-path crates' lint per AGENTS.md `## Conventions`; #423's text saying `forbid` was
+    stale), and SIMD is never the reason for an `#[expect(unsafe_code)]` exception here.
+    Calling a `#[target_feature]` fn the build did not enable — what x86 runtime dispatch
+    (`is_x86_feature_detected!`) does — is the one SIMD shape that needs `unsafe`, so x86 runs
+    the safe, autovectorizable code only.
+  - **Two routes, both safe Rust:** autovectorization-friendly restructuring of the hot loop,
+    and safe `#[target_feature]` `fn`s over `core::arch` intrinsics on **aarch64** (NEON,
+    always on) and **wasm32** (`simd128`, enabled at build time) — since Rust 1.87 those need
+    no `unsafe`. No other ISA family.
+  - **`std::simd` is out:** portable SIMD is nightly-only, and the workspace MSRV (1.92,
+    root `Cargo.toml`) is a stable toolchain.
+  - **The `f64` Tier-1 reference stays scalar.** SIMD targets only the throughput tiers
+    (`PrecalculateFixed16` and the #992 8-bit matrix-shaper), and a SIMD path keeps their
+    contract: it reproduces the scalar integer path it replaces code for code, so the
+    conformance gate's budgets do not move.
+  - **Profiling is the gate.** A SIMD path lands only at a site a profile of the
+    `benches/pipeline.rs` scenarios shows hottest, with its before/after numbers recorded in
+    this file the way [`docs/benchmarking.md`](../../docs/benchmarking.md#where-a-measured-number-is-kept)
+    requires (invocation, fixture size, one-machine caveat). None has landed (deferred table).
 - **Not hand-written: the changelog.** release-plz generates `CHANGELOG.md` from the
   conventional commits; the `feat(gamut-cmm)!` commit is the entry.
 
@@ -677,7 +695,7 @@ lcms2's reference answer there and what it diverges from is lcms2's grid. The sh
 | `multiProcessElementsType` (`mpet`) + `DToBx`/`BToDx` tags | The v4/iccMAX general-purpose processing pipeline; `gamut-icc` preserves it as `Raw`, and this CMM does not evaluate it. | ✗ out of scope |
 | Integer/`f32` CLUT tiers | Landed with #423: `PrecalculateF32`/`PrecalculateFixed16` (above). `f64` stays the Tier-1 default (correctness only, not bit-reproducible — the `gamut-color` posture, see [`references/color`](../../references/color/README.md)). | ✅ |
 | 8-bit integer matrix-shaper path | Landed with #992: lcms2's `OptimizeMatrixShaper` under `PrecalculateFixed16`'s 8-bit entry point (above). | ✅ |
-| SIMD evaluation | #423 requires a maintainer decision on `unsafe`/portable SIMD before any lands; the tiers are scalar safe Rust (settled decisions above). Handed to the maintainers as #993. | ☐ awaiting decision |
+| SIMD evaluation | Route settled by #993 (settled decisions, #423 section): safe SIMD only — autovectorization-friendly restructuring and safe `#[target_feature]` paths on aarch64/wasm32 — no `unsafe`, no x86 runtime dispatch, no `std::simd`, `f64` Tier-1 stays scalar. Lands per site only once profiling shows it hottest ([`docs/benchmarking.md`](../../docs/benchmarking.md)); the tiers are scalar safe Rust today. | ☐ deferred |
 | White-point ("scum dot") fixup on a resampled CLUT | lcms2's `PatchLUT` snaps the input white node onto the output white in a precalculated table (`cmsFLAGS_NOWHITEONWHITEFIXUP` disables it, as the conformance gate does). An lcms2 aesthetic with no ICC.1 basis; the resampling pass does not replicate it. | ✗ out of scope |
 | Public per-hop intent/BPC arrays | The chain internals already take them (proofing uses them); the public `chain` API stays single-intent until a consumer needs lcms2's `cmsCreateExtendedTransform` shape. | ☐ deferred |
 | Named-colour profiles | No continuous pixel transform; rejected with a typed error everywhere. | ✗ out of scope |

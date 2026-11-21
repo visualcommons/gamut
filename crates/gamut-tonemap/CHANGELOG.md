@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tonemap`'s desaturation (`DEFAULT_DESAT = 2.0`) and selectable `gamut_core` luma weights.
   Max-RGB mode is held by a golden test to an `f64` transcription of ffmpeg's `tonemap()`. The
   BT.2390 EETF (#1254) and BT.2446 Method A (#1255) follow as `ToneMapper`s.
+- *(gamut-tonemap)* plain-data operator selection (#1103). `ToneOperator` is a fieldless
+  `#[repr(u8)]` selector with permanent discriminants (`Linear = 0` … `Drago = 7`); `ToneParams`
+  is a `Copy` record of the curve parameter, Drago's bias and every `CurveToneMapper` setting,
+  and `ToneParams::mapper` builds a `CurveToneMapper<BuiltinCurve>` through the operators' own
+  constructors, mapping bit-for-bit as the direct construction.
 
 ### Other
 

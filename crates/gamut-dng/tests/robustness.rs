@@ -101,7 +101,8 @@ fn assert_truncated(dng: &[u8]) {
 /// of samples. Pins the strip path — the output buffer and the per-strip unpack — to the data.
 #[test]
 fn a_strip_declaring_huge_geometry_is_rejected_without_a_geometry_sized_allocation() {
-    let dng = patched_raw_ifd(DngEncoder::new(), |raw| {
+    let encoder = DngEncoder::new().with_compression(DngCompression::Uncompressed);
+    let dng = patched_raw_ifd(encoder, |raw| {
         raw.set(tags::IMAGE_WIDTH, Value::Short(vec![60000]));
         raw.set(tags::IMAGE_LENGTH, Value::Short(vec![60000]));
         raw.set(tags::ROWS_PER_STRIP, Value::Short(vec![60000]));
@@ -158,7 +159,10 @@ fn a_zero_width_tiled_raw_is_rejected_as_invalid_input() {
 /// assembled image and the per-tile unpack — to the data.
 #[test]
 fn a_tile_declaring_huge_geometry_is_rejected_without_a_geometry_sized_allocation() {
-    let dng = patched_raw_ifd(DngEncoder::new().with_tiling(16, 16), |raw| {
+    let encoder = DngEncoder::new()
+        .with_compression(DngCompression::Uncompressed)
+        .with_tiling(16, 16);
+    let dng = patched_raw_ifd(encoder, |raw| {
         raw.set(tags::IMAGE_WIDTH, Value::Short(vec![60000]));
         raw.set(tags::IMAGE_LENGTH, Value::Short(vec![60000]));
         raw.set(tags::TILE_WIDTH, Value::Short(vec![60000]));
