@@ -754,10 +754,13 @@ fn libwebp_decodes_every_lossless_presets_encode_bit_exactly() {
 
     let (w, h) = (32u32, 24u32);
     let dims = Dimensions::new(w, h).unwrap();
-    for (label, rgba) in [
-        ("pattern", pattern_rgba(w, h)),
-        ("photo", photo_like_rgba(w, h, 7)),
-    ] {
+    // The oracle's fixtures are opaque, so the photo-like one is given a graded alpha to reach the
+    // transparent path too.
+    let mut photo = photo_like_rgba(w, h, 7);
+    for (i, px) in photo.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        px[3] = (i * 5 % 256) as u8;
+    }
+    for (label, rgba) in [("pattern", pattern_rgba(w, h)), ("photo-alpha", photo)] {
         for level in 0..=9u8 {
             let preset = LosslessPreset::from_level(level).expect("0..=9");
             let mut file = Vec::new();
