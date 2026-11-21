@@ -463,28 +463,6 @@ mod tests {
         }
     }
 
-    /// A Lab→Lab abstract identity profile (the shape of lcms2's `cmsCreateLab4Profile`):
-    /// A2B0 holds identity B-curves only.
-    fn abstract_lab() -> IccProfile {
-        let mut header = ProfileHeader::new(DeviceClass::Abstract, ColorSpace::Lab);
-        header.pcs = ColorSpace::Lab;
-        IccProfile {
-            header,
-            tags: vec![Tag::new(
-                *b"A2B0",
-                TagData::LutAToB(LutAToB {
-                    input_channels: 3,
-                    output_channels: 3,
-                    a_curves: None,
-                    clut: None,
-                    m_curves: None,
-                    matrix: None,
-                    b_curves: vec![CurveOrParametric::Curve(Curve::Identity); 3],
-                }),
-            )],
-        }
-    }
-
     /// An RGB→RGB device-link profile whose A2B0 halves every channel (2-node CLUT).
     fn halving_link() -> IccProfile {
         let mut header = ProfileHeader::new(DeviceClass::DeviceLink, ColorSpace::Rgb);
@@ -602,7 +580,7 @@ mod tests {
         // Lab round-trip's f64 tightness.
         let src = rgb_shaper(None);
         let dst = rgb_shaper(None);
-        let lab = abstract_lab();
+        let lab = IccProfile::lab_v4();
         let options = TransformOptions {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
@@ -628,7 +606,7 @@ mod tests {
         // direction regardless of its device space. A Lab-device-space output-class profile
         // carrying only an A2B tag therefore chains fine at slot 0 (device→PCS); a
         // direction flip would look for its (absent) B2A tag and fail.
-        let mut lab_input = abstract_lab();
+        let mut lab_input = IccProfile::lab_v4();
         lab_input.header.device_class = DeviceClass::Output;
         let dst = rgb_shaper(None);
         let chained =

@@ -31,10 +31,7 @@
 //! lcms2 away from the decision boundary; magnitudes are deliberately not quantized
 //! (documented in STATUS.md).
 
-use gamut_icc::{
-    ColorSpace, Curve, CurveOrParametric, DeviceClass, IccProfile, LutAToB, ProfileHeader,
-    RenderingIntent, Tag, TagData,
-};
+use gamut_icc::{IccProfile, RenderingIntent};
 
 use crate::bpc;
 use crate::chain::link_chain;
@@ -57,29 +54,6 @@ fn delta_e76(a: [f64; 3], b: [f64; 3]) -> f64 {
     (dl * dl + da * da + db * db).sqrt()
 }
 
-/// The Lab-identity abstract profile lcms2's gamut/proofing machinery uses as its Lab
-/// endpoint (`cmsCreateLab4Profile`: v4, abstract class, Lab↔Lab, `A2B0` = identity
-/// curves). Hand-built here so the sub-transforms can run through the one chain engine.
-fn lab_connection_profile() -> IccProfile {
-    let mut header = ProfileHeader::new(DeviceClass::Abstract, ColorSpace::Lab);
-    header.pcs = ColorSpace::Lab;
-    IccProfile {
-        header,
-        tags: vec![Tag::new(
-            *b"A2B0",
-            TagData::LutAToB(LutAToB {
-                input_channels: 3,
-                output_channels: 3,
-                a_curves: None,
-                clut: None,
-                m_curves: None,
-                matrix: None,
-                b_curves: vec![CurveOrParametric::Curve(Curve::Identity); 3],
-            }),
-        )],
-    }
-}
-
 /// A gamut check for one source/proof profile pair: a [`Transform`] taking `src` device
 /// pixels and emitting **one channel per pixel** — `0.0` for in-gamut colours, else the
 /// ΔE₇₆ excess above the threshold (module docs). Built by [`GamutCheck::new`].
@@ -99,7 +73,7 @@ pub struct GamutCheck {
 
 impl GamutCheck {
     /// Builds the gamut check: `src`'s colours are converted to Lab at `options.intent`
-    /// (through the same chain machinery a `[src, Lab-identity]` transform would use,
+    /// (through the same chain machinery a `[src, IccProfile::lab_v4()]` transform would use,
     /// forced-BPC rule included — lcms2's `hInput`), then round-tripped twice through
     /// `proof` at media-relative (`hForward`/`hReverse`) and judged by the ΔE table in the
     /// module docs. The threshold is 5.0, tightened to 1.0 when `proof` is a matrix-shaper
@@ -124,7 +98,9 @@ impl GamutCheck {
     /// ([`CmmError::MissingTag`] and friends otherwise); plus whatever
     /// [`Pipeline::optimized`] reports for the requested level.
     pub fn new(src: &IccProfile, proof: &IccProfile, options: TransformOptions) -> Result<Self> {
-        let lab = lab_connection_profile();
+        // lcms2's gamut/proofing machinery uses its built-in Lab v4 identity as the Lab
+        // endpoint (`cmsCreateLab4Profile(NULL)`); `gamut-icc` builds the same profile.
+        let lab = IccProfile::lab_v4();
         let intent = options.intent;
         let relative = RenderingIntent::MediaRelativeColorimetric;
         let optimization = options.optimization;
@@ -226,7 +202,10 @@ impl Transform for GamutCheck {
 
 #[cfg(test)]
 mod tests {
-    use gamut_icc::{U8Fixed8, XyzNumber};
+    use gamut_icc::{
+        ColorSpace, Curve, CurveOrParametric, DeviceClass, LutAToB, ProfileHeader, Tag, TagData,
+        U8Fixed8, XyzNumber,
+    };
 
     use super::*;
 

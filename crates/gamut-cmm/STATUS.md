@@ -265,8 +265,8 @@ that add behaviour (#325 onward).
   `proofing` is the four-profile chain `[src, proof, proof, dst]` at intents
   `[intent, intent, relative, proofing_intent]` with BPC on the first two hops only
   (`cmsCreateProofingTransform`, `cmsxform.c:1365-1395`); the gamut check's three
-  sub-transforms run through the same engine against a hand-built Lab-identity abstract
-  profile (the `cmsCreateLab4Profile` shape).
+  sub-transforms run through the same engine against `gamut-icc`'s `IccProfile::lab_v4`, the
+  Lab identity lcms2 builds as `cmsCreateLab4Profile(NULL)`, tag for tag.
 - **Single intent/BPC per chain in v1:** the chain internals take per-hop intent/BPC arrays
   (proofing needs them), but the public `IccTransform::chain` replicates one
   `TransformOptions` across every hop — exactly what lcms2's
