@@ -400,6 +400,17 @@ mod tests {
     }
 
     #[test]
+    fn a_curve_positive_everywhere_still_needs_a_positive_source_peak() {
+        // With `Linear` a bad peak also fails the normalization check, so it cannot tell whether
+        // the peak itself was validated. This curve normalizes fine at 0 and −1 (scale 1 and
+        // 1/2), so only the peak's own check rejects them.
+        let lifted = |x: f32| x.abs() + 1.0;
+        for bad in [0.0, -1.0] {
+            assert_rejected(CurveToneMapper::new(lifted, bad));
+        }
+    }
+
+    #[test]
     fn desat_must_be_finite_and_not_negative() {
         let mapper = CurveToneMapper::new(Linear, 1.0).expect("valid");
         for bad in [-1e-3, f32::INFINITY, f32::NAN] {
