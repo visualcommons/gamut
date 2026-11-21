@@ -85,8 +85,8 @@ pub const CHROMINANCE: [u16; 64] = [
 /// top and [`Self::new`] rejects zero — so an encoder holding a `QuantTables` never divides by
 /// zero and never emits a DQT segment its own decoder would refuse. A table whose entries all fit
 /// `1..=255` is written as an 8-bit (`Pq = 0`) table under a baseline (SOF0) frame; any entry above
-/// 255 makes the table 16-bit (`Pq = 1`) and a sequential frame extended (SOF1) — see the
-/// [module docs](self) for the libjpeg convention this follows.
+/// 255 makes the table 16-bit (`Pq = 1`) and a sequential frame SOF1, libjpeg's convention where
+/// T.81 §B.2.4.1 would keep `Pq = 0` at 8-bit precision (`STATUS.md` records the deviation).
 ///
 /// Handed to [`JpegEncoder::with_quant_tables`](crate::JpegEncoder::with_quant_tables), the tables
 /// are used verbatim, replacing the frozen quality→scale mapping; [`Self::annex_k`] and
@@ -162,7 +162,7 @@ impl QuantTables {
 
     /// These tables re-scaled by the IJG quality mapping as `cjpeg` applies it by default —
     /// libjpeg's `jpeg_set_quality(.., force_baseline = FALSE)` — clamping each entry to
-    /// `1..=32767` instead of `1..=255` ([`scale_extended`]). Above quality 23 every Annex K
+    /// `1..=32767` instead of `1..=255`. Above quality 23 every Annex K
     /// entry still fits eight bits, so the result equals [`Self::scaled`]; from 23 down the coarsest
     /// entries exceed 255 and the encode becomes extended sequential (SOF1) with 16-bit tables,
     /// byte-for-byte the DQT `cjpeg -quality q` writes. `quality` is clamped to `1..=100`.
