@@ -395,7 +395,8 @@ impl PngReport {
 
     /// Where a C2PA manifest store is **carried**: the whole span of the first CRC-valid `caBX`
     /// chunk before the first `IDAT` — length, type, payload **and CRC** — or `None` when the file
-    /// carries none there. The store's own bytes are the span's `payload`.
+    /// carries none there. The store's own bytes are the span's `payload`; both ranges are `u64`
+    /// absolute file offsets, as `gamut-isobmff` and `gamut-riff` report their C2PA spans.
     ///
     /// This is the range a `c2pa.hash.data` assertion must exclude (C2PA 2.4 §18.5.4): the store's
     /// bytes change when it is written, the length field when it is resized, and the CRC with

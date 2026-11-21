@@ -754,6 +754,11 @@ fn a_dng_reports_its_reserved_store_beside_the_accounting() {
     );
 }
 
+/// A reported `u64` file-offset range as indices into this test's in-memory file.
+fn in_memory(range: &std::ops::Range<u64>) -> std::ops::Range<usize> {
+    usize::try_from(range.start).expect("in memory")..usize::try_from(range.end).expect("in memory")
+}
+
 /// A PNG the encoder signed with `store`, and the `caBX` chunk span it reported.
 fn signed_png(store: &[u8]) -> (Vec<u8>, gamut::png::C2paSpan) {
     let rgb = [0x40u8; 8 * 8 * 3];
@@ -810,7 +815,7 @@ fn a_cabx_appended_after_iend_is_listed_as_unread_not_as_absence() {
         .encode_to_vec(rgb_image(&rgb))
         .expect("encode");
     let (signed, span) = signed_png(b"STORE-BYTES-NEVER-PRINTED");
-    let chunk = &signed[span.chunk.clone()];
+    let chunk = &signed[in_memory(&span.chunk)];
     let mut appended = plain.clone();
     appended.extend_from_slice(chunk);
     // The same bytes under another chunk type: the trailer finding alone, for the verdict.
@@ -1193,15 +1198,16 @@ fn json_output_reports_a_png_store_and_every_other_cabx_with_its_reason() {
     // right behind the store, a damaged one behind that, one between the IDATs and IEND, and one
     // after IEND.
     let (signed, span) = signed_png(b"STORE-BYTES-NEVER-PRINTED");
-    let chunk = &signed[span.chunk.clone()];
+    let chunk_range = in_memory(&span.chunk);
+    let chunk = &signed[chunk_range.clone()];
     let mut damaged = chunk.to_vec();
     *damaged.last_mut().expect("a CRC") ^= 0xFF;
     let iend = signed.len() - 12;
-    let mut file = signed[..span.chunk.end].to_vec();
+    let mut file = signed[..chunk_range.end].to_vec();
     let mut starts = Vec::new();
     for (copy, rest) in [
         (chunk, &[][..]),
-        (&damaged[..], &signed[span.chunk.end..iend]),
+        (&damaged[..], &signed[chunk_range.end..iend]),
         (chunk, &signed[iend..]),
         (chunk, &[][..]),
     ] {
@@ -1220,12 +1226,9 @@ fn json_output_reports_a_png_store_and_every_other_cabx_with_its_reason() {
     assert_eq!(store["size"], 25);
     assert_eq!(
         store["range"],
-        json_range(span.payload.start as u64, span.payload.end as u64)
+        json_range(span.payload.start, span.payload.end)
     );
-    assert_eq!(
-        store["chunk"],
-        json_range(span.chunk.start as u64, span.chunk.end as u64)
-    );
+    assert_eq!(store["chunk"], json_range(span.chunk.start, span.chunk.end));
     let unread = &doc["c2pa"]["unread"];
     assert_eq!(unread.as_array().map(Vec::len), Some(4), "{doc}");
     for (i, (start, reason)) in starts

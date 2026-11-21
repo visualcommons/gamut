@@ -110,8 +110,11 @@ accepts.
 
 **Exclusion span, and filling it.** `encode_with_report` (for the file just written) and
 `PngReport::c2pa` (for any file, including an indexed encode) name the chunk's **whole** span —
-length, type, payload and CRC — as `C2paSpan`, with the payload bracketed inside it. C2PA §18.5.4 says
-the length and type go inside the exclusion; the CRC must too, since it changes with the payload,
+length, type, payload and CRC — as `C2paSpan`, with the payload bracketed inside it, both as
+`Range<u64>` absolute file offsets, like `gamut-isobmff`'s and `gamut-riff`'s C2PA spans
+(`fill_c2pa` refuses a span that does not fit the target's `usize` rather than truncating it).
+C2PA §18.5.4 says the length and type go inside the exclusion; the CRC must too, since it changes
+with the payload,
 and a `c2pa.hash.data` computed over any of them breaks on the store's first write. The span is
 derived from the same chunk walk the byte accounting uses, so it is always one of the report's
 claimed segments.
