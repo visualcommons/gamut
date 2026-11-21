@@ -13,7 +13,7 @@ name = "exiv2-oracle"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "Dev-only FFI oracle: round-trips XMP/EXIF through exiv2 (with its bundled Adobe XMPCore) and reads/writes EXIF, XMP and ICC at the image-container level (PNG/WebP/TIFF/BMFF) for gamut's conformance cross-checks."
+description = "Dev-only FFI oracle: round-trips XMP/EXIF through exiv2 (with its bundled Adobe XMPCore) and reads/writes EXIF, XMP and ICC at the image-container level (PNG/WebP/TIFF/BMFF), and runs its EXIF<->XMP conversion (copyExifToXmp/copyXmpToExif) for gamut's conformance cross-checks."
 license = "MIT OR Apache-2.0"
 build = "build.rs"
 # Declares this crate as the sole provider of the native `exiv2` library.

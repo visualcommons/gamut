@@ -301,6 +301,95 @@ int exiv2_image_set(const char* data, size_t len, const char* exif_key, const ch
     }
 }
 
+// Returns the container's EXIF re-encoded as a bare TIFF stream (in the container's byte order,
+// little-endian when it has none), or 4 when the image carries no EXIF.
+int exiv2_image_exif(const char* data, size_t len, char** out_buf, size_t* out_len) {
+    try {
+        auto image = open_image(data, len);
+        auto& exifData = image->exifData();
+        if (exifData.empty()) {
+            g_last_error = "image carries no Exif";
+            return 4;
+        }
+        Exiv2::ByteOrder order = image->byteOrder();
+        if (order == Exiv2::invalidByteOrder) {
+            order = Exiv2::littleEndian;
+        }
+        Exiv2::Blob blob;
+        Exiv2::ExifParser::encode(blob, nullptr, 0, order, exifData);
+        *out_buf = dup_bytes(std::string(reinterpret_cast<const char*>(blob.data()), blob.size()),
+                             out_len);
+        return *out_buf != nullptr ? 0 : 3;
+    } catch (const std::exception& e) {
+        g_last_error = e.what();
+        return 1;
+    } catch (...) {
+        g_last_error = "unknown exception";
+        return 1;
+    }
+}
+
+// Returns the container's raw XMP packet as exiv2 read it, or 4 when the image carries none.
+int exiv2_image_xmp_packet(const char* data, size_t len, char** out_buf, size_t* out_len) {
+    try {
+        auto image = open_image(data, len);
+        const std::string& packet = image->xmpPacket();
+        if (packet.empty()) {
+            g_last_error = "image carries no XMP packet";
+            return 4;
+        }
+        *out_buf = dup_bytes(packet, out_len);
+        return *out_buf != nullptr ? 0 : 3;
+    } catch (const std::exception& e) {
+        g_last_error = e.what();
+        return 1;
+    } catch (...) {
+        g_last_error = "unknown exception";
+        return 1;
+    }
+}
+
+// ---- EXIF <-> XMP conversion: exiv2's `copyExifToXmp` / `copyXmpToExif` (convert.cpp). --------
+
+// Decodes a bare TIFF EXIF stream, runs `copyExifToXmp` into an empty XmpData, and returns the
+// serialized XMP packet. Returns 1 if exiv2 throws, 2 if it cannot serialize the packet.
+int exiv2_copy_exif_to_xmp(const char* data, size_t len, char** out_buf, size_t* out_len) {
+    try {
+        Exiv2::ExifData exifData;
+        Exiv2::ExifParser::decode(exifData, reinterpret_cast<const Exiv2::byte*>(data), len);
+        Exiv2::XmpData xmpData;
+        Exiv2::copyExifToXmp(exifData, xmpData);
+        std::string out;
+        if (Exiv2::XmpParser::encode(out, xmpData) != 0) {
+            return 2;
+        }
+        *out_buf = dup_bytes(out, out_len);
+        return *out_buf != nullptr ? 0 : 3;
+    } catch (...) {
+        return 1;
+    }
+}
+
+// Parses an XMP packet, runs `copyXmpToExif` into an empty ExifData, and returns it encoded as a
+// little-endian bare TIFF stream. Returns 1 if exiv2 throws or rejects the packet.
+int exiv2_copy_xmp_to_exif(const char* xmp, size_t len, char** out_buf, size_t* out_len) {
+    try {
+        Exiv2::XmpData xmpData;
+        if (Exiv2::XmpParser::decode(xmpData, std::string(xmp, len)) != 0) {
+            return 1;
+        }
+        Exiv2::ExifData exifData;
+        Exiv2::copyXmpToExif(xmpData, exifData);
+        Exiv2::Blob blob;
+        Exiv2::ExifParser::encode(blob, nullptr, 0, Exiv2::littleEndian, exifData);
+        *out_buf = dup_bytes(std::string(reinterpret_cast<const char*>(blob.data()), blob.size()),
+                             out_len);
+        return *out_buf != nullptr ? 0 : 3;
+    } catch (...) {
+        return 1;
+    }
+}
+
 // Copies the message the last failing `exiv2_image_*` call recorded into a malloc'd string
 // (freed via `exiv2_free`). Callers serialize every exiv2 call, so "last" is well defined.
 int exiv2_last_error(char** out_buf, size_t* out_len) {
