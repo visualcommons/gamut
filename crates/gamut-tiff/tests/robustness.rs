@@ -14,15 +14,27 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8, Rgb16};
-use gamut_tiff::{Compression, Ifd, Predictor, TiffDecoder, TiffEncoder, TiffMetadata, Value};
+use gamut_tiff::{
+    Compression, DecodeLimits, Ifd, Predictor, TiffDecoder, TiffEncoder, TiffMetadata, Value,
+};
 
 mod common;
 
-/// The largest single allocation this binary grants: four times the decoder's default byte budget,
-/// `DecodeLimits::DEFAULT_MAX_IMAGE_BYTES` (64 MiB, which `TiffDecoder::with_limits` overrides), so
-/// no decode that budget admits (nor its widening to RGB output) is refused,
-/// and far below the gibibyte-scale requests a declared count or geometry produces.
-const CAP: usize = 256 << 20;
+/// The byte budget every decoder in this binary carries: 64 MiB of stored samples. The default
+/// `DecodeLimits` bound a page by its dimensions and pixel count alone (32768 per side, 16384²
+/// pixels), which still admits a header-sized reservation of gibibytes; a malloc-limited caller —
+/// this binary, libFuzzer — sets the byte budget it can afford, as here.
+const BUDGET: usize = 64 << 20;
+
+/// The largest single allocation this binary grants: four times [`BUDGET`], so no decode that
+/// budget admits (nor its widening to RGB output) is refused, and far below the gibibyte-scale
+/// requests a declared count or geometry produces.
+const CAP: usize = 4 * BUDGET;
+
+/// A decoder with [`BUDGET`] as its byte budget.
+fn budgeted() -> TiffDecoder {
+    TiffDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(BUDGET))
+}
 
 /// Forwards to [`System`], refusing (null, so the caller aborts) any request past [`CAP`].
 struct CappedAllocator;
@@ -113,7 +125,7 @@ fn hostile_input_to_the_metadata_entry_points_does_not_panic() {
     // `metadata` follows the `ExifIFD` pointer into a second directory and `c2pa_exclusions`
     // walks the chain to its end to read an offset/count pair — offset-driven reads of untrusted
     // bytes on paths `decode_page` never takes, so the fuzz corpus above cannot reach them.
-    let dec = TiffDecoder::new();
+    let dec = budgeted();
     let valid = valid_metadata_tiff();
     for len in 0..=valid.len() {
         let _ = dec.metadata(&valid[..len]);
@@ -143,7 +155,7 @@ const ISSUE_949_OOM: &[u8] = b"\
 /// the page is now described as declared — one bit per sample — and refused by the decoder.
 #[test]
 fn absent_bits_per_sample_is_not_sized_by_samples_per_pixel() {
-    let dec = TiffDecoder::new();
+    let dec = budgeted();
     let info = dec.info(ISSUE_949_OOM).expect("the page is describable");
     assert_eq!(
         (info.bits_per_sample, info.samples_per_pixel),
@@ -154,7 +166,7 @@ fn absent_bits_per_sample_is_not_sized_by_samples_per_pixel() {
 
 #[test]
 fn specific_malformed_inputs_are_refused_as_invalid_input() {
-    let dec = TiffDecoder::new();
+    let dec = budgeted();
     let cases: &[&[u8]] = &[
         b"",
         b"II",
@@ -183,7 +195,7 @@ fn specific_malformed_inputs_are_refused_as_invalid_input() {
 
 #[test]
 fn truncations_do_not_panic() {
-    let dec = TiffDecoder::new();
+    let dec = budgeted();
     for valid in [valid_lzw_tiff(), valid_rgb16_tiff()] {
         for len in 0..=valid.len() {
             let _ = dec.decode_page(&valid[..len], 0);
@@ -193,7 +205,7 @@ fn truncations_do_not_panic() {
 
 #[test]
 fn byte_flip_fuzz_does_not_panic() {
-    let dec = TiffDecoder::new();
+    let dec = budgeted();
     for valid in [valid_lzw_tiff(), valid_rgb16_tiff()] {
         byte_flip_fuzz(&valid, |data| {
             let _ = dec.decode_page(data, 0);

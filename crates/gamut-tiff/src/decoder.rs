@@ -76,8 +76,8 @@ pub struct TiffDecoder {
     limits: DecodeLimits,
 }
 
-/// Rejects a byte count past `max_bytes` — [`DecodeLimits::max_image_bytes`], 64 MiB by default
-/// (e.g. a 4096×4096 8-bit RGBA image, or a 2896×2896 16-bit RGB one).
+/// Rejects a byte count past `max_bytes` — [`DecodeLimits::max_image_bytes`], opt-in and unbounded
+/// by default, when the dimension and pixel caps are what bound a page.
 ///
 /// An *allocation* guard, not a validity one: the caller is about to reserve this many bytes for a
 /// buffer whose size the file's tags — not its data — declare, so a malformed or hostile header
@@ -320,11 +320,16 @@ impl TiffDecoder {
         self
     }
 
-    /// Sets the image limits: the per-side dimension caps and the stored-sample byte budget
-    /// ([`DecodeLimits::max_image_bytes`], default 64 MiB). A page past any of them is refused
-    /// with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before
-    /// anything is allocated for its pixels, and so is a tile whose own stored bytes exceed the
-    /// byte budget.
+    /// Sets the image limits: the per-side dimension caps, the pixel-count cap and the opt-in
+    /// stored-sample byte budget ([`DecodeLimits::max_image_bytes`]). A page past any of them is
+    /// refused with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before
+    /// anything is allocated for its pixels, and so is a tile whose own dimensions or stored bytes
+    /// exceed them — a tile is reserved whole, so it is bounded like a page.
+    ///
+    /// The default is the workspace's [`DecodeLimits::new`]: each side at most 32768 and at most
+    /// 16384 × 16384 pixels, with no byte budget. TIFF's `ImageWidth`/`ImageLength` (and tile
+    /// sides) are LONGs that can declare far more; such a page is refused by default and needs
+    /// widened limits.
     ///
     /// The budget counts the samples as the file *stores* them — 1-bit rows packed, palette
     /// indices unexpanded — because that is the buffer the tags make this decoder reserve.
@@ -600,7 +605,7 @@ fn decode_page_samples(data: &[u8], page: usize, limits: DecodeLimits) -> Result
     // never disagree about a default; what follows here is purely which of those declarations this
     // decoder is willing to act on.
     let info = info::page_info(ifd, file.order)?;
-    if info.width > limits.max_width() || info.height > limits.max_height() {
+    if !limits.admits_dimensions(info.width, info.height) {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
             "TIFF: image dimensions exceed the decode limits",
@@ -779,7 +784,7 @@ fn decode_page_samples(data: &[u8], page: usize, limits: DecodeLimits) -> Result
         stored_row_bytes,
         compression,
         order: info.byte_order,
-        max_image_bytes: limits.max_image_bytes(),
+        limits,
     };
     let tiled = info.tiled;
     let mut packed = if tiled {
@@ -910,8 +915,8 @@ struct Layout {
     compression: Compression,
     /// The file's byte order — how 16-bit samples and the 16-bit predictor read and write them.
     order: ByteOrder,
-    /// [`DecodeLimits::max_image_bytes`]: the most one tile may make the tile reader reserve.
-    max_image_bytes: usize,
+    /// The page's [`DecodeLimits`]: they bound each tile the tile reader reserves, too.
+    limits: DecodeLimits,
 }
 
 /// Decompresses one strip/tile of byte-level data (`None`/PackBits/LZW/Deflate) to `want` bytes.
@@ -980,20 +985,25 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
     }
     // Every offset below is a byte offset, so the per-pixel stride carries the sample width too.
     let pixel_bytes = l.spp * (l.bps as usize / 8);
-    let tw = ifd
+    let tile_width = ifd
         .get_u32(tags::TILE_WIDTH)
-        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileWidth"))?
-        as usize;
-    let th = ifd
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileWidth"))?;
+    let tile_length = ifd
         .get_u32(tags::TILE_LENGTH)
-        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileLength"))?
-        as usize;
-    if tw == 0 || th == 0 {
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileLength"))?;
+    if tile_width == 0 || tile_length == 0 {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "TIFF: zero tile dimension",
         ));
     }
+    if !l.limits.admits_dimensions(tile_width, tile_length) {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: tile dimensions exceed the decode limits",
+        ));
+    }
+    let (tw, th) = (tile_width as usize, tile_length as usize);
     let offsets = ifd
         .get_u64_vec(tags::TILE_OFFSETS)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileOffsets"))?;
@@ -1016,7 +1026,7 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile too large"))?;
     within_size_limit(
         tile_size,
-        l.max_image_bytes,
+        l.limits.max_image_bytes(),
         "TIFF: tile exceeds the size limit",
     )?;
     let raws = extent_slices(&offsets, &counts, data, env!("CARGO_PKG_NAME"))?;
@@ -1091,7 +1101,7 @@ mod tests {
             stored_row_bytes: 2,
             compression: Compression::None,
             order: ByteOrder::LittleEndian,
-            max_image_bytes: DecodeLimits::DEFAULT_MAX_IMAGE_BYTES,
+            limits: DecodeLimits::new(),
         }
     }
 
@@ -1132,6 +1142,11 @@ mod tests {
         let dims = "TIFF: image dimensions exceed the decode limits";
         assert_unsupported(decode(exact.with_max_width(16)), dims);
         assert_unsupported(decode(exact.with_max_height(12)), dims);
+        assert_unsupported(decode(exact.with_max_pixels(17 * 13 - 1)), dims);
+        assert_eq!(
+            decode(exact.with_max_pixels(17 * 13)).unwrap(),
+            Dimensions::new(17, 13).unwrap()
+        );
         assert_unsupported(
             decode(exact.with_max_image_bytes(17 * 13 - 1)),
             "TIFF: image exceeds the size limit",
@@ -1155,15 +1170,32 @@ mod tests {
         assert_eq!(decode(256).unwrap(), Dimensions::new(16, 1).unwrap());
     }
 
-    /// The default limits are `DecodeLimits::default()` — the 64 MiB the decoder hard-coded before
-    /// they were configurable.
+    /// A tile is bounded by the dimension and pixel caps like a page, inclusively: the 16×1 page's
+    /// one 16×16 tile passes a 16-pixel-tall cap the page alone would not need.
+    #[test]
+    fn with_limits_bounds_each_tile_by_the_dimension_caps() {
+        let tiff = gray_tiff(16, 1, Some(16));
+        let decode = |limits: DecodeLimits| {
+            TiffDecoder::new()
+                .with_limits(limits)
+                .decode_image(&tiff)
+                .map(|image: ImageBuf<Gray8>| image.dimensions())
+        };
+        let tile = "TIFF: tile dimensions exceed the decode limits";
+        let exact = DecodeLimits::new().with_max_width(16).with_max_height(16);
+        assert_eq!(decode(exact).unwrap(), Dimensions::new(16, 1).unwrap());
+        assert_unsupported(decode(exact.with_max_height(15)), tile);
+        assert_unsupported(decode(DecodeLimits::new().with_max_pixels(255)), tile);
+        assert_eq!(
+            decode(DecodeLimits::new().with_max_pixels(256)).unwrap(),
+            Dimensions::new(16, 1).unwrap()
+        );
+    }
+
+    /// The default limits are the workspace's `DecodeLimits::default()`.
     #[test]
     fn the_default_limits_are_the_shared_defaults() {
         assert_eq!(TiffDecoder::new().limits, DecodeLimits::default());
-        assert_eq!(
-            TiffDecoder::new().limits.max_image_bytes(),
-            DecodeLimits::DEFAULT_MAX_IMAGE_BYTES
-        );
     }
 
     /// An IFD holding one strip at `offset` of `count` bytes, with `RowsPerStrip` set when given.
