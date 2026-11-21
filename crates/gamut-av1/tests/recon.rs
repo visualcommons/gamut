@@ -717,6 +717,22 @@ fn multi_tile_matches_dav1d() {
 }
 
 #[test]
+fn a_default_config_codes_one_tile_that_both_decoders_reproduce() {
+    // #1227: the default layout is libaom's, one tile. A 200 × 150 frame is four superblocks wide
+    // and three high, so any multi-tile default would split it; the stream must carry exactly one
+    // tile, and libaom and dav1d must reconstruct it to the encoder's own reconstruction.
+    let p = planes(200, 150, |x, y| {
+        [(x * 3) as u8, (y * 5) as u8, (x ^ y) as u8]
+    });
+    let encoded = encode_still_with_recon(&p, &Av1EncodeConfig::new(40)).unwrap();
+    let info = gamut_av1::Av1Decoder::new()
+        .inspect(&encoded.still.obus)
+        .unwrap();
+    assert_eq!(info.tile_count, 1);
+    check_with(encoded, 40);
+}
+
+#[test]
 fn every_tile_layout_matches_both_decoders() {
     // Configurable tiling (#648): tile *rows* as well as columns, layouts the frame clamps, and
     // tiles coded on several threads. A tile row's top edge is an above edge the decoder treats as

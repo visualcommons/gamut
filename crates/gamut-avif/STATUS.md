@@ -223,8 +223,8 @@ adding it needs no container change.
 | `disable_cdf_update`=0 + frame-end CDF update | §5.9.2,§7.7 | ✅ (`headers::frame_header_payload`; §7.7 n/a — see below) | M1 |
 | frame_size / render_size (no override, no superres) | §5.9.5/.6 | ✅ | M0 |
 | superres_params (enable_superres + use_superres + coded_denom) | §5.9.8,§7.16 | ✅ (frame_size_override deferred) | M1 |
-| tile_info: single tile | §5.9.15 | ✅ | M0 |
-| multi-tile (uniform spacing, tile_size_bytes, context_update_tile_id, tile group) | §5.9.15/.16 | ✅ (2 cols ≥2 SB wide; rows deferred) | M1 |
+| tile_info: single tile | §5.9.15 | ✅ (`gamut-av1`'s default layout, libaom's, #1227) | M0 |
+| multi-tile (uniform spacing, tile_size_bytes, context_update_tile_id, tile group) | §5.9.15/.16 | ✅ in `gamut-av1` (`Tiling`: columns and rows); `AvifEncoder` codes the one-tile default until a tiling knob lands (#1233) | M1 |
 | quantization: base_q_idx=0 ⇒ CodedLossless | §5.9.12 | ✅ | M0 |
 | quantization: base_q_idx>0, delta-Q, using_qmatrix | §5.9.12/.13,§9.5 | ✅ (base_q_idx>0; per-SB delta-Q only as a test-only syntax exercise, #1011; qmatrix ☐) | M1 |
 | segmentation_params (disabled) | §5.9.14 | ✅ (off; the lossy default since #1011) | M0 |

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gamut-av1)* `Av1Color::with_primaries` and `Av1Color::with_transfer`, completing the `const`
+  setters beside `with_matrix` and `with_range` (issue #1227).
+
+### Changed
+
+- *(gamut-av1)* [**breaking**] **output-changing for default encodes:** `Tiling::DEFAULT` (and so
+  `Tiling::default()` and `Av1EncodeConfig::new`) is now `Tiling::SINGLE`, one tile, matching
+  libaom's `tile_columns`/`tile_rows` and libavif's `tileColsLog2`/`tileRowsLog2` defaults. It was
+  `Tiling::new(1, 0)`, two tile columns once the frame was at least two superblocks wide, so every
+  default encode of a frame wider than 64 samples (bar widths 65–71 and 129–135, which already
+  coded one tile) changes its bytes. A default config now codes with one
+  tile-coding thread whatever `threads` says; ask for `Tiling::new(1, 0)` to keep the previous
+  layout and its bytes (issue #1227).
+
 ## [0.5.0](https://github.com/visualcommons/gamut/compare/gamut-av1-v0.4.1...gamut-av1-v0.5.0) - 2026-10-12
 
 ### Added

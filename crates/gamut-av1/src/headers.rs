@@ -356,11 +356,12 @@ fn level_tile_limits(seq_level_idx: u8) -> (usize, usize) {
 /// Uniform spacing rounds the tile size up, so the coded column count is `ceil(sbCols /
 /// ceil(sbCols >> cols_log2))` and may be fewer than `1 << cols_log2`; rows likewise.
 ///
-/// [`Default`] is `cols_log2 = 1, rows_log2 = 0`: two tile columns once the frame is at least two
-/// superblocks wide, else one tile — the layout the encoder used before the option existed. The
-/// cropped-size rule keeps one tile at widths 65–71 and 129–135, where the second column would
-/// hold fewer than 8 samples; the encoder coded those widths as two tiles before, a stream that
-/// broke its level.
+/// [`Default`] is [`Tiling::SINGLE`]: one tile wherever §5.9.15 allows it, as libaom's
+/// `tile_columns`/`tile_rows` and libavif's `tileColsLog2`/`tileRowsLog2` default to, so a
+/// default-against-default size comparison measures the coding rather than tile-boundary
+/// overhead. One tile is one tile-coding thread; ask for more tiles to encode (and decode) in
+/// parallel. (Before #1227 the default was `cols_log2 = 1`, two tile columns once the frame was
+/// two superblocks wide.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Tiling {
@@ -393,8 +394,8 @@ impl Tiling {
 }
 
 impl Tiling {
-    /// The [`Default`] layout, usable in `const` context: two tile columns, one tile row.
-    pub const DEFAULT: Self = Self::new(1, 0);
+    /// The [`Default`] layout, usable in `const` context: [`Tiling::SINGLE`], libaom's default.
+    pub const DEFAULT: Self = Self::SINGLE;
 }
 
 impl Default for Tiling {
@@ -1122,23 +1123,28 @@ mod tests {
     }
 
     #[test]
-    fn the_default_tiling_is_the_legacy_two_column_layout() {
-        // Before the option existed the encoder coded two tile columns once the frame was two
-        // superblocks wide, one tile otherwise, and always one tile row.
-        let one = layout(Tiling::default(), 1, 3, 0);
+    fn the_default_tiling_is_libaoms_single_tile() {
+        // libaom's `tile_columns`/`tile_rows` and libavif's `tileColsLog2`/`tileRowsLog2` all
+        // default to 0. Both the trait and the `const` must say so.
+        assert_eq!(Tiling::SINGLE, Tiling::new(0, 0));
+        assert_eq!(Tiling::default(), Tiling::SINGLE);
+        assert_eq!(Tiling::DEFAULT, Tiling::SINGLE);
+    }
+
+    #[test]
+    fn one_column_split_codes_two_columns_once_the_frame_is_two_superblocks_wide() {
+        // `cols_log2 = 1` is one tile on a one-superblock frame, two from two superblocks up, and
+        // always one tile row.
+        let two_cols = Tiling::new(1, 0);
+        let one = layout(two_cols, 1, 3, 0);
         assert_eq!((one.cols_log2, one.rows_log2), (0, 0));
         assert_eq!(one.col_starts, vec![0, 16]);
-        let two = layout(Tiling::default(), 2, 3, 0);
+        let two = layout(two_cols, 2, 3, 0);
         assert_eq!((two.cols_log2, two.rows_log2), (1, 0));
         assert_eq!(two.col_starts, vec![0, 16, 32]);
         assert_eq!(two.row_starts, vec![0, 48]);
         // An odd superblock count rounds the first tile up: 3 → 2 + 1.
-        assert_eq!(
-            layout(Tiling::default(), 3, 1, 0).col_starts,
-            vec![0, 32, 48]
-        );
-        assert_eq!(Tiling::default(), Tiling::new(1, 0));
-        assert_eq!(Tiling::SINGLE, Tiling::new(0, 0));
+        assert_eq!(layout(two_cols, 3, 1, 0).col_starts, vec![0, 32, 48]);
     }
 
     #[test]
@@ -1158,7 +1164,7 @@ mod tests {
         // three split 2 + 1 at 128, so 135 leaves 7. One more sample makes each split legal.
         let cols = |w: usize, req: Tiling| TileLayout::resolve(req, w, SB, 0, None);
         for (w, want) in [(71, 0), (72, 1), (135, 0), (136, 1)] {
-            assert_eq!(cols(w, Tiling::default()).cols_log2, want, "width {w}");
+            assert_eq!(cols(w, Tiling::new(1, 0)).cols_log2, want, "width {w}");
         }
         // The request drops to the nearest legal split, not to one tile: five superblocks at
         // log2 2 split 2 + 2 + 1 at 256 (4 samples left of a 260-wide frame), at log2 1 3 + 2.
@@ -1234,7 +1240,7 @@ mod tests {
         // Two superblocks would split into two 64-wide tiles, so they stay one tile; three split
         // 2 + 1, which is legal since only the rightmost is narrow.
         let at = |sb_cols: usize| {
-            TileLayout::resolve(Tiling::default(), sb_cols * SB, SB, 0, Some(0)).cols_log2
+            TileLayout::resolve(Tiling::new(1, 0), sb_cols * SB, SB, 0, Some(0)).cols_log2
         };
         assert_eq!(at(2), 0);
         assert_eq!(at(3), 1);
@@ -1267,7 +1273,7 @@ mod tests {
 
         use crate::decode::{FrameHeader, SequenceHeader};
         for (w, h, req) in [
-            (64, 64, Tiling::default()),
+            (64, 64, Tiling::new(1, 0)),
             (200, 130, Tiling::new(2, 1)),
             (130, 130, Tiling::new(6, 6)),
             (4160, 64, Tiling::SINGLE),

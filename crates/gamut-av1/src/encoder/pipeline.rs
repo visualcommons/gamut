@@ -798,8 +798,8 @@ mod tests {
         }
         let cases: &[(u32, u32, u8, u64)] = &[
             (64, 48, 40, 0xb9e0_eb56_8470_1461),
-            (160, 96, 90, 0x5c64_97fe_666c_5078),
-            (200, 136, 200, 0xad8f_9751_87b9_e2f4),
+            (160, 96, 90, 0x9ea6_7266_f179_9284),
+            (200, 136, 200, 0xfb7b_4158_f561_7a91),
         ];
         let got: Vec<(u32, u32, u8, u64)> = cases
             .iter()
@@ -968,7 +968,9 @@ mod tests {
         // them — are merged back before the in-loop filters. Both must carry the variation, or the
         // second pass codes a different stream from the reconstruction the first one produced.
         let p = planes(640, 64, smooth_field);
-        let config = Av1EncodeConfig::new(0).with_threads(NonZeroUsize::new(3).unwrap());
+        let config = Av1EncodeConfig::new(0)
+            .with_tiling(Tiling::new(1, 0))
+            .with_threads(NonZeroUsize::new(3).unwrap());
         let mut restored = Vec::new();
         for q in [110u8, 160, 200, 240] {
             let coded = exercised(&p, &config.with_qindex(q));
