@@ -100,7 +100,8 @@
 //! # Ok::<(), gamut_cmm::CmmError>(())
 //! ```
 // `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
-// the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
+// the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust — and
+// SIMD never will: #993 settled it as safe-only (STATUS.md, "Settled decisions (#423)").
 #![deny(unsafe_code)]
 
 // Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
