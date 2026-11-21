@@ -247,6 +247,48 @@ defers to `Exposure` — an unnormalized `L_wmax` of 10⁶ is not a case the pap
 
 ---
 
+## ffmpeg `tonemap`: desaturation and max-RGB application
+
+Source: FFmpeg `libavfilter/vf_tonemap.c`, function `tonemap()`, at commit
+`b8c699bfbebd889d7795fb07bd7679b84ab366fb` (<https://github.com/FFmpeg/FFmpeg/blob/b8c699bfbebd889d7795fb07bd7679b84ab366fb/libavfilter/vf_tonemap.c>;
+LGPL-2.1+, so not vendored — the formula is transcribed). Luma coefficients: `libavutil/csp.c`,
+`[AVCOL_SPC_BT709] = { AVR(0.2126), AVR(0.7152), AVR(0.0722) }`. Code:
+`gamut_tonemap::{CurveToneMapper, ApplyMode::MaxRgb}`; test:
+`crates/gamut-tonemap/tests/ffmpeg_desat_golden.rs`.
+
+Per pixel, on linear RGB normalized to reference white (`peak` is in units of 100 cd/m²,
+`REFERENCE_WHITE` in `libavfilter/colorspace.h`):
+
+```
+if desat > 0:                                   // option "desat", default 2
+    Y          = kr·r + kg·g + kb·b
+    overbright = max(Y − desat, 1e-6) / max(Y, 1e-6)
+    c          = c·(1 − overbright) + Y·overbright     for c in r, g, b   (MIX)
+sig_orig = max(max(r, g, b), 1e-6)
+sig      = curve(sig_orig)                      // see below
+c        = c · sig / sig_orig                   for c in r, g, b
+```
+
+The curves (`param` as `init()` leaves it: unset → 1.0, except `reinhard`, whose user value `p`
+becomes `(1 − p) / p`, and `gamma`/`mobius`, which default to 1.8/0.3):
+
+| `tonemap=` | `curve(sig)` | as `CurveToneMapper` |
+|---|---|---|
+| `linear` | `sig · param / peak` | `Linear`, target peak `param` |
+| `clip` | `clamp(sig · param, 0, 1)` | `min(param·x, 1)`; equal when `peak · param ≥ 1` |
+| `hable` | `hable(sig) / hable(peak)` (Hable's `partial`, constants as above) | `Hable` (white cancels) |
+| `reinhard` | `sig / (sig + param) · (peak + param) / peak` | `Reinhard` of `x / param` |
+| `gamma`, `mobius` | not of the `f(sig) / f(peak)` form | — |
+
+`CurveToneMapper` generalizes the normalization to `target_peak · f(x) / f(source_peak)` for any
+scalar curve, and adds two driving signals ffmpeg does not have (per channel, and luma — the
+latter as in libplacebo). It keeps both `1e-6` floors as written, including the consequence that a
+pixel with `Y < 1e-6` desaturates fully (`overbright = 1e-6 / 1e-6 = 1`). Its luma weights are
+`gamut_core`'s fixed-point ones (`W / 65536`, each within `2⁻¹⁷` of the decimal), the one
+intended departure from the source.
+
+---
+
 ## Cross-reference
 
 - Luminance reference levels: `gamut_core::luminance`; provenance in `references/color/README.md`
