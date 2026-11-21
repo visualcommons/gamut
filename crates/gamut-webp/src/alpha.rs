@@ -795,8 +795,9 @@ mod tests {
     /// On a grainy soft-alpha fixture — the radial shadow with ±16 of sensor-like noise, the kind of
     /// mask whose lossless `ALPH` dominates a file — the payload is non-increasing as alpha quality
     /// falls from lossless through `75` (56 levels) down to `0` (issue #1206's acceptance
-    /// criterion). The qualities visit every distinct level count in that range once: `71..=75`
-    /// one by one, then every fifth quality, since `2 + quality / 5` is constant in between.
+    /// criterion, as corrected on the issue to the range libwebp itself satisfies). The qualities
+    /// visit every distinct level count in that range once: `71..=75` one by one, then every fifth
+    /// quality, since `2 + quality / 5` is constant in between.
     ///
     /// This is a claim about the fixture, not a law of the quantizer, and the range is where it
     /// holds. The k-means levels at one count are not nested in those at the next, so between `76`
