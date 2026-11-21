@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(gamut-isobmff)* `ContentLightLevel` and `MasteringDisplay` are now `gamut-core`'s, re-exported
+  at the same `gamut_isobmff::` paths ([#1244](https://github.com/visualcommons/gamut/issues/1244)).
+  Source-compatible: the fields, `MasteringDisplay::new` and `#[non_exhaustive]` are unchanged,
+  and both additionally derive `Hash`.
+
 ## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-isobmff-v2.0.1...gamut-isobmff-v3.0.0) - 2026-10-12
 
 ### Added

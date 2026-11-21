@@ -73,6 +73,7 @@ pub mod c2pa;
 mod cicp;
 pub mod convert;
 mod error;
+mod hdr;
 mod image;
 // Executable laws for the conversion engine, shared by this crate's property tests and the
 // out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
@@ -94,6 +95,7 @@ use core::num::NonZeroU32;
 pub use cicp::Cicp;
 pub use convert::RawImage;
 pub use error::{Error, ErrorKind, Result};
+pub use hdr::{ContentLightLevel, MasteringDisplay};
 pub use image::{ImageBuf, ImageRef};
 pub use limits::DecodeLimits;
 pub use metadata::RawMetadata;

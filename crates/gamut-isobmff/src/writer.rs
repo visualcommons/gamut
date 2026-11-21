@@ -610,12 +610,12 @@ mod tests {
     #[test]
     fn serialize_property_writes_mdcv_as_a_24_byte_plain_box() {
         let bytes = serialize_property(&PropertyKind::MasteringDisplayColourVolume(
-            crate::model::MasteringDisplay {
-                display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
-                white_point: [15635, 16450],
-                max_display_mastering_luminance: 10_000_000,
-                min_display_mastering_luminance: 50,
-            },
+            crate::model::MasteringDisplay::new(
+                [[8500, 39850], [6550, 2300], [35400, 14600]],
+                [15635, 16450],
+                10_000_000,
+                50,
+            ),
         ));
         assert_eq!(
             bytes,
