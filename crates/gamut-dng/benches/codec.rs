@@ -146,8 +146,8 @@ use gamut_core::Dimensions;
 #[cfg(feature = "jxl-encode")]
 use gamut_dng::JxlSettings;
 use gamut_dng::{
-    CalibrationIlluminant, CameraProfile, DngCompression, DngDecoder, DngEncoder, RawImage,
-    cfa_color,
+    CalibrationIlluminant, CameraProfile, DngCompression, DngDecoder, DngEncoder,
+    LosslessPredictor, RawImage, cfa_color,
 };
 
 fn main() {
@@ -292,7 +292,7 @@ impl std::fmt::Display for Case {
         let scheme = match self.compression {
             DngCompression::Uncompressed => "uncompressed".to_string(),
             DngCompression::Deflate => "deflate".to_string(),
-            DngCompression::LosslessJpeg => "lossless-jpeg".to_string(),
+            DngCompression::LosslessJpeg(_) => "lossless-jpeg".to_string(),
             DngCompression::Jxl(_) => "jpeg-xl".to_string(),
             other => format!("{other:?}"),
         };
@@ -325,7 +325,7 @@ const CASES: &[Case] = &[
     },
     Case {
         photometry: Photometry::Cfa,
-        compression: DngCompression::LosslessJpeg,
+        compression: DngCompression::LosslessJpeg(LosslessPredictor::Left),
     },
     #[cfg(feature = "jxl-encode")]
     Case {
@@ -342,7 +342,7 @@ const CASES: &[Case] = &[
     },
     Case {
         photometry: Photometry::LinearRaw,
-        compression: DngCompression::LosslessJpeg,
+        compression: DngCompression::LosslessJpeg(LosslessPredictor::Left),
     },
     #[cfg(feature = "jxl-encode")]
     Case {
