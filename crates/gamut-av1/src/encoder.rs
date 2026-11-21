@@ -114,7 +114,7 @@ impl Effort {
 /// Built with [`Av1EncodeConfig::new`] and the `const` `with_*` setters; the public fields read a
 /// configuration back. [`new`](Self::new) codes at the given quantizer with the default
 /// [`Av1Color`] (identity matrix, so GBR planes), [`Effort::Balanced`], the [`Tiling::default`]
-/// layout, one thread and no superres.
+/// layout (one tile, as libaom and libavif default to), one thread and no superres.
 ///
 /// ```
 /// use std::num::NonZeroUsize;
@@ -744,12 +744,11 @@ mod tests {
             (2, 32, 32, 40, 0x2cee_d06e_116f_84f9),
             (3, 48, 48, 16, 0x24fa_0cb0_41a7_5c54),
             (4, 64, 48, 90, 0xcb16_c36e_28da_2df3),
-            (0, 100, 80, 8, 0xb6c9_186d_65e4_65f1),
-            // One tile: two would leave the second 2 samples wide (Annex A.3, CroppedTileWidth).
+            (0, 100, 80, 8, 0x39ee_c7c5_66d7_f491),
             (0, 130, 70, 120, 0xe098_b58f_9ae1_2cda),
             (2, 64, 64, 200, 0x5a5c_1a4f_0f5e_8fac),
-            (3, 96, 96, 60, 0x36f5_8d2c_3684_0002),
-            (4, 128, 64, 30, 0xe749_0937_59b1_43c0),
+            (3, 96, 96, 60, 0x7758_1285_bbdd_0ff7),
+            (4, 128, 64, 30, 0x6701_faee_dbf5_d037),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
         let got: Vec<(u8, u32, u32, u8, u64)> = cases
@@ -791,7 +790,7 @@ mod tests {
 
     #[test]
     fn a_new_config_holds_the_documented_defaults_and_each_setter_sets_its_own_field() {
-        // `Av1EncodeConfig::new` must be the `Balanced` preset on the legacy two-column layout on
+        // `Av1EncodeConfig::new` must be the `Balanced` preset on one tile (libaom's default) on
         // one thread, with the identity colour and no superres, so a bare config reproduces the
         // pinned streams above.
         let config = Av1EncodeConfig::new(7);
@@ -799,7 +798,7 @@ mod tests {
         assert_eq!(config.color, Av1Color::default());
         assert_eq!(config.effort, Effort::Balanced);
         assert_eq!(config.superres, None);
-        assert_eq!(config.tiling, Tiling::new(1, 0));
+        assert_eq!(config.tiling, Tiling::SINGLE);
         assert_eq!(config.threads.get(), 1);
         assert_eq!(Av1EncodeConfig::lossless(), Av1EncodeConfig::new(0));
         let built = Av1EncodeConfig::new(7)
@@ -994,7 +993,7 @@ mod tests {
             default,
             encode_still(&p, &Av1EncodeConfig::new(40)).unwrap().obus
         );
-        assert_ne!(at(Tiling::SINGLE), default);
+        assert_ne!(at(Tiling::new(1, 0)), default);
         assert_ne!(at(Tiling::new(1, 1)), default);
         assert_ne!(at(Tiling::new(2, 0)), default);
     }
@@ -1041,13 +1040,13 @@ mod tests {
             }
         });
         let cases: &[(Effort, u8, u64)] = &[
-            (Effort::Thorough, 40, 0xe067_d32e_9491_3c8f),
-            (Effort::Balanced, 40, 0x96e5_c275_b493_ce51),
-            (Effort::Fast, 40, 0x71c6_ad52_69ee_3895),
-            (Effort::Fastest, 40, 0xb0c1_e20a_e32a_6fb1),
-            (Effort::Balanced, 120, 0x6fa7_90ff_0c36_9732),
-            (Effort::Fast, 120, 0x9a5d_85fe_2cb8_c80a),
-            (Effort::Fastest, 120, 0xd9e4_e7cb_d1a7_2609),
+            (Effort::Thorough, 40, 0xa33d_c689_ca29_7f97),
+            (Effort::Balanced, 40, 0xfb88_ca4f_7487_cead),
+            (Effort::Fast, 40, 0x0dce_a72c_422e_7638),
+            (Effort::Fastest, 40, 0x9b47_2742_e89a_a652),
+            (Effort::Balanced, 120, 0x152b_14b9_d0b6_f4bb),
+            (Effort::Fast, 120, 0x91bb_928e_0b92_9192),
+            (Effort::Fastest, 120, 0x99b0_0c13_41a1_e395),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
         let got: Vec<(Effort, u8, u64)> = cases

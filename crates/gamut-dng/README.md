@@ -62,7 +62,9 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
   AnalogBalance, BaselineExposure, profile identity); the full level model (`RawLevels`: the
   BlackLevel repeat pattern with RATIONAL values, `BlackLevelDeltaH/V`, per-plane `WhiteLevel`,
   `LinearizationTable`, `MaskedAreas`), active area, default crop, and 8/10/12/14/16-bit packing;
-  typed `OpcodeList1/2/3` containers (parse + pass-through write); an embedded RGB preview;
+  typed `OpcodeList1/2/3` containers (parse + pass-through write); an embedded uncompressed RGB
+  preview, size-capped or left out (`DngEncoder::with_preview(DngPreview)`, the raw image then
+  being IFD 0 itself);
   EXIF/XMP/IPTC/ICC metadata (`DngEncoder::with_dng_metadata`) — the `ExifIFD` carried whole as
   the shared `Exif` model's Exif sub-IFD, the XMP/IPTC-IIM/ICC payloads verbatim, and, with the optional
   `metadata` feature, `gamut-metadata`'s `TypedMetadata` and `MetadataSink` over them; a **C2PA
@@ -85,13 +87,15 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
   MD5-over-raw-image computation (`RawImage::new_raw_image_digest`).
 - **`RawImage::to_linear`** — the spec's chapter-5 raw-to-linear-reference mapping, differentially
   gated (±1 of 16-bit) against the Adobe SDK's stage-2 image.
-- **Lossless JPEG (`Compression = 7`)** through `gamut-jpeg`'s `lossless` module, which owns
+- **Lossless JPEG (`Compression = 7`)**, the encoder's default raw compression (predictor 1, as
+  the Adobe DNG SDK writes by default), through `gamut-jpeg`'s `lossless` module, which owns
   all of T.81: decode covers the full process-14 reader envelope (predictors 1–7, point
   transform, per-component tables, restart markers; SDK-differential), and the DNG writer
-  encodes with `gamut_jpeg::lossless::LosslessEncoder`'s default — predictor 1, no point
-  transform, no restarts — the subset every reader accepts. Callers who want the SOF3 coder itself
-  (with its other predictors, point transform and restart intervals) use `gamut_jpeg::lossless`
-  directly.
+  encodes with `gamut_jpeg::lossless::LosslessEncoder` at the predictor
+  `DngCompression::LosslessJpeg(LosslessPredictor)` names (any of T.81 Table H.1's seven, each
+  accepted and decoded exactly by the Adobe SDK; `Left`, predictor 1, is the SDK's own choice),
+  no point transform and no restarts. Callers who want the SOF3 coder itself (with its point
+  transform and restart intervals) use `gamut_jpeg::lossless` directly.
 - **Deferred** (ledger in `STATUS.md`): lossy JPEG (34892), floating-point samples (fp16 JXL
   rejects with a typed error), the standard opcode *processing* library, 4-colour CFA encoding,
   and writing mask/depth sub-images.

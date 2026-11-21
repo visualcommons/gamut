@@ -39,6 +39,10 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   segmentation, token partitions, and skip); `WebpDecoder` decodes any conformant key frame.
 - **Alpha** — `EncodeImage<Rgba8>` / `DecodeImage<Rgba8>`. A transparent lossy image uses the extended
   (`VP8X`) format with an `ALPH` chunk (raw or lossless); an opaque one stays a simple file.
+  Alpha is stored exactly at the default alpha quality `100`; `WebpEncoder::with_alpha_quality(q)`
+  (libwebp's `alpha_quality`, libvips' `alpha_q`) trades that away below it, reducing the lossy
+  image's alpha plane to at most `2 + q / 5` levels up to `70` and `16 + (q − 70) · 8` above —
+  the same plane libwebp produces. Lossless encodes keep alpha bit-exact regardless.
 - **Compression effort** — `WebpEncoder::with_effort(Effort)` is libwebp's `method` dial, `0..=6`,
   defaulting to `4`. It applies to both codestreams and never changes what the format guarantees:
   lossless stays bit-exact at every rung, lossy keeps its quality target. The lossless rungs race
@@ -56,8 +60,9 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   file: the encoder codes both ways and keeps the smaller.
 - **Decode limits** — a few header bytes can declare a 16384×16384 frame (1 GiB of RGBA), so
   `WebpDecoder` refuses, with `Unsupported`, any frame over the `DecodeLimits` set with
-  `with_limits`: a byte budget — 64 MiB by default, charged at four bytes per pixel whether or not
-  the file is opaque — and dimension caps, by default the format's 16384. All are checked against
+  `with_limits`: dimension and pixel caps — by default the workspace's 32768 per side and
+  16384 × 16384 pixels, which admit every frame the format can declare — and an opt-in byte budget,
+  charged at four bytes per pixel whether or not the file is opaque. All are checked against
   the `VP8 `/`VP8L` header before any frame-sized allocation and before a backend sees the job.
 - **Embedded metadata** — `WebpEncoder::with_icc_profile` / `with_exif` / `with_xmp` embed the `ICCP`,
   `EXIF`, and `XMP ` chunks; `WebpDecoder::metadata` reads them back out of any WebP file, as a

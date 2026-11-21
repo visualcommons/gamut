@@ -633,6 +633,21 @@ fn deferred_height_limits_are_exact_and_bound_missing_dnl_growth() {
         )),
         "JPEG: image exceeds the dimension limit"
     );
+    // The pixel count is checked against the height the DNL resolves, at its exact boundary.
+    assert!(
+        DecodeImage::<Gray8>::decode_image(
+            &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_pixels(8 * 16)),
+            &resolved,
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        err_msg(DecodeImage::<Gray8>::decode_image(
+            &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_pixels(8 * 16 - 1)),
+            &resolved,
+        )),
+        "JPEG: image exceeds the dimension limit"
+    );
     assert!(
         DecodeImage::<Gray8>::decode_image(
             &JpegDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(8 * 16)),
@@ -783,6 +798,15 @@ fn deferred_row_limit_uses_the_tighter_budget_and_dimension_precedence_on_ties()
             ),
         ),
         (1, "JPEG: image exceeds the dimension limit")
+    );
+    // The pixel count over the width bounds the deferred height like an explicit height does.
+    assert_eq!(
+        selected(JpegDecoder::new().with_limits(DecodeLimits::new().with_max_pixels(8 * 8))),
+        (1, "JPEG: image exceeds the dimension limit")
+    );
+    assert_eq!(
+        selected(JpegDecoder::new().with_limits(DecodeLimits::new().with_max_pixels(8 * 9))),
+        (2, "JPEG: image exceeds the dimension limit")
     );
 }
 

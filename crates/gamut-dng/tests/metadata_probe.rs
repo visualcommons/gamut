@@ -5,7 +5,8 @@ mod common;
 
 use gamut_core::ErrorKind;
 use gamut_dng::{
-    ByteOrder, DngDecoder, DngEncoder, DngMetadata, Exif, ExifTag, Ifd, TiffFile, Value, Variant,
+    ByteOrder, DngCompression, DngDecoder, DngEncoder, DngMetadata, Exif, ExifTag, Ifd, TiffFile,
+    Value, Variant,
 };
 
 /// A little-endian DNG carrying all four metadata carriers, and the metadata it was encoded with.
@@ -19,7 +20,10 @@ fn metadata_rich_dng() -> (Vec<u8>, DngMetadata) {
         .with_iptc(vec![0x1c, 0x02, 0x05, 0x00, 0x03, b'a', b'b', b'c'])
         .with_icc(vec![0u8; 16]);
     let mut dng = Vec::new();
+    // Uncompressed, so every image directory carries the `Compression = 1` entry the lossy-JPEG
+    // test relabels in place.
     DngEncoder::new()
+        .with_compression(DngCompression::Uncompressed)
         .with_dng_metadata(meta.clone())
         .encode(
             &common::sample_raw(32, 24, 16),

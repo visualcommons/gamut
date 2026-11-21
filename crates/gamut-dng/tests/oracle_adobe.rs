@@ -58,13 +58,15 @@ fn adobe_sdk_validates_full_calibration_profile() {
 }
 
 /// The Adobe SDK must decode the stage-1 samples back to exactly what we packed — the definitive
-/// check that gamut's bit-packing (12/14/16-bit, MSB-first, byte-aligned rows) matches DNG.
+/// check that gamut's bit-packing (10/12/14/16-bit, MSB-first, byte-aligned rows) matches DNG.
+/// The raw is pinned uncompressed: the default lossless-JPEG strip would not be packed at all.
 #[test]
 fn adobe_decodes_packed_cfa_samples_exactly() {
-    for bits in [12u16, 14, 16] {
+    for bits in [10u16, 12, 14, 16] {
         let raw = common::sample_raw(64, 48, bits);
         let mut dng = Vec::new();
         DngEncoder::new()
+            .with_compression(gamut_dng::DngCompression::Uncompressed)
             .encode(&raw, &common::sample_profile(), &mut dng)
             .expect("encode");
         let decoded = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe reads raw");
@@ -99,11 +101,11 @@ fn adobe_decodes_linear_raw_samples_exactly() {
 /// padding columns and rows on the edge tiles).
 #[test]
 fn adobe_validates_and_decodes_tiled_dngs_exactly() {
-    use gamut_dng::DngCompression;
+    use gamut_dng::{DngCompression, LosslessPredictor};
     for compression in [
         DngCompression::Uncompressed,
         DngCompression::Deflate,
-        DngCompression::LosslessJpeg,
+        DngCompression::LosslessJpeg(LosslessPredictor::Left),
     ] {
         // 12-bit exercises per-tile sub-byte packing where the scheme allows it; Deflate is
         // limited to whole-byte depths (the SDK reader's constraint, enforced at encode).
@@ -191,7 +193,10 @@ fn new_raw_image_digest_matches_adobe() {
 fn adobe_rejects_a_corrupted_raw_digest() {
     let raw = common::sample_raw(64, 48, 16);
     let mut dng = Vec::new();
+    // Uncompressed, so the flipped byte is a raw sample the stored digest covers rather than a
+    // lossless-JPEG marker byte whose damage the SDK reports as a decode failure first.
     DngEncoder::new()
+        .with_compression(gamut_dng::DngCompression::Uncompressed)
         .encode(&raw, &common::sample_profile(), &mut dng)
         .expect("encode");
     let good_digest = gamut_dng_oracle::new_raw_image_digest(&dng).expect("digest");

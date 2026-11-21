@@ -333,6 +333,67 @@ pub fn libwebp_encode_lossy_rgba_config(
     out
 }
 
+/// Encodes interleaved RGBA to a lossy WebP via libwebp's advanced `WebPEncode` API at `quality`
+/// and `alpha_quality` (both `0..=100`), every other knob at `WebPConfigInit`'s default, returning
+/// the file bytes. Below `alpha_quality` 100 libwebp level-reduces the alpha plane with
+/// `QuantizeLevels` before coding it losslessly, so the alpha libwebp decodes from this file *is*
+/// its quantized plane — the reference gamut-webp's own alpha level quantizer is checked against.
+/// Panics (these are tests) on a bad buffer size or a libwebp error.
+#[must_use]
+pub fn libwebp_encode_lossy_rgba_alpha_quality(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    quality: f32,
+    alpha_quality: i32,
+) -> Vec<u8> {
+    let expected = width as usize * height as usize * 4;
+    assert_eq!(
+        rgba.len(),
+        expected,
+        "RGBA buffer is not width*height*4 bytes"
+    );
+
+    let mut out: Vec<u8> = Vec::new();
+    // SAFETY: as in `libwebp_encode_lossy_rgba_config`: each struct is zero-initialised then filled
+    // by its `*Init` function, and every raw pointer stays valid across the calls.
+    unsafe {
+        let mut config: libwebp_sys::WebPConfig = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPConfigInit(&mut config) != 0,
+            "WebPConfigInit failed (version mismatch?)"
+        );
+        config.quality = quality;
+        config.alpha_quality = alpha_quality;
+        assert!(
+            libwebp_sys::WebPValidateConfig(&config) != 0,
+            "WebPValidateConfig rejected alpha_quality {alpha_quality}"
+        );
+
+        let mut pic: libwebp_sys::WebPPicture = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPPictureInit(&mut pic) != 0,
+            "WebPPictureInit failed (version mismatch?)"
+        );
+        pic.width = width as c_int;
+        pic.height = height as c_int;
+        assert!(
+            libwebp_sys::WebPPictureImportRGBA(&mut pic, rgba.as_ptr(), width as c_int * 4) != 0,
+            "WebPPictureImportRGBA failed"
+        );
+        pic.writer = Some(collect_writer);
+        pic.custom_ptr = std::ptr::from_mut(&mut out).cast::<c_void>();
+
+        let ok = libwebp_sys::WebPEncode(&config, &mut pic);
+        libwebp_sys::WebPPictureFree(&mut pic);
+        assert!(
+            ok != 0,
+            "WebPEncode failed at alpha_quality {alpha_quality}"
+        );
+    }
+    out
+}
+
 /// Reads the canvas dimensions of a WebP file with libwebp, or `None` if it is not a valid WebP.
 #[must_use]
 pub fn libwebp_get_info(webp: &[u8]) -> Option<(u32, u32)> {

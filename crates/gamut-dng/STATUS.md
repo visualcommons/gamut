@@ -35,10 +35,10 @@ internal encode→decode round-trips guard every lossless path.
 | P7  | Ch4     | `LinearRaw` photometric (demosaiced RGB), samples-per-pixel / photometric handling | ✅ done |
 | P8  | Ch6     | Colour & calibration: ColorMatrix1/2, CameraCalibration, ForwardMatrix, illuminants, AnalogBalance, BaselineExposure, profile name/policy + `CameraProfile` API | ✅ done |
 | P9  | Ch5     | Levels (Black/White) + ActiveArea + DefaultCrop + **bit-depth packing 8/10/12/14/16** (MSB-first, Adobe-verified pixel-exact). Completed by #253: the full spec level model (`RawLevels`) and the chapter-5 mapping itself (`RawImage::to_linear`, gated ±1 LSB against the Adobe SDK's stage-2 image) | ✅ done |
-| P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0 (JPEG preview + size cap deferred) | ✅ done |
+| P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0. Since #1245 `DngEncoder::with_preview(DngPreview)` caps its longer side (a whole-factor box shrink of the half-resolution preview) or leaves it out, the raw image then being IFD 0 itself (`NewSubFileType = 0`, no `SubIFDs`; Adobe-validated stripped and tiled). A JPEG-compressed preview stays deferred | ✅ done |
 | P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe. Finalization hardened it: full IFD-forest raw search, per-strip sub-byte alignment, `SampleFormat` validation, 64-bit offset reads | ✅ done |
 | P12 | Ch4     | Deflate/ZIP (8) encode+decode (zlib format; encode `gamut-deflate`, decode `miniz_oxide`) — CFA + LinearRaw, Adobe-validated; encode limited to 8/16-bit (the SDK reader's constraint) | ✅ done |
-| P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope and published the `lossless_jpeg` module (since #1083 `gamut_jpeg::lossless`); per-chunk geometry follows the spec's total-sample-count rule, and #584 made the encoder use it: a CFA chunk is declared as `repeat-cols` interleaved components at `width / repeat-cols` so predictor 1 differences like colours (DNG 1.7.1.0 p. 20), falling back to the chunk's own geometry past four components or on a width the repeat does not divide. The T.81 65535 line limit now binds the *frame* width, so an untiled Bayer strip encodes up to 131 070 photosites wide (previously refused past 65 535) and decodes back exactly. #1083 moved the SOF3 coder into `gamut-jpeg` (its `lossless` module, on that crate's shared entropy layer), output byte-identical across the move; since #1231 the writer reaches it through `gamut_jpeg::lossless::LosslessEncoder`'s default (predictor 1, no point transform, no restarts), output unchanged | ✅ done |
+| P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope and published the `lossless_jpeg` module (since #1083 `gamut_jpeg::lossless`); per-chunk geometry follows the spec's total-sample-count rule, and #584 made the encoder use it: a CFA chunk is declared as `repeat-cols` interleaved components at `width / repeat-cols` so predictor 1 differences like colours (DNG 1.7.1.0 p. 20), falling back to the chunk's own geometry past four components or on a width the repeat does not divide. The T.81 65535 line limit now binds the *frame* width, so an untiled Bayer strip encodes up to 131 070 photosites wide (previously refused past 65 535) and decodes back exactly; since #1245 a raw past that width, or past 65 535 rows, is tiled automatically rather than refused. #1083 moved the SOF3 coder into `gamut-jpeg` (its `lossless` module, on that crate's shared entropy layer), output byte-identical across the move; since #1231 the writer reaches it through `gamut_jpeg::lossless::LosslessEncoder` (no point transform, no restarts), and since #1245 at the caller's T.81 predictor (`DngCompression::LosslessJpeg(LosslessPredictor)`; all seven Adobe-validated and decoded exactly, predictor 1 the SDK's own choice) | ✅ done |
 | P14 | Ch2     | Tiled raw layout (`TileWidth`/`TileLength`/`TileOffsets`/`TileByteCounts`): decode with edge-crop reassembly + `with_tiling` encode (zero-padded edge tiles), all schemes, Adobe pixel-exact | ✅ done |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
 | P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) — embed + decode, Adobe-validated. #353 replaced the crate-local models with the workspace facade's; since #1087 `DngMetadata::exif` is `gamut-exif`'s `Exif` through a normal, feature-independent edge (the `TiffMetadata::exif` shape), and the facade wiring (`TypedMetadata`, `MetadataSink`) is the optional `metadata` feature | ✅ done |
@@ -156,7 +156,16 @@ One path per item, ahead of the API freeze. Every change below is breaking:
   gamut-ifd's `Compression` code list, and JPEG XL's distance and effort travel in its
   `JxlSettings` payload (`lossless()`, the default, or `lossy(Distance)`, then
   `with_effort(JxlEffort)`); `with_jxl_distance`/`with_jxl_effort` are gone, so a JPEG XL
-  setting can no longer be configured where it is ignored.
+  setting can no longer be configured where it is ignored. Since #1245 `LosslessJpeg` likewise
+  carries its T.81 predictor, `LosslessJpeg(LosslessPredictor)` (gamut-jpeg's `Predictor`,
+  re-exported under that name beside the TIFF `Predictor` tag value), read back through
+  `DngCompression::lossless_predictor`. Since #1245 too, `DngEncoder::new()` (and
+  `DngCompression::default()`) writes `LosslessJpeg(LosslessPredictor::Left)` — the Adobe DNG
+  SDK's own default — rather than `Uncompressed`: the raw samples are unchanged, every default
+  encode's bytes are not. `with_compression(DngCompression::Uncompressed)` restores the old
+  output. So that the new default refuses no raw the old one wrote, an untiled lossless-JPEG raw
+  whose one-strip frame would exceed T.81's 65535 lines or samples per line is tiled
+  automatically (256 × 256 tiles, the short side rounded up to 16 for a thin raw).
 - **`DngDecoder::deconstruct` is removed.** The free `deconstruct` remains.
 - **The tag-value enums are `repr`'d.** `CalibrationIlluminant` and `CfaLayout` are
   `repr(u16)`. `ProfileEmbedPolicy`, `PreviewColorSpace` and `TableEncoding` are `repr(u32)`,
@@ -727,6 +736,12 @@ use; additions are semver-additive.
   position is interior to a payload layout the rewrite does not reproduce (the strips it sat
   between are re-packed), so there is no offset to restore it to. `PreservedSpan` reports both
   offsets, so a caller can see which happened.
+- **Sub-8-bit raws are not valid DNG 1.7.1** (known limitation, pre-existing; #1259) —
+  `RawImage` accepts `bits_per_sample` in `1..=16` and the encoder writes a 1–7-bit raw, but DNG
+  1.7.1.0's `BitsPerSample` entry supports only 8 to 32 bits/sample, so such a file is outside
+  the spec under every compression. Lossless JPEG codes a 1-bit raw in a 2-bit SOF3 frame (T.81
+  B.2.2's floor) and gamut reads it back exactly, but no Adobe-SDK check covers a sub-8-bit file.
+  Whether the encoder refuses those depths or widens them to 8 bits is #1259's decision.
 - **Floating-point samples** (`SampleFormat = 3`, fp16 JPEG XL, the float predictors
   34894/34895) — rejected with typed errors on decode; the u16 sample model would need a float
   sibling.
@@ -740,6 +755,9 @@ use; additions are semver-additive.
   matrices, `ReductionMatrix`) is its own feature. Decode of 4-colour patterns works.
 - **PGTM2 inside Camera Profile IFDs** (`ExtraCameraProfiles`) — surfaced via extras; typed
   parse covers the IFD0/raw-IFD placements.
+- **Writing a JPEG-compressed preview** — `DngPreview` (#1245) is `#[non_exhaustive]` so a JPEG
+  arm, the reference SDK's own preview form, can be added over gamut-jpeg's baseline encoder
+  without a break; today the encoder writes an uncompressed RGB preview (capped or not) or none.
 - **JPEG-compressed previews as pixels** — surfaced as verbatim chunks (`SubImageData::
   Undecoded`); decoding them needs the baseline DCT codec above.
 - **Advanced 1.7 metadata without a typed surface** (`RGBTables`, `ImageStats`,

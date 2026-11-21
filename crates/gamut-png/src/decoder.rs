@@ -35,12 +35,6 @@ use crate::walk::metadata;
 use crate::walk::{collected, walk_metadata_chunks};
 use crate::{adam7, inflate, pack};
 
-/// Default cap on the decoded sample buffer: the workspace's
-/// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`], 64 MiB, a 4096×4096 RGBA8 image.
-///
-/// `pub(crate)` because [`crate::deconstruct`] reports against the same budget: a file this
-/// decoder decodes is one the report walk will inflate to count filters.
-pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = DecodeLimits::DEFAULT_MAX_IMAGE_BYTES;
 /// Default cumulative cap on metadata payloads — inflated iCCP/zTXt/iTXt plus the raw `caBX`
 /// manifest store: 16 MiB.
 pub(crate) const DEFAULT_MAX_METADATA_BYTES: usize = 16 << 20;
@@ -55,11 +49,14 @@ pub(crate) fn lossy() -> Error {
 
 /// A reusable PNG decoder with hostile-input limits.
 ///
-/// The defaults ([`DecodeLimits::default`]) accept anything the spec allows dimensionally — IHDR
-/// itself bounds each side to 2³¹ − 1 (§11.2.1) — but cap the decoded sample buffer at 64 MiB.
-/// The byte budget, not the dimension caps, is the real safety guard (it bounds both the inflated
-/// scanline stream and the sample buffer, so peak memory stays within roughly twice the budget
-/// plus the input). Tighten the dimension caps when the application knows its domain.
+/// The defaults ([`DecodeLimits::default`]) are the workspace's: each side at most 32768 and at
+/// most 16384 × 16384 pixels, with no byte budget. That is narrower than IHDR, which bounds each
+/// side only to 2³¹ − 1 (§11.2.1): a PNG with a side past 32768, or past 16384² pixels, is refused
+/// by default and needs widened limits. The pixel cap bounds both the inflated scanline stream and
+/// the sample buffer — at most 2 GiB each, for 16384² RGBA16 — and an opt-in byte budget
+/// ([`DecodeLimits::with_max_image_bytes`]) bounds them tighter, keeping peak memory within
+/// roughly twice the budget plus the input. Tighten either when the application knows its
+/// domain.
 #[derive(Debug, Clone)]
 pub struct PngDecoder {
     limits: DecodeLimits,
@@ -76,8 +73,8 @@ impl Default for PngDecoder {
 }
 
 impl PngDecoder {
-    /// Creates a decoder with the default limits ([`DecodeLimits::default`]: spec-maximum
-    /// dimensions and 64 MiB of decoded samples; and 16 MiB of inflated metadata).
+    /// Creates a decoder with the default limits ([`DecodeLimits::default`]: 32768 per side,
+    /// 16384 × 16384 pixels and no byte budget; and 16 MiB of inflated metadata).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -123,8 +120,9 @@ impl PngDecoder {
         self
     }
 
-    /// Sets the image limits: the per-side dimension caps and the decoded-sample byte budget
-    /// ([`DecodeLimits::max_image_bytes`], default 64 MiB). An image past any of them is refused
+    /// Sets the image limits: the per-side dimension caps, the pixel-count cap and the opt-in
+    /// decoded-sample byte budget ([`DecodeLimits::max_image_bytes`], unbounded by default). An
+    /// image past any of them is refused
     /// with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before
     /// anything is allocated for its pixels.
     #[must_use]
@@ -368,7 +366,7 @@ impl PngDecoder {
     /// Enforces the dimension and byte-budget limits (all math checked) and returns the exact
     /// byte length of the filtered scanline stream the IDAT data must inflate to.
     fn check_limits(&self, header: &Ihdr) -> Result<usize> {
-        if header.width > self.limits.max_width() || header.height > self.limits.max_height() {
+        if !self.limits.admits_dimensions(header.width, header.height) {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "PNG: image exceeds the dimension limit",
@@ -1065,6 +1063,15 @@ pub(crate) mod tests {
         assert!(DecodeImage::<Rgb8>::decode_image(&narrow, &png).is_err());
         let short = PngDecoder::new().with_limits(limits(17, 12));
         assert!(DecodeImage::<Rgb8>::decode_image(&short, &png).is_err());
+    }
+
+    #[test]
+    fn pixel_limit_is_exact() {
+        let (png, _) = rgb_png(17, 13);
+        let exact = PngDecoder::new().with_limits(DecodeLimits::new().with_max_pixels(17 * 13));
+        assert!(DecodeImage::<Rgb8>::decode_image(&exact, &png).is_ok());
+        let under = PngDecoder::new().with_limits(DecodeLimits::new().with_max_pixels(17 * 13 - 1));
+        assert!(DecodeImage::<Rgb8>::decode_image(&under, &png).is_err());
     }
 
     #[test]

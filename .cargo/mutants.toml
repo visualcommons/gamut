@@ -170,9 +170,9 @@ exclude_re = [
     # gamut-dng version computation — `if v > *version { *version = v }` (and the analogous
     # `if backward_version > required` pick in encode): at equality both branches produce the
     # same version value, so `>=` cannot change the written tag: equivalent.
-    '^crates/gamut-dng/src/encoder\.rs:629:14: replace > with >= in backward_version_for$',
-    '^crates/gamut-dng/src/encoder\.rs:660:14: replace > with >= in required_dng_version$',
-    '^crates/gamut-dng/src/encoder\.rs:379:33: replace > with >= in DngEncoder::encode$',
+    '^crates/gamut-dng/src/encoder\.rs:689:14: replace > with >= in backward_version_for$',
+    '^crates/gamut-dng/src/encoder\.rs:720:14: replace > with >= in required_dng_version$',
+    '^crates/gamut-dng/src/encoder\.rs:442:33: replace > with >= in DngEncoder::encode$',
     # gamut-av1 quant::dequant — `sign = if dq < 0 { -1 } else { 1 }`. The sign multiplies
     # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
     # `<` and `<=` disagree. `±0 == 0`, so the reconstruction is identical: equivalent.
@@ -261,15 +261,10 @@ exclude_re = [
     # `WebpEncoder::lossless` below; `lossless_is_the_default_mode` pins what it returns.
     '^crates/gamut-avif/src/encoder\.rs:383:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
-    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None }`); replacing the body with the
+    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None, 100 }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
     # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
-    '^crates/gamut-webp/src/encoder\.rs:142:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
-    # gamut-webp `alpha::write_compressed_alph`: `0xff00_0000 | (u32::from(a) << 8)` ORs the opaque
-    # alpha byte (bits 24-31) with the green byte (bits 8-15); the operands are disjoint, so `|` == `^`.
-    # Its ALPH header byte `method.code() << 2 | 0x01` is the same shape: the shift clears the two
-    # low bits the `0x01` occupies.
-    '^crates/gamut-webp/src/alpha\.rs:(186:31|191:33): replace \| with \^ in write_compressed_alph$',
+    '^crates/gamut-webp/src/encoder\.rs:143:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `transform::fwht4x4` negative-bias correction `x += i32::from(x < 0)`: the only value
     # where `<` and `<=` disagree is x == 0, where the extra +1 is absorbed by the subsequent
     # `(x + 3) >> 3` (both yield 0), so the four `< -> <=` mutations are unobservable. (The `+=`→`-=`,
@@ -286,7 +281,7 @@ exclude_re = [
     # size tie `<` keeps raw and `<=` would keep compressed, but both decode to identical alpha (the
     # transform is bijective) and real content never ties, so no non-contrived test can distinguish
     # them. (`< -> >` / `< -> ==` pick the *larger*/wrong encoding and are caught by the round-trip.)
-    '^crates/gamut-webp/src/alpha\.rs:231:28: replace < with <= in write_alph_with_effort$',
+    '^crates/gamut-webp/src/alpha\.rs:396:28: replace < with <= in write_alph_with_effort$',
     # gamut-webp VP8 header — behaviourally-equivalent bit packing/branches.
     # write_uncompressed_chunk packs disjoint fields into the frame tag (`version<<1 | 1<<4 |
     # size<<5`, each within its width) and the dimension words (`width | hscale<<14`, width ≤ 0x3FFF);

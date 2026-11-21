@@ -3,10 +3,10 @@
 //! `docs/testing.md`'s per-crate table names `JpegDecoder` as this crate's untrusted-input
 //! surface. The crate is `#![deny(unsafe_code)]` with no `unsafe` site in its decode path.
 //!
-//! **The decoder's default is bounded** (#1024): `JpegDecoder::new()` caps dimensions at the
-//! format's own 65 535-sample ceiling and the native raster at 64 MiB, the figure `PngDecoder` uses
-//! as its default. The target's explicit `with_limits` call restates exactly that default. They are kept so that a later change to the crate's default
-//! cannot silently change what this target searches. Without a budget, every `SOF` the engine
+//! **The target's limits are explicit**: each side up to the format's own 65 535-sample ceiling
+//! and the native raster at 64 MiB — the decoder's default from #1024 until #1226 replaced it with
+//! the workspace's 32768 per side and 16384² pixels with no byte budget. They are kept so that a
+//! change to the crate's default cannot silently change what this target searches. Without a budget, every `SOF` the engine
 //! writes with a large frame would be a 12 GB allocation that libFuzzer reports at once, which is a
 //! report about a default rather than a search of the decoder.
 //!
@@ -25,7 +25,7 @@ use gamut_core::{DecodeImage, DecodeLimits, Rgb8};
 use gamut_jpeg::JpegDecoder;
 use libfuzzer_sys::fuzz_target;
 
-/// The decoded raster budget, matching `gamut-png`'s default `max_image_bytes`.
+/// The decoded raster budget, matching the other decode targets' `max_image_bytes`.
 const MAX_IMAGE_BYTES: usize = 64 << 20;
 
 fuzz_target!(|data: &[u8]| {

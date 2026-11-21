@@ -218,6 +218,26 @@ pub struct WebpConfig {
     /// Applies to [`WebpMode::Lossless`] only, and is ignored for [`WebpMode::Lossy`], exactly as
     /// [`quality`](Self::quality) is ignored for lossless.
     pub near_lossless: Option<NearLossless>,
+    /// Alpha quality, `0..=100` (libwebp's `alpha_quality`, cwebp's `-alpha_q`, libvips' `alpha_q`);
+    /// the default `100` stores alpha losslessly. Values above `100` behave as `100`, as for
+    /// [`quality`](Self::quality).
+    ///
+    /// Applies to [`WebpMode::Lossy`] only, where a transparent image carries its alpha in an
+    /// `ALPH` chunk; a [`WebpMode::Lossless`] encode carries alpha inside the VP8L bitstream,
+    /// bit-exactly, and ignores it. Below `100` the alpha plane is reduced to at most
+    /// `2 + quality / 5` distinct values up to `70` (`2` at `0`, `16` at `70`) and
+    /// `16 + (quality − 70) · 8` above it (`248` at `99`) — libwebp's own mapping and its own
+    /// k-means level quantizer, which keeps the plane's minimum and maximum — and the `ALPH`
+    /// header records the level reduction (RFC 9649 §2.7.1, `P = 1`). The reduced plane is then
+    /// coded losslessly, so the decoded alpha is exactly the quantized plane — byte for byte the
+    /// one libwebp produces at the same `alpha_quality`.
+    ///
+    /// Fewer levels usually, not always, mean fewer bytes. Grainy soft-edged masks shrink steadily
+    /// as the quality falls; but at high settings (more levels than the mask has structure) the size
+    /// can wander slightly either side of lossless, and a perfectly smooth ramp, which the alpha
+    /// predictors already code almost for free, can grow when quantized into steps. libwebp shares
+    /// both behaviours.
+    pub alpha_quality: u8,
 }
 
 impl Default for WebpConfig {
@@ -227,6 +247,7 @@ impl Default for WebpConfig {
             quality: 75,
             effort: Effort::Default,
             near_lossless: None,
+            alpha_quality: 100,
         }
     }
 }
@@ -242,6 +263,7 @@ mod tests {
         assert_eq!(c.quality, 75);
         assert_eq!(c.effort, Effort::Default);
         assert_eq!(c.near_lossless, None);
+        assert_eq!(c.alpha_quality, 100, "alpha is lossless by default");
         assert_eq!(WebpMode::default(), WebpMode::Lossless);
     }
 
