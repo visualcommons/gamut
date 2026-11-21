@@ -189,7 +189,8 @@ pub enum Process {
 /// quality→scale mapping is frozen. The byte stream is likewise stable for a given configuration;
 /// [`Process::Optimized`] changes the Huffman tables and hence the entropy bytes, but it
 /// is opt-in and leaves the coefficients — and the decoded image — untouched. Caller-supplied
-/// tables ([`Self::with_quant_tables`]) bypass the frozen mapping without changing it.
+/// tables ([`Self::with_quant_tables`]) and jpegli's distance control ([`Self::with_distance`])
+/// bypass the frozen mapping without changing it.
 ///
 /// # Example
 ///
@@ -207,6 +208,8 @@ pub enum Process {
 #[derive(Clone)]
 pub struct JpegEncoder {
     quality: u8,
+    /// The jpegli butteraugli distance ([`Self::with_distance`]); `None` selects [`Self::quality`].
+    distance: Option<f32>,
     subsampling: ChromaSubsampling,
     restart_interval: u16,
     density_unit: DensityUnit,
@@ -229,6 +232,7 @@ impl fmt::Debug for JpegEncoder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JpegEncoder")
             .field("quality", &self.quality)
+            .field("distance", &self.distance)
             .field("subsampling", &self.subsampling)
             .field("restart_interval", &self.restart_interval)
             .field("density_unit", &self.density_unit)

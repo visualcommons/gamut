@@ -28,7 +28,8 @@
 //! / 4:4:0 subsampling (the shared [`ChromaSubsampling`]), standard (Annex K) tables — or, with
 //! [`Process::Optimized`], tables fitted to the image's own symbol statistics
 //! (Annex K.2), a few percent smaller for the same decoded pixels — a quality→quantization mapping
-//! (or caller-supplied [`QuantTables`] via [`JpegEncoder::with_quant_tables`]), opt-in
+//! (or caller-supplied [`QuantTables`] via [`JpegEncoder::with_quant_tables`], or jpegli's
+//! distance-scaled tables via [`JpegEncoder::with_distance`]), opt-in
 //! rate–distortion optimized coefficient selection ([`JpegEncoder::with_rd_optimization`]:
 //! per-block AC trellis, optionally with per-block adaptive quantization), an opt-in jpegli-style
 //! **XYB colour mode** ([`JpegEncoder::with_color_mode`]: scaled-XYB samples, no JFIF APP0, Adobe
@@ -167,4 +168,4 @@ pub use gamut_core::{DecodeLimits, RawMetadata};
 #[cfg(feature = "metadata")]
 pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataSink, TypedMetadata};
 pub use marker::DensityUnit;
-pub use quant::{CHROMINANCE, LUMINANCE, QuantTables};
+pub use quant::{CHROMINANCE, LUMINANCE, QuantTables, jpegli_quality_to_distance};
