@@ -120,14 +120,14 @@ fn convert_policy_round_trips_by_field_name() {
 #[test]
 fn cicp_round_trips_by_field_name() {
     let cicp = Cicp {
-        colour_primaries: 9,
+        color_primaries: 9,
         transfer_characteristics: 16,
         matrix_coefficients: 9,
         full_range: false,
     };
     assert_json(
         cicp,
-        r#"{"colour_primaries":9,"transfer_characteristics":16,"matrix_coefficients":9,"full_range":false}"#,
+        r#"{"color_primaries":9,"transfer_characteristics":16,"matrix_coefficients":9,"full_range":false}"#,
     );
 }
 
