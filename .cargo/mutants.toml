@@ -525,6 +525,17 @@ exclude_re = [
     # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
     # the same scale and no input can distinguish the mutant: equivalent.
     '^crates/gamut-jpeg/src/quant\.rs:212:10: replace < with <= in quality_scale$',
+    # gamut-jpeg quant::jpegli::jpegli_distance_to_scale: `if distance < JPEGLI_DIST0` (jpegli's
+    # `DistanceToScale` knee at 1.5). `<` and `<=` disagree only at distance == 1.5. There the
+    # linear branch returns 1.5 and the power-law branch returns `max(0.75, 1.5^(1-e)·1.5^e)`,
+    # which is 1.5 in real arithmetic and at most an f32 rounding step away from it. The function
+    # is private, and its only consumer is `jpegli_tables`, which rounds `global·scale·base` to an
+    # integer entry. `tests/oracle_distance.rs` encodes distance 1.5 exactly, in every frame that
+    # reaches this function (YCbCr 4:2:0 and non-4:2:0, XYB; grayscale never calls it), and the
+    # mutant's tables equal jpegli's there too. So no input can distinguish it: equivalent. The
+    # branch cannot be removed: below the knee the power law exceeds the distance. Rewriting the
+    # comparison would change jpegli's float arithmetic, which the oracle pins bit for bit.
+    '^crates/gamut-jpeg/src/quant/jpegli\.rs:499:17: replace < with <= in jpegli_distance_to_scale$',
     # gamut-dng predictor `undo`: `if channels == 0 || group_cols < 2 { return; }`, relaxed to
     # `&&`, is equivalent. `factor` reaches this line only through
     # `x_factor(predictor).filter(|&f| f > 0)`, so `channels = spp * factor` is zero only when
