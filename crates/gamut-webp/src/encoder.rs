@@ -3,8 +3,9 @@
 //!
 //! Both the lossless **VP8L** path (see [`crate::vp8l::encoder`]) and the lossy **VP8** path are
 //! implemented, via the [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) and `EncodeImage<Rgba8>`
-//! impls; transparent lossy images use the extended (`VP8X`) format with a raw `ALPH` alpha chunk,
-//! as does any image carrying embedded metadata.
+//! impls; transparent lossy images use the extended (`VP8X`) format with a lossless `ALPH` alpha
+//! chunk (raw or VP8L-compressed, whichever is smaller, searched at the configured effort), as does
+//! any image carrying embedded metadata.
 
 use core::ops::Range;
 use std::fmt;
@@ -497,8 +498,8 @@ impl WebpEncoder {
 
     /// Encodes interleaved 8-bit RGBA `pixels` (row-major) of `dims`, appending the WebP file to
     /// `out`. A fully opaque image with no metadata produces a simple file; a transparent one uses
-    /// the extended (`VP8X`) format with a raw `ALPH` alpha chunk (lossy color) or in-bitstream alpha
-    /// (lossless). Backs the [`EncodeImage<Rgba8>`] impl; the buffer is already validated by
+    /// the extended (`VP8X`) format with a lossless `ALPH` alpha chunk (lossy color) or in-bitstream
+    /// alpha (lossless). Backs the [`EncodeImage<Rgba8>`] impl; the buffer is already validated by
     /// [`ImageRef`].
     fn encode_rgba8_inner(
         &self,
@@ -530,8 +531,14 @@ impl WebpEncoder {
                 let vp8 = self.encode_vp8_codestream(ImageRef::new(&rgb, dims)?)?;
                 if transparent {
                     let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
-                    let alph =
-                        alpha::write_alph(&alpha, dims.width() as usize, dims.height() as usize)?;
+                    // The configured effort reaches the alpha coder too: rungs 5-6 search every
+                    // `ALPH` pre-filter, which a default-effort call here would never reach.
+                    let alph = alpha::write_alph_with_effort(
+                        &alpha,
+                        dims.width() as usize,
+                        dims.height() as usize,
+                        self.config.effort,
+                    )?;
                     self.wrap(dims, WebpCodestream::Vp8, &vp8, Some(&alph), true)
                 } else {
                     self.wrap(dims, WebpCodestream::Vp8, &vp8, None, false)
@@ -700,6 +707,47 @@ mod tests {
                 .config()
                 .effort,
             Effort::Slower
+        );
+    }
+
+    /// Kills a dropped `self.config.effort` at the lossy RGBA path's `ALPH` call (#1203): rungs 5-6
+    /// search every `ALPH` pre-filter, rung 4 codes with none. On a wrapping linear ramp a
+    /// pre-filter wins outright, so only an encoder that passes its effort through gets a non-`None`
+    /// filter (`ALPH` header bits 2-3, RFC 9649 §2.7.1) and the smaller payload at rung 6.
+    #[test]
+    fn lossy_rgba_codes_alph_at_the_configured_effort() {
+        let (w, h) = (32usize, 32usize);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| [0x40, 0x80, 0xc0, ((i % w) * 7 + (i / w) * 13) as u8])
+            .collect();
+        let alph_at = |effort: Effort| -> Vec<u8> {
+            let mut file = Vec::new();
+            WebpEncoder::lossy(75)
+                .with_effort(effort)
+                .encode_image(
+                    ImageRef::<Rgba8>::new(&rgba, dims(w as u32, h as u32)).unwrap(),
+                    &mut file,
+                )
+                .expect("rgba encode");
+            gamut_riff::WebpLayout::parse(&file)
+                .expect("own output parses")
+                .alph
+                .expect("transparent lossy output carries ALPH")
+                .to_vec()
+        };
+        let rung4 = alph_at(Effort::Default);
+        let rung6 = alph_at(Effort::Slowest);
+        assert_eq!((rung4[0] >> 2) & 0x03, 0, "rung 4 searches no pre-filter");
+        assert_ne!(
+            (rung6[0] >> 2) & 0x03,
+            0,
+            "rung 6 must find the winning pre-filter"
+        );
+        assert!(
+            rung6.len() < rung4.len(),
+            "rung 6 ALPH ({} B) must undercut rung 4 ({} B)",
+            rung6.len(),
+            rung4.len()
         );
     }
 

@@ -193,15 +193,6 @@ fn write_compressed_alph(
     Ok(out)
 }
 
-/// Builds the smaller of the raw and lossless-compressed `ALPH` payloads for an alpha plane.
-///
-/// # Errors
-///
-/// Propagates a VP8L encoding error from the compressed path.
-pub fn write_alph(plane: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
-    write_alph_with_effort(plane, width, height, Effort::default())
-}
-
 /// Builds the smaller of the raw and lossless-compressed `ALPH` payloads, spending `effort` on the
 /// compressed path's VP8L encode.
 ///
@@ -447,7 +438,7 @@ mod tests {
         // A smoothly-banded plane compresses well, so the chosen payload should beat the raw size.
         let (w, h) = (64, 64);
         let plane: Vec<u8> = (0..w * h).map(|i| ((i / w) * 4) as u8).collect();
-        let chunk = write_alph(&plane, w, h).unwrap();
+        let chunk = write_alph_with_effort(&plane, w, h, Effort::default()).unwrap();
         assert!(
             chunk.len() < 1 + w * h,
             "compressible alpha should beat raw"

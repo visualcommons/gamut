@@ -563,6 +563,10 @@ fn tiled_rgba(w: u32, h: u32) -> Vec<u8> {
 /// should say what moved and why (the same rule `default_bytes.rs` states). The lossy column is
 /// deliberately **not** monotone at rung 0→1: rung 0 emits no `B_PRED` modes at all, so it spends
 /// fewer header bits on a worse prediction. Only the VP8L ladder claims monotonicity.
+///
+/// The lossy RGBA columns also carry the `ALPH` chunk, which is coded at the same rung (#1203):
+/// rungs 0-3 spend a cheaper VP8L search on the alpha plane than the default (rung 0's is far the
+/// largest), and rungs 5-6 search all four `ALPH` pre-filters.
 #[test]
 fn every_effort_rung_pins_its_output_bytes() {
     let d = dims(32, 24);
@@ -598,13 +602,13 @@ fn every_effort_rung_pins_its_output_bytes() {
         (134, 0x414b_d885_3a94_d316),
     ];
     const LOSSY60_RGBA: [(usize, u64); 7] = [
-        (172, 0x3b9c_e9fc_45c8_e0ba),
-        (186, 0x4e86_861b_b8de_dbb4),
-        (186, 0x4e86_861b_b8de_dbb4),
+        (918, 0xb71e_2477_41ed_463c),
+        (220, 0x94b7_a070_1ae5_c6d3),
+        (194, 0x54d8_fd6b_3e6a_f78d),
         (184, 0xd5b5_d2a9_f740_8bc7),
         (184, 0xe2df_69e2_2c62_ce64),
         (184, 0xe2df_69e2_2c62_ce64),
-        (184, 0xe2df_69e2_2c62_ce64),
+        (182, 0xe145_7719_c676_27b7),
     ];
 
     // The busy fixture is the one the two-pass VP8 derivation is actually visible in (see `busy`).
@@ -639,13 +643,13 @@ fn every_effort_rung_pins_its_output_bytes() {
         (1452, 0x1af0_7556_ce3c_4e47),
     ];
     const BUSY_LOSSY60_RGBA: [(usize, u64); 7] = [
-        (2006, 0x1b05_1ab2_78fa_182d),
+        (8384, 0x8b73_b943_6cd4_02b9),
         (1902, 0x7723_400f_6c97_eb68),
         (1902, 0x7723_400f_6c97_eb68),
         (1678, 0x2854_d6a4_7516_7592),
         (1560, 0xee54_68aa_8ddc_632e),
-        (1560, 0xee54_68aa_8ddc_632e),
-        (1560, 0xee54_68aa_8ddc_632e),
+        (1502, 0x77ea_d95b_e415_cba4),
+        (1502, 0x77ea_d95b_e415_cba4),
     ];
 
     let prgb = patchwork(96, 80, 3);
@@ -678,13 +682,13 @@ fn every_effort_rung_pins_its_output_bytes() {
         (1500, 0x7eca_6871_1963_eae7),
     ];
     const PATCH_LOSSY60_RGBA: [(usize, u64); 7] = [
-        (5930, 0x0a06_79c4_cf67_fa1b),
-        (5434, 0x9d9d_2ab5_bf81_63a6),
-        (5434, 0x9d9d_2ab5_bf81_63a6),
-        (5132, 0x617f_8f42_96ac_c10f),
+        (7038, 0x23d3_984e_c0e3_8848),
+        (6542, 0x1056_67d6_8719_cadd),
+        (6360, 0x4c6b_ff94_4244_d6df),
+        (5576, 0x2be3_2b31_ba81_2402),
         (5102, 0x01e0_f3cc_764b_692d),
-        (5102, 0x01e0_f3cc_764b_692d),
-        (5102, 0x01e0_f3cc_764b_692d),
+        (5048, 0x434b_42be_2be6_d03a),
+        (5048, 0x434b_42be_2be6_d03a),
     ];
 
     let srgb = smooth_rgb(96, 80);
