@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- *(webp)* **output-changing for every lossy encode:** `WebpConfig::quality` now selects the VP8
+- *(webp)* [**breaking**] **output-changing for every lossy encode:** `WebpConfig::quality` now selects the VP8
   base quantizer along libwebp's `QualityToCompression` curve rather than the linear
   `(100 − quality)·127/100`, so the same `quality` lands on the same base quantizer as libwebp,
   cwebp's `-q` and libvips' `Q` (with SNS off). The two mappings differ across the whole range: at
