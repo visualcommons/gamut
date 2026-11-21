@@ -63,7 +63,8 @@ encoder's reconstruction — takes an `Av1EncodeConfig` carrying every knob belo
 - **Adapting CDFs** (`disable_cdf_update = 0`, AV1 §8.2.6): each tile starts from the §9.4
   defaults and nudges every context toward what it codes.
 - **Colour signalling**: `Av1EncodeConfig::with_color` takes an `Av1Color` (the CICP
-  primaries/transfer/matrix triple plus the signal range) and mirrors it into the sequence
+  primaries/transfer/matrix triple plus the signal range, each replaceable through
+  `with_primaries`/`with_transfer`/`with_matrix`/`with_range`) and mirrors it into the sequence
   header's `color_config()` and the `av1C`/`colr` values `gamut-avif` stamps.
 - **Chroma sampling** comes from the buffer: 4:4:4, 4:2:2 and 4:2:0 are all coded, and
   **monochrome** (`mono_chrome = 1`) from a `ChromaSubsampling::Cs400` buffer — use
@@ -78,7 +79,8 @@ encoder's reconstruction — takes an `Av1EncodeConfig` carrying every knob belo
   `Effort::Thorough` prunes the lossy mode-decision search; the default is `Effort::Balanced`.
 - **Tiling and threads** are `Av1EncodeConfig::with_tiling` / `with_threads`: a `Tiling` picks
   the uniform tile layout, and `threads` caps how many tiles are coded concurrently. The stream
-  depends on the layout only, never on the thread count.
+  depends on the layout only, never on the thread count. The default is `Tiling::SINGLE`, one
+  tile, as libaom and libavif default to: more tiles buy parallelism at some cost in size.
 
 ```rust,ignore
 let planes = Planar16::from_planes(w, h, BitDepth::Twelve, [y, u, v])?;

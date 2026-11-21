@@ -1,6 +1,8 @@
 //! The thread cap (issue #655): `AvifEncoder::with_threads` codes an RGBA input's colour and alpha
-//! stills concurrently and each still's tiles on `gamut-av1`'s tile-parallel path, and the file
-//! is byte-identical at every thread count. A conformant reader (libavif over dav1d) reconstructs
+//! stills concurrently, and each still's tiles on `gamut-av1`'s tile-parallel path, and the file
+//! is byte-identical at every thread count. `gamut-av1`'s default layout is one tile (libaom's
+//! default, #1227) and `AvifEncoder` has no tiling knob yet (#1233), so here only the colour/alpha
+//! split runs concurrently; `gamut-av1` pins its tile-parallel path at explicit layouts. A conformant reader (libavif over dav1d) reconstructs
 //! the multi-threaded file to exactly the AV1 encoder's own reconstruction.
 //!
 //! libavif is linked in from the `third_party/libavif` + `third_party/dav1d` submodules via the
@@ -9,13 +11,13 @@
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1Color, Av1EncodeConfig, Tiling};
+use gamut_av1::{Av1Color, Av1EncodeConfig};
 use gamut_avif::{Av1CodestreamEncoder, Av1EncodeRequest, AvifEncoder};
 use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr};
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Result, Rgb8, Rgba8, Rgba16};
 
-/// Wide enough for `gamut-av1`'s default layout to code two tile columns, so the tiles of each
-/// still really are coded concurrently.
+/// The fixture's width, two and a half superblocks: wide enough that a tile layout split into
+/// columns codes more than one, once `AvifEncoder` can ask for one (#1233).
 const W: u32 = 160;
 const H: u32 = 40;
 
@@ -107,21 +109,6 @@ fn threads_default_to_one_and_report_the_chosen_cap() {
         AvifEncoder::new().with_threads(threads(6)).config().threads,
         threads(6)
     );
-}
-
-/// The fixture is coded in more than one tile, so the tile-parallel path is what the
-/// thread-count checks below exercise rather than a one-tile encode no thread count can change.
-#[test]
-fn the_fixture_codes_more_than_one_tile() {
-    let px = source_rgb8();
-    let image = ImageRef::<Rgb8>::new(&px, dims()).unwrap();
-    let planes = Planar8::from_rgb8_identity_view(image);
-    let at = |tiling| {
-        gamut_av1::encode_still(&planes, &Av1EncodeConfig::new(Q50).with_tiling(tiling))
-            .unwrap()
-            .obus
-    };
-    assert_ne!(at(Tiling::DEFAULT), at(Tiling::SINGLE));
 }
 
 #[test]
