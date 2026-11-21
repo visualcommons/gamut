@@ -1157,6 +1157,7 @@ dependencies = [
 name = "gamut-webp"
 version = "0.4.0"
 dependencies = [
+ "gamut-bitstream",
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
