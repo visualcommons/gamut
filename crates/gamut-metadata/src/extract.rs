@@ -26,7 +26,7 @@ use crate::source::MetadataBlock;
 ///
 /// # fn demo(exif: &[u8], xmp: &[u8]) -> Result<(), gamut_metadata::MetadataError> {
 /// let meta = MetadataExtractor::new()
-///     .policy(ConflictPolicy::IimWins)
+///     .with_policy(ConflictPolicy::IimWins)
 ///     .extract(&[MetadataBlock::Exif(exif), MetadataBlock::Xmp(xmp)])?;
 /// # let _ = meta;
 /// # Ok(())
@@ -47,7 +47,7 @@ impl MetadataExtractor {
     /// Sets the [`ConflictPolicy`] used when the legacy IIM and XMP carriers disagree on a mapped
     /// IPTC field, and returns the extractor.
     #[must_use]
-    pub fn policy(mut self, policy: ConflictPolicy) -> Self {
+    pub fn with_policy(mut self, policy: ConflictPolicy) -> Self {
         self.policy = policy;
         self
     }

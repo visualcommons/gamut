@@ -148,7 +148,7 @@ fn reconciliation_folds_iim_into_xmp_per_policy() {
 
     // IimWins prefers the legacy value — and folds it into the single XMP graph.
     let iim_wins = MetadataExtractor::new()
-        .policy(ConflictPolicy::IimWins)
+        .with_policy(ConflictPolicy::IimWins)
         .extract(&blocks)
         .unwrap();
     assert_eq!(iim_wins.iptc().unwrap().city(), Some("Kyoto"));
@@ -219,7 +219,7 @@ fn embed_iim_request_without_iptc_produces_no_block() {
         .extract(&[MetadataBlock::Exif(&exif)])
         .unwrap();
     let enc = MetadataEmbedder::new()
-        .emit_iptc_iim(true)
+        .with_emit_iptc_iim(true)
         .embed(&meta)
         .unwrap();
     assert!(enc.iptc_iim.is_none());
@@ -243,8 +243,8 @@ fn embed_emits_legacy_iim_only_on_request() {
 
     // Opt-in: the legacy IIM block is produced (in the chosen charset) and re-parses to the City.
     let enc = MetadataEmbedder::new()
-        .emit_iptc_iim(true)
-        .iim_charset(IimCharset::Latin1)
+        .with_emit_iptc_iim(true)
+        .with_iim_charset(IimCharset::Latin1)
         .embed(&meta)
         .unwrap();
     let iim = enc.iptc_iim.expect("legacy IIM emitted on request");
@@ -346,7 +346,7 @@ fn embed_rejects_the_manifest_store_under_reject_policy() {
         .unwrap();
 
     let err = MetadataEmbedder::new()
-        .c2pa_policy(C2paPolicy::Reject)
+        .with_c2pa_policy(C2paPolicy::Reject)
         .embed(&meta)
         .unwrap_err();
 
@@ -366,7 +366,7 @@ fn embed_rejects_the_manifest_store_under_reject_policy() {
     // With no store present the same embedder succeeds: the policy is not a blanket refusal.
     let clean = Metadata::from_carriers(Some(Exif::new(ByteOrder::LittleEndian)), None, None);
     let enc = MetadataEmbedder::new()
-        .c2pa_policy(C2paPolicy::Reject)
+        .with_c2pa_policy(C2paPolicy::Reject)
         .embed(&clean)
         .unwrap();
     assert!(enc.exif.is_some());
@@ -379,8 +379,8 @@ fn embed_rejects_the_manifest_store_under_reject_policy() {
     let mut both = meta.clone();
     both.set_extension("com.example.raw", "WhiteLevel", Value::Long(vec![1]));
     let first = MetadataEmbedder::new()
-        .extension_policy(ExtensionPolicy::Reject)
-        .c2pa_policy(C2paPolicy::Reject)
+        .with_extension_policy(ExtensionPolicy::Reject)
+        .with_c2pa_policy(C2paPolicy::Reject)
         .embed(&both)
         .unwrap_err();
     assert!(matches!(first, MetadataError::UnembeddableExtension { .. }));
