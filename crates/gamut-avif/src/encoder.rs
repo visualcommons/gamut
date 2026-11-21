@@ -1333,7 +1333,7 @@ impl AvifEncoder {
             Property::new(
                 false,
                 PropertyKind::Colour(ColourInformation::Nclx(Cicp {
-                    colour_primaries: c.color_primaries,
+                    color_primaries: c.color_primaries,
                     transfer_characteristics: c.transfer_characteristics,
                     matrix_coefficients: c.matrix_coefficients,
                     full_range: c.full_range,
@@ -2556,7 +2556,7 @@ mod tests {
             // Every CICP field is whatever the configuration selected (AVIF v1.2.0 §2.2; mc = 0
             // additionally requires 4:4:4). `colr` must mirror the sequence header exactly, which
             // the backend seam re-checks for a foreign stream (AV1-ISOBMFF v1.3.0 §2.3.4).
-            assert_eq!(nclx.colour_primaries, want_primaries);
+            assert_eq!(nclx.color_primaries, want_primaries);
             assert_eq!(nclx.transfer_characteristics, want_transfer);
             assert_eq!(nclx.matrix_coefficients, want_matrix);
             assert_eq!(nclx.full_range, want_full_range);

@@ -195,7 +195,7 @@ fn build_xyb_icc() -> IccProfile {
 
 fn serialized_xyb_icc() -> Vec<u8> {
     IccWriter::new()
-        .recompute_profile_id(true)
+        .with_recompute_profile_id(true)
         .write(&build_xyb_icc())
         .expect("serialize XYB profile")
 }

@@ -322,7 +322,7 @@ fn encode_rejects_extensions_under_reject_policy() {
     meta.set_extension(OTHER_NS, "Later", Value::Long(vec![1]));
 
     let err = MetadataEmbedder::new()
-        .extension_policy(ExtensionPolicy::Reject)
+        .with_extension_policy(ExtensionPolicy::Reject)
         .embed(&meta)
         .unwrap_err();
 
@@ -340,7 +340,7 @@ fn encode_rejects_extensions_under_reject_policy() {
     let clean = Metadata::from_carriers(Some(Exif::new(ByteOrder::LittleEndian)), None, None);
     assert!(
         MetadataEmbedder::new()
-            .extension_policy(ExtensionPolicy::Reject)
+            .with_extension_policy(ExtensionPolicy::Reject)
             .embed(&clean)
             .is_ok()
     );

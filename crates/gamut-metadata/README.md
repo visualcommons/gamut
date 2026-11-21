@@ -63,7 +63,7 @@ meta.set_extension("com.example.raw", "WhiteLevel", Value::Long(vec![16_383]));
 // Embedding cannot carry it: dropped by default, or refused when losing it must be an error.
 let blocks = meta.to_blocks()?;                       // no block corresponds to the extension
 let strict = MetadataEmbedder::new()
-    .extension_policy(ExtensionPolicy::Reject)
+    .with_extension_policy(ExtensionPolicy::Reject)
     .embed(&meta);                                  // Err(MetadataError::UnembeddableExtension { .. })
 # assert!(blocks.exif.is_none() && strict.is_err());
 # Ok::<(), gamut_metadata::MetadataError>(())
@@ -104,7 +104,7 @@ assert_eq!(meta.c2pa.as_deref(), Some(manifest_store));
 let blocks = meta.to_blocks()?;
 assert_eq!(blocks.c2pa, None);                      // dropped by default...
 let strict = MetadataEmbedder::new()
-    .c2pa_policy(C2paPolicy::Reject)
+    .with_c2pa_policy(C2paPolicy::Reject)
     .embed(&meta);                                  // Err(MetadataError::UnembeddableC2pa { .. })
 # let _ = strict;
 # Ok(())
@@ -184,7 +184,7 @@ use gamut_metadata::{MetadataBlock, MetadataExtractor};
 # ) -> gamut_metadata::Result<()> {
 // A container crate has already located the metadata payloads in a file.
 let meta = MetadataExtractor::new()
-    .policy(ConflictPolicy::XmpWins)
+    .with_policy(ConflictPolicy::XmpWins)
     .extract(&[
         MetadataBlock::Exif(exif_payload),
         MetadataBlock::Xmp(xmp_payload),

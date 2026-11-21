@@ -123,7 +123,7 @@ impl Av1StillConfig {
             chroma_subsampling_x: factors.width().trailing_zeros() as u8,
             chroma_subsampling_y: factors.height().trailing_zeros() as u8,
             chroma_sample_position: color.chroma_sample_position,
-            color_primaries: color.cicp.colour_primaries,
+            color_primaries: color.cicp.color_primaries,
             transfer_characteristics: color.cicp.transfer_characteristics,
             matrix_coefficients: color.cicp.matrix_coefficients,
             full_range: color.cicp.full_range,

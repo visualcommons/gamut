@@ -66,7 +66,7 @@ pub(crate) fn run(args: &IccArgs) -> Result<(), CliError> {
     let blob = extract(&data, format, &args.input)?;
 
     let profile = if args.strict {
-        IccReader::new().strict(true).parse(&blob)?
+        IccReader::new().with_strict(true).parse(&blob)?
     } else {
         IccProfile::parse(&blob)?
     };
@@ -225,7 +225,7 @@ fn summarize(data: &TagData) -> String {
         TagData::Chromaticity(c) => format!("chromaticity ({} channels)", c.channels.len()),
         TagData::Cicp(c) => format!(
             "cicp {}/{}/{}/{}",
-            c.colour_primaries,
+            c.color_primaries,
             c.transfer_characteristics,
             c.matrix_coefficients,
             u8::from(c.full_range)

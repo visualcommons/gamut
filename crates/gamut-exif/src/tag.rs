@@ -17,19 +17,23 @@ use crate::tag::TagCount::{Any, Exact, OneOf};
 /// The 1st IFD ([`IfdKind::Thumbnail`]) reuses the 0th IFD's TIFF baseline tags rather than
 /// defining its own, so no [`ExifTag`] is classified under `Thumbnail`; [`ExifTag::from_id`]
 /// resolves a `Thumbnail` lookup against the [`IfdKind::Image`] tags.
+///
+/// `#[repr(u8)]` with permanent, append-only discriminants, so the value crosses a C boundary
+/// unchanged; a new directory takes the next free discriminant.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum IfdKind {
     /// The 0th IFD — primary-image / TIFF tags (Make, Model, Orientation, resolution, …).
-    Image,
+    Image = 0,
     /// The Exif sub-IFD — capture parameters (exposure, aperture, ISO, lens, …).
-    Exif,
+    Exif = 1,
     /// The GPS sub-IFD — positioning data.
-    Gps,
+    Gps = 2,
     /// The Interoperability sub-IFD — interoperability identification.
-    Interop,
+    Interop = 3,
     /// The 1st IFD — the embedded thumbnail's tags (shares the 0th IFD's tag definitions).
-    Thumbnail,
+    Thumbnail = 4,
 }
 
 /// How many components a specification requires a tag's value to have — for an [`ExifTag`], the
@@ -388,6 +392,15 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    #[test]
+    fn ifd_kind_discriminants_are_the_frozen_c_abi_values() {
+        assert_eq!(IfdKind::Image as u8, 0);
+        assert_eq!(IfdKind::Exif as u8, 1);
+        assert_eq!(IfdKind::Gps as u8, 2);
+        assert_eq!(IfdKind::Interop as u8, 3);
+        assert_eq!(IfdKind::Thumbnail as u8, 4);
+    }
 
     #[test]
     fn tag_ids_are_unique_within_each_ifd() {

@@ -69,7 +69,7 @@
 //!
 //! // ...and a caller that must not lose it silently can say so.
 //! let rejected = MetadataEmbedder::new()
-//!     .extension_policy(ExtensionPolicy::Reject)
+//!     .with_extension_policy(ExtensionPolicy::Reject)
 //!     .embed(&meta);
 //! assert!(matches!(
 //!     rejected,
@@ -110,7 +110,7 @@
 //!
 //! // ...or loudly, for a caller that must notice provenance is being dropped.
 //! let rejected = MetadataEmbedder::new()
-//!     .c2pa_policy(C2paPolicy::Reject)
+//!     .with_c2pa_policy(C2paPolicy::Reject)
 //!     .embed(&meta);
 //! assert!(matches!(rejected, Err(MetadataError::UnembeddableC2pa { .. })));
 //! # Ok::<(), gamut_metadata::MetadataError>(())

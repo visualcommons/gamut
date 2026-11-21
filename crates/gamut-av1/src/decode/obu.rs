@@ -520,7 +520,7 @@ impl SequenceHeader {
             };
 
         let cicp = |full_range| Cicp {
-            colour_primaries: u16::from(color_primaries),
+            color_primaries: u16::from(color_primaries),
             transfer_characteristics: u16::from(transfer_characteristics),
             matrix_coefficients: u16::from(matrix_coefficients),
             full_range,
@@ -636,7 +636,7 @@ mod tests {
         let cfg = still_config(32, 32, colour);
         let payload = crate::headers::sequence_header_payload(&cfg, 32, 32, true, false);
         let sh = SequenceHeader::parse(&payload).unwrap();
-        assert_eq!(sh.color.cicp.colour_primaries, 1);
+        assert_eq!(sh.color.cicp.color_primaries, 1);
         assert_eq!(sh.color.cicp.transfer_characteristics, 1);
         assert_eq!(sh.color.cicp.matrix_coefficients, 1);
         assert!(

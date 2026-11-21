@@ -183,7 +183,7 @@ fn model(kind: ProfileKind) -> Result<IccProfile, String> {
 /// Serializes with the profile ID stamped, as an embedding application would.
 fn serialize(profile: &IccProfile) -> Result<Vec<u8>, String> {
     IccWriter::new()
-        .recompute_profile_id(true)
+        .with_recompute_profile_id(true)
         .write(profile)
         .map_err(|e| e.to_string())
 }

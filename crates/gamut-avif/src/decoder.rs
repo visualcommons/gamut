@@ -322,7 +322,7 @@ mod tests {
         let cicp = Av1::signalled_colour(&config, &item.payload).unwrap();
         assert_eq!(
             (
-                cicp.colour_primaries,
+                cicp.color_primaries,
                 cicp.transfer_characteristics,
                 cicp.matrix_coefficients,
                 cicp.full_range

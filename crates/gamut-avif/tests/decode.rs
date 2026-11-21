@@ -884,7 +884,7 @@ fn colr(matrix: u16, full: bool) -> Property {
     Property::new(
         false,
         PropertyKind::Colour(gamut_isobmff::ColourInformation::Nclx(gamut_core::Cicp {
-            colour_primaries: 1,
+            color_primaries: 1,
             transfer_characteristics: 13,
             matrix_coefficients: matrix,
             full_range: full,
@@ -2404,7 +2404,7 @@ fn av1_sequence_header_reads_the_primary_and_alpha_items() {
     assert_eq!(primary.color.subsampling, ChromaSubsampling::Cs420);
     assert_eq!(
         (
-            primary.color.cicp.colour_primaries,
+            primary.color.cicp.color_primaries,
             primary.color.cicp.transfer_characteristics,
             primary.color.cicp.matrix_coefficients,
         ),

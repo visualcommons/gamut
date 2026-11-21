@@ -30,7 +30,7 @@ use crate::hvcc::HevcConfig;
 /// to 0 (ITU-T H.265 §E.3.1) and still-image content is overwhelmingly studio-swing. The SPS VUI
 /// is not read.
 const UNSIGNALLED_COLOUR: Cicp = Cicp {
-    colour_primaries: 2,
+    color_primaries: 2,
     transfer_characteristics: 2,
     matrix_coefficients: 6,
     full_range: false,

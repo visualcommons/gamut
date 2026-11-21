@@ -10,7 +10,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Cicp {
     /// `ColourPrimaries` (H.273 §8.1).
-    pub colour_primaries: u16,
+    pub color_primaries: u16,
     /// `TransferCharacteristics` (H.273 §8.2).
     pub transfer_characteristics: u16,
     /// `MatrixCoefficients` (H.273 §8.3).

@@ -271,7 +271,7 @@ fn render_property(p: &Property) -> String {
         ),
         PropertyKind::Colour(ColourInformation::Nclx(n)) => format!(
             "colr  nclx cp={} tc={} mc={} {}",
-            n.colour_primaries,
+            n.color_primaries,
             n.transfer_characteristics,
             n.matrix_coefficients,
             if n.full_range {
@@ -419,7 +419,7 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
             descriptive(ispe(128, 128)),
             descriptive(pixi(&[8, 8, 8])),
             descriptive(PropertyKind::Colour(ColourInformation::Nclx(Cicp {
-                colour_primaries: 1,
+                color_primaries: 1,
                 transfer_characteristics: 13,
                 matrix_coefficients: 6,
                 full_range: true,

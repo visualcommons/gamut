@@ -9,7 +9,7 @@
 //! panic, a hang, or an allocation past libFuzzer's malloc limit: a `clut` whose grid points and
 //! channel count multiply past the tag's own size is the canonical case.
 //!
-//! The lenient default is driven, not `IccReader::strict`: strict mode only adds refusals on top
+//! The lenient default is driven, not `IccReader::with_strict`: strict mode only adds refusals on top
 //! of the same parse, so it reaches nothing the lenient one does not.
 //!
 //! This target lists **no check beyond the crash oracle**, like `dng_decode`. A crash is minimised

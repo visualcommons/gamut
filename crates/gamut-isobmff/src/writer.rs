@@ -511,7 +511,7 @@ fn serialize_property(kind: &PropertyKind) -> Vec<u8> {
         PropertyKind::Colour(ColourInformation::Nclx(c)) => {
             let start = bb.begin_box(b"colr");
             bb.bytes(b"nclx");
-            bb.u16(c.colour_primaries);
+            bb.u16(c.color_primaries);
             bb.u16(c.transfer_characteristics);
             bb.u16(c.matrix_coefficients);
             bb.u8(u8::from(c.full_range) << 7); // full_range_flag in bit 7, reserved = 0

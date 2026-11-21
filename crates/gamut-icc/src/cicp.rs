@@ -23,7 +23,7 @@ use crate::error::{IccError, Result};
 /// [`IccError::Malformed`] if the element is shorter than 12 bytes or its flag byte is not 0 or 1.
 pub(crate) fn decode_cicp(element: &[u8]) -> Result<Cicp> {
     let mut r = ByteReader::at(element, 8)?;
-    let colour_primaries = u16::from(r.u8()?);
+    let color_primaries = u16::from(r.u8()?);
     let transfer_characteristics = u16::from(r.u8()?);
     let matrix_coefficients = u16::from(r.u8()?);
     let full_range = match r.u8()? {
@@ -36,7 +36,7 @@ pub(crate) fn decode_cicp(element: &[u8]) -> Result<Cicp> {
         }
     };
     Ok(Cicp {
-        colour_primaries,
+        color_primaries,
         transfer_characteristics,
         matrix_coefficients,
         full_range,
@@ -54,7 +54,7 @@ pub(crate) fn encode_cicp(cicp: &Cicp, out: &mut Vec<u8>) -> Result<()> {
         u8::try_from(code).map_err(|_| IccError::Malformed("icc: cicp code point exceeds 255"))
     };
     let fields = [
-        byte(cicp.colour_primaries)?,
+        byte(cicp.color_primaries)?,
         byte(cicp.transfer_characteristics)?,
         byte(cicp.matrix_coefficients)?,
         u8::from(cicp.full_range),
@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(
             cicp,
             Cicp {
-                colour_primaries: 1,
+                color_primaries: 1,
                 transfer_characteristics: 13,
                 matrix_coefficients: 0,
                 full_range: true,
@@ -110,7 +110,7 @@ mod tests {
     fn encodes_the_exact_bytes() {
         // 9-16-0-1 — PQ BT.2100 full-range R'G'B'.
         let cicp = Cicp {
-            colour_primaries: 9,
+            color_primaries: 9,
             transfer_characteristics: 16,
             matrix_coefficients: 0,
             full_range: true,
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn refuses_a_code_point_over_255_in_each_field() {
         let max = Cicp {
-            colour_primaries: 255,
+            color_primaries: 255,
             transfer_characteristics: 255,
             matrix_coefficients: 255,
             full_range: false,
@@ -134,7 +134,7 @@ mod tests {
         assert_eq!(out, element([255, 255, 255, 0]));
         for wide in [
             Cicp {
-                colour_primaries: 256,
+                color_primaries: 256,
                 ..max
             },
             Cicp {

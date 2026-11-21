@@ -374,7 +374,7 @@ fn reader_facade_lenient_and_strict() {
     assert!(gamut_icc::IccReader::new().parse(&bytes).is_ok());
     assert!(
         gamut_icc::IccReader::new()
-            .strict(true)
+            .with_strict(true)
             .parse(&bytes)
             .is_ok()
     );
@@ -384,7 +384,7 @@ fn reader_facade_lenient_and_strict() {
     assert!(gamut_icc::IccReader::new().parse(&poked).is_ok());
     assert!(
         gamut_icc::IccReader::new()
-            .strict(true)
+            .with_strict(true)
             .parse(&poked)
             .is_err()
     );
@@ -455,7 +455,7 @@ fn cicp_tag_matches_lcms() {
     let Some(TagData::Cicp(cicp)) = profile.get(Signature(*b"cicp")) else {
         panic!("expected a decoded cicp tag");
     };
-    assert_eq!(cicp.colour_primaries, 9);
+    assert_eq!(cicp.color_primaries, 9);
     assert_eq!(cicp.transfer_characteristics, 16);
     assert_eq!(cicp.matrix_coefficients, 0);
     assert!(cicp.full_range);

@@ -57,7 +57,7 @@ pub enum C2paPolicy {
 /// Each field is `Some` when that carrier was produced; a container crate writes each present block
 /// as its chunk / item / segment. IPTC-Core travels inside [`xmp`](Self::xmp) (the XMP packet);
 /// [`iptc_iim`](Self::iptc_iim) is the optional legacy binary form, emitted only when requested via
-/// [`MetadataEmbedder::emit_iptc_iim`].
+/// [`MetadataEmbedder::with_emit_iptc_iim`].
 ///
 /// A model's [extensions](Metadata::extensions) produce no block — they have no carrier — so
 /// nothing here corresponds to them. [`c2pa`](Self::c2pa) *is* a carrier field, but no policy fills
@@ -76,8 +76,8 @@ pub struct EncodedMetadata {
     /// The ICC profile blob, if [`Metadata::icc`] was present.
     pub icc: Option<Vec<u8>>,
     /// The legacy IPTC-IIM dataset stream (the payload a container wraps in a Photoshop `0x0404`
-    /// resource), emitted only when [`MetadataEmbedder::emit_iptc_iim`] is set and the model carries
-    /// IIM-expressible IPTC data.
+    /// resource), emitted only when [`MetadataEmbedder::with_emit_iptc_iim`] is set and the model
+    /// carries IIM-expressible IPTC data.
     pub iptc_iim: Option<Vec<u8>>,
     /// The C2PA manifest store to write — **never filled by [`MetadataEmbedder::embed`]**.
     ///
@@ -95,8 +95,9 @@ pub struct EncodedMetadata {
 /// of [`MetadataExtractor`](crate::MetadataExtractor).
 ///
 /// EXIF, XMP, and ICC each serialize their present field. IPTC-Core is already inside the XMP packet,
-/// so it needs no separate work; the **legacy** binary IIM block is opt-in ([`emit_iptc_iim`]) — it
-/// cannot represent the richer IPTC Extension data XMP can, so the default keeps embedding lossless.
+/// so it needs no separate work; the **legacy** binary IIM block is opt-in
+/// ([`with_emit_iptc_iim`]) — it cannot represent the richer IPTC Extension data XMP can, so the
+/// default keeps embedding lossless.
 ///
 /// ```no_run
 /// use gamut_metadata::{Metadata, MetadataEmbedder};
@@ -111,7 +112,7 @@ pub struct EncodedMetadata {
 /// # }
 /// ```
 ///
-/// [`emit_iptc_iim`]: MetadataEmbedder::emit_iptc_iim
+/// [`with_emit_iptc_iim`]: MetadataEmbedder::with_emit_iptc_iim
 #[derive(Debug, Clone, Copy)]
 pub struct MetadataEmbedder {
     emit_iptc_iim: bool,
@@ -143,15 +144,16 @@ impl MetadataEmbedder {
     /// embedder. Off by default — XMP already carries IPTC losslessly; the IIM projection is
     /// best-effort and for legacy-consumer compatibility only.
     #[must_use]
-    pub fn emit_iptc_iim(mut self, emit: bool) -> Self {
+    pub fn with_emit_iptc_iim(mut self, emit: bool) -> Self {
         self.emit_iptc_iim = emit;
         self
     }
 
     /// Sets the charset used to encode the legacy IIM text, and returns the embedder. Defaults to
-    /// [`IimCharset::Utf8`]; only relevant when [`emit_iptc_iim`](Self::emit_iptc_iim) is set.
+    /// [`IimCharset::Utf8`]; only relevant when [`with_emit_iptc_iim`](Self::with_emit_iptc_iim)
+    /// is set.
     #[must_use]
-    pub fn iim_charset(mut self, charset: IimCharset) -> Self {
+    pub fn with_iim_charset(mut self, charset: IimCharset) -> Self {
         self.iim_charset = charset;
         self
     }
@@ -159,7 +161,7 @@ impl MetadataEmbedder {
     /// Sets what to do with the model's [extensions](Metadata::extensions), and returns the
     /// embedder. Defaults to [`ExtensionPolicy::Drop`].
     #[must_use]
-    pub fn extension_policy(mut self, policy: ExtensionPolicy) -> Self {
+    pub fn with_extension_policy(mut self, policy: ExtensionPolicy) -> Self {
         self.extension_policy = policy;
         self
     }
@@ -168,7 +170,7 @@ impl MetadataEmbedder {
     /// embedder. Defaults to [`C2paPolicy::Drop`] — the store is never written into the new file
     /// either way; this chooses whether losing it is an error.
     #[must_use]
-    pub fn c2pa_policy(mut self, policy: C2paPolicy) -> Self {
+    pub fn with_c2pa_policy(mut self, policy: C2paPolicy) -> Self {
         self.c2pa_policy = policy;
         self
     }
@@ -176,10 +178,10 @@ impl MetadataEmbedder {
     /// Serializes the model to its per-carrier blocks.
     ///
     /// The model's [extensions](Metadata::extensions) are not carriers and produce no block; they
-    /// are dropped, or rejected, per [`extension_policy`](Self::extension_policy). A
+    /// are dropped, or rejected, per [`with_extension_policy`](Self::with_extension_policy). A
     /// [C2PA manifest store](Metadata::c2pa) likewise produces no block — it cannot be copied into
     /// a file it was not signed over — and is dropped, or rejected, per
-    /// [`c2pa_policy`](Self::c2pa_policy).
+    /// [`with_c2pa_policy`](Self::with_c2pa_policy).
     ///
     /// # Errors
     ///
@@ -188,15 +190,15 @@ impl MetadataEmbedder {
     /// representable in classic-TIFF widths,
     /// [`MetadataError::Icc`] for an ICC profile that violates
     /// an invariant, or [`MetadataError::Iptc`] when
-    /// [`emit_iptc_iim`](Self::emit_iptc_iim) is set and an IPTC value cannot be expressed in the
-    /// chosen IIM charset.
+    /// [`with_emit_iptc_iim`](Self::with_emit_iptc_iim) is set and an IPTC value cannot be
+    /// expressed in the chosen IIM charset.
     ///
     /// Also returns [`MetadataError::UnembeddableExtension`],
-    /// naming the first extension, when [`extension_policy`](Self::extension_policy) is
+    /// naming the first extension, when [`with_extension_policy`](Self::with_extension_policy) is
     /// [`ExtensionPolicy::Reject`] and the model carries one, or
     /// [`MetadataError::UnembeddableC2pa`] when
-    /// [`c2pa_policy`](Self::c2pa_policy) is [`C2paPolicy::Reject`] and the model carries a
-    /// manifest store. When both apply, the extension error is reported.
+    /// [`with_c2pa_policy`](Self::with_c2pa_policy) is [`C2paPolicy::Reject`] and the model
+    /// carries a manifest store. When both apply, the extension error is reported.
     pub fn embed(&self, meta: &Metadata) -> Result<EncodedMetadata> {
         // Refuse before serializing anything, so a rejected model produces no partial work.
         if self.extension_policy == ExtensionPolicy::Reject

@@ -25,21 +25,25 @@ use crate::transfer::{
 /// The encoder-exact per-channel transfer a [`SourceProfile`] linearizes with.
 ///
 /// `#[non_exhaustive]`: more transfers (HLG is the named next candidate) may be added later.
+/// `#[repr(u8)]` with permanent, append-only discriminants, so the value crosses a C boundary
+/// unchanged; a new transfer takes the next free discriminant. They are gamut's own ordering,
+/// deliberately *not* the CICP code point (Adobe RGB and ProPhoto RGB have none).
+#[repr(u8)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceTransfer {
     /// Linear — the identity transfer (CICP code point 8). The working space of a
     /// scene-linear pipeline (RAW demosaic / white balance / colour matrix), which
     /// operates on already-linear samples and applies its output transfer afterwards.
-    Linear,
+    Linear = 0,
     /// sRGB EOTF (IEC 61966-2-1).
-    Srgb,
+    Srgb = 1,
     /// Adobe RGB, pure `x^2.2`.
-    AdobeRgb,
+    AdobeRgb = 2,
     /// ProPhoto RGB, pure `x^1.8`.
-    ProPhotoRgb,
+    ProPhotoRgb = 3,
     /// BT.2020 PQ EOTF → nits → Reinhard@203 (tone-mapped to SDR).
-    Bt2020Pq,
+    Bt2020Pq = 4,
 }
 
 impl SourceTransfer {
@@ -82,6 +86,18 @@ impl SourceTransfer {
 /// let lab = p.gamma_rgb_to_oklab([1.0, 1.0, 1.0]);
 /// assert!((lab[0] - 1.0).abs() < 1e-6);
 /// ```
+///
+/// `#[non_exhaustive]`: the bundle is an open set, so a further encoder-exact parameter may join
+/// `gamut` and `transfer` later without a breaking change. Start from one of the named profiles
+/// and assign the public fields to build another:
+///
+/// ```
+/// use gamut_color::{SourceProfile, SourceTransfer};
+/// let mut linear_p3 = SourceProfile::DISPLAY_P3;
+/// linear_p3.transfer = SourceTransfer::Linear;
+/// assert_eq!(linear_p3.gamut, SourceProfile::DISPLAY_P3.gamut);
+/// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceProfile {
     /// The colour-science gamut (selects the `M1` matrix / primaries).
@@ -160,6 +176,15 @@ impl SourceProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_transfer_discriminants_are_the_frozen_c_abi_values() {
+        assert_eq!(SourceTransfer::Linear as u8, 0);
+        assert_eq!(SourceTransfer::Srgb as u8, 1);
+        assert_eq!(SourceTransfer::AdobeRgb as u8, 2);
+        assert_eq!(SourceTransfer::ProPhotoRgb as u8, 3);
+        assert_eq!(SourceTransfer::Bt2020Pq as u8, 4);
+    }
 
     #[test]
     fn profiles_decompose_to_cicp_axes() {

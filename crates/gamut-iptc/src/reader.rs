@@ -12,16 +12,18 @@ use crate::reconcile;
 ///
 /// The IPTC guidelines call for keeping the carriers in sync but prescribe no single winner;
 /// this policy is gamut's explicit knob. Marked `#[non_exhaustive]`: finer-grained policies may
-/// be added post-1.0.
+/// be added post-1.0. `#[repr(u8)]` with permanent, append-only discriminants, so the value
+/// crosses a C boundary unchanged; a new policy takes the next free discriminant.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum ConflictPolicy {
     /// The modern XMP value wins (the default; XMP is the authoritative modern carrier, matching
     /// exiv2/exiftool de-facto behaviour).
     #[default]
-    XmpWins,
+    XmpWins = 0,
     /// The legacy IIM value wins.
-    IimWins,
+    IimWins = 1,
 }
 
 /// A per-field disagreement between the two carriers, reported by [`IptcReader::conflicts`].
@@ -126,6 +128,12 @@ mod tests {
 
     use super::*;
     use crate::iim::IimDataSet;
+
+    #[test]
+    fn conflict_policy_discriminants_are_the_frozen_c_abi_values() {
+        assert_eq!(ConflictPolicy::XmpWins as u8, 0);
+        assert_eq!(ConflictPolicy::IimWins as u8, 1);
+    }
 
     #[test]
     fn read_irb_propagates_resource_stream_errors() {

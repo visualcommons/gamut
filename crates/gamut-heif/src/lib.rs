@@ -63,7 +63,7 @@
 //!         Ok(())
 //!     }
 //!     fn signalled_colour(_: &u8, _: &[u8]) -> Result<Cicp> {
-//!         Ok(Cicp { colour_primaries: 1, transfer_characteristics: 13,
+//!         Ok(Cicp { color_primaries: 1, transfer_characteristics: 13,
 //!                   matrix_coefficients: 1, full_range: true })
 //!     }
 //!     fn supports(_: &mut Backend, _: &u8) -> bool {
