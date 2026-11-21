@@ -204,8 +204,6 @@ fn alpha_levels(quality: u8) -> Option<usize> {
 pub(crate) fn quantize_levels(plane: &mut [u8], num_levels: usize) {
     /// libwebp's `MAX_ITER`.
     const MAX_ITER: usize = 6;
-    /// libwebp's `ERROR_THRESHOLD`, per pixel.
-    const ERROR_THRESHOLD: f64 = 1e-4;
 
     let mut freq = [0u32; 256];
     for &v in plane.iter() {
@@ -224,7 +222,6 @@ pub(crate) fn quantize_levels(plane: &mut [u8], num_levels: usize) {
         *centroid = min_s as f64 + (max_s - min_s) as f64 * i as f64 / (num_levels - 1) as f64;
     }
     let mut q_level = [0usize; 256];
-    let err_threshold = ERROR_THRESHOLD * plane.len() as f64;
     let mut last_err = 1e38;
     for _ in 0..MAX_ITER {
         let mut q_sum = [0f64; 256];
@@ -253,12 +250,8 @@ pub(crate) fn quantize_levels(plane: &mut [u8], num_levels: usize) {
                 inv_q_level[slot] = q_sum[slot] / q_count[slot];
             }
         }
-        let mut err = 0.0;
-        for s in min_s..=max_s {
-            let error = s as f64 - inv_q_level[q_level[s]];
-            err += f64::from(freq[s]) * error * error;
-        }
-        if last_err - err < err_threshold {
+        let err = squared_error(&freq, &inv_q_level, &q_level, min_s, max_s);
+        if converged(last_err, err, plane.len()) {
             break;
         }
         last_err = err;
@@ -272,6 +265,32 @@ pub(crate) fn quantize_levels(plane: &mut [u8], num_levels: usize) {
     for v in plane.iter_mut() {
         *v = map[usize::from(*v)];
     }
+}
+
+/// The squared error of one `quantize_levels` pass, summed as libwebp's `QuantizeLevels` sums it:
+/// `Σ freq[s] · (s − centroids[q_level[s]])²` over the values `min_s..=max_s`.
+fn squared_error(
+    freq: &[u32; 256],
+    centroids: &[f64; 256],
+    q_level: &[usize; 256],
+    min_s: usize,
+    max_s: usize,
+) -> f64 {
+    let mut err = 0.0;
+    for s in min_s..=max_s {
+        let error = s as f64 - centroids[q_level[s]];
+        err += f64::from(freq[s]) * error * error;
+    }
+    err
+}
+
+/// libwebp's `QuantizeLevels` stopping rule, `if (last_err - err < ERROR_THRESHOLD * N) break;`:
+/// the k-means stops once a pass improves the squared error over `pixels` values by less than
+/// `1e-4` per pixel.
+fn converged(last_err: f64, err: f64, pixels: usize) -> bool {
+    /// libwebp's `ERROR_THRESHOLD`, per pixel.
+    const ERROR_THRESHOLD: f64 = 1e-4;
+    last_err - err < ERROR_THRESHOLD * pixels as f64
 }
 
 /// Builds an `ALPH` chunk payload (RFC 9649 §2.7.1) for a **raw** (uncompressed) alpha plane: the
@@ -718,6 +737,35 @@ mod tests {
         let mut plane = vec![0u8, 1, 2, 255];
         quantize_levels(&mut plane, 3);
         assert_eq!(plane, [0, 0, 0, 255]);
+    }
+
+    /// The pass error weights each value's squared distance from its centroid by its count:
+    /// `3 · (1 − 0)² + 1 · (4 − 2)² = 7`. The `4` term has a distance other than `1`, so it tells
+    /// `freq · e · e` from `freq / e · e` and `freq · e / e`; the absent `2` and `3` add nothing.
+    #[test]
+    fn squared_error_weights_each_value_by_its_count() {
+        let mut freq = [0u32; 256];
+        freq[1] = 3;
+        freq[4] = 1;
+        let mut centroids = [0f64; 256];
+        centroids[1] = 2.0;
+        let mut q_level = [0usize; 256];
+        q_level[4] = 1;
+        assert_eq!(squared_error(&freq, &centroids, &q_level, 1, 4), 7.0);
+    }
+
+    /// The k-means stops on an improvement strictly below `1e-4` per pixel: no improvement and
+    /// half the threshold stop it, an improvement of exactly the threshold does not.
+    #[test]
+    fn converged_stops_strictly_below_the_per_pixel_threshold() {
+        let pixels = 10_000;
+        let threshold = 1e-4 * pixels as f64;
+        assert!(converged(5.0, 5.0, pixels), "no improvement");
+        assert!(
+            converged(threshold, threshold / 2.0, pixels),
+            "half the threshold"
+        );
+        assert!(!converged(threshold, 0.0, pixels), "exactly the threshold");
     }
 
     /// Below alpha quality 100 the header records level reduction and the stored plane has at most
