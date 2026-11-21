@@ -9,6 +9,7 @@
 //! and decoder's own chunk coders, not here.
 
 use gamut_core::{Error, Result};
+use gamut_deflate::Level;
 
 use crate::values::Compression;
 
@@ -41,15 +42,19 @@ pub fn is_lossy(scheme: Compression) -> bool {
 
 /// Deflates one already-packed strip to DNG's `Compression = 8` zlib stream.
 ///
-/// Encoding goes through the workspace's own space-optimising zlib encoder at its default level
-/// (lazy matching + per-block dynamic Huffman), the same choice `gamut-tiff` makes for Adobe
-/// Deflate. Inflation is its shared bounded inflate — see [`decompress`]. Uncompressed strips are
-/// the packed bytes themselves, and lossless JPEG and JPEG XL code samples rather than packed
-/// bytes, so Deflate is the one scheme that compresses here and the caller selects it by calling
-/// this function: no scheme parameter means no arm for a scheme it cannot encode.
-pub(crate) fn deflate(packed: &[u8]) -> Vec<u8> {
+/// Encoding goes through the workspace's own space-optimising zlib encoder at `level`
+/// ([`DngEncoder::with_deflate_level`](crate::DngEncoder::with_deflate_level), default
+/// [`Level::Default`]: lazy matching + per-block dynamic Huffman), the same knob `gamut-tiff`
+/// exposes for Adobe Deflate. Inflation is its shared bounded inflate — see [`decompress`].
+/// Uncompressed strips are the packed bytes themselves, and lossless JPEG and JPEG XL code samples
+/// rather than packed bytes, so Deflate is the one scheme that compresses here and the caller
+/// selects it by calling this function: no scheme parameter means no arm for a scheme it cannot
+/// encode.
+pub(crate) fn deflate(packed: &[u8], level: Level) -> Vec<u8> {
     let mut out = Vec::new();
-    gamut_deflate::DeflateEncoder::new().zlib_compress(packed, &mut out);
+    gamut_deflate::DeflateEncoder::new()
+        .with_level(level)
+        .zlib_compress(packed, &mut out);
     out
 }
 
@@ -113,7 +118,7 @@ mod tests {
     #[test]
     fn deflate_roundtrips() {
         let data: Vec<u8> = (0..4096).map(|i| (i * 7 % 251) as u8).collect();
-        let packed = deflate(&data);
+        let packed = deflate(&data, Level::Default);
         assert!(packed.len() < data.len(), "structured data should shrink");
         assert_eq!(
             decompress(Compression::Deflate, &packed, data.len()).unwrap(),
@@ -121,12 +126,34 @@ mod tests {
         );
     }
 
+    /// The level reaches the zlib encoder: every level inflates back exactly, and `Store` —
+    /// stored blocks only — is strictly larger than `Best`, so a `deflate` that dropped `level`
+    /// for the default cannot pass both bounds.
+    #[test]
+    fn every_deflate_level_round_trips_and_the_level_reaches_the_encoder() {
+        let data: Vec<u8> = (0..4096).map(|i| (i * 7 % 251) as u8).collect();
+        for level in [Level::Store, Level::Fast, Level::Default, Level::Best] {
+            let packed = deflate(&data, level);
+            assert_eq!(
+                decompress(Compression::Deflate, &packed, data.len()).unwrap(),
+                data,
+                "{level:?}"
+            );
+        }
+        let stored = deflate(&data, Level::Store);
+        assert!(
+            stored.len() > data.len(),
+            "stored blocks add framing, never shrink"
+        );
+        assert!(deflate(&data, Level::Best).len() < stored.len());
+    }
+
     /// A stream inflating to exactly `max_out` is accepted; one byte over is rejected, and with a
     /// message distinct from generic corruption so the caller can tell a bomb from a bad stream.
     #[test]
     fn inflation_is_capped_at_max_out() {
         let data: Vec<u8> = (0..4096).map(|i| (i * 7 % 251) as u8).collect();
-        let packed = deflate(&data);
+        let packed = deflate(&data, Level::Default);
         assert!(decompress(Compression::Deflate, &packed, data.len()).is_ok());
         let over = decompress(Compression::Deflate, &packed, data.len() - 1).unwrap_err();
         assert_eq!(
@@ -145,7 +172,7 @@ mod tests {
                 .static_message(),
             Some("corrupt zlib stream")
         );
-        let mut packed = deflate(&[1, 2, 3, 4]);
+        let mut packed = deflate(&[1, 2, 3, 4], Level::Default);
         packed.pop();
         assert_eq!(
             decompress(Compression::Deflate, &packed, 4)
