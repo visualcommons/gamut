@@ -71,12 +71,27 @@ assert!(sdr.iter().all(|c| (0.0..=1.0).contains(c)));
 # Ok::<(), gamut_core::Error>(())
 ```
 
+A runtime-selected operator, e.g. from a config file or across a C boundary, is a plain-data
+`ToneOperator` plus a `Copy` `ToneParams` record, built into the same mapper:
+
+```rust
+use gamut_tonemap::{ToneMapper, ToneOperator, ToneParams};
+
+let mapper = ToneParams::new(ToneOperator::Drago, 100.0, 10.0) // Drago, world_max = 100
+    .with_bias(0.7)
+    .mapper()?;
+let sdr = mapper.map_rgb([4.0, 2.0, 0.5]);
+assert!(sdr.iter().all(|c| c.is_finite()));
+# Ok::<(), gamut_core::Error>(())
+```
+
 ## Status
 
 The `ToneCurve` trait (with a blanket impl for any `Fn(f32) -> f32`) and eight built-in operators —
 `Linear`, `Clamp`, `Exposure`, `Reinhard`, `ReinhardExtended`, `Aces`, `Hable`, and `Drago` — plus
 their parameter-default constants; the RGB-aware `ToneMapper` trait with `CurveToneMapper`,
-`ApplyMode` and `DEFAULT_DESAT` (#1236). Every item is at the crate root, its one public path.
+`ApplyMode` and `DEFAULT_DESAT` (#1236); and the plain-data `ToneOperator` selector with
+`ToneParams` and `BuiltinCurve` (#1103). Every item is at the crate root, its one public path.
 Each is implemented clean-slate from the primary source documented in
 [`references/tonemap`](../../references/tonemap/README.md); `CurveToneMapper`'s desaturation and
 max-RGB application transcribe ffmpeg's `tonemap` filter and are held to it by a golden test.
