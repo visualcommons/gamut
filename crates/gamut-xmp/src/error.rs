@@ -68,6 +68,19 @@ pub enum XmpError {
     /// `bytes[..offset]` is the first packet and `bytes[offset..]` the rest.
     #[error("XMP: more than one <?xpacket?> packet; the next begins at byte {0}")]
     MultiplePackets(usize),
+
+    /// The packet nests elements more deeply than the reader accepts; the value is that limit,
+    /// the number of elements that may be open at once (the outermost `x:xmpmeta` or `rdf:RDF`
+    /// counts as one). The limit is 256.
+    ///
+    /// Raised by [`crate::XmpMeta::parse`], [`crate::XmpPacket::to_meta`] and
+    /// [`crate::XmpMeta::from_sidecar`] as soon as the 257th nested start tag is read (issue
+    /// #1260). The XMP specification sets no depth limit, so this is a reader-side bound on hostile
+    /// input: without it a small packet nesting thousands of structures overflowed the stack, an
+    /// abort rather than an error. The deepest structures the standard schemas define (an MWG
+    /// region list, for instance) need about a dozen levels.
+    #[error("XMP: element nesting is deeper than {0} levels")]
+    NestingTooDeep(usize),
 }
 
 /// A specialized [`Result`](core::result::Result) for the XMP read path.
@@ -142,6 +155,11 @@ mod tests {
         // A catenation is malformed input the caller can split, not an unimplemented feature.
         assert_eq!(
             classified(XmpError::MultiplePackets(42)),
+            gamut_core::ErrorKind::InvalidInput
+        );
+        // Nesting past the reader's bound is hostile or corrupt input, not a missing feature.
+        assert_eq!(
+            classified(XmpError::NestingTooDeep(256)),
             gamut_core::ErrorKind::InvalidInput
         );
     }
