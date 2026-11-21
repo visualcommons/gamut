@@ -20,47 +20,39 @@ implementation wins.
   corruption) from the encode and parse paths. For anything that ingests untrusted images,
   that alone justifies the rewrite.
 
-- **Builds anywhere `cargo` does.** No autotools, no CMake, no nasm/yasm, no vendored C, no
-  FFI boundary to audit. `cargo build` cross-compiles cleanly to wasm32, aarch64, and musl
-  targets that libaom makes miserable — one toolchain, reproducible builds, no system-library
-  version skew. CI proves it each merge: the [Extended workflow](.github/workflows/extended.yml)
-  `cargo check`s the library surface for `wasm32-unknown-unknown`, `wasm32-unknown-emscripten`,
-  `aarch64-unknown-linux-gnu`, and `x86_64-unknown-linux-musl`. The one deliberate exception is
-  `gamut-jxl`'s optional `encode` feature, which statically builds the libjxl reference encoder
-  (cmake + a C++ toolchain at build time; the emsdk toolchain on `wasm32-unknown-emscripten`,
-  where a dedicated Extended lane runs the full JXL test suite under node) — a
-  maintainer-approved departure documented in that crate; its pure-Rust `decode` feature keeps
-  JPEG XL C-free and available on every `wasm32` target.
-
-- **WASM as a first-class target, not an afterthought.** The C codecs run through Emscripten
-  come out large, slow to instantiate, and awkward to tree-shake. A native Rust → wasm build
-  is smaller and talks to the JS/TS ecosystem directly, which makes serverless/edge image
-  optimization (Workers, Lambda, and friends) practical instead of shipping a multi-megabyte
-  blob.
+- **Builds anywhere `cargo` does, WASM included.** No autotools, no CMake, no nasm/yasm, no
+  vendored C, no FFI boundary to audit: one toolchain, reproducible builds, no system-library
+  version skew. That makes wasm32 a first-class target rather than an Emscripten afterthought —
+  a native Rust → wasm build is smaller, instantiates faster, and talks to the JS/TS ecosystem
+  directly, so serverless and edge image optimization (Workers, Lambda, and friends) is
+  practical. The [Extended workflow](.github/workflows/extended.yml) `cargo check`s the library
+  surface for `wasm32-unknown-unknown`, `wasm32-unknown-emscripten`, `aarch64-unknown-linux-gnu`,
+  and `x86_64-unknown-linux-musl` on every merge.
 
 - **A genuinely clean license story.** gamut deliberately targets royalty-free formats and
-  ships under MIT OR Apache-2.0 — no GPL/LGPL reach. The lone static-linking case is
-  `gamut-jxl`'s optional `encode` feature (the BSD-3-Clause libjxl reference encoder plus its
-  permissively-licensed bundled libraries — highway, brotli, skcms); every other codec, and a
-  decode-only JPEG XL build, links no C at all. Patent-unencumbered formats deserve
+  ships under MIT OR Apache-2.0 — no GPL/LGPL reach. Patent-unencumbered formats deserve
   permissively-licensed code to match.
+
+  The one deliberate exception to both of the above is `gamut-jxl`'s optional `encode` feature,
+  which statically builds the BSD-3-Clause libjxl reference encoder (plus its permissive bundled
+  highway, brotli and skcms) and so needs cmake and a C++ toolchain at build time — a
+  maintainer-approved departure documented in that crate. Its pure-Rust `decode` feature keeps
+  JPEG XL C-free on every target, and every other codec links no C at all.
 
 - **Encoder-first, size-first — the gap the Rust ecosystem actually has.** Most Rust imaging
   is decode-only and hands the hard encoders off to C wrappers. gamut is built the other way
   round: encoders are the product, and the thing we optimize is *output bytes at a given
   quality and speed*, with the space/time tradeoff documented per format. That's the number
-  that lands on storage and bandwidth bills. Decoders may follow where the Rust ecosystem
-  lacks a strong, feature-complete implementation, but encoders are the priority.
+  that lands on storage and bandwidth bills. Decoders follow where the Rust ecosystem lacks a
+  strong, feature-complete implementation.
 
-- **One codebase, shared primitives.** Color management, DSP, bitstream, and container parsing
-  live in shared crates (`gamut-color`, `gamut-dsp`, `gamut-bitstream`, `gamut-isobmff`,
-  `gamut-riff`) instead of being re-implemented inside each separate C library. Consistent
-  behavior across formats, one API, one place to fix a color bug — and you compile in only the
+- **One readable codebase, shared primitives.** Implemented clean-slate from the official specs
+  in `references/`, with color management, DSP, bitstream, and container parsing in shared
+  crates (`gamut-color`, `gamut-dsp`, `gamut-bitstream`, `gamut-isobmff`, `gamut-riff`) rather
+  than re-implemented inside each separate C library: consistent behavior across formats, one
+  API, one place to fix a color bug, and code you can actually audit, fork, and experiment with —
+  not decades of accreted platform `#ifdef`s and inline assembly. You compile in only the
   formats you enable via Cargo features.
-
-- **Readable enough to change.** Implemented clean-slate from the official specs in
-  `references/`, the code is something you can actually audit, fork, and experiment with —
-  not decades of accreted platform `#ifdef`s and inline assembly.
 
 ### Author's Remarks
 
