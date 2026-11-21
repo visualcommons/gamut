@@ -57,6 +57,10 @@ No ANS coder and no JPEG XL prefix code ship here, and neither is planned: `gamu
 format's reference implementations rather than coding its entropy layer itself. An entropy coder
 for `gamut-av2` would join behind its own module when that stub crate gains an encoder.
 
+The crate stays on 0.x for the foreseeable future, by design. It holds low-level primitives shaped
+by the codecs above it, and its API is expected to churn as they need new ones, so no 1.0
+stability promise is planned; under SemVer a 0.x minor release may break.
+
 ## License
 
 MIT or Apache-2.0, at your option — see the [workspace README](../../README.md#license).
