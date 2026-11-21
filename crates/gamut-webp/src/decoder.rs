@@ -94,7 +94,7 @@ impl fmt::Debug for WebpDecoder {
 
 impl WebpDecoder {
     /// Creates a decoder with the default configuration: no backends, the lossless
-    /// [`ConvertPolicy`], format-maximum dimensions, a 64 MiB decoded-frame budget, and
+    /// [`ConvertPolicy`], the workspace's default [`DecodeLimits`] (no byte budget), and
     /// [`ChromaUpsampling::Interpolated`].
     #[must_use]
     pub fn new() -> Self {
