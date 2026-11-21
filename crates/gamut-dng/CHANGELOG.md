@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gamut-dng)* `DngDecoder::metadata` reads a DNG's Exif, XMP, IPTC-IIM and ICC metadata without
+  decoding its raw image, so files whose image the decoder cannot handle (lossy JPEG) still yield
+  it; the result equals `decode`'s `DecodedDng::metadata` ([#1108](https://github.com/visualcommons/gamut/issues/1108))
+
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-dng-v1.0.0...gamut-dng-v2.0.0) - 2026-10-12
 
 ### Added

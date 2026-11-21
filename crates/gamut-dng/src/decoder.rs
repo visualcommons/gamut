@@ -420,6 +420,38 @@ impl DngDecoder {
         })
     }
 
+    /// Reads `data`'s embedded metadata — the `ExifIFD`, XMP, IPTC-IIM and ICC blocks — without
+    /// decoding its raw image.
+    ///
+    /// The result equals [`decode`](Self::decode)'s [`DecodedDng::metadata`] for every file
+    /// `decode` accepts, and it is read by the same code. It is also available for files `decode`
+    /// refuses because of their *image*: a compression this crate cannot decode (lossy JPEG), a
+    /// raw IFD it cannot select, or corrupt sample data. The whole main IFD chain is parsed (as
+    /// `decode` parses it), so a malformed later main-chain IFD fails the probe; the metadata is
+    /// taken from IFD 0 and the directories it points at, the `SubIFDs` tree is not walked, and
+    /// no strip or tile is touched.
+    ///
+    /// The metadata read degrades as `decode`'s does rather than failing: an `ExifIFD` (or a
+    /// pointer inside it) whose target cannot be read is left out, never an error. That is the
+    /// opposite of `gamut-tiff`'s `TiffDecoder::metadata`, which fails on it; here the two DNG
+    /// surfaces agreeing on one file matters more.
+    ///
+    /// The C2PA manifest store is not part of [`DngMetadata`]; [`c2pa_summary`](crate::c2pa_summary)
+    /// locates it without a decode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the
+    /// container is malformed, or if IFD 0 carries no `DNGVersion` (50706) — a TIFF that is not
+    /// a DNG, which [`decode`](Self::decode) refuses too.
+    pub fn metadata(&self, data: &[u8]) -> Result<DngMetadata> {
+        // `read` guarantees at least one IFD, so index 0 below is IFD 0.
+        let file = read(data)?;
+        let ifd0 = TrackedIfd::new(&file.ifds[0]);
+        read_version(&ifd0)?;
+        Ok(decode_metadata(&ifd0, data, file.order, file.variant))
+    }
+
     /// Decodes `data` (a DNG file) into its raw image, profile, and version.
     ///
     /// # Errors
@@ -484,14 +516,8 @@ impl DngDecoder {
         // once. (Reading the bytes independently is what let a duplicated entry report bytes
         // from the eager `Ifd`, which keeps the last duplicate, while the ranges reported none.)
         let c2pa_exclusions = c2pa_exclusions(data)?;
-        let (metadata, c2pa) = decode_metadata(
-            ifd0,
-            &tracked[last_main],
-            c2pa_exclusions.is_some(),
-            data,
-            order,
-            variant,
-        );
+        let c2pa = decode_c2pa(&tracked[last_main], c2pa_exclusions.is_some());
+        let metadata = decode_metadata(ifd0, data, order, variant);
         let gain_table_map = decode_gain_map(raw_ifd, tags::PROFILE_GAIN_TABLE_MAP, order)?;
         let gain_table_map2 = decode_gain_map(ifd0, tags::PROFILE_GAIN_TABLE_MAP2, order)?;
         let depth_info = decode_depth_info(ifd0);
@@ -588,15 +614,7 @@ impl DngDecoder {
     }
 }
 
-/// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD —
-/// and the C2PA manifest store from `store_ifd`, the last IFD of the main chain.
-///
-/// The `ExifIFD` is handed over whole, as a directory: every entry it holds survives, so no field
-/// of it is "unmodelled". The one exception is a standard pointer field (`InteroperabilityIFD`
-/// in a camera file): it arrives as the sub-IFD group it points at, or — when its target cannot
-/// be read — not at all, never as a raw offset into this file ([`resolve_exif_pointers`]). The
-/// DNG's own IFD 0 is *not* returned as EXIF — [`DecodedDng`] already carries those fields,
-/// typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
+/// Takes the C2PA manifest store from `store_ifd`, the last IFD of the main chain.
 ///
 /// The store is taken as the `UNDEFINED` bytes C2PA 2.4 §A.3.6 mandates, verbatim — the file's
 /// byte order does not apply to them — and only when `located` says
@@ -608,22 +626,34 @@ impl DngDecoder {
 /// header, or one of several in a directory §A.3.6 allows only one store in — is put back for
 /// the extras rather than returned, so it still reaches the caller and decode → encode still
 /// works: every store this hands back is one the encoder will accept.
-fn decode_metadata(
-    ifd0: &TrackedIfd,
-    store_ifd: &TrackedIfd,
-    located: bool,
-    data: &[u8],
-    order: ByteOrder,
-    variant: Variant,
-) -> (DngMetadata, Option<Vec<u8>>) {
-    let c2pa = match store_ifd.get(C2PA_MANIFEST_STORE) {
+fn decode_c2pa(store_ifd: &TrackedIfd, located: bool) -> Option<Vec<u8>> {
+    match store_ifd.get(C2PA_MANIFEST_STORE) {
         Some(Value::Undefined(store)) if located => Some(store.clone()),
         Some(_) => {
             store_ifd.untouch(C2PA_MANIFEST_STORE);
             None
         }
         None => None,
-    };
+    }
+}
+
+/// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD.
+///
+/// The `ExifIFD` is handed over whole, as a directory: every entry it holds survives, so no field
+/// of it is "unmodelled". The one exception is a standard pointer field (`InteroperabilityIFD`
+/// in a camera file): it arrives as the sub-IFD group it points at, or — when its target cannot
+/// be read — not at all, never as a raw offset into this file ([`resolve_exif_pointers`]). The
+/// DNG's own IFD 0 is *not* returned as EXIF — [`DecodedDng`] already carries those fields,
+/// typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
+///
+/// Everything it reads is in IFD 0 or reached by offset from it, which is why
+/// [`DngDecoder::metadata`] can call it without walking the IFD tree or decoding the raw image.
+fn decode_metadata(
+    ifd0: &TrackedIfd,
+    data: &[u8],
+    order: ByteOrder,
+    variant: Variant,
+) -> DngMetadata {
     let exif = ifd0
         .get_u32(tags::EXIF_IFD)
         .and_then(|offset| read_ifd_at(data, u64::from(offset), order, variant).ok())
@@ -633,13 +663,12 @@ fn decode_metadata(
             });
             crate::metadata::exif_model(exif_ifd, order)
         });
-    let metadata = DngMetadata {
+    DngMetadata {
         exif,
         xmp: bytes_value(ifd0.get(tags::XMP)),
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
         icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
-    };
-    (metadata, c2pa)
+    }
 }
 
 /// The deepest level below the Exif directory [`resolve_exif_pointers`] follows: **one**, the
