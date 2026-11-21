@@ -741,8 +741,8 @@ mod tests {
     /// Kills `BlockVariation::exercised` → `true` (and `frame_header_payload`'s gate on it), which
     /// would put the position-only segmentation, `delta_q` and `delta_lf` back on every encode,
     /// and pins `BlockVariation::Frame` at each public entry point: the plain one, the options one
-    /// `gamut-avif`'s lossy encoder calls (BT.709 4:2:0, two tiles, two threads), superres and the
-    /// high-bit-depth one.
+    /// `gamut-avif`'s lossy encoder calls (BT.709 4:2:0, the one-tile default, two threads),
+    /// superres and the high-bit-depth one.
     #[cfg(feature = "decode")]
     #[test]
     fn block_variation_exercised_is_off_in_every_default_lossy_encode() {
