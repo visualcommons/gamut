@@ -101,9 +101,13 @@ run = "cargo clippy --workspace --fix --allow-dirty --allow-staged"
 # does NOT compile the `--all-targets`/`--all-features` cross-check oracle dev-deps
 # (the vendored C codecs). The full `lint` above is the gate CI runs. `check-ffi` rides
 # along because gamut-ffi's living shims are cfg'd out under default features and would
-# otherwise only fail in CI's --all-features lanes.
+# otherwise only fail in CI's --all-features lanes. `GAMUT_JXL_SYS_SKIP_NATIVE=1` keeps the
+# default-feature `gamut-jxl` `encode` path from building libjxl with cmake: clippy only
+# type-checks and links nothing, so the declarations-only `gamut-jxl-sys` is enough, and a fresh
+# worktree's push does not pay minutes of C++ build (`check-ffi` already sets the same switch).
 [tasks.lint-quick]
-description = "Fast Clippy check (default features; no C-oracle build) for the pre-push hook"
+description = "Fast Clippy check (default features; no C-oracle or native libjxl build) for the pre-push hook"
+env = { GAMUT_JXL_SYS_SKIP_NATIVE = "1" }
 run = "cargo clippy --workspace -- -D warnings"
 depends_post = ["check-ffi"]
 

@@ -5,9 +5,11 @@
 /// exact fmt/clippy commands have a single source of truth with CI.
 ///
 /// Hook layout:
-///   pre-commit  auto-fix formatting + lint on the staged snapshot, then re-stage
+///   pre-commit  auto-fix formatting on the staged snapshot, then re-stage (seconds;
+///               no compile -- clippy waits for pre-push, the full lint/test for CI)
 ///   commit-msg  enforce Conventional Commits AT COMMIT TIME (policy in .convco)
-///   pre-push    fast static gate (format + fast lint); heavy checks live in CI
+///   pre-push    fast static gate (format + type-check-only lint, no native libjxl
+///               build); heavy checks live in CI
 amends "package://github.com/jdx/hk/releases/download/v1.48.0/hk@1.48.0#/Config.pkl"
 
 // One definition per concern, reused across hooks so check/fix never drift.
@@ -60,9 +62,10 @@ hooks {
     ["pre-commit"] {
         fix = true
         stash = "git"
+        // Formatting only: a workspace clippy here compiled every crate (and, in a fresh
+        // worktree, libjxl) on every commit. Lint runs once per push instead.
         steps {
             ["fmt"] = fmt
-            ["clippy"] = clippy
         }
     }
 
