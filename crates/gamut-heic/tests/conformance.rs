@@ -14,9 +14,10 @@
 //!
 //! kvazaar encodes 4:2:0 YCbCr, and libheif's RGB↔YCbCr conversion is not bit-exact, so an RGB
 //! round-trip is only *near*-exact — bit-exact comparisons live in the YCbCr/planar domain (test 3).
-//! The presentation-pixel tests (2, 4) therefore use a measured tolerance: our nearest co-sited
-//! chroma upsample + BT.601 integer conversion differs slightly from libheif's (bilinear upsample).
-//! Measured maxima are documented at each assertion.
+//! The presentation-pixel tests (2, 4) therefore use a measured tolerance. Both readers replicate
+//! chroma by default (test 2c pins that libheif's default decode is its nearest-neighbour path), so
+//! the residual is the colour conversion: libheif's 8-bit integer coefficients against
+//! gamut-color's BT.601 inverse. Measured maxima are documented at each assertion.
 
 mod common;
 
@@ -26,7 +27,7 @@ use common::Decode;
 use gamut_codec_abi::{Decoder, ImageDesc, Status, StreamConfig};
 use gamut_core::{DecodeImage, Error, ErrorKind, ImageBuf, Rgba8};
 use gamut_heic::{
-    AbiHevcDecoder, ChromaSubsampling, DecodedFrame, HeifContainer, HeifDecoder,
+    AbiHevcDecoder, ChromaSubsampling, ChromaUpsampling, DecodedFrame, HeifContainer, HeifDecoder,
     HevcCodestreamDecoder, HevcConfig, iter_nal_units,
 };
 use libheif_oracle::{EncodeOpts, NclxProfile, OracleChroma};
@@ -463,8 +464,9 @@ fn t2_presentation_pixels_match_libheif() {
 
     // Measured (libheif 1.23.1 + kvazaar 2.3.2, q90 4:2:0, explicit BT.601-full colr): max_rgb=1,
     // mean_rgb≈0.010, max_a=0, frac_within2=1.0000. With both readers on the same colour policy the
-    // only residual is chroma-upsampling/rounding (our nearest co-sited + BT.601 integer conversion
-    // vs libheif's bilinear) over a smooth gradient. Bounds keep a little headroom over those maxima.
+    // only residual is conversion rounding (both replicate chroma, test 2c; gamut-color's BT.601
+    // inverse vs libheif's 8-bit integer coefficients). Bounds keep a little headroom over those
+    // maxima.
     assert!(d.max_rgb <= 3, "RGB max diff too high: {}", d.max_rgb);
     assert!(
         d.mean_rgb <= 0.5,
@@ -503,6 +505,125 @@ fn t2b_lossless_gray_tight_bound() {
         d.max_rgb
     );
     assert_eq!(d.max_a, 0, "opaque alpha must be exact");
+}
+
+/// Dimensions of the chroma-detail fixture.
+const DETAIL_W: u32 = 64;
+const DETAIL_H: u32 = 48;
+
+/// A 64×48 opaque 4:2:0 fixture whose colour changes every 2×2 block (a hashed hue per block),
+/// so every chroma sample differs from its neighbours and any chroma reconstruction other than
+/// replication shows. Lossy q95, explicit BT.601-full `colr`.
+fn chroma_detail_fixture() -> &'static [u8] {
+    static FIXTURE: OnceLock<Vec<u8>> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let (w, h) = (DETAIL_W as usize, DETAIL_H as usize);
+        let mut src = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let block = ((y / 2) * w / 2 + x / 2) as u32;
+                let hash = block.wrapping_mul(2_654_435_761).rotate_left(13);
+                let i = (y * w + x) * 4;
+                src[i..i + 4].copy_from_slice(&[
+                    64 + (hash & 0x7f) as u8,
+                    64 + ((hash >> 8) & 0x7f) as u8,
+                    64 + ((hash >> 16) & 0x7f) as u8,
+                    255,
+                ]);
+            }
+        }
+        libheif_oracle::encode_rgba_to_heic(
+            DETAIL_W,
+            DETAIL_H,
+            &src,
+            &EncodeOpts {
+                quality: 95,
+                nclx: Some(nclx_bt601_full()),
+                ..Default::default()
+            },
+        )
+        .expect("encode chroma-detail fixture")
+    })
+}
+
+/// libheif's **default** decode (`heif_decode_image` with no options, as `heif-dec` runs it)
+/// replicates 4:2:0 chroma, so gamut-heic's default [`ChromaUpsampling::Nearest`] is the one
+/// that matches it.
+///
+/// libheif's decoding options prefer bilinear but leave `only_use_preferred_chroma_algorithm`
+/// false (`heif_decoding_options_alloc`, `libheif/api/libheif/heif_decoding.cc`), and its colour
+/// pipeline is a cheapest-path search (`ColorConversionPipeline::construct_pipeline`) in which the
+/// one-step nearest-neighbour `Op_YCbCr420_to_RGB32` / `Op_YCbCr_to_RGB` undercut
+/// `Op_YCbCr420_bilinear_to_YCbCr444` followed by a 4:4:4 conversion. Bilinear runs only when a
+/// caller forces it (`heif-dec -C bilinear`).
+#[test]
+fn t2c_default_chroma_upsampling_matches_libheif_default() {
+    use libheif_oracle::OracleUpsampling;
+    let heic = chroma_detail_fixture();
+    let decode = |u| {
+        let (w, h, px) = libheif_oracle::decode_primary_rgba_with(heic, u).expect("libheif decode");
+        assert_eq!((w, h), (DETAIL_W, DETAIL_H));
+        px
+    };
+    let default = decode(OracleUpsampling::LibraryDefault);
+    let nearest = decode(OracleUpsampling::ForceNearest);
+    let bilinear = decode(OracleUpsampling::ForceBilinear);
+
+    // The premise: libheif's default is its nearest-neighbour path, byte for byte, and the
+    // fixture is busy enough that forcing bilinear moves it.
+    assert_eq!(
+        default, nearest,
+        "libheif's default is not its nearest path"
+    );
+    let forced = rgba_diff(&default, &bilinear);
+    assert!(
+        forced.max_rgb >= 16,
+        "fixture does not discriminate the two libheif paths: max_rgb={}",
+        forced.max_rgb
+    );
+
+    let ours = |up: ChromaUpsampling| -> Vec<u8> {
+        let decoder = HeifDecoder::new()
+            .with_backend(De265Decoder)
+            .with_chroma_upsampling(up);
+        let img: ImageBuf<Rgba8> = decoder.decode_image(heic).expect("gamut-heic decode");
+        img.as_samples().to_vec()
+    };
+    let default_ours: ImageBuf<Rgba8> = HeifDecoder::new()
+        .with_backend(De265Decoder)
+        .decode_image(heic)
+        .expect("gamut-heic default decode");
+    let planar = HeifDecoder::new()
+        .with_backend(De265Decoder)
+        .decode_planar(heic)
+        .expect("gamut-heic planar decode");
+    assert_eq!(planar.chroma(), ChromaSubsampling::Cs420);
+    let nearest_ours = ours(ChromaUpsampling::Nearest);
+    assert_eq!(default_ours.as_samples(), nearest_ours.as_slice());
+
+    let d = rgba_diff(&nearest_ours, &default);
+    let i = rgba_diff(&ours(ChromaUpsampling::Interpolated), &default);
+    eprintln!(
+        "t2c vs libheif default: nearest max_rgb={} mean_rgb={:.3}; interpolated max_rgb={} \
+         mean_rgb={:.3}; libheif bilinear vs default max_rgb={} mean_rgb={:.3}",
+        d.max_rgb, d.mean_rgb, i.max_rgb, i.mean_rgb, forced.max_rgb, forced.mean_rgb
+    );
+    // Stated tolerance: the residual is the colour conversion alone — libheif's 8-bit
+    // `Op_YCbCr420_to_RGB32` rounds its coefficients to 1/256 where gamut-color's BT.601 inverse
+    // does not. Measured (libheif 1.23.1 + kvazaar, q95 4:2:0): nearest max_rgb=1,
+    // mean_rgb≈0.020; interpolated max_rgb=50, mean_rgb≈14.1; libheif forced bilinear vs its
+    // default max_rgb=154, mean_rgb≈15.3.
+    assert!(d.max_rgb <= 2, "nearest max diff too high: {}", d.max_rgb);
+    assert!(
+        d.mean_rgb <= 0.5,
+        "nearest mean diff too high: {:.3}",
+        d.mean_rgb
+    );
+    // And the interpolated surface is measurably further from the reference than the default.
+    assert!(
+        i.mean_rgb > d.mean_rgb,
+        "interpolated is not further from libheif's default than nearest"
+    );
 }
 
 // ============================================================================================

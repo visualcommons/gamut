@@ -6,7 +6,8 @@
 //! reference reader (libheif). This crate exposes four safe entry points the tests build on:
 //!
 //! * [`decode_primary_rgba`] — libheif decodes the primary image to interleaved 8-bit RGBA. The
-//!   pixel-conformance oracle.
+//!   pixel-conformance oracle. [`decode_primary_rgba_with`] forces one chroma upsampling
+//!   algorithm the way `heif-dec -C` does.
 //! * [`introspect`] — a small typed [`OracleStructure`] describing the container (primary item id,
 //!   all items and their 4cc types, per-image dimensions / alpha / thumbnails, Exif/XMP blocks).
 //! * [`decode_hevc_intra`] — feeds raw HEVC NAL units (config + picture, **no** start codes)
@@ -71,6 +72,32 @@ fn heif_check(err: sys::heif_error) -> Result<(), String> {
 ///
 /// Returns libheif's message if the bytes cannot be parsed or the primary image cannot be decoded.
 pub fn decode_primary_rgba(heic: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    decode_primary_rgba_with(heic, OracleUpsampling::LibraryDefault)
+}
+
+/// The chroma upsampling libheif runs when it converts a subsampled decode to RGBA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OracleUpsampling {
+    /// `heif_decode_image` with no options: what any libheif reader, `heif-dec` included, gets
+    /// unless it asks otherwise. libheif *prefers* bilinear there but leaves
+    /// `only_use_preferred_chroma_algorithm` false, so its cost search may pick a cheaper path.
+    LibraryDefault,
+    /// Nearest-neighbour forced (`heif-dec -C nearest-neighbor`).
+    ForceNearest,
+    /// Bilinear forced (`heif-dec -C bilinear`): `Op_YCbCr420_bilinear_to_YCbCr444`.
+    ForceBilinear,
+}
+
+/// [`decode_primary_rgba`] with the chroma upsampling chosen by `upsampling`, set the way
+/// `heif-dec -C` sets it.
+///
+/// # Errors
+///
+/// Returns libheif's message if the bytes cannot be parsed or the primary image cannot be decoded.
+pub fn decode_primary_rgba_with(
+    heic: &[u8],
+    upsampling: OracleUpsampling,
+) -> Result<(u32, u32, Vec<u8>), String> {
     // SAFETY: the context/handle/image handles below are released on every return path; the input
     // slice outlives the (copying) read call.
     unsafe {
@@ -87,7 +114,7 @@ pub fn decode_primary_rgba(heic: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             ))?;
             let mut handle: *mut sys::heif_image_handle = ptr::null_mut();
             heif_check(sys::heif_context_get_primary_image_handle(ctx, &mut handle))?;
-            let out = decode_handle_rgba(handle);
+            let out = decode_handle_rgba(handle, upsampling);
             sys::heif_image_handle_release(handle);
             out
         })();
@@ -99,17 +126,44 @@ pub fn decode_primary_rgba(heic: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
 /// Decodes one image handle to tightly packed interleaved RGBA.
 unsafe fn decode_handle_rgba(
     handle: *const sys::heif_image_handle,
+    upsampling: OracleUpsampling,
 ) -> Result<(u32, u32, Vec<u8>), String> {
-    // SAFETY: `handle` is a live libheif image handle; `img` is released before returning.
+    // SAFETY: `handle` is a live libheif image handle; `img` is released before returning, and
+    // `options` (when allocated) is freed right after the decode call that reads it.
     unsafe {
+        let forced = match upsampling {
+            OracleUpsampling::LibraryDefault => None,
+            OracleUpsampling::ForceNearest => Some(sys::heif_chroma_upsampling_nearest_neighbor),
+            OracleUpsampling::ForceBilinear => Some(sys::heif_chroma_upsampling_bilinear),
+        };
+        let options = match forced {
+            None => ptr::null_mut(),
+            Some(algorithm) => {
+                let options = sys::heif_decoding_options_alloc();
+                if options.is_null() {
+                    return Err("heif_decoding_options_alloc returned null".into());
+                }
+                (*options)
+                    .color_conversion_options
+                    .preferred_chroma_upsampling_algorithm = algorithm;
+                (*options)
+                    .color_conversion_options
+                    .only_use_preferred_chroma_algorithm = 1;
+                options
+            }
+        };
         let mut img: *mut sys::heif_image = ptr::null_mut();
-        heif_check(sys::heif_decode_image(
+        let decoded = heif_check(sys::heif_decode_image(
             handle,
             &mut img,
             sys::heif_colorspace_RGB,
             sys::heif_chroma_interleaved_RGBA,
-            ptr::null(),
-        ))?;
+            options,
+        ));
+        if !options.is_null() {
+            sys::heif_decoding_options_free(options);
+        }
+        decoded?;
 
         let w = sys::heif_image_get_width(img, sys::heif_channel_interleaved);
         let h = sys::heif_image_get_height(img, sys::heif_channel_interleaved);
