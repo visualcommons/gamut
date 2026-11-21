@@ -75,7 +75,7 @@ fn colr_nclx_body_encodes_every_field() {
     it.properties = vec![Property::new(
         false,
         PropertyKind::Colour(ColourInformation::Nclx(Cicp {
-            colour_primaries: 2,
+            color_primaries: 2,
             transfer_characteristics: 3,
             matrix_coefficients: 5,
             full_range: true,

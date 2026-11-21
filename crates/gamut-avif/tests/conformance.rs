@@ -177,7 +177,7 @@ fn structure_agrees_with_libavif() {
                 _ => None,
             });
         if let Some(nclx) = nclx {
-            assert_eq!(nclx.colour_primaries, oracle.color_primaries, "{name}: cp");
+            assert_eq!(nclx.color_primaries, oracle.color_primaries, "{name}: cp");
             assert_eq!(
                 nclx.transfer_characteristics, oracle.transfer_characteristics,
                 "{name}: tc"
@@ -893,7 +893,7 @@ fn sequence_header_fields_agree_with_libavif() {
         );
         assert_eq!(
             (
-                colour.cicp.colour_primaries,
+                colour.cicp.color_primaries,
                 colour.cicp.transfer_characteristics,
                 colour.cicp.matrix_coefficients,
             ),

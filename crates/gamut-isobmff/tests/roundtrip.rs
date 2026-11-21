@@ -37,7 +37,7 @@ fn transform_properties() {
         item.properties[3] = Property::new(
             false,
             PropertyKind::Colour(ColourInformation::Nclx(Cicp {
-                colour_primaries: 9,
+                color_primaries: 9,
                 transfer_characteristics: 16,
                 matrix_coefficients: 9,
                 full_range: false,

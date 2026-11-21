@@ -520,7 +520,7 @@ mod tests {
         profile.tags.retain(|tag| tag.signature != sig);
         if let Some(transfer_characteristics) = transfer {
             let cicp = gamut_core::Cicp {
-                colour_primaries: 9,
+                color_primaries: 9,
                 transfer_characteristics,
                 matrix_coefficients: 0,
                 full_range: true,

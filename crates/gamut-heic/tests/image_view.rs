@@ -89,7 +89,7 @@ fn typed_property_accessors() {
         prop(
             false,
             PropertyKind::Colour(ColourInformation::Nclx(Cicp {
-                colour_primaries: 9,
+                color_primaries: 9,
                 transfer_characteristics: 16,
                 matrix_coefficients: 9,
                 full_range: true,

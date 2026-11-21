@@ -151,7 +151,7 @@ impl Codestream for StubCodec {
             chroma,
             bit_depth,
             colour: Cicp {
-                colour_primaries: 2,
+                color_primaries: 2,
                 transfer_characteristics: 2,
                 matrix_coefficients: u16::from(matrix),
                 full_range: full != 0,

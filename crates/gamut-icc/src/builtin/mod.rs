@@ -31,7 +31,7 @@
 //! different places. **Primaries** come from `gamut-color`: a code point it gives no
 //! chromaticities for cannot be described. Adobe RGB and ProPhoto RGB have no ITU-T H.273 code
 //! point on either axis — [`gamut_color::SourceProfile`]'s `ADOBE_RGB` and `PROPHOTO_RGB` return
-//! `None` from both [`colour_primaries`](gamut_color::SourceProfile::color_primaries) and
+//! `None` from both [`color_primaries`](gamut_color::SourceProfile::color_primaries) and
 //! [`transfer_characteristics`](gamut_color::SourceProfile::transfer_characteristics) — so they
 //! are reachable only as the named [`BuiltinProfile::AdobeRgb`] and
 //! [`BuiltinProfile::ProPhotoRgb`], whose primaries come from the total
@@ -71,7 +71,7 @@
 //!
 //! // … yet are encodable here, as are all four BT.709-family code points; that the latter
 //! // encode one curve is pinned by `every_bt709_family_code_point_builds_the_same_curve`.
-//! let axes = Cicp { colour_primaries: 1, transfer_characteristics: 1,
+//! let axes = Cicp { color_primaries: 1, transfer_characteristics: 1,
 //!                   matrix_coefficients: 0, full_range: true };
 //! for code in [1, 4, 5, 6, 14, 15] {
 //!     assert!(IccProfile::from_cicp(Cicp { transfer_characteristics: code, ..axes }).is_some());
@@ -378,7 +378,7 @@ impl BuiltinProfile {
     /// ```
     /// use gamut_icc::BuiltinProfile;
     /// let cicp = BuiltinProfile::Bt2020Pq.cicp().expect("BT.2100 PQ has code points");
-    /// assert_eq!((cicp.colour_primaries, cicp.transfer_characteristics), (9, 16));
+    /// assert_eq!((cicp.color_primaries, cicp.transfer_characteristics), (9, 16));
     /// assert_eq!(BuiltinProfile::AdobeRgb.cicp(), None);
     /// ```
     #[must_use]

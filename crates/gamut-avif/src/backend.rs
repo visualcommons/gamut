@@ -486,7 +486,7 @@ impl SeqHeaderParams {
             ));
         }
         let colour = (
-            color.cicp.colour_primaries,
+            color.cicp.color_primaries,
             color.cicp.transfer_characteristics,
             color.cicp.matrix_coefficients,
             color.cicp.full_range,

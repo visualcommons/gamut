@@ -157,7 +157,7 @@ fn colr(matrix: u16, full: bool) -> Property {
     Property::new(
         false,
         PropertyKind::Colour(ColourInformation::Nclx(Cicp {
-            colour_primaries: 1,
+            color_primaries: 1,
             transfer_characteristics: 13,
             matrix_coefficients: matrix,
             full_range: full,

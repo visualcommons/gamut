@@ -1576,7 +1576,7 @@ fn cicp_pairs(pairs: &[(&str, &str)], prefer_cicp_transfer: bool) -> (Worst, Wor
     use gamut_icc::BuiltinProfile;
     set_quiet_log_handler();
     let bt709 = IccProfile::from_cicp(Cicp {
-        colour_primaries: 1,
+        color_primaries: 1,
         transfer_characteristics: 1,
         matrix_coefficients: 0,
         full_range: true,

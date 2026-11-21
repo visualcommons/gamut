@@ -39,7 +39,7 @@ pub fn av01_item(id: u32, payload: Vec<u8>) -> Item {
         Property::new(
             false,
             PropertyKind::Colour(ColourInformation::Nclx(Cicp {
-                colour_primaries: 1,
+                color_primaries: 1,
                 transfer_characteristics: 13,
                 matrix_coefficients: 0,
                 full_range: true,

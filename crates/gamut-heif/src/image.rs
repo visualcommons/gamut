@@ -742,7 +742,7 @@ mod tests {
 
     fn nclx(matrix_coefficients: u16) -> ColourInformation {
         ColourInformation::Nclx(Cicp {
-            colour_primaries: 1,
+            color_primaries: 1,
             transfer_characteristics: 13,
             matrix_coefficients,
             full_range: true,

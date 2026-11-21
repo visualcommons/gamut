@@ -30,7 +30,7 @@ use crate::profile::IccProfile;
 /// use gamut_core::Cicp;
 /// use gamut_icc::{CicpTransferReading, IccProfile};
 ///
-/// let bt709 = Cicp { colour_primaries: 1, transfer_characteristics: 1,
+/// let bt709 = Cicp { color_primaries: 1, transfer_characteristics: 1,
 ///                    matrix_coefficients: 0, full_range: true };
 /// let display = IccProfile::from_cicp_with(bt709, CicpTransferReading::Bt1886Display);
 /// assert!(display.is_some());
@@ -68,7 +68,7 @@ pub(super) fn rgb_is_full_range(cicp: Cicp) -> bool {
 /// The `cicpType` value for a pair of CICP axes.
 pub(super) fn cicp_of(primaries: ColorPrimaries, transfer: TransferCharacteristics) -> Cicp {
     rgb_conforming_cicp(Cicp {
-        colour_primaries: primaries.code_point(),
+        color_primaries: primaries.code_point(),
         transfer_characteristics: transfer.code_point(),
         // Both set by `rgb_conforming_cicp`, which owns the §10.3 and range rules for every
         // constructor.
@@ -129,7 +129,7 @@ impl IccProfile {
     /// use gamut_icc::{BuiltinProfile, IccProfile};
     ///
     /// // BT.709 primaries + sRGB transfer is sRGB, and is built as such.
-    /// let signalled = Cicp { colour_primaries: 1, transfer_characteristics: 13,
+    /// let signalled = Cicp { color_primaries: 1, transfer_characteristics: 13,
     ///                        matrix_coefficients: 0, full_range: true };
     /// assert_eq!(IccProfile::from_cicp(signalled), IccProfile::builtin(BuiltinProfile::Srgb));
     ///
@@ -148,7 +148,7 @@ impl IccProfile {
     /// assert!(IccProfile::from_cicp(narrow_rgb).is_none());
     ///
     /// // "Unspecified" primaries name no chromaticities, so no profile can be built.
-    /// assert!(IccProfile::from_cicp(Cicp { colour_primaries: 2, ..signalled }).is_none());
+    /// assert!(IccProfile::from_cicp(Cicp { color_primaries: 2, ..signalled }).is_none());
     /// ```
     ///
     /// The BT.709-family transfers 1, 6, 14 and 15 are read literally, as the inverse of H.273
@@ -182,7 +182,7 @@ impl IccProfile {
     /// use gamut_core::Cicp;
     /// use gamut_icc::{CicpTransferReading, IccProfile, KnownTag, TagData};
     ///
-    /// let bt709 = Cicp { colour_primaries: 1, transfer_characteristics: 1,
+    /// let bt709 = Cicp { color_primaries: 1, transfer_characteristics: 1,
     ///                    matrix_coefficients: 0, full_range: true };
     /// let display = IccProfile::from_cicp_with(bt709, CicpTransferReading::Bt1886Display)
     ///     .expect("BT.709 is buildable");
@@ -207,14 +207,14 @@ impl IccProfile {
         if !rgb_is_full_range(cicp) {
             return None;
         }
-        let primaries = ColorPrimaries::from_code_point(cicp.colour_primaries)?;
+        let primaries = ColorPrimaries::from_code_point(cicp.color_primaries)?;
         let chromaticities = primaries.chromaticities()?;
         let transfer = cicp.transfer_characteristics;
         let trc = Trc::for_code_point(transfer, reading)?;
         let named = BuiltinProfile::for_axes(primaries, transfer);
         let mut description = match named {
             Some(space) => space.parts().description.to_owned(),
-            None => format!("CICP {}/{transfer}", cicp.colour_primaries),
+            None => format!("CICP {}/{transfer}", cicp.color_primaries),
         };
         // Compared against the literal reading's curve rather than keyed on `reading`, so the
         // qualifier is written exactly where the reading changed the profile and nowhere else.

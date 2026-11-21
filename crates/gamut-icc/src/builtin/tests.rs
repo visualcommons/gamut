@@ -121,7 +121,7 @@ fn every_bt709_family_code_point_builds_the_same_curve() {
         for code in [1_u16, 6, 14, 15] {
             let profile = IccProfile::from_cicp_with(
                 Cicp {
-                    colour_primaries: 1,
+                    color_primaries: 1,
                     transfer_characteristics: code,
                     matrix_coefficients: 0,
                     full_range: true,
@@ -168,7 +168,7 @@ fn bt1886_curve_matches_gamut_color() {
 fn the_reading_reaches_only_the_bt709_family() {
     const BT709_FAMILY: [u16; 4] = [1, 6, 14, 15];
     let rgb = |transfer| Cicp {
-        colour_primaries: 1,
+        color_primaries: 1,
         transfer_characteristics: transfer,
         matrix_coefficients: 0,
         full_range: true,
@@ -216,7 +216,7 @@ fn bt1886_reading_is_what_the_docs_quote() {
     let mid_grey = |transfer, reading| {
         let profile = IccProfile::from_cicp_with(
             Cicp {
-                colour_primaries: 1,
+                color_primaries: 1,
                 transfer_characteristics: transfer,
                 matrix_coefficients: 0,
                 full_range: true,
@@ -438,7 +438,7 @@ fn no_unlisted_transfer_code_point_is_encodable() {
 #[test]
 fn unrepresentable_signalling_is_rejected() {
     let srgb = Cicp {
-        colour_primaries: 1,
+        color_primaries: 1,
         transfer_characteristics: 13,
         matrix_coefficients: 0,
         full_range: true,
@@ -448,14 +448,14 @@ fn unrepresentable_signalling_is_rejected() {
         (
             "unmodelled primaries",
             Cicp {
-                colour_primaries: 11,
+                color_primaries: 11,
                 ..srgb
             },
         ),
         (
             "unspecified primaries",
             Cicp {
-                colour_primaries: 2,
+                color_primaries: 2,
                 ..srgb
             },
         ),
@@ -492,7 +492,7 @@ fn unrepresentable_signalling_is_rejected() {
 #[test]
 fn from_cicp_zeroes_the_matrix_coefficients() {
     let conforming = Cicp {
-        colour_primaries: 9,
+        color_primaries: 9,
         transfer_characteristics: 16,
         matrix_coefficients: 0,
         full_range: true,
@@ -526,7 +526,7 @@ fn from_cicp_zeroes_the_matrix_coefficients() {
 fn narrow_range_builds_only_under_luma_chroma_coefficients() {
     const EQUATIONS_30_TO_32: [u16; 12] = [1, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15];
     let full = Cicp {
-        colour_primaries: 9,
+        color_primaries: 9,
         transfer_characteristics: 16,
         matrix_coefficients: 0,
         full_range: true,
@@ -789,7 +789,7 @@ fn opened_by_lcms(profile: &IccProfile) -> lcms2_oracle::Profile {
 /// The profile `from_cicp` builds for full-range RGB signalling of `primaries` and `transfer`.
 fn rgb_cicp(primaries: u16, transfer: u16) -> Option<IccProfile> {
     IccProfile::from_cicp(Cicp {
-        colour_primaries: primaries,
+        color_primaries: primaries,
         transfer_characteristics: transfer,
         matrix_coefficients: 0,
         full_range: true,
@@ -1002,7 +1002,7 @@ fn oracle_bt1886_reading_matches_its_curve_through_lcms() {
     for code in [1_u16, 6, 14, 15] {
         let profile = IccProfile::from_cicp_with(
             Cicp {
-                colour_primaries: 1,
+                color_primaries: 1,
                 transfer_characteristics: code,
                 matrix_coefficients: 0,
                 full_range: true,
@@ -1044,7 +1044,7 @@ fn oracle_cicp_tag_matches_the_lcms_synthesiser() {
     for primaries in buildable_primaries() {
         for transfer in [1_u16, 4, 5, 6, 8, 13, 14, 15, 16] {
             let ours = IccProfile::from_cicp(Cicp {
-                colour_primaries: primaries,
+                color_primaries: primaries,
                 transfer_characteristics: transfer,
                 matrix_coefficients: 9,
                 full_range: true,

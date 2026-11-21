@@ -583,7 +583,7 @@ mod tests {
                 ],
             }),
             TagData::Cicp(Cicp {
-                colour_primaries: 9,
+                color_primaries: 9,
                 transfer_characteristics: 16,
                 matrix_coefficients: 0,
                 full_range: true,

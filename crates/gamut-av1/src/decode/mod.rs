@@ -1213,7 +1213,7 @@ mod tests {
             bit_depth,
             subsampling,
             cicp: gamut_core::Cicp {
-                colour_primaries: 2,
+                color_primaries: 2,
                 transfer_characteristics: 2,
                 matrix_coefficients: 2,
                 full_range: false,

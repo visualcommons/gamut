@@ -722,12 +722,12 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
             let colour_type = r.fourcc()?;
             match &colour_type {
                 b"nclx" => {
-                    let colour_primaries = r.u16()?;
+                    let color_primaries = r.u16()?;
                     let transfer_characteristics = r.u16()?;
                     let matrix_coefficients = r.u16()?;
                     let full_range = (r.u8()? >> 7) & 1 == 1;
                     Ok(PropertyKind::Colour(ColourInformation::Nclx(Cicp {
-                        colour_primaries,
+                        color_primaries,
                         transfer_characteristics,
                         matrix_coefficients,
                         full_range,

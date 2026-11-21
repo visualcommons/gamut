@@ -49,7 +49,7 @@ let bytes = p3.to_bytes()?; // ready to embed
 // The range flag is read against the matrix: narrow range on Y/Cb/Cr de-matrixes to full-scale
 // RGB and builds, while narrow range on the RGB samples themselves (matrix 0) is declined.
 let signalled = Cicp {
-    colour_primaries: 9,
+    color_primaries: 9,
     transfer_characteristics: 16,
     matrix_coefficients: 9,
     full_range: false,
