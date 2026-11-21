@@ -234,6 +234,25 @@ mod settings_tests {
 mod tests {
     use super::*;
 
+    /// A chunk is bounded by its own IFD geometry, not the workspace default limits: a single-strip
+    /// raw one sample past the default 32768-per-side cap — 32769 × 1, and 1 × 32769 — still
+    /// decodes. (The default 16384² pixel cap is not reached here: a chunk past it is a gibibyte.)
+    #[test]
+    fn decode_chunk_admits_sides_past_the_default_limits() {
+        let long = DecodeLimits::DEFAULT_MAX_DIMENSION as usize + 1;
+        let samples: Vec<u16> = (0..long).map(|i| (i * 2711 % 65536) as u16).collect();
+        let settings = JxlSettings::lossless().with_effort(Effort::Lightning);
+        for (cols, rows) in [(long, 1), (1, long)] {
+            assert!(!DecodeLimits::new().admits_dimensions(cols as u32, rows as u32));
+            let bytes = encode_chunk(&samples, cols, rows, 1, settings).unwrap();
+            assert_eq!(
+                decode_chunk(&bytes, cols, rows, 1).unwrap(),
+                samples,
+                "{cols}x{rows}"
+            );
+        }
+    }
+
     /// A stray alpha channel invalidates a raw chunk on its own, even when the colour channel
     /// count matches `SamplesPerPixel` (the spec allows exactly 1 or 3 planes, no alpha).
     #[test]
