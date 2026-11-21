@@ -16,8 +16,9 @@ the encoder-first workspace, decoding) that is:
   [`../../references/`](../../references)) rather than wrapping libwebp.
 - **Layered on shared crates.** The container comes from [`gamut-riff`](../gamut-riff); color
   handling and pixel clamping from [`gamut-color`](../gamut-color); integer-DSP helpers from
-  [`gamut-dsp`](../gamut-dsp). (The VP8 boolean coder and VP8L LSB-first bit I/O are codec-specific
-  and live in-crate.)
+  [`gamut-dsp`](../gamut-dsp); the VP8L LSB-first bit reader from
+  [`gamut-bitstream`](../gamut-bitstream) (`LsbBitReader`). (The VP8 boolean arithmetic coder and
+  the VP8L bit writer have no other user and live in-crate.)
 - **Buildable anywhere `cargo` is.** No C, no nasm — cross-compiles cleanly (wasm32, aarch64, musl).
   (The differential test suite is the one exception: it builds libwebp via `libwebp-sys` as a
   dev-dependency, so running `cargo test` needs a C toolchain. The shipped library does not.)
