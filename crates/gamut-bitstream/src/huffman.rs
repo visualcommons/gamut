@@ -19,6 +19,8 @@
 //! `gamut-webp`'s VP8L prefix coder uses both. `gamut-deflate` keeps its own copy of the same pair
 //! by design: its default build has no dependency at all, so it cannot reach this crate (#1104).
 
+use std::num::Wrapping;
+
 /// A Huffman table in the two-list form of T.81 §B.2.4.2, as [`build_optimal_table`] returns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HuffmanTable {
@@ -260,19 +262,24 @@ const MAX_CANONICAL_LEN: usize = 16;
 /// `(BITS, HUFFVAL)` pair, the same canonical order reached from the other table form.
 #[must_use]
 pub fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
+    // Every count and code below is kept modulo 2^16 (`Wrapping<u16>`): the steps only add and
+    // double, so the low 16 bits of each code are exactly what unbounded arithmetic gives, the
+    // truncation documented above, and no over-subscribed input can overflow and panic. `Wrapping`
+    // rather than `wrapping_add` keeps the `+` and `<<` operators, so the gate still mutates them.
+    //
     // Step 1: the number of codes of each length. A zero length lands in `bl_count[0]`, which the
     // RFC clears; a 16-bit count is never read (`next_code[bits]` reads `bl_count[bits - 1]`), so
     // the array stops short of it and `get_mut` drops it along with every longer length.
-    let mut bl_count = [0u32; MAX_CANONICAL_LEN];
+    let mut bl_count = [Wrapping(0u16); MAX_CANONICAL_LEN];
     for &len in lengths {
         if let Some(count) = bl_count.get_mut(usize::from(len)) {
             *count += 1;
         }
     }
-    bl_count[0] = 0;
+    bl_count[0] = Wrapping(0);
     // Step 2: the smallest code of each length.
-    let mut next_code = [0u32; MAX_CANONICAL_LEN + 1];
-    let mut code = 0u32;
+    let mut next_code = [Wrapping(0u16); MAX_CANONICAL_LEN + 1];
+    let mut code = Wrapping(0u16);
     for bits in 1..=MAX_CANONICAL_LEN {
         code = (code + bl_count[bits - 1]) << 1;
         next_code[bits] = code;
@@ -284,7 +291,7 @@ pub fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
         if len != 0
             && let Some(next) = next_code.get_mut(usize::from(len))
         {
-            *slot = *next as u16;
+            *slot = next.0;
             *next += 1;
         }
     }
@@ -665,6 +672,22 @@ mod tests {
         assert_eq!(codes[15], 0xFFFE);
         assert_eq!(codes[16], 0xFFFF);
         assert_eq!(codes[17], 0);
+    }
+
+    #[test]
+    fn canonical_codes_truncate_over_subscribed_lengths_without_overflow() {
+        // 2^18 - 1 length-1 symbols and 2^14 length-15 ones over-subscribe the code space so far
+        // that the unbounded `next_code` sum passes 2^32. The codes are the low 16 bits of the
+        // unbounded procedure's: length-1 symbol `s` gets `s`, and the length-15 run starts at
+        // `(2^18 - 1) * 2^14 mod 2^16 = 0xC000`.
+        let ones = (1 << 18) - 1;
+        let mut lengths = vec![1u8; ones];
+        lengths.resize(ones + (1 << 14), 15);
+        let codes = canonical_codes(&lengths);
+        assert_eq!(codes[0], 0);
+        assert_eq!(codes[0x1_2345], 0x2345);
+        assert_eq!(codes[ones], 0xC000);
+        assert_eq!(codes[ones + 0x3FFF], 0xFFFF);
     }
 
     #[test]
