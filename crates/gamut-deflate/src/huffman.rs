@@ -2,10 +2,17 @@
 //! length-limited canonical-code builder for dynamic blocks (§3.2.2).
 //!
 //! DEFLATE packs Huffman codes most-significant-bit-of-the-code first, but [`BitWriter`] is
-//! LSB-first, so every code is bit-reversed via [`reverse_bits`] before emission. The length-limited
-//! builder and canonical-code assignment are ported from `gamut-webp`'s VP8L prefix coder (the
-//! algorithms are format-independent). Length-limiting uses a count-floor heuristic that lands within
-//! ~1% of the entropy-optimal code; a package-merge limiter is an optional future refinement.
+//! LSB-first, so every code is bit-reversed via [`reverse_bits`] before emission. Length-limiting
+//! uses a count-floor heuristic that lands within ~1% of the entropy-optimal code; a package-merge
+//! limiter is an optional future refinement.
+//!
+//! **Accepted duplicate (#1104).** The length-limited builder and canonical-code assignment here
+//! are a copy of the format-neutral pair `gamut-bitstream` owns (`build_length_limited_lengths`,
+//! `canonical_codes`), which `gamut-webp`'s VP8L prefix coder uses. This crate keeps its own
+//! because its default build has no dependency at all, and depending on `gamut-bitstream` would
+//! pull in `gamut-core` with it. The two must produce the same lengths for the same histogram and
+//! limit; a fix to one belongs in the other. They differ only in form: this copy returns codes
+//! already bit-reversed for DEFLATE's LSB-first writer, and caps lengths at DEFLATE's 15 bits.
 //!
 //! [`BitWriter`]: crate::bitwriter::BitWriter
 

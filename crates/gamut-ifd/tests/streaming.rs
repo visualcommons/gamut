@@ -33,21 +33,9 @@ fn fixture_files(order: ByteOrder, variant: Variant) -> Vec<TiffFile> {
     root.set_sub_ifd(tags::SUB_IFDS, vec![child]);
 
     vec![
-        TiffFile {
-            order,
-            variant,
-            ifds: vec![flat],
-        },
-        TiffFile {
-            order,
-            variant,
-            ifds: vec![page_a, page_b],
-        },
-        TiffFile {
-            order,
-            variant,
-            ifds: vec![root],
-        },
+        TiffFile::new(order, variant, vec![flat]),
+        TiffFile::new(order, variant, vec![page_a, page_b]),
+        TiffFile::new(order, variant, vec![root]),
     ]
 }
 
@@ -188,11 +176,11 @@ fn lazy_reads_touch_only_what_is_asked_for() {
     ifd.set(256, Value::Short(vec![640]));
     ifd.set(258, Value::Short(vec![8, 8, 8])); // 6 bytes, out of line
     ifd.set(273, Value::Long(vec![0x10_0000])); // "StripOffsets": points into the payload
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd],
+    ))
     .expect("write");
     // Two megabytes of payload after the directory — the part a lazy parse must never touch.
     let mut data = bytes;
@@ -233,11 +221,11 @@ fn maker_note_mini_ifd_parses_through_a_rebased_view() {
     let mut note_ifd = Ifd::new();
     note_ifd.set(1, Value::Short(vec![7]));
     note_ifd.set(2, Value::Ascii("vendor mode".to_owned())); // out of line within the note
-    let note = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![note_ifd.clone()],
-    })
+    let note = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![note_ifd.clone()],
+    ))
     .expect("write note");
     let mut outer = vec![0u8; 1000];
     outer.extend_from_slice(&note);
@@ -270,12 +258,7 @@ fn unterminated_directory(order: ByteOrder, variant: Variant) -> (Vec<u8>, u64, 
     let mut ifd = Ifd::new();
     ifd.set(1, Value::Short(vec![7])); // inline: no value bytes after the directory
     ifd.set(2, Value::Long(vec![0x0102_0304]));
-    let bytes = write(&TiffFile {
-        order,
-        variant,
-        ifds: vec![ifd.clone()],
-    })
-    .expect("write");
+    let bytes = write(&TiffFile::new(order, variant, vec![ifd.clone()])).expect("write");
     let offset = IfdReader::open(&bytes[..])
         .expect("open")
         .first_ifd_offset();
@@ -358,11 +341,7 @@ fn parses_a_real_file_through_stream_source() {
     let mut root = Ifd::new();
     root.set(256, Value::Short(vec![640]));
     root.set_sub_ifd(tags::SUB_IFDS, vec![child]);
-    let file = TiffFile {
-        order: ByteOrder::BigEndian,
-        variant: Variant::Classic,
-        ifds: vec![root],
-    };
+    let file = TiffFile::new(ByteOrder::BigEndian, Variant::Classic, vec![root]);
     let bytes = write(&file).expect("write");
 
     let path = std::env::temp_dir().join(format!(

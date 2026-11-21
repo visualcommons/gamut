@@ -74,11 +74,7 @@ fn every_type_ifd(order: ByteOrder, variant: Variant) -> Ifd {
 #[test]
 fn every_field_type_roundtrips_through_a_file() {
     for (order, variant) in orders_and_variants() {
-        let file = TiffFile {
-            order,
-            variant,
-            ifds: vec![every_type_ifd(order, variant)],
-        };
+        let file = TiffFile::new(order, variant, vec![every_type_ifd(order, variant)]);
         let bytes = write(&file).expect("write");
         let parsed = read(&bytes).expect("read");
         assert_eq!(parsed, file, "{order:?} {variant:?}");
@@ -95,11 +91,7 @@ fn large_out_of_line_value_roundtrips_and_classifies() {
     let mut ifd = Ifd::new();
     ifd.set(700, Value::Undefined(payload.clone()));
     ifd.set(256, Value::Short(vec![1]));
-    let file = TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd],
-    };
+    let file = TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![ifd]);
     let bytes = write(&file).expect("write");
     let AuditedFile {
         file: parsed,
@@ -123,11 +115,11 @@ fn maker_note_bytes_survive_and_pin_at_their_source_offset() {
     let mut note_ifd = Ifd::new();
     note_ifd.set(1, Value::Short(vec![7]));
     note_ifd.set(2, Value::Ascii("vendor mode".to_owned()));
-    let note = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![note_ifd],
-    })
+    let note = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![note_ifd],
+    ))
     .expect("write note");
 
     let mut exif = Ifd::new();
@@ -136,11 +128,7 @@ fn maker_note_bytes_survive_and_pin_at_their_source_offset() {
     let mut root = Ifd::new();
     root.set(256, Value::Short(vec![640]));
     root.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
-    let file = TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![root],
-    };
+    let file = TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![root]);
 
     // (a) Value-level byte exactness through an ordinary rewrite.
     let bytes = write(&file).expect("write");
@@ -159,6 +147,7 @@ fn maker_note_bytes_survive_and_pin_at_their_source_offset() {
     let WriteOutput {
         bytes: pinned_bytes,
         segments: map,
+        ..
     } = write_with(
         &file,
         &WriteOptions::default().with_pin(tags::MAKER_NOTE, note_at),
@@ -191,11 +180,7 @@ fn vendor_tag_values_are_byte_exact_after_rewrite() {
     let mut ifd = Ifd::new();
     ifd.set(0xEA1C, Value::Undefined(vendor_blob.clone())); // a real-world vendor padding tag
     ifd.set(0x9C9B, Value::Byte(vec![0x58, 0x00, 0x50, 0x00])); // XP* style vendor tag
-    let file = TiffFile {
-        order: ByteOrder::BigEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd],
-    };
+    let file = TiffFile::new(ByteOrder::BigEndian, Variant::Classic, vec![ifd]);
     let bytes = write(&file).expect("write");
     let reparsed = read(&write(&read(&bytes).expect("read")).expect("rewrite")).expect("reread");
     assert_eq!(

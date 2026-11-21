@@ -213,7 +213,11 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
 }
 
 /// What [`write_with`] returns: the serialised stream and the writer's own account of it.
+///
+/// `#[non_exhaustive]` so the writer's account can grow; only [`write_with`] builds one, and a
+/// destructuring pattern outside this crate ends in `..`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct WriteOutput {
     /// The serialised TIFF/IFD stream.
     pub bytes: Vec<u8>,

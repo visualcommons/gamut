@@ -37,11 +37,7 @@ fn sample_file() -> TiffFile {
     ifd.set(296, Value::Short(vec![2])); // ResolutionUnit (inch)
     ifd.set(305, Value::Ascii("gamut-tiff benchmark".to_owned())); // Software
     ifd.set(306, Value::Ascii("2026:06:13 00:00:00".to_owned())); // DateTime
-    TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd],
-    }
+    TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])
 }
 
 #[divan::bench]

@@ -284,6 +284,13 @@ The API was frozen after a full-surface review; the additions and breaks:
   still flagged. **Behaviour change:** `TiffEncoder` now refuses, with `ErrorKind::Unsupported`,
   a `with_predictor` value other than `None` or `HorizontalDifferencing`, which the shared type
   can now express and which would otherwise be silently encoded unpredicted.
+- **libtiff's extension codes (#1229).** `Compression` gains `Jp2000` (`34712`), `Lerc`
+  (`34887`), `Zstd` (`50000`) and `Webp` (`50001`), the codes libtiff's `tiff.h` writes beyond
+  the specifications, and this crate's readers admit them. **Behaviour change:** `TiffInfo` now
+  names such a page's scheme where it used to refuse the page as `Unsupported`, and
+  `deconstruct` no longer reports their codes as `Anomaly::UnknownCode`. Decoding their data is
+  still refused with `ErrorKind::Unsupported`, and encoding them is too; decoders for them are
+  not yet planned (each needs an external codec — zstd, libwebp, a JPEG 2000 codec, LERC).
 - **The workspace shapes (#1082). Breaking.** `TiffMetadata::exif` is gamut-exif's `Exif` model
   (a new normal `gamut-exif` edge, re-exported with `ExifTag`), replacing the raw `exif`/`ifd0`/
   `gps` directories and `exif_byte_order`: the model carries all three and its byte order, as

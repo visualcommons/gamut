@@ -4,13 +4,15 @@
 //! Each enum is the **union** of the codes the vendored specifications assign — TIFF 6.0
 //! (`references/tiff/tiff6.pdf`, Section 8 and Part 2) with its Technical Notes, and DNG 1.7.1.0
 //! (`references/dng/DNG_Spec_1_7_1_0.pdf`, Chapter 4) — so gamut-tiff and gamut-dng name a code
-//! the same way. Each is `#[repr(u16)]` with the on-disk code as its discriminant, converts back
-//! with `u16::from`, and parses with one `TryFrom<u16>` that refuses a code no specification
-//! here assigns.
+//! the same way. `Compression` additionally names the four codes libtiff writes beyond them
+//! (`third_party/libtiff/libtiff/tiff.h`: JPEG 2000, LERC, ZSTD and WebP), so a reader can say
+//! which scheme a file it cannot decode uses. Each is `#[repr(u16)]` with the on-disk code as its
+//! discriminant, converts back with `u16::from`, and parses with one `TryFrom<u16>` that refuses a
+//! code none of those sources assigns.
 //!
 //! Recognising a code is not supporting it. Which schemes a codec decodes or encodes, and which
 //! codes its own profile admits at all, stays with the codec: gamut-tiff refuses the DNG-only
-//! codes and gamut-dng the TIFF-only ones, each by variant.
+//! codes and gamut-dng the TIFF-only ones (libtiff's four among them), each by variant.
 
 /// The `unsupported` error every `TryFrom<u16>` below returns for an unassigned code.
 fn unassigned(message: &'static str) -> gamut_core::Error {
@@ -46,8 +48,16 @@ pub enum Compression {
     Deflate = 8,
     /// `32773` — PackBits, a byte-oriented run-length scheme (TIFF 6.0 §9).
     PackBits = 32773,
+    /// `34712` — JPEG 2000 (Leadtools; libtiff's `COMPRESSION_JP2000`).
+    Jp2000 = 34712,
+    /// `34887` — Esri LERC (libtiff's `COMPRESSION_LERC`).
+    Lerc = 34887,
     /// `34892` — DNG lossy JPEG (DNG 1.4).
     LossyJpeg = 34892,
+    /// `50000` — Zstandard (libtiff's `COMPRESSION_ZSTD`; not in the Adobe-maintained registry).
+    Zstd = 50000,
+    /// `50001` — WebP (libtiff's `COMPRESSION_WEBP`; not in the Adobe-maintained registry).
+    Webp = 50001,
     /// `52546` — JPEG XL (DNG 1.7).
     JpegXl = 52546,
 }
@@ -60,8 +70,8 @@ impl TryFrom<u16> for Compression {
     ///
     /// # Errors
     ///
-    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a code no
-    /// vendored specification assigns.
+    /// An [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a code neither
+    /// a vendored specification nor libtiff's `tiff.h` assigns.
     fn try_from(code: u16) -> Result<Self, Self::Error> {
         Ok(match code {
             1 => Compression::None,
@@ -73,7 +83,11 @@ impl TryFrom<u16> for Compression {
             7 => Compression::Jpeg,
             8 | 32946 => Compression::Deflate,
             32773 => Compression::PackBits,
+            34712 => Compression::Jp2000,
+            34887 => Compression::Lerc,
             34892 => Compression::LossyJpeg,
+            50000 => Compression::Zstd,
+            50001 => Compression::Webp,
             52546 => Compression::JpegXl,
             _ => return Err(unassigned("unrecognised Compression code")),
         })
@@ -310,6 +324,11 @@ mod tests {
                 (Compression::Jpeg, 7),
                 (Compression::Deflate, 8),
                 (Compression::PackBits, 32773),
+                // The four codes libtiff's `tiff.h` writes beyond the specifications, one row each.
+                (Compression::Jp2000, 34712),
+                (Compression::Lerc, 34887),
+                (Compression::Zstd, 50000),
+                (Compression::Webp, 50001),
                 (Compression::LossyJpeg, 34892),
                 (Compression::JpegXl, 52546),
             ],

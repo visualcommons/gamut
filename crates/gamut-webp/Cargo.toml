@@ -16,6 +16,9 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+# The length-limited Huffman builder and canonical-code assignment the VP8L prefix coder emits
+# with (#1104): format-neutral, so it lives in the shared bitstream crate.
+gamut-bitstream.workspace = true
 gamut-codec-abi = { workspace = true, features = ["std"] }
 gamut-core.workspace = true
 gamut-color.workspace = true
