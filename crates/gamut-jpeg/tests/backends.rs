@@ -1507,7 +1507,7 @@ fn custom_quant_tables_pin_the_encode_to_the_built_in_path() {
     // would otherwise encode with the wrong tables. The output must equal a registry-free encode
     // of the same configuration.
     use gamut_jpeg::QuantTables;
-    let tables = QuantTables::new([9u8; 64], [13u8; 64]).unwrap();
+    let tables = QuantTables::new([9u16; 64], [13u16; 64]).unwrap();
     let log: Log = Arc::default();
     let mut enc = JpegEncoder::new().with_quant_tables(tables);
     enc = enc.with_backend(ScriptedEncoder {

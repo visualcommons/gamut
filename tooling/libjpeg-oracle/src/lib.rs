@@ -277,8 +277,8 @@ pub fn encode(
 
 /// [`encode`] with `params.quality` applied as `cjpeg` applies it by default —
 /// `jpeg_set_quality(.., force_baseline = FALSE)` — rather than clamped to baseline: quantization
-/// table entries keep values up to 32767, so below quality 25 the stream carries 16-bit (`Pq = 1`)
-/// tables and an extended-sequential (SOF1) frame.
+/// table entries keep values up to 32767, so from quality 23 down the stream carries 16-bit
+/// (`Pq = 1`) tables and an extended-sequential (SOF1) frame.
 ///
 /// # Errors
 ///
@@ -743,7 +743,7 @@ mod tests {
 
     #[test]
     fn extended_quality_writes_sof1_and_baseline_quality_sof0() {
-        // Below quality 25 the unforced mapping leaves luma entries above 255, which libjpeg
+        // From quality 23 down the unforced mapping leaves luma entries above 255, which libjpeg
         // writes as a 16-bit table under SOF1; the forced mapping stays baseline (SOF0).
         let (w, h) = (16, 16);
         let params = EncodeParams {

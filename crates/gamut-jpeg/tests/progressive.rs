@@ -713,7 +713,7 @@ fn custom_quant_tables_feed_baseline_and_progressive_identically() {
     // decode(progressive) == decode(baseline) byte-for-byte under a custom pair distinct from any
     // quality-scaled Annex K output.
     use gamut_jpeg::QuantTables;
-    let tables = QuantTables::new([6u8; 64], [14u8; 64]).unwrap();
+    let tables = QuantTables::new([6u16; 64], [14u16; 64]).unwrap();
     let (w, h) = (23u32, 19u32);
     for mode in [Mode::Gray, Mode::C420] {
         let src: Vec<u8> = (0..(w * h * mode.channels()) as usize)

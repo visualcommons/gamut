@@ -395,7 +395,7 @@ int oracle_jpeg_encode_meta(const unsigned char *pixels, unsigned int width, uns
  *
  * `quality` is applied with `force_baseline` (nonzero = TRUE, clamping every table entry to 255 as
  * `cjpeg -baseline` does; zero = cjpeg's default, which keeps entries up to 32767 and so writes
- * 16-bit Pq=1 tables and an SOF1 frame below quality 25). `h_samp`/`v_samp` set the luma sampling factors
+ * 16-bit Pq=1 tables and an SOF1 frame from quality 23 down). `h_samp`/`v_samp` set the luma sampling factors
  * (chroma stays 1x1): 1,1 = 4:4:4, 2,1 = 4:2:2, 2,2 = 4:2:0, 1,2 = 4:4:0. `progressive` selects a
  * default progressive script; `restart_interval` and `optimize_coding` map to the like-named cinfo fields.
  *

@@ -83,8 +83,8 @@ fn geomean(t: &[f64]) -> f64 {
 }
 
 /// Rounds and clamps real-valued steps into a baseline table.
-fn to_table(steps: &[f64; 64]) -> [u8; 64] {
-    steps.map(|s| s.round().clamp(1.0, 255.0) as u8)
+fn to_table(steps: &[f64; 64]) -> [u16; 64] {
+    steps.map(|s| s.round().clamp(1.0, 255.0) as u16)
 }
 
 /// The Annex K luminance table as reals, natural order.
@@ -99,7 +99,7 @@ fn annex_k_luma() -> [f64; 64] {
 /// per pixel times `ppd` (one of [`PIXELS_PER_DEGREE`]). Scaled so its geometric mean equals
 /// Annex K.1's, which keeps the quality sweep's strength comparable; the BD-rate does not depend
 /// on that scale.
-fn csf_luma(ppd: f64) -> [u8; 64] {
+fn csf_luma(ppd: f64) -> [u16; 64] {
     let (peak, _) = (1..=800)
         .map(|i| f64::from(i) * 0.05)
         .map(|f| (f, mannos_sakrison(f)))
@@ -116,22 +116,27 @@ fn csf_luma(ppd: f64) -> [u8; 64] {
 
 /// A flat table at Annex K.1's geometric mean: every frequency quantized alike, the MSE-optimal
 /// shape for an orthonormal transform.
-fn flat() -> [u8; 64] {
+fn flat() -> [u16; 64] {
     to_table(&[geomean(&annex_k_luma()); 64])
 }
 
 /// `base` with every step multiplied by `k`.
-fn scaled_table(base: &[u8; 64], k: f64) -> [u8; 64] {
+fn scaled_table(base: &[u16; 64], k: f64) -> [u16; 64] {
     to_table(&base.map(|b| f64::from(b) * k))
 }
 
 /// Which base tables a variant scales by quality.
 #[derive(Clone, Copy)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a handful of sweep arms built once per run; boxing would cost the `Copy` the sweep \
+              loops rely on and save nothing measurable"
+)]
 enum Tables {
     /// `with_quality(q)`: the frozen Annex K path.
     AnnexK,
     /// `with_quant_tables(QuantTables::new(luma, chroma).scaled(q))`.
-    Custom([u8; 64], [u8; 64]),
+    Custom([u16; 64], [u16; 64]),
 }
 
 /// One encoder configuration under test.
@@ -542,8 +547,8 @@ fn bdrate(args: &[String]) {
 }
 
 fn tables() {
-    let row = |name: &str, t: &[u8; 64]| {
-        let cells: Vec<String> = t.iter().map(u8::to_string).collect();
+    let row = |name: &str, t: &[u16; 64]| {
+        let cells: Vec<String> = t.iter().map(u16::to_string).collect();
         println!("{name},{}", cells.join(","));
     };
     row("annexk-luma", &LUMINANCE);

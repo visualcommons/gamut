@@ -177,6 +177,30 @@ fn xyb_x_table_moves_x_alone_to_destination_2() {
 }
 
 #[test]
+fn a_16bit_xyb_x_table_makes_the_xyb_frame_sof1() {
+    // The XYB prologue writes its own DQT, so its 16-bit signal must reach the frame header too:
+    // an X table above 255 (with an 8-bit pair) is Pq=1 at destination 2 under SOF1, and
+    // libjpeg-turbo still reads the stream.
+    let tables = QuantTables::annex_k().with_xyb_x([300u16; 64]).unwrap();
+    let src = rgb_gradient(16, 16);
+    let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(16, 16).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_color_mode(JpegColorMode::Xyb)
+        .with_quant_tables(tables)
+        .encode_to_vec(img)
+        .unwrap();
+    let segments = header_segments(&jpeg);
+    let dqt = segment(&segments, 0xDB);
+    assert_eq!((dqt.len(), dqt[130]), (2 * 65 + 129, 0x12), "Pq=1 | Tq=2");
+    assert!(segments.iter().all(|(code, _)| *code != 0xC0));
+    assert_eq!(
+        sof_components(&segment(&segments, 0xC1))[0],
+        (b'R', 0x22, 2)
+    );
+    libjpeg_oracle::decode(&jpeg).expect("libjpeg-turbo reads the SOF1 XYB stream");
+}
+
+#[test]
 fn xyb_x_table_round_trips_through_libjpeg_and_through_gamut() {
     // The X plane must be quantized with the table its Tq names: a decoder dequantizing X with
     // the quality-60 table recovers the source only if the encoder divided by that same table.

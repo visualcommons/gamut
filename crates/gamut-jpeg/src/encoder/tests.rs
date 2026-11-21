@@ -241,7 +241,7 @@ fn single_horizontal_frequency_lights_one_ac_coefficient() {
 
 /// The test-side reference for one 8×8 block of `plane` at block coords `(bx, by)`: the same
 /// §A.3.1/§A.3.3/§A.3.4 stages, written independently of the production gather.
-fn reference_block(plane: &Plane, bx: usize, by: usize, quant: &[u8; 64]) -> [i32; 64] {
+fn reference_block(plane: &Plane, bx: usize, by: usize, quant: &[u16; 64]) -> [i32; 64] {
     let mut block = [0i32; 64];
     for (i, cell) in block.iter_mut().enumerate() {
         let x = (bx * 8 + i % 8).min(plane.width - 1);

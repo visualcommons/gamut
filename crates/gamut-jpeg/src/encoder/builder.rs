@@ -93,8 +93,10 @@ impl JpegEncoder {
     /// encode is pinned to the **built-in** encoder: pushed backends are not consulted, because a
     /// [`JpegEncodeRequest`] cannot carry custom tables. Grayscale uses only the
     /// luma table. In [`JpegColorMode::Xyb`] a [`QuantTables::with_xyb_x`] table quantizes the X
-    /// channel at its own destination (`Tq = 2`); other modes ignore it. The frozen quality
-    /// contract is unaffected — it continues to govern the default path.
+    /// channel at its own destination (`Tq = 2`); other modes ignore it. A table the stream
+    /// emits with any entry above 255 is written 16-bit (`Pq = 1`) and makes a sequential frame
+    /// extended (SOF1) instead of baseline ([`QuantTables`]). The frozen quality contract is
+    /// unaffected — it continues to govern the default path.
     #[must_use]
     pub fn with_quant_tables(mut self, tables: QuantTables) -> Self {
         self.quant_tables = Some(tables);
@@ -229,7 +231,7 @@ impl JpegEncoder {
 
     /// The luminance quantization table (natural order): the caller's table when
     /// [`Self::with_quant_tables`] is set, otherwise Annex K.1 scaled for the configured quality.
-    pub(super) fn luma_quant(&self) -> [u8; 64] {
+    pub(super) fn luma_quant(&self) -> [u16; 64] {
         match &self.quant_tables {
             Some(tables) => *tables.luma(),
             None => quant::scale(&quant::LUMINANCE, self.quality),
@@ -238,7 +240,7 @@ impl JpegEncoder {
 
     /// The chrominance quantization table (natural order): the caller's table when
     /// [`Self::with_quant_tables`] is set, otherwise Annex K.2 scaled for the configured quality.
-    pub(super) fn chroma_quant(&self) -> [u8; 64] {
+    pub(super) fn chroma_quant(&self) -> [u16; 64] {
         match &self.quant_tables {
             Some(tables) => *tables.chroma(),
             None => quant::scale(&quant::CHROMINANCE, self.quality),
@@ -247,7 +249,7 @@ impl JpegEncoder {
 
     /// The separate XYB X-channel table (natural order) when the caller's [`QuantTables`] carry
     /// one ([`QuantTables::with_xyb_x`]); `None` means X shares the luminance table.
-    pub(super) fn xyb_x_quant(&self) -> Option<[u8; 64]> {
+    pub(super) fn xyb_x_quant(&self) -> Option<[u16; 64]> {
         self.quant_tables.and_then(|tables| tables.xyb_x().copied())
     }
 
@@ -359,8 +361,8 @@ mod tests {
     #[test]
     fn quant_chokepoints_prefer_custom_tables_and_fall_back_to_the_scaled_annex_k() {
         // Distinct luma/chroma fixtures: a swapped arm in either chokepoint changes the result.
-        let luma = [7u8; 64];
-        let chroma = [11u8; 64];
+        let luma = [7u16; 64];
+        let chroma = [11u16; 64];
         let tables = QuantTables::new(luma, chroma).expect("nonzero fixtures");
         let custom = JpegEncoder::new().with_quant_tables(tables);
         assert_eq!(custom.luma_quant(), luma);
