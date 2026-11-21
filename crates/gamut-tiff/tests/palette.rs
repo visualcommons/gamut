@@ -131,9 +131,12 @@ fn decode_page_indexed8_returns_indices_and_colour_map() {
             &mut tiff,
         )
         .expect("encode");
-    let (image, table) = TiffDecoder::new()
+    let page = TiffDecoder::new()
         .decode_page_indexed8(&tiff, 0)
         .expect("decode");
+    assert_eq!(page.image().as_samples(), &idx);
+    assert_eq!(page.palette().rgb(2), Some([70, 80, 90]));
+    let (image, table) = page.into_parts();
     assert_eq!(image.as_samples(), &idx);
     assert_eq!(
         (image.dimensions().width(), image.dimensions().height()),

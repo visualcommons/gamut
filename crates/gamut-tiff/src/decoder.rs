@@ -430,10 +430,10 @@ impl TiffDecoder {
     ///     &mut tiff,
     /// )?;
     ///
-    /// let (image, table) = TiffDecoder::new().decode_page_indexed8(&tiff, 0)?;
-    /// assert_eq!(image.as_samples(), &indices);
-    /// assert_eq!(table.rgb(1), Some([0, 0, 255]));
-    /// assert_eq!(table.rgb_entries().len(), 256);
+    /// let page = TiffDecoder::new().decode_page_indexed8(&tiff, 0)?;
+    /// assert_eq!(page.image().as_samples(), &indices);
+    /// assert_eq!(page.palette().rgb(1), Some([0, 0, 255]));
+    /// assert_eq!(page.palette().rgb_entries().len(), 256);
     /// # Ok(())
     /// # }
     /// ```
@@ -443,11 +443,7 @@ impl TiffDecoder {
     /// As [`TiffDecoder::decode_page_as`] at [`Indexed8`]: in particular an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error for a page that is not
     /// palette colour, since no other layout carries indices.
-    pub fn decode_page_indexed8(
-        &self,
-        data: &[u8],
-        page: usize,
-    ) -> Result<(ImageBuf<Indexed8>, Palette)> {
+    pub fn decode_page_indexed8(&self, data: &[u8], page: usize) -> Result<IndexedPage> {
         let img = decode_page_samples(data, page, self.limits)?;
         let Samples::Indexed(indices, table) = img.samples else {
             return Err(Error::unsupported(
@@ -456,7 +452,44 @@ impl TiffDecoder {
             ));
         };
         let entries: Vec<[u8; 3]> = (0..=u8::MAX).map(|i| table.entry(i)).collect();
-        Ok((ImageBuf::new(indices, img.dims)?, Palette::new(&entries)?))
+        Ok(IndexedPage {
+            image: ImageBuf::new(indices, img.dims)?,
+            palette: Palette::new(&entries)?,
+        })
+    }
+}
+
+/// A palette-colour page decoded by [`TiffDecoder::decode_page_indexed8`]: its bare [`Indexed8`]
+/// indices and the colour table they select from.
+///
+/// `#[non_exhaustive]` so it can gain fields (as gamut-png's `DecodedPng` carries its palette
+/// beside the image) without a breaking change; read it through the accessors, or take both
+/// halves with [`IndexedPage::into_parts`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct IndexedPage {
+    image: ImageBuf<Indexed8>,
+    palette: Palette,
+}
+
+impl IndexedPage {
+    /// The page's palette indices, one byte per pixel.
+    #[must_use]
+    pub fn image(&self) -> &ImageBuf<Indexed8> {
+        &self.image
+    }
+
+    /// The page's colour table, always 256 entries (see
+    /// [`TiffDecoder::decode_page_indexed8`]).
+    #[must_use]
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    /// Splits the page into its indices and its colour table, without copying either.
+    #[must_use]
+    pub fn into_parts(self) -> (ImageBuf<Indexed8>, Palette) {
+        (self.image, self.palette)
     }
 }
 
