@@ -159,7 +159,11 @@ One path per item, ahead of the API freeze. Every change below is breaking:
   setting can no longer be configured where it is ignored. Since #1245 `LosslessJpeg` likewise
   carries its T.81 predictor, `LosslessJpeg(LosslessPredictor)` (gamut-jpeg's `Predictor`,
   re-exported under that name beside the TIFF `Predictor` tag value), read back through
-  `DngCompression::lossless_predictor`.
+  `DngCompression::lossless_predictor`. Since #1245 too, `DngEncoder::new()` (and
+  `DngCompression::default()`) writes `LosslessJpeg(LosslessPredictor::Left)` — the Adobe DNG
+  SDK's own default — rather than `Uncompressed`: the raw samples are unchanged, every default
+  encode's bytes are not. `with_compression(DngCompression::Uncompressed)` restores the old
+  output.
 - **`DngDecoder::deconstruct` is removed.** The free `deconstruct` remains.
 - **The tag-value enums are `repr`'d.** `CalibrationIlluminant` and `CfaLayout` are
   `repr(u16)`. `ProfileEmbedPolicy`, `PreviewColorSpace` and `TableEncoding` are `repr(u32)`,

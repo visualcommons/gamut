@@ -191,7 +191,10 @@ fn new_raw_image_digest_matches_adobe() {
 fn adobe_rejects_a_corrupted_raw_digest() {
     let raw = common::sample_raw(64, 48, 16);
     let mut dng = Vec::new();
+    // Uncompressed, so the flipped byte is a raw sample the stored digest covers rather than a
+    // lossless-JPEG marker byte whose damage the SDK reports as a decode failure first.
     DngEncoder::new()
+        .with_compression(gamut_dng::DngCompression::Uncompressed)
         .encode(&raw, &common::sample_profile(), &mut dng)
         .expect("encode");
     let good_digest = gamut_dng_oracle::new_raw_image_digest(&dng).expect("digest");

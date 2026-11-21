@@ -982,6 +982,49 @@ fn decoder_rejects_garbage() {
     assert!(DngDecoder::new().decode(&[]).is_err());
 }
 
+/// The default encoder writes what the DNG SDK writes by default: the raw sub-IFD is lossless
+/// JPEG (`Compression = 7`) in one strip, a single SOF3 frame with predictor 1 whose samples are
+/// the mosaic, IFD 0 keeps the uncompressed preview, and the backward version stays at 1.1 (no
+/// newer reader is needed). gamut's decoder and the Adobe SDK both read the raw back exactly.
+#[test]
+fn the_default_encoder_writes_a_lossless_jpeg_raw_ifd() {
+    use gamut_dng::tags;
+    let raw = common::sample_raw(64, 48, 14);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+
+    let file = gamut_ifd::read(&dng).expect("parse");
+    let ifd0 = &file.ifds[0];
+    assert_eq!(ifd0.get_u32(tags::NEW_SUBFILE_TYPE), Some(1));
+    assert_eq!(ifd0.get_u32(tags::COMPRESSION), Some(1), "the preview");
+    assert_eq!(
+        ifd0.get(tags::DNG_BACKWARD_VERSION),
+        Some(&gamut_ifd::Value::Byte(vec![1, 1, 0, 0]))
+    );
+    let raw_off = ifd0.get_u64(tags::SUB_IFDS).expect("SubIFDs");
+    let raw_ifd = gamut_ifd::read_ifd_at(&dng, raw_off, file.order, file.variant).expect("raw IFD");
+    assert_eq!(raw_ifd.get_u32(tags::NEW_SUBFILE_TYPE), Some(0));
+    assert_eq!(raw_ifd.get_u32(tags::COMPRESSION), Some(7));
+    assert_eq!(raw_ifd.get_u32(tags::BITS_PER_SAMPLE), Some(14));
+    assert_eq!(raw_ifd.get_u32(tags::ROWS_PER_STRIP), Some(48));
+    let offsets = raw_ifd.get_u32_vec(tags::STRIP_OFFSETS).expect("offsets");
+    let counts = raw_ifd
+        .get_u32_vec(tags::STRIP_BYTE_COUNTS)
+        .expect("counts");
+    assert_eq!((offsets.len(), counts.len()), (1, 1));
+    let strip = &dng[offsets[0] as usize..(offsets[0] + counts[0]) as usize];
+    let frame = gamut_jpeg::lossless::decode(strip).expect("one SOF3 frame");
+    assert_eq!(frame.precision, 14);
+    assert_eq!(frame.samples, raw.samples());
+
+    assert_eq!(DngDecoder::new().decode(&dng).expect("decode").raw, raw);
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe must accept the default DNG");
+    let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe decode");
+    assert_eq!(adobe.samples, raw.samples());
+}
+
 /// `DngPreview::None` makes IFD 0 the raw image itself — the one IFD of the file, the main image
 /// (`NewSubFileType = 0`) with the DNG tags beside it, and no `SubIFDs` child — which gamut and
 /// the Adobe SDK both read back to the input samples, stripped or tiled, CFA or LinearRaw,

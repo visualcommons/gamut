@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(gamut-dng)* [**breaking**] `DngEncoder::new()` (and `DngCompression::default()`) now
+  compresses the raw image with lossless JPEG (`Compression = 7`, predictor 1), as the Adobe DNG
+  SDK does by default, instead of writing it uncompressed. The samples are unchanged — the
+  scheme is lossless and every DNG reader decodes it — but every default encode's bytes differ
+  and are smaller; call `.with_compression(DngCompression::Uncompressed)` for the previous
+  output ([#1245](https://github.com/visualcommons/gamut/issues/1245))
+
 ### Added
 
 - *(gamut-dng)* `DngEncoder::with_preview(DngPreview)` caps the IFD 0 preview's longer side

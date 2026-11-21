@@ -76,10 +76,11 @@ pub enum DngCompression {
     Jxl(JxlSettings),
 }
 
-/// [`Uncompressed`](DngCompression::Uncompressed), the scheme [`DngEncoder::new`] writes.
+/// Lossless JPEG with [`LosslessPredictor::Left`], the scheme [`DngEncoder::new`] writes — the
+/// DNG SDK's own default raw compression (`Compression = 7`, predictor 1).
 impl Default for DngCompression {
     fn default() -> Self {
-        Self::Uncompressed
+        Self::LosslessJpeg(LosslessPredictor::Left)
     }
 }
 
@@ -145,7 +146,9 @@ impl Default for DngEncoder {
             dng_version: None,
             backward_version: [1, 1, 0, 0],
             variant: Variant::Classic,
-            compression: DngCompression::Uncompressed,
+            // Lossless JPEG, as the DNG SDK writes by default: the raw stays exact, every DNG
+            // reader decodes it (it needs no newer backward version), and any bit depth codes.
+            compression: DngCompression::default(),
             preview: DngPreview::default(),
             tiling: None,
             gain_table_map: None,
@@ -158,7 +161,9 @@ impl Default for DngEncoder {
 }
 
 impl DngEncoder {
-    /// Creates an encoder that writes little-endian (`II`) DNG.
+    /// Creates an encoder that writes little-endian (`II`) classic-TIFF DNG with a lossless-JPEG
+    /// raw image (`Compression = 7`, predictor 1 — what the DNG SDK writes by default) and an
+    /// uncapped uncompressed RGB preview in IFD 0.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -208,7 +213,9 @@ impl DngEncoder {
     }
 
     /// Returns a copy of this encoder that compresses the raw image with `compression` (default
-    /// [`DngCompression::Uncompressed`]).
+    /// lossless JPEG with predictor 1, `DngCompression::LosslessJpeg(LosslessPredictor::Left)`,
+    /// the DNG SDK's own default; [`DngCompression::Uncompressed`] writes the packed samples
+    /// verbatim).
     ///
     /// Each [`DngCompression`] is a scheme the encoder writes, with two encode-time limits:
     /// [`Deflate`](DngCompression::Deflate) needs 8/16-bit samples, and
@@ -755,9 +762,12 @@ impl DngEncoder {
         match self.compression {
             DngCompression::LosslessJpeg(predictor) => {
                 let (width, components) = lossless_jpeg_geometry(cols, spp, period);
+                // T.81 B.2.2 floors a lossless frame's precision at 2 bits; a 1-bit raw (which
+                // `RawImage` accepts) codes exactly in a 2-bit frame, and readers take the
+                // samples from the frame, not from `BitsPerSample`.
                 gamut_jpeg::lossless::LosslessEncoder::new()
                     .with_predictor(predictor)
-                    .encode(samples, width, rows, components, bits)
+                    .encode(samples, width, rows, components, bits.max(2))
             }
             DngCompression::Jxl(settings) => {
                 #[cfg(all(
@@ -1266,8 +1276,10 @@ mod tests {
         let raw = sample_raw(8, 6, bits);
         let profile = sample_profile();
         let mut out = Vec::new();
+        // Uncompressed, so the raw strip is the packed samples this unpacks directly.
         let report = DngEncoder::new()
             .with_byte_order(order)
+            .with_compression(DngCompression::Uncompressed)
             .encode(&raw, &profile, &mut out)
             .expect("encode");
         assert_eq!(report.len, out.len());
@@ -1737,6 +1749,36 @@ mod tests {
             let decoded = crate::DngDecoder::new().decode(&out).expect("decode");
             assert_eq!(decoded.raw.samples(), raw.samples(), "{predictor:?}");
         }
+    }
+
+    /// Lossless JPEG's 2-bit precision floor does not refuse a 1-bit raw under the default
+    /// scheme: it codes in a 2-bit frame and decodes back to the same samples.
+    #[test]
+    fn a_one_bit_raw_codes_as_lossless_jpeg() {
+        let pattern = vec![
+            cfa_color::RED,
+            cfa_color::GREEN,
+            cfa_color::GREEN,
+            cfa_color::BLUE,
+        ];
+        let samples: Vec<u16> = (0..8 * 6).map(|i| (i % 3 % 2) as u16).collect();
+        let raw =
+            RawImage::new_cfa(Dimensions::new(8, 6).unwrap(), 1, (2, 2), pattern, samples).unwrap();
+        let mut out = Vec::new();
+        DngEncoder::new()
+            .encode(&raw, &sample_profile(), &mut out)
+            .expect("a 1-bit raw encodes");
+        let decoded = crate::DngDecoder::new().decode(&out).expect("decode");
+        assert_eq!(decoded.raw.samples(), raw.samples());
+    }
+
+    /// The default scheme is the DNG SDK's: lossless JPEG at predictor 1, on both the enum's
+    /// `Default` and the encoder a caller gets from `new`.
+    #[test]
+    fn the_default_compression_is_predictor_1_lossless_jpeg() {
+        let sdk_default = DngCompression::LosslessJpeg(LosslessPredictor::Left);
+        assert_eq!(DngCompression::default(), sdk_default);
+        assert_eq!(DngEncoder::new().compression, sdk_default);
     }
 
     #[test]

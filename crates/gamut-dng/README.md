@@ -87,7 +87,8 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
   MD5-over-raw-image computation (`RawImage::new_raw_image_digest`).
 - **`RawImage::to_linear`** — the spec's chapter-5 raw-to-linear-reference mapping, differentially
   gated (±1 of 16-bit) against the Adobe SDK's stage-2 image.
-- **Lossless JPEG (`Compression = 7`)** through `gamut-jpeg`'s `lossless` module, which owns
+- **Lossless JPEG (`Compression = 7`)**, the encoder's default raw compression (predictor 1, as
+  the Adobe DNG SDK writes by default), through `gamut-jpeg`'s `lossless` module, which owns
   all of T.81: decode covers the full process-14 reader envelope (predictors 1–7, point
   transform, per-component tables, restart markers; SDK-differential), and the DNG writer
   encodes with `gamut_jpeg::lossless::LosslessEncoder` at the predictor
