@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(webp)* [**breaking**] **output-changing for every lossy encode:** `WebpConfig::quality` now selects the VP8
+  base quantizer along libwebp's `QualityToCompression` curve rather than the linear
+  `(100 − quality)·127/100`, so the same `quality` lands on the same base quantizer as libwebp,
+  cwebp's `-q` and libvips' `Q` (with SNS off). The two mappings differ across the whole range: at
+  the default 75 the index moves from 31 to 26, at 60 from 50 to 33, and every `quality` strictly
+  between 0 and 100 now codes at a finer quantizer than before, so a lossy file encoded at an
+  unchanged `quality` comes out larger and closer to its source. Lossless encodes are unaffected. To keep the previous
+  quantizer, choose the quality that reaches it on the new curve (issue #1204).
+
 ## [0.4.0](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.1...gamut-webp-v0.4.0) - 2026-10-12
 
 ### Added

@@ -249,6 +249,10 @@ pub struct LibwebpLossyConfig {
     pub method: i32,
     /// Deblocking filter strength, `0..=100` (`0` disables the loop filter).
     pub filter_strength: i32,
+    /// Spatial noise shaping strength, `0..=100` (libwebp's default is `50`). SNS modulates the
+    /// quality curve per segment; `0` turns it off, so every segment — and, at `segments = 1`, the
+    /// frame header's base quantizer — takes the bare `QualityToCompression` value.
+    pub sns_strength: i32,
 }
 
 /// Appends libwebp's emitted output chunks into the `Vec<u8>` behind `picture.custom_ptr`. Matches the
@@ -301,6 +305,7 @@ pub fn libwebp_encode_lossy_rgba_config(
         config.segments = cfg.segments;
         config.method = cfg.method;
         config.filter_strength = cfg.filter_strength;
+        config.sns_strength = cfg.sns_strength;
         assert!(
             libwebp_sys::WebPValidateConfig(&config) != 0,
             "WebPValidateConfig rejected {cfg:?}"

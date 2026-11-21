@@ -264,7 +264,7 @@ exclude_re = [
     # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
     # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
-    '^crates/gamut-webp/src/encoder\.rs:125:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
+    '^crates/gamut-webp/src/encoder\.rs:142:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `alpha::write_compressed_alph`: `0xff00_0000 | (u32::from(a) << 8)` ORs the opaque
     # alpha byte (bits 24-31) with the green byte (bits 8-15); the operands are disjoint, so `|` == `^`.
     # Its ALPH header byte `method.code() << 2 | 0x01` is the same shape: the shift clears the two

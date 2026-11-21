@@ -367,6 +367,7 @@ fn gamut_decodes_libwebp_lossy_forced_features_bit_exact() {
         segments: 1,
         method: 4,
         filter_strength: 60,
+        sns_strength: 50,
     };
 
     // Guard: prove the advanced config actually reaches the encoder. This is a *conformance*

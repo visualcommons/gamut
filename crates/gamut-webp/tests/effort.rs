@@ -567,6 +567,12 @@ fn tiled_rgba(w: u32, h: u32) -> Vec<u8> {
 /// The lossy RGBA columns also carry the `ALPH` chunk, which is coded at the same rung (#1203):
 /// rungs 0-3 spend a cheaper VP8L search on the alpha plane than the default (rung 0's is far the
 /// largest), and rungs 5-6 search all four `ALPH` pre-filters.
+///
+/// The lossy columns are pinned by base quantizer, not by the quality that reaches it: these
+/// digests were captured at qualities 60 and 95, which the old linear mapping sent to base
+/// quantizers 50 and 6. When quality moved onto libwebp's curve (#1204) the columns moved to 33 and
+/// 93, the qualities that land on those same quantizers, and every digest held — which is what
+/// shows that change moved nothing but the quality-to-quantizer mapping.
 #[test]
 fn every_effort_rung_pins_its_output_bytes() {
     let d = dims(32, 24);
@@ -592,7 +598,7 @@ fn every_effort_rung_pins_its_output_bytes() {
         (246, 0x6f7c_d692_613c_775e),
         (216, 0xb770_b826_a8e4_1754),
     ];
-    const LOSSY60_RGB: [(usize, u64); 7] = [
+    const LOSSY33_RGB: [(usize, u64); 7] = [
         (122, 0x9ef8_1c74_ea19_d16c),
         (136, 0x2eb3_c30d_36b6_067e),
         (136, 0x2eb3_c30d_36b6_067e),
@@ -601,7 +607,7 @@ fn every_effort_rung_pins_its_output_bytes() {
         (134, 0x414b_d885_3a94_d316),
         (134, 0x414b_d885_3a94_d316),
     ];
-    const LOSSY60_RGBA: [(usize, u64); 7] = [
+    const LOSSY33_RGBA: [(usize, u64); 7] = [
         (918, 0xb71e_2477_41ed_463c),
         (220, 0x94b7_a070_1ae5_c6d3),
         (194, 0x54d8_fd6b_3e6a_f78d),
@@ -633,7 +639,7 @@ fn every_effort_rung_pins_its_output_bytes() {
         (13202, 0x9f43_8822_8cf0_0d09),
         (13202, 0x9f43_8822_8cf0_0d09),
     ];
-    const BUSY_LOSSY60_RGB: [(usize, u64); 7] = [
+    const BUSY_LOSSY33_RGB: [(usize, u64); 7] = [
         (1898, 0x3b9b_365a_f0da_ec79),
         (1794, 0x662a_15bc_cf1e_5f8b),
         (1794, 0x662a_15bc_cf1e_5f8b),
@@ -642,7 +648,7 @@ fn every_effort_rung_pins_its_output_bytes() {
         (1452, 0x1af0_7556_ce3c_4e47),
         (1452, 0x1af0_7556_ce3c_4e47),
     ];
-    const BUSY_LOSSY60_RGBA: [(usize, u64); 7] = [
+    const BUSY_LOSSY33_RGBA: [(usize, u64); 7] = [
         (8384, 0x8b73_b943_6cd4_02b9),
         (1902, 0x7723_400f_6c97_eb68),
         (1902, 0x7723_400f_6c97_eb68),
@@ -672,7 +678,7 @@ fn every_effort_rung_pins_its_output_bytes() {
         (3586, 0x73ff_3012_b8f4_14ae),
         (3586, 0x73ff_3012_b8f4_14ae),
     ];
-    const PATCH_LOSSY60_RGB: [(usize, u64); 7] = [
+    const PATCH_LOSSY33_RGB: [(usize, u64); 7] = [
         (2328, 0x694d_3467_b970_2251),
         (1832, 0xafb1_b617_367a_ce08),
         (1832, 0xafb1_b617_367a_ce08),
@@ -681,7 +687,7 @@ fn every_effort_rung_pins_its_output_bytes() {
         (1500, 0x7eca_6871_1963_eae7),
         (1500, 0x7eca_6871_1963_eae7),
     ];
-    const PATCH_LOSSY60_RGBA: [(usize, u64); 7] = [
+    const PATCH_LOSSY33_RGBA: [(usize, u64); 7] = [
         (7038, 0x23d3_984e_c0e3_8848),
         (6542, 0x1056_67d6_8719_cadd),
         (6360, 0x4c6b_ff94_4244_d6df),
@@ -692,7 +698,7 @@ fn every_effort_rung_pins_its_output_bytes() {
     ];
 
     let srgb = smooth_rgb(96, 80);
-    const SMOOTH_LOSSY95_RGB: [(usize, u64); 7] = [
+    const SMOOTH_LOSSY93_RGB: [(usize, u64); 7] = [
         (492, 0xb6f5_db75_6942_5bdc),
         (472, 0xf13f_9296_fc56_0ab0),
         (484, 0x293f_cb65_b36d_4eb2),
@@ -726,14 +732,14 @@ fn every_effort_rung_pins_its_output_bytes() {
                 encode_lossless(effort, &rgba, d),
             ),
             (
-                "lossy60 rgb",
-                LOSSY60_RGB[level],
-                encode_lossy_rgb(effort, 60, &rgb, d),
+                "lossy33 rgb",
+                LOSSY33_RGB[level],
+                encode_lossy_rgb(effort, 33, &rgb, d),
             ),
             (
-                "lossy60 rgba",
-                LOSSY60_RGBA[level],
-                encode_lossy(effort, 60, &rgba, d),
+                "lossy33 rgba",
+                LOSSY33_RGBA[level],
+                encode_lossy(effort, 33, &rgba, d),
             ),
             (
                 "busy lossless rgb",
@@ -746,14 +752,14 @@ fn every_effort_rung_pins_its_output_bytes() {
                 encode_lossless(effort, &brgba, bd),
             ),
             (
-                "busy lossy60 rgb",
-                BUSY_LOSSY60_RGB[level],
-                encode_lossy_rgb(effort, 60, &brgb, bd),
+                "busy lossy33 rgb",
+                BUSY_LOSSY33_RGB[level],
+                encode_lossy_rgb(effort, 33, &brgb, bd),
             ),
             (
-                "busy lossy60 rgba",
-                BUSY_LOSSY60_RGBA[level],
-                encode_lossy(effort, 60, &brgba, bd),
+                "busy lossy33 rgba",
+                BUSY_LOSSY33_RGBA[level],
+                encode_lossy(effort, 33, &brgba, bd),
             ),
             (
                 "patchwork lossless rgb",
@@ -766,19 +772,19 @@ fn every_effort_rung_pins_its_output_bytes() {
                 encode_lossless(effort, &prgba, bd),
             ),
             (
-                "patchwork lossy60 rgb",
-                PATCH_LOSSY60_RGB[level],
-                encode_lossy_rgb(effort, 60, &prgb, bd),
+                "patchwork lossy33 rgb",
+                PATCH_LOSSY33_RGB[level],
+                encode_lossy_rgb(effort, 33, &prgb, bd),
             ),
             (
-                "patchwork lossy60 rgba",
-                PATCH_LOSSY60_RGBA[level],
-                encode_lossy(effort, 60, &prgba, bd),
+                "patchwork lossy33 rgba",
+                PATCH_LOSSY33_RGBA[level],
+                encode_lossy(effort, 33, &prgba, bd),
             ),
             (
-                "smooth lossy95 rgb",
-                SMOOTH_LOSSY95_RGB[level],
-                encode_lossy_rgb(effort, 95, &srgb, bd),
+                "smooth lossy93 rgb",
+                SMOOTH_LOSSY93_RGB[level],
+                encode_lossy_rgb(effort, 93, &srgb, bd),
             ),
             (
                 "tiled lossless rgba",
