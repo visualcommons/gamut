@@ -205,8 +205,8 @@ impl core::fmt::Display for MetadataNotice {
 impl PngEncoder {
     /// Carries every metadata chunk a [`PngMetadata`] holds into this encoder, so that
     /// re-encoding a file keeps its EXIF, ICC profile, XMP packet, text annotations, colour
-    /// chunks, significant bits, background, physical dimensions and modification time instead of
-    /// dropping them.
+    /// chunks, HDR static metadata (`mDCV`, `cLLI`), significant bits, background, physical
+    /// dimensions and modification time instead of dropping them.
     ///
     /// This is the write-side counterpart of [`metadata`](crate::metadata): read a file's
     /// metadata without touching its pixels, then hand it to the encoder that rewrites them.
@@ -287,6 +287,15 @@ impl PngEncoder {
         // `with_cicp` leaves it behind with a notice rather than carry the defect forward.
         if let Some(cicp) = metadata.cicp {
             self = self.with_cicp(cicp);
+        }
+        // The HDR static metadata goes back byte for byte, primaries in the order the source
+        // stored them, and independently of the cICP §11.3.2.7 pairs it with: a source whose
+        // cICP was left behind above still carries its mDCV, as its author wrote it.
+        if let Some(display) = metadata.mastering_display {
+            self = self.with_mastering_display(display);
+        }
+        if let Some(level) = metadata.content_light_level {
+            self = self.with_content_light_level(level);
         }
         if metadata.c2pa.is_some() {
             self.carry_notices.push(MetadataNotice::C2paManifestStore);

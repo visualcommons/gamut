@@ -99,14 +99,15 @@ pub struct DecodedImage {
     /// The `eXIf` payload libpng accepted (`png_get_eXIf_1`), verbatim.
     pub exif: Option<Vec<u8>>,
     /// The chunks of a type in [`KEPT_UNKNOWN_CHUNKS`] (`png_get_unknown_chunks`), as
-    /// `(type, payload)` in file order. libpng 1.6.43 predates both, so it reads them as unknown
-    /// chunks and keeps their payloads verbatim.
+    /// `(type, payload)` in file order. libpng 1.6.43 predates all of them, so it reads them as
+    /// unknown chunks and keeps their payloads verbatim.
     pub unknown_chunks: Vec<([u8; 4], Vec<u8>)>,
 }
 
 /// The chunk types [`decode`] asks libpng to keep as unknown chunks, which this libpng does not
-/// parse itself: `cICP` (PNG 3rd edition §11.3.2.6) and the C2PA manifest store `caBX`.
-pub const KEPT_UNKNOWN_CHUNKS: [[u8; 4]; 2] = [*b"cICP", *b"caBX"];
+/// parse itself: `cICP`, `mDCV` and `cLLI` (PNG 3rd edition §11.3.2.6–§11.3.2.8; libpng parses the
+/// last two natively only from 1.6.45) and the C2PA manifest store `caBX`.
+pub const KEPT_UNKNOWN_CHUNKS: [[u8; 4]; 4] = [*b"cICP", *b"mDCV", *b"cLLI", *b"caBX"];
 
 /// One text chunk as libpng read it back (see [`DecodedImage::texts`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1143,7 +1144,12 @@ mod tests {
                         },
                     },
                 ],
-                extra_chunks: &[(*b"cICP", &[9, 16, 0, 1]), (*b"caBX", b"store")],
+                extra_chunks: &[
+                    (*b"cICP", &[9, 16, 0, 1]),
+                    (*b"mDCV", &[1; 24]),
+                    (*b"cLLI", &[2; 8]),
+                    (*b"caBX", b"store"),
+                ],
                 ..EncodeOpts::default()
             },
         );
@@ -1177,7 +1183,12 @@ mod tests {
         );
         assert_eq!(
             dec.unknown_chunks,
-            [(*b"cICP", vec![9, 16, 0, 1]), (*b"caBX", b"store".to_vec())]
+            [
+                (*b"cICP", vec![9, 16, 0, 1]),
+                (*b"mDCV", vec![1; 24]),
+                (*b"cLLI", vec![2; 8]),
+                (*b"caBX", b"store".to_vec())
+            ]
         );
     }
 

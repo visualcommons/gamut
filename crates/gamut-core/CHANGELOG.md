@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(gamut-core)* `ContentLightLevel` and `MasteringDisplay`, the HDR static-metadata types, lifted
+  from `gamut-isobmff` so every carrier shares one copy
+  ([#1244](https://github.com/visualcommons/gamut/issues/1244)). They now also derive `Hash`, and
+  `Serialize`/`Deserialize` under the `serde` feature, by field name.
+
 - *(gamut-core)* the `serde` feature now derives `Serialize`/`Deserialize` on every plain-data type,
   not only `ColorModel`: `PixelFormat`, `ErrorKind`, `Orientation`, `Cicp`, `DecodeLimits`,
   `Palette`, `RawMetadata`, `segment::Segment`, and `convert`'s `ConvertPolicy`, `AlphaPolicy`,

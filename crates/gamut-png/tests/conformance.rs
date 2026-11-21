@@ -575,6 +575,61 @@ fn srgb_intent_survives() {
     }
 }
 
+/// `mDCV` and `cLLI` framed by libpng — right after `IHDR`, as unknown chunks, since the vendored
+/// 1.6.43 predates both — decode to the values §11.3.2.7 Examples 9–12 and §11.3.2.8 Examples
+/// 13–14 give, with the pixels intact. The payload bytes are the spec's (with Example 9's green
+/// `x` as 0.265 / 0.00002 = 13 250, not its transposed 13520).
+#[test]
+fn hdr_chunks_written_by_libpng_are_read() {
+    let (width, height) = (4u32, 4u32);
+    let pixels = sample_bytes(width, height, libpng_oracle::COLOR_RGB, 8, 5);
+    let mdcv = [
+        0x84, 0xD0, 0x3E, 0x80, 0x33, 0xC2, 0x86, 0xC4, 0x1D, 0x4C, 0x0B, 0xB8, // P3 RGB
+        0x3D, 0x13, 0x40, 0x42, // D65
+        0x00, 0x0C, 0x35, 0x00, 0x00, 0x00, 0x01, 0xF4, // 80 and 0.05 cd/m²
+    ];
+    let clli = [0x00, 0x98, 0x96, 0x80, 0x00, 0x26, 0x25, 0xA0];
+    let png = libpng_oracle::encode(
+        &pixels,
+        width,
+        height,
+        libpng_oracle::COLOR_RGB,
+        8,
+        &EncodeOpts {
+            extra_chunks: &[
+                (*b"cICP", &[12, 13, 0, 1]),
+                (*b"mDCV", &mdcv),
+                (*b"cLLI", &clli),
+            ],
+            ..EncodeOpts::default()
+        },
+    );
+    assert_matches_oracle(&png, "HDR static metadata");
+
+    let meta = PngDecoder::new().decode(&png).unwrap().metadata;
+    assert_eq!(
+        meta.mastering_display,
+        Some(gamut_png::MasteringDisplay::new(
+            [[34_000, 16_000], [13_250, 34_500], [7_500, 3_000]],
+            [15_635, 16_450],
+            800_000,
+            500,
+        ))
+    );
+    let level = meta.content_light_level.expect("cLLI surfaced");
+    assert_eq!(
+        level,
+        gamut_png::ContentLightLevelInfo::new(10_000_000, 2_500_000)
+    );
+    assert_eq!(
+        level.to_content_light_level(),
+        Some(gamut_png::ContentLightLevel {
+            max_content_light_level: 1000,
+            max_pic_average_light_level: 250,
+        })
+    );
+}
+
 /// A libpng-written interlaced fixture at the decoder's exact dimension limit decodes; one past
 /// it is refused.
 #[test]

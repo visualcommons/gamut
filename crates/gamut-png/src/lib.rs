@@ -13,8 +13,8 @@
 //! # Reading metadata without the pixels
 //!
 //! [`metadata`] walks the chunk stream and returns a [`PngMetadata`] — the EXIF/ICC/XMP/text
-//! payloads plus the parsed colour chunks (`cICP`, `sRGB`, `gAMA`, `cHRM`) — skipping IDAT by
-//! length, so no pixel data is read or inflated. It is the counterpart of `gamut_jpeg::JpegDecoder::metadata`
+//! payloads plus the parsed colour chunks (`cICP`, `sRGB`, `gAMA`, `cHRM`) and the HDR static
+//! metadata (`mDCV`, `cLLI`) — skipping IDAT by length, so no pixel data is read or inflated. It is the counterpart of `gamut_jpeg::JpegDecoder::metadata`
 //! and `gamut_webp::WebpDecoder::metadata`, and what a colour-space probe should call.
 //! [`PngDecoder::metadata`] is the same walk with a configurable inflation budget.
 //!
@@ -124,8 +124,9 @@ pub use chunk::{
 };
 pub use color::ColorType;
 pub use decoded::{
-    Background, Chromaticities, Cicp, DecodedPng, IccProfile, ModificationTime, PhysicalDimensions,
-    PngHeader, PngImage, PngMetadata, TextChunk, TextChunkKind,
+    Background, Chromaticities, Cicp, ContentLightLevelInfo, DecodedPng, IccProfile,
+    ModificationTime, PhysicalDimensions, PngHeader, PngImage, PngMetadata, TextChunk,
+    TextChunkKind,
 };
 pub use decoder::{PngDecoder, TransparencyKey};
 pub use deconstruct::{
@@ -138,8 +139,12 @@ pub use filter::{FilterStrategy, FilterType};
 /// The workspace's shared vocabulary, accepted by [`PngDecoder::with_limits`],
 /// [`PngDecoder::with_convert_policy`] and [`PngEncoder::encode_indexed8`] (and returned in
 /// [`DecodedPng::palette`]), re-exported so a caller needs no direct `gamut-core`
-/// dependency to spell them.
-pub use gamut_core::{DecodeLimits, Palette, convert::ConvertPolicy};
+/// dependency to spell them. [`MasteringDisplay`] is [`PngMetadata::mastering_display`]'s and
+/// [`PngEncoder::with_mastering_display`]'s; [`ContentLightLevel`] converts exactly into a
+/// [`ContentLightLevelInfo`].
+pub use gamut_core::{
+    ContentLightLevel, DecodeLimits, MasteringDisplay, Palette, convert::ConvertPolicy,
+};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_level`].
 pub use gamut_deflate::Level;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell

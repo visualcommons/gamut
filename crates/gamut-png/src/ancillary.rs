@@ -24,12 +24,14 @@
 //! chunks — are [`crate::text`]'s. The conversion of the colour-type-shaped `bKGD` and `sBIT`
 //! payloads to the header actually written is [`crate::written`]'s.
 
-use gamut_core::{Error, Result};
+use gamut_core::{Error, MasteringDisplay, Result};
 use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::carry::MetadataNotice;
 use crate::chunk;
-use crate::decoded::{Background, Cicp, ModificationTime, PhysicalDimensions, XMP_KEYWORD};
+use crate::decoded::{
+    Background, Cicp, ContentLightLevelInfo, ModificationTime, PhysicalDimensions, XMP_KEYWORD,
+};
 use crate::text::{
     DEFAULT_ICC_PROFILE_NAME, IccpName, TextEntry, TextKind, profile_name_verdict, write_text,
 };
@@ -133,6 +135,10 @@ pub(crate) struct Ancillary {
     /// single-value slot like [`cicp`](Self::cicp) itself, so setting code points again replaces
     /// it.
     cicp_notice: Option<MetadataNotice>,
+    /// mDCV: the mastering display colour volume, written as stored (§11.3.2.7, Table 19).
+    pub mdcv: Option<MasteringDisplay>,
+    /// cLLI: `MaxCLL` and `MaxFALL`, written as stored (§11.3.2.8, Table 20).
+    pub clli: Option<ContentLightLevelInfo>,
     /// sBIT: significant bits per channel (1–4 values, matching the colour type).
     pub sbit: Option<Vec<u8>>,
     /// bKGD: background colour, pre-serialised to its colour-type-specific bytes.
@@ -430,6 +436,19 @@ impl Ancillary {
                 &[primaries, transfer, 0, u8::from(full_range)],
             );
         }
+        // §5.6 Table 5 places both "before PLTE and IDAT"; among the colour chunks their order is
+        // free, and they sit beside the cICP §11.3.2.7 says must accompany an mDCV.
+        if let Some(mdcv) = self.mdcv {
+            chunk::write_chunk(out, *b"mDCV", &mdcv_payload(mdcv));
+        }
+        if let Some(clli) = self.clli {
+            let data = [
+                clli.max_content_light_level.to_be_bytes(),
+                clli.max_frame_average_light_level.to_be_bytes(),
+            ]
+            .concat();
+            chunk::write_chunk(out, *b"cLLI", &data);
+        }
         if let Some(chrm) = self.chrm {
             let mut data = [0u8; 32];
             for (slot, value) in chrm.iter().enumerate() {
@@ -506,6 +525,20 @@ impl Ancillary {
             None => {}
         }
     }
+}
+
+/// The 24-byte `mDCV` payload (§11.3.2.7, Table 19): each primary's and then the white point's
+/// `x, y` as PNG two-byte unsigned integers, then the maximum and minimum luminance as four-byte
+/// ones, every value as given.
+fn mdcv_payload(mdcv: MasteringDisplay) -> Vec<u8> {
+    let mut data = Vec::with_capacity(24);
+    for [x, y] in mdcv.display_primaries.into_iter().chain([mdcv.white_point]) {
+        data.extend(x.to_be_bytes());
+        data.extend(y.to_be_bytes());
+    }
+    data.extend(mdcv.max_display_mastering_luminance.to_be_bytes());
+    data.extend(mdcv.min_display_mastering_luminance.to_be_bytes());
+    data
 }
 
 /// The `caBX` payload the caller asked for.
@@ -1394,5 +1427,43 @@ mod tests {
         let mut out = vec![0u8; 8];
         narrow.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         assert_eq!(find_chunk(&out, b"cICP"), Some(vec![1, 13, 0, 0]));
+    }
+
+    /// The values of §11.3.2.7 Examples 9–12 and §11.3.2.8 Examples 13–14, byte for byte: the
+    /// Display P3 primaries and D65 white point as two-byte integers, 80 and 0.05 cd/m² as
+    /// four-byte ones, then 1000 and 250 cd/m² as `MaxCLL`/`MaxFALL`. Green's `x` is 0.265 /
+    /// 0.00002 = 13 250; Example 9 prints its stored value as 13520 (`34 D0`), a transposition.
+    ///
+    /// Kills the `mDCV` and `cLLI` arms of [`Ancillary::write_pre_plte`] and [`mdcv_payload`]'s
+    /// field order: every value differs from every other.
+    #[test]
+    fn hdr_chunks_are_written_in_table_order() {
+        let a = Ancillary {
+            mdcv: Some(MasteringDisplay::new(
+                [[34_000, 16_000], [13_250, 34_500], [7_500, 3_000]],
+                [15_635, 16_450],
+                800_000,
+                500,
+            )),
+            clli: Some(ContentLightLevelInfo::new(10_000_000, 2_500_000)),
+            ..Default::default()
+        };
+        let mut out = vec![0u8; 8];
+        a.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
+        assert_eq!(
+            find_chunk(&out, b"mDCV"),
+            Some(vec![
+                0x84, 0xD0, 0x3E, 0x80, // red (34000, 16000)
+                0x33, 0xC2, 0x86, 0xC4, // green (13250, 34500)
+                0x1D, 0x4C, 0x0B, 0xB8, // blue (7500, 3000)
+                0x3D, 0x13, 0x40, 0x42, // white (15635, 16450)
+                0x00, 0x0C, 0x35, 0x00, // max 800 000
+                0x00, 0x00, 0x01, 0xF4, // min 500
+            ])
+        );
+        assert_eq!(
+            find_chunk(&out, b"cLLI"),
+            Some(vec![0x00, 0x98, 0x96, 0x80, 0x00, 0x26, 0x25, 0xA0])
+        );
     }
 }

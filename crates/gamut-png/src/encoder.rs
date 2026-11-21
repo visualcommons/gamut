@@ -32,7 +32,9 @@ use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
 #[cfg(doc)]
 use crate::decoded::PngMetadata;
-use crate::decoded::{Background, Chromaticities, Cicp, ModificationTime, PhysicalDimensions};
+use crate::decoded::{
+    Background, Chromaticities, Cicp, ContentLightLevelInfo, ModificationTime, PhysicalDimensions,
+};
 use crate::effort::{Effort, EffortKnobs};
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::{PaletteOrder, Plte};
@@ -439,6 +441,43 @@ impl PngEncoder {
     #[must_use]
     pub fn with_cicp(mut self, cicp: Cicp) -> Self {
         self.ancillary.set_cicp(cicp);
+        self
+    }
+
+    /// Records the mastering display colour volume (mDCV chunk, §11.3.2.7) — the SMPTE ST 2086
+    /// description of the display the content was mastered on — written byte for byte as the
+    /// value [`PngMetadata::mastering_display`] reads back. Calling this again replaces it.
+    ///
+    /// The chunk's units are [`MasteringDisplay`]'s own: chromaticities in units of 0.00002,
+    /// luminances in units of 0.0001 cd/m². Its primaries are written in the order given;
+    /// §11.3.2.7 orders them by chromaticity — largest `x`, then largest `y`, then the remaining
+    /// one, so red, green, blue for an RGB space — while the HEVC convention an AVIF or HEIC
+    /// `mdcv` follows is green, blue, red, so a value read from one of those needs reordering
+    /// first. A luminance past §7.1's 2³¹ − 1 is not a PNG four-byte unsigned integer and is
+    /// written anyway, as [`with_gamma`](Self::with_gamma) writes a gamma.
+    ///
+    /// §11.3.2.7: "a cICP chunk must accompany the use of mDCV", so set
+    /// [`with_cicp`](Self::with_cicp) too; the two are independent setters and this one does not
+    /// enforce the pairing. §5.6 places the chunk before `PLTE` and `IDAT`, beside `cICP`.
+    ///
+    /// [`MasteringDisplay`]: gamut_core::MasteringDisplay
+    #[must_use]
+    pub fn with_mastering_display(mut self, display: gamut_core::MasteringDisplay) -> Self {
+        self.ancillary.mdcv = Some(display);
+        self
+    }
+
+    /// Records the content light level information (cLLI chunk, §11.3.2.8): `MaxCLL` and
+    /// `MaxFALL` in units of 0.0001 cd/m², written byte for byte as the value
+    /// [`PngMetadata::content_light_level`] reads back. Calling this again replaces it.
+    ///
+    /// An ISOBMFF-shaped [`gamut_core::ContentLightLevel`] (whole cd/m²) converts exactly with
+    /// `.into()`. Zero in either level means "unknown" (§11.3.2.8). A level past §7.1's 2³¹ − 1
+    /// is written anyway, as [`with_gamma`](Self::with_gamma) writes a gamma. §5.6 places the
+    /// chunk before `PLTE` and `IDAT`.
+    #[must_use]
+    pub fn with_content_light_level(mut self, level: ContentLightLevelInfo) -> Self {
+        self.ancillary.clli = Some(level);
         self
     }
 

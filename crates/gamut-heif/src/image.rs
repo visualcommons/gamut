@@ -8,10 +8,14 @@
 //! ISO/IEC 23000-22; see `references/heif`). Nothing here reads a codec configuration record or a
 //! coded payload: that is the codec binding's ([`Codestream`](crate::Codestream)).
 
+/// The typed `clli`/`mdcv` property values are the workspace's shared HDR static-metadata types,
+/// owned by `gamut-core` (#1244), and re-exported so the accessors here and the [`PropertyKind`]
+/// variants share one type.
+pub use gamut_core::{ContentLightLevel, MasteringDisplay};
 use gamut_core::{Dimensions, Error, Orientation, RawMetadata, Result};
-/// The typed `clap`/`pasp`/`clli`/`mdcv` property values are the container crate's own,
-/// re-exported so the accessors here and the [`PropertyKind`] variants share one type (#743).
-pub use gamut_isobmff::{CleanAperture, ContentLightLevel, MasteringDisplay, PixelAspectRatio};
+/// The typed `clap`/`pasp` property values are the container crate's own, re-exported so the
+/// accessors here and the [`PropertyKind`] variants share one type (#743).
+pub use gamut_isobmff::{CleanAperture, PixelAspectRatio};
 use gamut_isobmff::{
     ColourInformation, EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, PropertyKind,
 };

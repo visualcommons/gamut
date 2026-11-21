@@ -12,8 +12,8 @@ use common::{
 };
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
 use gamut_png::{
-    Background, Cicp, ModificationTime, PhysicalDimensions, PhysicalUnit, PngDecoder, PngEncoder,
-    PngMetadata, SrgbIntent,
+    Background, Cicp, ContentLightLevelInfo, MasteringDisplay, ModificationTime,
+    PhysicalDimensions, PhysicalUnit, PngDecoder, PngEncoder, PngMetadata, SrgbIntent,
 };
 
 /// A 2×2 RGB8 source for the encoder-driven tests.
@@ -125,6 +125,13 @@ fn metadata_agrees_with_decode_field_for_field() {
             // other.
             .with_srgb(SrgbIntent::Perceptual)
             .with_cicp(Cicp::new(1, 13, true))
+            .with_mastering_display(MasteringDisplay::new(
+                [[34_000, 16_000], [13_250, 34_500], [7_500, 3_000]],
+                [15_635, 16_450],
+                800_000,
+                500,
+            ))
+            .with_content_light_level(ContentLightLevelInfo::new(10_000_000, 2_500_000))
             // The two chunks shaped by the IHDR, which each walk has to read against its own
             // copy of the header, and the two that are not.
             .with_significant_bits(&[5, 6, 5])
@@ -143,6 +150,7 @@ fn metadata_agrees_with_decode_field_for_field() {
     assert!(meta.c2pa.is_some() && !meta.texts.is_empty());
     assert!(meta.gamma.is_some() && meta.chromaticities.is_some());
     assert!(meta.srgb.is_some() && meta.cicp.is_some());
+    assert!(meta.mastering_display.is_some() && meta.content_light_level.is_some());
     assert!(meta.significant_bits.is_some() && meta.background.is_some());
     assert!(meta.physical_dimensions.is_some() && meta.modification_time.is_some());
 }

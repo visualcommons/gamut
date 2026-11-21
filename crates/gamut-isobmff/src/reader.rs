@@ -810,12 +810,8 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
                 *primary = [r.u16()?, r.u16()?];
             }
             Ok(PropertyKind::MasteringDisplayColourVolume(
-                MasteringDisplay {
-                    display_primaries,
-                    white_point: [r.u16()?, r.u16()?],
-                    max_display_mastering_luminance: r.u32()?,
-                    min_display_mastering_luminance: r.u32()?,
-                },
+                // Arguments evaluate left to right, so the fields are read in stored order.
+                MasteringDisplay::new(display_primaries, [r.u16()?, r.u16()?], r.u32()?, r.u32()?),
             ))
         }
         // The codec-configuration records this crate's consumers stamp (AV1, HEVC, VVC).
@@ -889,12 +885,12 @@ mod tests {
     fn parse_property_reads_mdcv_fields_in_stored_order() {
         assert_eq!(
             parse_property(*b"mdcv", &MDCV_BODY).unwrap(),
-            PropertyKind::MasteringDisplayColourVolume(MasteringDisplay {
-                display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
-                white_point: [15635, 16450],
-                max_display_mastering_luminance: 10_000_000,
-                min_display_mastering_luminance: 50,
-            })
+            PropertyKind::MasteringDisplayColourVolume(MasteringDisplay::new(
+                [[8500, 39850], [6550, 2300], [35400, 14600]],
+                [15635, 16450],
+                10_000_000,
+                50,
+            ))
         );
     }
 

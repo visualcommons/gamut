@@ -8,8 +8,8 @@ use core::fmt::Debug;
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy};
 use gamut_core::segment::Segment;
 use gamut_core::{
-    Cicp, ColorModel, DecodeLimits, Dimensions, ErrorKind, Orientation, Palette, PixelFormat,
-    RawMetadata,
+    Cicp, ColorModel, ContentLightLevel, DecodeLimits, Dimensions, ErrorKind, MasteringDisplay,
+    Orientation, Palette, PixelFormat, RawMetadata,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -128,6 +128,28 @@ fn cicp_round_trips_by_field_name() {
     assert_json(
         cicp,
         r#"{"color_primaries":9,"transfer_characteristics":16,"matrix_coefficients":9,"full_range":false}"#,
+    );
+}
+
+#[test]
+fn hdr_static_metadata_round_trips_by_field_name() {
+    let level = ContentLightLevel {
+        max_content_light_level: 1000,
+        max_pic_average_light_level: 400,
+    };
+    assert_json(
+        level,
+        r#"{"max_content_light_level":1000,"max_pic_average_light_level":400}"#,
+    );
+    let display = MasteringDisplay::new(
+        [[35400, 14600], [8500, 39850], [6550, 2300]],
+        [15635, 16450],
+        40_000_000,
+        5,
+    );
+    assert_json(
+        display,
+        r#"{"display_primaries":[[35400,14600],[8500,39850],[6550,2300]],"white_point":[15635,16450],"max_display_mastering_luminance":40000000,"min_display_mastering_luminance":5}"#,
     );
 }
 
