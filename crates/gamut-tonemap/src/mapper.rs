@@ -122,7 +122,7 @@ pub enum ApplyMode {
 ///
 /// Luma uses `gamut_core`'s fixed-point weights ([`BT709_LUMA_WEIGHTS`] unless
 /// [`with_luma_weights`](Self::with_luma_weights) says otherwise), each exactly `W / 65536`: within
-/// `2⁻¹⁷` of the decimal coefficient, so `Y` is within about `8e-6` relative of the decimal-weight
+/// `2⁻¹⁷` of the decimal coefficient, so `Y` is within `2⁻¹⁷ · (r + g + b)` of the decimal-weight
 /// luma ffmpeg computes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurveToneMapper<C> {
