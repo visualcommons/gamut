@@ -93,7 +93,7 @@ pub mod transfer;
 pub mod xyb;
 pub mod ycbcr;
 
-pub use cct::cct_from_xy;
+pub use cct::{cct_from_xy, daylight_xy};
 pub use cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics};
 pub use format::{BitDepth, ChromaSubsampling, ChromaUpsampling};
 pub use lab::{delta_e_76, delta_e_2000};

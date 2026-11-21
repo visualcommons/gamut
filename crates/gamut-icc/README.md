@@ -65,6 +65,9 @@ are read from [`gamut-color`](../gamut-color) rather than restated here, so the 
 Adobe RGB and ProPhoto RGB have no code point on either CICP axis, so their profiles carry each
 encoding's standard tone curve and no `cicpType` tag, and `BuiltinProfile::cicp` returns `None`
 for them.
+`IccProfile::lab_v4`, `IccProfile::lab_v2` and `IccProfile::xyz` are the PCS identity profiles —
+abstract profiles a transform chain ends on to get CIELAB or XYZ out — reproducing Little-CMS's
+built-in Lab and XYZ profiles tag for tag.
 `from_cicp` reaches further on the transfer axis — the BT.709 family (H.273 code points 1, 6, 14
 and 15), the BT.470-6 display gammas 2.2 and 2.8 (4 and 5), linear, sRGB and PQ all have an ICC
 tone-curve encoding — because what an ICC tag can

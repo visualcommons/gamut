@@ -1,4 +1,6 @@
-//! Correlated colour temperature (CCT) of a CIE 1931 chromaticity, by Robertson's method.
+//! Correlated colour temperature (CCT) of a CIE 1931 chromaticity, by Robertson's method — and,
+//! the other way, the CIE daylight locus ([`daylight_xy`]), the chromaticity of daylight at a
+//! temperature.
 //!
 //! Robertson's method walks a table of *isotemperature lines* — points on the Planckian locus in
 //! the CIE 1960 UCS `(u, v)` plane, each with the slope of the line of constant CCT crossing it —
@@ -120,9 +122,83 @@ pub fn cct_from_xy(xy: [f64; 2]) -> Option<f64> {
     None
 }
 
+/// The chromaticity of CIE daylight at correlated colour temperature `cct` kelvin — the CIE
+/// daylight locus (CIE 15:2004), the inverse direction of [`cct_from_xy`] for daylight whites.
+///
+/// `x` is the CIE cubic in `1/T` — one set of coefficients for `4000 K ..= 7000 K`, another above
+/// 7000 K up to `25 000 K` — and `y = −3.000 x² + 2.870 x − 0.275`. Those are the two ranges the
+/// CIE defines the polynomial over, so a temperature outside `4000 K ..= 25 000 K` (or a
+/// non-finite one) returns `None` rather than an extrapolation. The CIE standard illuminants come
+/// back to their published chromaticities: D50 at 5003 K, D65 at 6504 K, D75 at 7504 K.
+///
+/// Little-CMS's `cmsWhitePointFromTemp` is this function, with the same ranges; its
+/// incomplete-adaptation absolute intent turns a mixed temperature back into a white with it,
+/// which is what `gamut-cmm` uses it for.
+#[must_use]
+pub fn daylight_xy(cct: f64) -> Option<[f64; 2]> {
+    let (t, t2, t3) = (cct, cct * cct, cct * cct * cct);
+    let x = if (4000.0..=7000.0).contains(&cct) {
+        -4.6070e9 / t3 + 2.9678e6 / t2 + 0.09911e3 / t + 0.244063
+    } else if (7000.0..=25_000.0).contains(&cct) {
+        -2.0064e9 / t3 + 1.9018e6 / t2 + 0.24748e3 / t + 0.237040
+    } else {
+        return None;
+    };
+    Some([x, -3.000 * x * x + 2.870 * x - 0.275])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CIE D-series illuminants' published chromaticities (to five places) sit on the
+    /// daylight locus at their nominal temperatures, `1.4388 / 1.4380` × the round figure — D50,
+    /// D55 and D65 on the first polynomial, D75 on the second. The published values come from the
+    /// illuminants' spectra, not from the polynomial, which is a fit: measured, it lands within
+    /// 2.6e-5 of them in `x` and 1.3e-4 in `y`, and the tolerances are those bounds rounded up.
+    #[test]
+    fn daylight_locus_recovers_the_d_series() {
+        for (name, cct, want) in [
+            ("D50", 5003.0, [0.34567, 0.35850]),
+            ("D55", 5503.0, [0.33242, 0.34743]),
+            ("D65", 6504.0, [0.31271, 0.32902]),
+            ("D75", 7504.0, [0.29902, 0.31485]),
+        ] {
+            let got = daylight_xy(cct).expect("inside the daylight locus");
+            for (k, tolerance) in [(0, 3e-5), (1, 1.5e-4)] {
+                assert!(
+                    (got[k] - want[k]).abs() < tolerance,
+                    "{name}[{k}]: {} vs {}",
+                    got[k],
+                    want[k]
+                );
+            }
+        }
+    }
+
+    /// The locus is defined over `4000 K ..= 25 000 K`, both ends included, and 7000 K belongs
+    /// to the lower polynomial; outside it there is no answer. The 7000 K value is the lower
+    /// polynomial's to the last bit, which the upper one misses by ~1e-6 in `x`.
+    #[test]
+    fn daylight_locus_range_is_closed_at_both_ends() {
+        assert!(daylight_xy(4000.0).is_some());
+        assert!(daylight_xy(25_000.0).is_some());
+        for outside in [3999.999, 25_000.001, f64::NAN, f64::INFINITY, -6504.0] {
+            assert_eq!(daylight_xy(outside), None, "{outside}");
+        }
+        let t: f64 = 7000.0;
+        let lower = -4.6070e9 / t.powi(3) + 2.9678e6 / t.powi(2) + 0.09911e3 / t + 0.244063;
+        let upper = -2.0064e9 / t.powi(3) + 1.9018e6 / t.powi(2) + 0.24748e3 / t + 0.237040;
+        let x = daylight_xy(t).expect("7000 K is on the locus")[0];
+        assert!(
+            (x - lower).abs() < 1e-12,
+            "{x} vs the lower polynomial's {lower}"
+        );
+        assert!(
+            (x - upper).abs() > 1e-7,
+            "the two polynomials must be told apart here"
+        );
+    }
 
     /// The CIE standard illuminants sit on (or very near) the Planckian locus at their nominal
     /// temperatures, so they pin the table and the interpolation end to end. Tolerances are the

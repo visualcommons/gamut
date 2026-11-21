@@ -207,10 +207,27 @@ that add behaviour (#325 onward).
   entire rendering; for v4 profiles the perceptual tables already target the Perceptual
   Reference Medium and this CMM — like lcms2 — applies **no additional gamut mapping**
   toward the PRMG (`references/cmm/ICCSpecRevision_22_02_05_PRMG.pdf`, `render.pdf`).
-- **ICC-absolute = `diag(wIn/wOut)` at adaptation state 1.0 only** (lcms2's default and this
-  crate's only state; `ComputeAbsoluteIntent`, `cmscnvrt.c:249-325`): the `chad` tag is
-  consumed solely by the non-default adaptation-state branches, so it is **never read**
-  here — closing the loop on P4's chad audit. Media whites come from `wtpt` via
+- **ICC-absolute = `diag(wIn/wOut)` at the default adaptation state 1.0** (lcms2's default;
+  `ComputeAbsoluteIntent`, `cmscnvrt.c:249-325`): the `chad` tag is consumed solely by the
+  non-default adaptation-state branches, so at the default it is **never read** — closing
+  the loop on P4's chad audit. `TransformOptions::adaptation_state` (issue #1246, an
+  `AdaptationState` validated to `0..=1`) selects those branches, transcribed verbatim
+  (`chadOut · Scale · chadIn⁻¹` at 0; at a partial state the kelvin-interpolated
+  temperature of the two `chad` whites, through `gamut-color`'s Robertson `cct_from_xy` and
+  daylight-locus `daylight_xy`, as lcms2's `CHAD2Temp`/`Temp2CHAD`), with `chad` read by
+  `_cmsReadCHAD`'s rules (`cmsio1.c:94-128`). Differential: `oracle_intents.rs`'s
+  `absolute_at_every_adaptation_state_matches_lcms2`, states 0, 0.5 and 1 against
+  `cmsCreateExtendedTransform` on two white pairs, worst device |Δ| 5.6e-7, ΔE₀₀ 2.1e-5.
+  A `chad` white beyond either end of Robertson's table is an `UnsupportedProfile` error at
+  a partial state, as lcms2's `cmsTempFromWhitePoint` fails the transform (`cct_from_xy`'s
+  clamp to its end temperatures is rejected here, not used); the one residual difference is
+  a white hotter than 100 000 K but short of the table's 0-mired line, which lcms2
+  interpolates toward infinity and this crate refuses. Two documented divergences, both on
+  inputs lcms2 itself mishandles: a mixed temperature outside the daylight locus's
+  4000–25 000 K, or a singular output `chad` at a partial state, is an `UnsupportedProfile`
+  error (lcms2 reads an uninitialised white, or a temperature of 0 K). lcms2 also reads both `chad`s at state
+  1.0 and fails on a v2 display `wtpt` it cannot adapt; at state 1.0 this crate reads
+  neither. Media whites come from `wtpt` via
   `_cmsReadMediaWhitePoint`'s quirks (`cmsio1.c:64-90`), replicated verbatim: missing or
   unusable tag → lcms2's **rounded** D50 literals (0.9642/1.0/0.8249 — not the exact
   s15Fixed16 PCS illuminant; everywhere P6 replicates an lcms2 *algorithm* the rounded
@@ -265,8 +282,8 @@ that add behaviour (#325 onward).
   `proofing` is the four-profile chain `[src, proof, proof, dst]` at intents
   `[intent, intent, relative, proofing_intent]` with BPC on the first two hops only
   (`cmsCreateProofingTransform`, `cmsxform.c:1365-1395`); the gamut check's three
-  sub-transforms run through the same engine against a hand-built Lab-identity abstract
-  profile (the `cmsCreateLab4Profile` shape).
+  sub-transforms run through the same engine against `gamut-icc`'s `IccProfile::lab_v4`, the
+  Lab identity lcms2 builds as `cmsCreateLab4Profile(NULL)`, tag for tag.
 - **Single intent/BPC per chain in v1:** the chain internals take per-hop intent/BPC arrays
   (proofing needs them), but the public `IccTransform::chain` replicates one
   `TransformOptions` across every hop — exactly what lcms2's

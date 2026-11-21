@@ -189,6 +189,63 @@ pub(crate) fn narrow_u16(v: u16) -> u8 {
     ((u32::from(v) * 65281 + 8_388_608) >> 24) as u8
 }
 
+/// How far the observer is adapted to each medium's white under ICC-absolute colorimetric
+/// rendering — lcms2's adaptation state (`cmsSetAdaptationState`), a number in `[0, 1]`.
+///
+/// - **[`FULL`](Self::FULL) (`1.0`, the default — lcms2's too):** fully adapted. The absolute
+///   intent is the diagonal media-white scaling `diag(wIn / wOut)`, the standard v4
+///   behaviour, and no profile's `chad` tag is read.
+/// - **[`NONE`](Self::NONE) (`0.0`):** not adapted. The chromatic adaptation each profile
+///   recorded in its `chad` tag is undone around that scaling, so a white the source medium
+///   rendered warm stays warm on the destination.
+/// - **In between:** partial adaptation. lcms2 interpolates linearly in **kelvin** between the
+///   destination's and the source's adopted-white temperatures (read from their `chad` tags by
+///   Robertson's method), and adapts through the CIE daylight white at the mixed temperature.
+///
+/// The value is validated on construction ([`AdaptationState::new`]) so a transform never
+/// meets a NaN or an out-of-range state: lcms2 documents the range `0..=1` and checks nothing.
+/// Equality is plain `f64` equality, which is a total equivalence here because NaN is
+/// excluded — hence `Eq`.
+///
+/// ```
+/// use gamut_cmm::AdaptationState;
+///
+/// assert_eq!(AdaptationState::default(), AdaptationState::FULL);
+/// assert_eq!(AdaptationState::new(0.5).map(AdaptationState::get), Some(0.5));
+/// assert_eq!(AdaptationState::new(1.5), None);
+/// assert_eq!(AdaptationState::new(f64::NAN), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdaptationState(f64);
+
+// `new` admits only values in `[0, 1]`, so NaN never occurs and `f64`'s `==` is reflexive.
+impl Eq for AdaptationState {}
+
+impl AdaptationState {
+    /// Full adaptation, `1.0` — lcms2's default.
+    pub const FULL: Self = Self(1.0);
+    /// No adaptation, `0.0`.
+    pub const NONE: Self = Self(0.0);
+
+    /// The adaptation state `degree`, or `None` unless `0.0 <= degree <= 1.0` (NaN included).
+    #[must_use]
+    pub fn new(degree: f64) -> Option<Self> {
+        (0.0..=1.0).contains(&degree).then_some(Self(degree))
+    }
+
+    /// The degree of adaptation, in `[0, 1]`.
+    #[must_use]
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for AdaptationState {
+    fn default() -> Self {
+        Self::FULL
+    }
+}
+
 /// Options for building an [`IccTransform`].
 ///
 /// `Default` matches lcms2's `cmsCreateTransform` defaults in the two knobs lcms2 also
@@ -196,9 +253,8 @@ pub(crate) fn narrow_u16(v: u16) -> u8 {
 /// v4 forcing rule on [`IccTransform::between`]). Pipeline optimization deliberately does
 /// **not** follow lcms2's default — it defaults *off*, so this crate's documented
 /// stage-by-stage numerics are what an unconfigured transform produces. The adaptation state
-/// is fixed at lcms2's default `1.0` (observer fully adapted) — the only state this crate
-/// implements, which is also what makes the `chad` tag irrelevant to the absolute intent
-/// here.
+/// defaults to lcms2's default, [`AdaptationState::FULL`] (observer fully adapted), at which
+/// the absolute intent reads no `chad` tag.
 ///
 /// The struct is `#[non_exhaustive]` so a further option can be added without a breaking
 /// change: build it from [`TransformOptions::default`] with the `with_*` methods.
@@ -259,6 +315,12 @@ pub struct TransformOptions {
     /// lcms2 builds it — the oracle reads the TRC tags — and spends nothing a caller did not
     /// ask for.
     pub prefer_cicp_transfer: bool,
+    /// The observer's adaptation state for [`RenderingIntent::IccAbsoluteColorimetric`]
+    /// (lcms2's `cmsSetAdaptationState`), applied at every absolute-intent PCS seam of the
+    /// chain; the other intents never read it. Default [`AdaptationState::FULL`]. See
+    /// [`AdaptationState`] for what each value does, and the crate's `intent` module for the
+    /// transcribed lcms2 math.
+    pub adaptation_state: AdaptationState,
 }
 
 impl Default for TransformOptions {
@@ -268,6 +330,7 @@ impl Default for TransformOptions {
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
             prefer_cicp_transfer: false,
+            adaptation_state: AdaptationState::FULL,
         }
     }
 }
@@ -304,6 +367,24 @@ impl TransformOptions {
     pub const fn with_prefer_cicp_transfer(self, prefer_cicp_transfer: bool) -> Self {
         Self {
             prefer_cicp_transfer,
+            ..self
+        }
+    }
+
+    /// These options with the absolute-intent adaptation state replaced
+    /// ([`TransformOptions::adaptation_state`]).
+    ///
+    /// ```
+    /// use gamut_cmm::{AdaptationState, TransformOptions};
+    ///
+    /// let half = AdaptationState::new(0.5).expect("0.5 is in [0, 1]");
+    /// let options = TransformOptions::default().with_adaptation_state(half);
+    /// assert_eq!(options.adaptation_state.get(), 0.5);
+    /// ```
+    #[must_use]
+    pub const fn with_adaptation_state(self, adaptation_state: AdaptationState) -> Self {
+        Self {
+            adaptation_state,
             ..self
         }
     }
@@ -398,8 +479,10 @@ impl IccTransform {
     ///   (`references/cmm/ICCSpecRevision_22_02_05_PRMG.pdf`, `render.pdf`).
     /// - **ICC-absolute:** the media-white scaling `diag(wIn/wOut)` at the seam
     ///   (the crate's `intent` module); `options.black_point_compensation` is **ignored** (mutual
-    ///   exclusion, as in lcms2). Implemented at adaptation state 1.0 only (the lcms2
-    ///   default), where the `chad` tag is never read.
+    ///   exclusion, as in lcms2). That is the default adaptation state,
+    ///   [`AdaptationState::FULL`], where the `chad` tag is never read; a lower
+    ///   `options.adaptation_state` folds both profiles' `chad` tags into the seam as lcms2's
+    ///   `ComputeAbsoluteIntent` does.
     /// - **BPC forcing:** black-point compensation is applied when requested — and **forced
     ///   on** for perceptual/saturation when the *destination* profile is v4 (encoded
     ///   version ≥ 4.0), replicating lcms2's `_cmsLinkProfiles` (`cmscnvrt.c:1119-1135`,
@@ -429,6 +512,7 @@ impl IccTransform {
             &intents,
             &bpc_flags,
             options.prefer_cicp_transfer,
+            options.adaptation_state,
         )?;
         Self::from_pipeline(pipeline, options.optimization)
     }
@@ -676,7 +760,10 @@ mod icc_transform_tests {
         U8Fixed8, XyzNumber,
     };
 
-    use super::{IccTransform, PipelineOptimization, Transform, TransformOptions, is_empty_layer};
+    use super::{
+        AdaptationState, IccTransform, PipelineOptimization, Transform, TransformOptions,
+        is_empty_layer,
+    };
     use crate::pipeline::Stage;
 
     const D65: [f64; 3] = [0.9504, 1.0, 1.0889];
@@ -777,6 +864,23 @@ mod icc_transform_tests {
         assert_eq!(options.intent, RenderingIntent::Perceptual);
         assert!(!options.black_point_compensation);
         assert!(!options.prefer_cicp_transfer);
+        assert_eq!(options.adaptation_state, AdaptationState::FULL);
+        assert_eq!(AdaptationState::default().get(), 1.0);
+    }
+
+    #[test]
+    fn adaptation_state_admits_exactly_the_closed_unit_interval() {
+        for degree in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                AdaptationState::new(degree).map(AdaptationState::get),
+                Some(degree)
+            );
+        }
+        for degree in [-1e-12, 1.0 + 1e-12, f64::NAN, f64::INFINITY] {
+            assert_eq!(AdaptationState::new(degree), None, "{degree}");
+        }
+        assert_eq!(AdaptationState::NONE.get(), 0.0);
+        assert_eq!(AdaptationState::FULL.get(), 1.0);
     }
 
     #[test]
@@ -807,6 +911,13 @@ mod icc_transform_tests {
             base.with_prefer_cicp_transfer(true),
             TransformOptions {
                 prefer_cicp_transfer: true,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_adaptation_state(AdaptationState::NONE),
+            TransformOptions {
+                adaptation_state: AdaptationState::NONE,
                 ..base
             }
         );
@@ -847,6 +958,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -858,6 +970,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -881,6 +994,7 @@ mod icc_transform_tests {
                 black_point_compensation: true, // must be ignored under absolute
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -906,6 +1020,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -931,6 +1046,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -948,6 +1064,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -972,6 +1089,7 @@ mod icc_transform_tests {
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
             prefer_cicp_transfer: false,
+            adaptation_state: AdaptationState::FULL,
         };
         let xyz_to_lab = IccTransform::between(&src, &dst, options).unwrap();
         assert_eq!(
@@ -997,6 +1115,7 @@ mod icc_transform_tests {
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
             prefer_cicp_transfer: false,
+            adaptation_state: AdaptationState::FULL,
         };
         let xyz_to_lab = IccTransform::between(&src, &dst, rel).unwrap();
         assert_eq!(
@@ -1024,6 +1143,7 @@ mod icc_transform_tests {
                     black_point_compensation: false,
                     optimization: PipelineOptimization::None,
                     prefer_cicp_transfer: false,
+                    adaptation_state: AdaptationState::FULL,
                 },
             )
             .unwrap();
@@ -1037,6 +1157,7 @@ mod icc_transform_tests {
                     black_point_compensation: true,
                     optimization: PipelineOptimization::None,
                     prefer_cicp_transfer: false,
+                    adaptation_state: AdaptationState::FULL,
                 },
             )
             .unwrap();
@@ -1054,6 +1175,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -1069,6 +1191,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -1082,6 +1205,7 @@ mod icc_transform_tests {
                 black_point_compensation: true,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -1098,6 +1222,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -1118,6 +1243,7 @@ mod icc_transform_tests {
                 black_point_compensation: true,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -1129,6 +1255,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -1152,6 +1279,7 @@ mod icc_transform_tests {
                 black_point_compensation: true,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -1163,6 +1291,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();
@@ -1225,6 +1354,7 @@ mod icc_transform_tests {
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
                 prefer_cicp_transfer: false,
+                adaptation_state: AdaptationState::FULL,
             },
         )
         .unwrap();

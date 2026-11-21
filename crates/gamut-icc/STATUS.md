@@ -27,6 +27,7 @@ serialization as an equivalent profile.
 | P10 | §8, §10.3 | Profile-class conformance validation (`IccProfile::validate`), plus the `cicpType` `MatrixCoefficients` clause (issue #587) | ✅ |
 | P11 | — | **v1 stabilization** (issue #180): API-surface hardening (private modules, `Eq` model, std conversion traits, validated fallible writes, `ProfileHeader::new`) + spec-citation audit | ✅ |
 | P12 | §8.4, §9.2 | **Built-in profiles** (issue #424): `IccProfile::builtin` / `gray_with_gamma` / `from_cicp` / `from_source_profile` | ✅ |
+| P13 | §8.8 | **PCS identity built-ins** (issue #1246): `IccProfile::lab_v4` / `lab_v2` / `xyz`, lcms2's `cmsCreateLab4Profile` / `cmsCreateLab2Profile` / `cmsCreateXYZProfile` tag for tag | ✅ |
 
 ## Modelled element types
 
@@ -273,6 +274,7 @@ serialized, compared against something this crate did not compute:
 | A transform through our sRGB into lcms2's own sRGB is the identity to one 8-bit code | sRGB | `oracle_transform_through_our_srgb_is_the_identity` |
 | A 203 cd/m² PQ signal lands at 0.0203 of lcms2's D50 media white (two `uInt16` quanta), under media-relative, absolute and perceptual intents | BT.2100 PQ | `oracle_pq_diffuse_white_lands_at_its_share_of_the_peak` |
 | The same signal into lcms2's own sRGB, media-relative, is `srgb_oetf(0.0203)` to 1e-4 | BT.2100 PQ | `oracle_pq_diffuse_white_is_dark_grey_in_lcms_srgb` |
+| lcms2's own profile, decoded, has the same header model and equal tags in the same order; lcms2 reads ours back with that tag set | `lab_v4`, `lab_v2`, `xyz` against `cmsCreateLab4Profile(NULL)`, `cmsCreateLab2Profile(NULL)`, `cmsCreateXYZProfile()` | `oracle_identity_builtins_match_lcms_tag_for_tag` (in `tests/oracle.rs`) |
 
 Not checked by lcms2: the `chad` tag's contents (it is read only through the colorants it
 produced), and any `from_cicp` profile's end-to-end transform other than sRGB's and BT.2100 PQ's
