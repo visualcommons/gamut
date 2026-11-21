@@ -250,6 +250,9 @@ impl DngEncoder {
     /// large raws (e.g. Apple ProRAW) are stored, and it bounds a reader's per-chunk working
     /// set; for small images the per-tile padding overhead usually outweighs that. The preview
     /// stays stripped.
+    ///
+    /// Without this the raw is one strip, except a lossless-JPEG raw too large for one T.81 frame
+    /// (a frame width or height past 65535), which is tiled automatically at up to 256 × 256.
     #[must_use]
     pub fn with_tiling(mut self, tile_width: u32, tile_height: u32) -> Self {
         self.tiling = Some((tile_width, tile_height));
@@ -401,8 +404,9 @@ impl DngEncoder {
         );
         let spp = usize::from(raw.samples_per_pixel());
         let period = horizontal_cfa_period(raw);
+        let tiling = self.raw_tiling(raw.dimensions(), spp, period);
 
-        let raw_data = match self.tiling {
+        let raw_data = match tiling {
             None => vec![self.encode_chunk(raw.samples(), width, height, spp, period, bits)?],
             Some((tile_width, tile_height)) => {
                 if tile_width == 0
@@ -467,9 +471,9 @@ impl DngEncoder {
         if store.is_some() {
             reserve_c2pa_entry(&mut ifd0);
         }
-        let raw_ifd = build_raw_ifd(self, raw)?;
+        let raw_ifd = build_raw_ifd(self, raw, tiling)?;
 
-        let raw_blocks = match self.tiling {
+        let raw_blocks = match tiling {
             None => ImageBlocks {
                 offset_tag: tags::STRIP_OFFSETS,
                 bytecount_tag: tags::STRIP_BYTE_COUNTS,
@@ -745,6 +749,27 @@ fn uses_spectral_illuminant(profile: &CameraProfile) -> bool {
 }
 
 impl DngEncoder {
+    /// The raw image's chunk layout: the [`with_tiling`](Self::with_tiling) grid when one was set,
+    /// otherwise one strip — unless the raw is lossless JPEG and that strip's frame (its
+    /// [`lossless_jpeg_geometry`] width, or its height) exceeds the 65535 that a T.81 B.2.2 frame
+    /// header's 16-bit `X`/`Y` can carry. Such a raw is tiled instead, at
+    /// [`AUTO_TILE`]-capped tiles, so lossless JPEG writes every raw that uncompressed writes
+    /// (DNG 1.7.1.0 p. 20: a tiled raw is as conformant as a stripped one, and the DNG SDK tiles
+    /// its own lossless-JPEG raws).
+    fn raw_tiling(
+        &self,
+        dims: gamut_core::Dimensions,
+        spp: usize,
+        period: usize,
+    ) -> Option<(u32, u32)> {
+        if self.tiling.is_some() || !matches!(self.compression, DngCompression::LosslessJpeg(_)) {
+            return self.tiling;
+        }
+        let (frame_width, _) = lossless_jpeg_geometry(dims.width() as usize, spp, period);
+        (frame_width > LOSSLESS_JPEG_MAX_DIM || dims.height() as usize > LOSSLESS_JPEG_MAX_DIM)
+            .then(|| (auto_tile_side(dims.width()), auto_tile_side(dims.height())))
+    }
+
     /// Encodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each.
     /// Lossless JPEG and JPEG XL code samples directly; the byte-oriented schemes pack then
     /// compress. Rows are byte-aligned per chunk (each chunk is an independent sample stream),
@@ -834,6 +859,20 @@ fn lossless_jpeg_geometry(cols: usize, spp: usize, period: usize) -> (usize, usi
     }
 }
 
+/// The largest lossless-JPEG frame width or height: T.81 B.2.2's `X` and `Y` are 16-bit (`Y = 0`
+/// defers the height to a DNL marker, which this encoder does not write).
+const LOSSLESS_JPEG_MAX_DIM: usize = 65535;
+
+/// The side of a tile [`DngEncoder::raw_tiling`] picks for a raw no single lossless-JPEG frame
+/// holds: 256, the DNG SDK's own tile size, or — for the raw's short side — that side rounded up
+/// to TIFF 6.0 §15's multiple of 16, so a thin raw is not zero-padded to 256.
+const AUTO_TILE: u32 = 256;
+
+/// One side of [`DngEncoder::raw_tiling`]'s automatic tile for an image `extent` pixels long.
+fn auto_tile_side(extent: u32) -> u32 {
+    extent.min(AUTO_TILE).next_multiple_of(16)
+}
+
 /// Splits an image into full-size `tw × th` sample tiles in row-major tile order, zero-padding
 /// edge tiles (TIFF 6.0 §15: every stored tile has the same dimensions).
 fn tile_samples(
@@ -901,6 +940,7 @@ fn color_plane_count(raw: &RawImage) -> usize {
 
 /// Builds the raw sub-IFD: the image-data tags, the photometry-specific tags (CFA pattern, or
 /// `LinearRaw` planes), and the level model. The strip offsets are filled in by the writer.
+/// `tiling` is the layout [`DngEncoder::raw_tiling`] chose, `None` for one strip.
 ///
 /// # Errors
 ///
@@ -908,7 +948,7 @@ fn color_plane_count(raw: &RawImage) -> usize {
 /// model cannot be stored: a delta vector whose
 /// length doesn't match the active area, a non-integral white level, or a level outside the
 /// tag's representable range.
-fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
+fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage, tiling: Option<(u32, u32)>) -> Result<Ifd> {
     let compression = encoder.compression.code();
     let mut ifd = Ifd::new();
     let dims = raw.dimensions();
@@ -927,7 +967,7 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
     // A tiled image carries the tile geometry; a stripped one carries RowsPerStrip (a strip/tile
     // IFD must not mix the two families).
-    match encoder.tiling {
+    match tiling {
         Some((tile_width, tile_height)) => {
             ifd.set(tags::TILE_WIDTH, count_value(tile_width));
             ifd.set(tags::TILE_LENGTH, count_value(tile_height));
@@ -1447,29 +1487,58 @@ mod tests {
         assert_eq!(frame.samples, raw.samples());
     }
 
-    /// The reshape moves the T.81 65535-sample-line ceiling from the strip's width to its
-    /// *frame* width: an untiled Bayer strip is now writable up to `2 × 65535` photosites wide
-    /// (the TIFF `ImageWidth` is a LONG, and DNG 1.7.1.0 p. 20 lets the JPEG geometry differ
-    /// from the strip's), and our own decoder reads it back exactly. One past that, the frame
-    /// would be 65536 wide and the encoder still refuses it rather than writing an invalid SOF3.
-    #[test]
-    fn cfa_lossless_jpeg_width_ceiling_is_twice_the_frame_limit() {
-        let encode = |w: u32| {
-            let mut out = Vec::new();
-            DngEncoder::new()
-                .with_compression(DngCompression::LosslessJpeg(LosslessPredictor::Left))
-                .encode(&sample_raw(w, 2, 16), &sample_profile(), &mut out)
-                .map(|_| out)
-        };
-        let widest = 2 * 65535;
-        let out = encode(widest).expect("a 131070-wide Bayer strip fits a 65535-wide frame");
+    /// Encodes `raw` with `compression` and no explicit tiling; returns the raw IFD's
+    /// `(TileWidth, TileLength)` (`None` when stripped) after checking the file decodes back to
+    /// `raw` exactly.
+    fn untiled_layout(raw: &RawImage, compression: DngCompression) -> Option<(u32, u32)> {
+        let mut out = Vec::new();
+        DngEncoder::new()
+            .with_compression(compression)
+            .encode(raw, &sample_profile(), &mut out)
+            .expect("encode");
         let decoded = crate::DngDecoder::new().decode(&out).expect("decode");
-        assert_eq!(decoded.raw.samples(), sample_raw(widest, 2, 16).samples());
-        let err = encode(widest + 2).expect_err("a 65536-wide frame is not encodable");
-        assert!(
-            err.to_string()
-                .contains("lossless-JPEG dimensions must be 1..=65535"),
-            "{err}"
+        assert_eq!(decoded.raw.samples(), raw.samples());
+        let file = gamut_ifd::read(&out).expect("parse");
+        let raw_off = file.ifds[0].get_u32(tags::SUB_IFDS).expect("SubIFDs");
+        let raw_ifd = read_ifd_at(&out, raw_off.into(), file.order, Variant::Classic).expect("raw");
+        let tile = raw_ifd
+            .get_u32(tags::TILE_WIDTH)
+            .zip(raw_ifd.get_u32(tags::TILE_LENGTH));
+        assert_eq!(tile.is_none(), raw_ifd.get(tags::ROWS_PER_STRIP).is_some());
+        tile
+    }
+
+    /// The reshape moves the T.81 65535-sample-line ceiling from the strip's width to its
+    /// *frame* width: an untiled Bayer strip stays one strip up to `2 × 65535` photosites wide
+    /// (the TIFF `ImageWidth` is a LONG, and DNG 1.7.1.0 p. 20 lets the JPEG geometry differ
+    /// from the strip's). One past that the frame would be 65536 wide, so the raw is tiled
+    /// instead — 256-wide tiles, and only 16 rows tall for this 2-row raw — rather than refused:
+    /// lossless JPEG writes every raw uncompressed writes.
+    #[test]
+    fn lossless_jpeg_tiles_a_raw_wider_than_one_frame() {
+        let lj = DngCompression::LosslessJpeg(LosslessPredictor::Left);
+        let widest = 2 * 65535;
+        assert_eq!(untiled_layout(&sample_raw(widest, 2, 16), lj), None);
+        assert_eq!(
+            untiled_layout(&sample_raw(widest + 2, 2, 16), lj),
+            Some((256, 16))
+        );
+    }
+
+    /// A lossless-JPEG raw taller than a frame's 65535 lines is tiled too (16-wide tiles for this
+    /// 2-column raw, 256 tall); at 65535 rows it is still one strip, and an uncompressed raw is
+    /// never tiled on its own, whatever its height.
+    #[test]
+    fn lossless_jpeg_tiles_a_raw_taller_than_one_frame() {
+        let lj = DngCompression::LosslessJpeg(LosslessPredictor::Left);
+        assert_eq!(untiled_layout(&sample_raw(2, 65535, 16), lj), None);
+        assert_eq!(
+            untiled_layout(&sample_raw(2, 65536, 16), lj),
+            Some((16, 256))
+        );
+        assert_eq!(
+            untiled_layout(&sample_raw(2, 65536, 16), DngCompression::Uncompressed),
+            None
         );
     }
 

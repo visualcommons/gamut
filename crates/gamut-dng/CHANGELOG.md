@@ -14,7 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SDK does by default, instead of writing it uncompressed. The samples are unchanged — the
   scheme is lossless and every DNG reader decodes it — but every default encode's bytes differ
   and are smaller; call `.with_compression(DngCompression::Uncompressed)` for the previous
-  output ([#1245](https://github.com/visualcommons/gamut/issues/1245))
+  output. A raw too large for one lossless-JPEG frame (T.81 caps a frame at 65535 lines and
+  65535 samples per line, so an untiled raw taller than 65535 rows, a Bayer raw wider than
+  131070 or a `LinearRaw` wider than 65535) is now tiled automatically at up to 256 × 256
+  instead of refused, so the new default writes every raw the old one did — those raws alone
+  change layout from one strip to tiles ([#1245](https://github.com/visualcommons/gamut/issues/1245))
 
 ### Added
 
