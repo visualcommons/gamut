@@ -15,11 +15,7 @@ fn public_api_roundtrips_a_directory() {
     // Both byte orders and both container variants (classic TIFF and BigTIFF) round-trip.
     for variant in [Variant::Classic, Variant::Big] {
         for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
-            let file = TiffFile {
-                order,
-                variant,
-                ifds: vec![ifd.clone()],
-            };
+            let file = TiffFile::new(order, variant, vec![ifd.clone()]);
             let bytes = write(&file).expect("write");
             let parsed = read(&bytes).expect("read back");
             assert_eq!(parsed, file);

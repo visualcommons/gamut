@@ -469,11 +469,11 @@ mod tests {
         ifd.set(tags::TILE_WIDTH, Value::Short(vec![16]));
         // Deliberately no TileOffsets/TileByteCounts, and no strip offsets either: the IFD says
         // "tiled" and then provides nothing.
-        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![ifd],
-        })
+        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![ifd],
+        ))
         .expect("write");
 
         let report = deconstruct(&bytes).expect("deconstruct");
@@ -555,11 +555,11 @@ mod tests {
             parent.set_sub_ifd(tags::SUB_IFDS, vec![ifd]);
             ifd = parent;
         }
-        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![ifd],
-        })
+        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![ifd],
+        ))
         .expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
         assert!(
@@ -640,11 +640,11 @@ mod tests {
         ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![1000, 2000]));
         ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![4]));
         // Write with no real strips so the writer does not overwrite our deliberate mismatch.
-        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![ifd],
-        })
+        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![ifd],
+        ))
         .expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
         assert!(
@@ -731,11 +731,11 @@ mod tests {
         let mut ifd = Ifd::new();
         ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
         ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
-        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![ifd],
-        })
+        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![ifd],
+        ))
         .expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
         assert!(

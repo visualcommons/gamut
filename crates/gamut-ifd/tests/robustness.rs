@@ -41,11 +41,11 @@ fn valid_stream(variant: Variant) -> Vec<u8> {
     first.set_sub_ifd(330, vec![child]);
     let mut second = Ifd::new();
     second.set(256, Value::Long(vec![9]));
-    write(&TiffFile {
-        order: ByteOrder::LittleEndian,
+    write(&TiffFile::new(
+        ByteOrder::LittleEndian,
         variant,
-        ifds: vec![first, second],
-    })
+        vec![first, second],
+    ))
     .expect("write")
 }
 

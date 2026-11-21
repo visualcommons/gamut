@@ -48,8 +48,16 @@ MyEncoder
     .unwrap();
 ```
 
-Enable the optional `serde` feature to serialize and deserialize [`ColorModel`] by its Rust variant
-name (for example, `ColorModel::Rgba` is `"Rgba"` in JSON). The feature is disabled by default.
+Enable the optional `serde` feature to serialize and deserialize the plain-data types. The enums
+(`ColorModel`, `PixelFormat`, `ErrorKind`, `Orientation`, and `convert`'s `AlphaPolicy`,
+`DepthPolicy` and `LumaPolicy`) go by their Rust variant name (for example, `ColorModel::Rgba` is
+`"Rgba"` in JSON), and an unknown name is rejected. The structs (`Dimensions`, `Cicp`,
+`DecodeLimits`, `Palette`, `RawMetadata`, `convert::ConvertPolicy` and `segment::Segment`) go by
+field name; `Dimensions` deserializes through `Dimensions::new`, so a zero width or height is
+rejected, and `Palette` through `Palette::with_alpha`, so an empty or oversized table, or more
+alpha values than entries, is rejected. [`Error`] is not covered: it is an opaque
+boxed value carrying an optional `source` error, not plain data, so serialize its `kind()` instead.
+The feature is disabled by default.
 
 ## Status
 

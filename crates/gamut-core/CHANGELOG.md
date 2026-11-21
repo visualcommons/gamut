@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gamut-core)* the `serde` feature now derives `Serialize`/`Deserialize` on every plain-data type,
+  not only `ColorModel`: `PixelFormat`, `ErrorKind`, `Orientation`, `Cicp`, `DecodeLimits`,
+  `Palette`, `RawMetadata`, `segment::Segment`, and `convert`'s `ConvertPolicy`, `AlphaPolicy`,
+  `DepthPolicy` and `LumaPolicy`. Enums go by variant name, structs by field name. `Dimensions`
+  serializes as `{"width", "height"}` and deserializes through `Dimensions::new`, so a zero side is
+  rejected; `Palette` serializes as `{"rgb", "alpha"}` and deserializes through
+  `Palette::with_alpha`, so its entry-count and alpha-length checks hold too. `Error` stays unserializable: it is an
+  opaque boxed value with a `source` chain, not plain data.
+
 ## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-core-v2.0.1...gamut-core-v3.0.0) - 2026-10-12
 
 ### Added

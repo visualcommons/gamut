@@ -105,6 +105,13 @@ What gamut-tiff and gamut-dng had each copied now lives here once:
 - `Variant`, `FieldType` and `Value` are `#[non_exhaustive]`: the `bigtiff` feature adds variants,
   and Cargo feature unification would otherwise let any crate in a build break a dependent's
   exhaustive `match`. `WriteOptions` is built only through its `with_*` builders.
+- **Report structs are `#[non_exhaustive]` (issue #1229). Breaking.** `TiffFile`,
+  `SegmentReport`, `WriteOutput`, `Audit` and `AuditOutcome` can each grow a field without a
+  major bump. A `TiffFile` is built with `TiffFile::new(order, variant, ifds)` rather than a
+  struct literal; the other four are built only by this crate (`SegmentMap::finish`,
+  `write_with`, `audit`, `Auditor::finish`), and a destructuring pattern outside the crate ends
+  in `..`. Every field stays public. `FieldType` is `#[repr(u16)]` with its on-disk codes as
+  discriminants, and `Compression` names libtiff's `Jp2000`, `Lerc`, `Zstd` and `Webp` codes.
 
 ## P9 — RAW-grade streaming (issue #252)
 

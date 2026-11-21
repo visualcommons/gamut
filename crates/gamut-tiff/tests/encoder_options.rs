@@ -69,6 +69,36 @@ fn a_predicted_image_round_trips_through_the_decoder() {
 }
 
 #[test]
+fn libtiff_extension_compressions_are_refused_for_encoding() {
+    // STATUS.md promises the reader-only extension codes (#1229) are refused on encode, not
+    // silently written uncompressed under a code that names another scheme. Each alternative of
+    // `compress_bytes`'s catch-all arm is driven on its own, on the strip path and the tiled path.
+    let buf = rgb(16, 16);
+    for scheme in [
+        Compression::Jp2000,
+        Compression::Lerc,
+        Compression::Zstd,
+        Compression::Webp,
+    ] {
+        for tiled in [false, true] {
+            let mut enc = TiffEncoder::new().with_compression(scheme);
+            if tiled {
+                enc = enc.with_tiling(16, 16);
+            }
+            let mut out = Vec::new();
+            let err = enc
+                .encode_image(img(&buf, 16, 16), &mut out)
+                .expect_err("an extension scheme must not encode");
+            assert_eq!(
+                err.kind(),
+                gamut_core::ErrorKind::Unsupported,
+                "{scheme:?}, tiled = {tiled}"
+            );
+        }
+    }
+}
+
+#[test]
 fn tile_dimensions_must_be_positive_multiples_of_16() {
     let buf = rgb(32, 32);
     // Each invalid dimension is rejected on its own, pinning every disjunct of the validation

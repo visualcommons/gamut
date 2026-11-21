@@ -1258,11 +1258,11 @@ mod tests {
         let mut ifd0 = Ifd::new();
         ifd0.set(tags::DNG_VERSION, Value::Byte(vec![1, 7, 1, 0]));
         ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw, empty]);
-        let bytes = gamut_ifd::write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![ifd0, with_software("page")],
-        })
+        let bytes = gamut_ifd::write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![ifd0, with_software("page")],
+        ))
         .expect("write");
 
         let decoded = DngDecoder::new().decode(&bytes).expect("decode");
@@ -1310,11 +1310,11 @@ mod tests {
             tags::SUB_IFDS,
             vec![raw, with_software("stale"), with_software("stale")],
         );
-        let mut bytes = gamut_ifd::write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![ifd0, with_software("page")],
-        })
+        let mut bytes = gamut_ifd::write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![ifd0, with_software("page")],
+        ))
         .expect("write");
         let pages: Vec<u32> = IfdReader::open(&bytes[..])
             .expect("header")
@@ -1457,11 +1457,7 @@ mod tests {
         );
 
         // Two-pass layout: size the container, then point the strip just past it.
-        let single = |ifd: Ifd| TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![ifd],
-        };
+        let single = |ifd: Ifd| TiffFile::new(ByteOrder::LittleEndian, Variant::Classic, vec![ifd]);
         let mut dng = write(&single(ifd.clone())).expect("write");
         let strip_at = dng.len() as u32;
         let mut placed = ifd;

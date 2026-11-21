@@ -18,6 +18,7 @@
 /// assert_eq!(LIMITS.max_image_bytes(), DecodeLimits::DEFAULT_MAX_IMAGE_BYTES);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DecodeLimits {
     max_width: u32,
     max_height: u32,

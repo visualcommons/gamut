@@ -12,48 +12,52 @@
 /// Non-exhaustive because the `bigtiff` feature adds variants: Cargo unifies features across a
 /// build graph, so a dependent's exhaustive `match` would break the moment any other crate in the
 /// same build enabled it.
+///
+/// `#[repr(u16)]` with the on-disk code as each variant's discriminant, so [`code`](Self::code)
+/// is the cast `ty as u16` and the code a variant documents is the one it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
 #[non_exhaustive]
 pub enum FieldType {
     /// `1` — an 8-bit unsigned integer.
-    Byte,
+    Byte = 1,
     /// `2` — an 8-bit byte holding a 7-bit ASCII code; NUL-terminated.
-    Ascii,
+    Ascii = 2,
     /// `3` — a 16-bit unsigned integer.
-    Short,
+    Short = 3,
     /// `4` — a 32-bit unsigned integer.
-    Long,
+    Long = 4,
     /// `5` — two `Long`s: a fraction's numerator then denominator.
-    Rational,
+    Rational = 5,
     /// `6` — an 8-bit signed (two's-complement) integer.
-    SByte,
+    SByte = 6,
     /// `7` — an 8-bit byte whose meaning depends on the field.
-    Undefined,
+    Undefined = 7,
     /// `8` — a 16-bit signed (two's-complement) integer.
-    SShort,
+    SShort = 8,
     /// `9` — a 32-bit signed (two's-complement) integer.
-    SLong,
+    SLong = 9,
     /// `10` — two `SLong`s: a signed fraction's numerator then denominator.
-    SRational,
+    SRational = 10,
     /// `11` — a 32-bit IEEE single-precision float.
-    Float,
+    Float = 11,
     /// `12` — a 64-bit IEEE double-precision float.
-    Double,
+    Double = 12,
     /// `13` — a 32-bit unsigned sub-IFD offset (TIFF Technical Note 1 / the Adobe PageMaker 6.0
     /// TIFF supplement). Shaped like `Long`, but marks the value as a child-directory pointer.
-    Ifd,
+    Ifd = 13,
     /// `129` — a UTF-8 string (Exif 3.0 / CIPA DC-008 §4.6.2); NUL-terminated. Like `Ascii`, but
     /// the bytes are explicitly UTF-8 rather than 7-bit ASCII, so non-ASCII text round-trips.
-    Utf8,
+    Utf8 = 129,
     /// `16` — a 64-bit unsigned integer (BigTIFF; `references/tiff/bigtiff.html`).
     #[cfg(feature = "bigtiff")]
-    Long8,
+    Long8 = 16,
     /// `17` — a 64-bit signed (two's-complement) integer (BigTIFF).
     #[cfg(feature = "bigtiff")]
-    SLong8,
+    SLong8 = 17,
     /// `18` — a 64-bit unsigned IFD offset (BigTIFF).
     #[cfg(feature = "bigtiff")]
-    Ifd8,
+    Ifd8 = 18,
 }
 
 impl FieldType {
@@ -88,31 +92,10 @@ impl FieldType {
         })
     }
 
-    /// Returns the on-disk type code.
+    /// Returns the on-disk type code — the variant's `repr(u16)` discriminant.
     #[must_use]
     pub fn code(self) -> u16 {
-        match self {
-            FieldType::Byte => 1,
-            FieldType::Ascii => 2,
-            FieldType::Short => 3,
-            FieldType::Long => 4,
-            FieldType::Rational => 5,
-            FieldType::SByte => 6,
-            FieldType::Undefined => 7,
-            FieldType::SShort => 8,
-            FieldType::SLong => 9,
-            FieldType::SRational => 10,
-            FieldType::Float => 11,
-            FieldType::Double => 12,
-            FieldType::Ifd => 13,
-            FieldType::Utf8 => 129,
-            #[cfg(feature = "bigtiff")]
-            FieldType::Long8 => 16,
-            #[cfg(feature = "bigtiff")]
-            FieldType::SLong8 => 17,
-            #[cfg(feature = "bigtiff")]
-            FieldType::Ifd8 => 18,
-        }
+        self as u16
     }
 
     /// Returns the number of bytes in a single value of this type.
@@ -155,6 +138,36 @@ mod tests {
         assert_eq!(FieldType::Utf8.code(), 129);
         assert_eq!(FieldType::Utf8.size(), 1);
         assert_eq!(FieldType::from_code(128), None);
+    }
+
+    /// Each variant's `repr(u16)` discriminant is the TIFF 6.0 §2 / TN1 / Exif 3.0 type code it
+    /// documents, pinned independently of [`FieldType::from_code`].
+    #[test]
+    fn field_type_discriminants_are_the_on_disk_codes() {
+        for (ty, code) in [
+            (FieldType::Byte, 1),
+            (FieldType::Ascii, 2),
+            (FieldType::Short, 3),
+            (FieldType::Long, 4),
+            (FieldType::Rational, 5),
+            (FieldType::SByte, 6),
+            (FieldType::Undefined, 7),
+            (FieldType::SShort, 8),
+            (FieldType::SLong, 9),
+            (FieldType::SRational, 10),
+            (FieldType::Float, 11),
+            (FieldType::Double, 12),
+            (FieldType::Ifd, 13),
+            (FieldType::Utf8, 129),
+            #[cfg(feature = "bigtiff")]
+            (FieldType::Long8, 16),
+            #[cfg(feature = "bigtiff")]
+            (FieldType::SLong8, 17),
+            #[cfg(feature = "bigtiff")]
+            (FieldType::Ifd8, 18),
+        ] {
+            assert_eq!(ty.code(), code, "{ty:?}");
+        }
     }
 
     #[cfg(feature = "bigtiff")]
