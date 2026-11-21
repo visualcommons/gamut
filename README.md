@@ -104,13 +104,38 @@ though each frame is an independent keyframe — only single still images are su
 Add the umbrella `gamut` crate and enable only the formats you need:
 
 ```sh
-cargo add gamut -F avif,jxl
+cargo add gamut -F png,avif,webp
 ```
 
-The umbrella has no default features, so a bare dependency compiles only `gamut-core`. The
-`primitives` feature additionally re-exports the shared building blocks (`gamut::color` /
-`gamut::dsp` / `gamut::bitstream`) for tooling and sandbox use; `all` enables it along with every
-format.
+Every codec speaks the same `EncodeImage`/`DecodeImage` traits over typed pixel buffers, so one
+decoded image feeds any encoder — here a PNG transcoded to lossy AVIF and lossless WebP:
+
+```rust
+use gamut::avif::AvifEncoder;
+use gamut::core::{DecodeImage, EncodeImage, ImageBuf, Rgba8};
+use gamut::png::PngDecoder;
+use gamut::webp::WebpEncoder;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let png = std::fs::read("input.png")?;
+
+    // Decode into the pixel layout you ask for. Widening (grey, RGB, palette → RGBA) is
+    // automatic; a lossy change such as 16 → 8 bits is an error unless you opt in.
+    let image: ImageBuf<Rgba8> = PngDecoder::new().decode_image(&png)?;
+
+    let avif = AvifEncoder::lossy(80).encode_to_vec(image.as_ref())?;
+    let webp = WebpEncoder::lossless().encode_to_vec(image.as_ref())?;
+
+    std::fs::write("output.avif", &avif)?;
+    std::fs::write("output.webp", &webp)?;
+    Ok(())
+}
+```
+
+The umbrella has no default features, so a bare dependency compiles only `gamut-core`; the
+feature-to-crate map is in [its README](crates/gamut/README.md#features). The `primitives` feature
+additionally re-exports the shared building blocks (`gamut::color` / `gamut::dsp` /
+`gamut::bitstream`) for tooling, and `all` enables everything.
 
 ## Crates
 
