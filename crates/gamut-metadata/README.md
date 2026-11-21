@@ -292,6 +292,10 @@ This crate names no format crate, so the table of which gamut format crate locat
 `MetadataBlock` kind, `#[repr(u8)]` with append-only discriminants and an `ALL` slice — is defined
 here, because `MetadataSink` states its writable carriers in it.
 
+Audio and video metadata (ID3, Vorbis comment, ISOBMFF `ilst`, Matroska `Tags`, …) and a MIME-keyed
+support query are **deferred until a direct consumer is confirmed** (#216); [STATUS.md](STATUS.md)
+records that disposition, its start condition and the proposed API shape.
+
 ## Consumer integration
 
 The dependency direction is `format → gamut-metadata → per-format crates`, settled here. A format
