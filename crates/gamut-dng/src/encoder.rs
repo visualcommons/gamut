@@ -754,8 +754,7 @@ impl DngEncoder {
     /// [`lossless_jpeg_geometry`] width, or its height) exceeds the 65535 that a T.81 B.2.2 frame
     /// header's 16-bit `X`/`Y` can carry. Such a raw is tiled instead, at
     /// [`AUTO_TILE`]-capped tiles, so lossless JPEG writes every raw that uncompressed writes
-    /// (DNG 1.7.1.0 p. 20: a tiled raw is as conformant as a stripped one, and the DNG SDK tiles
-    /// its own lossless-JPEG raws).
+    /// (the DNG SDK likewise writes its own lossless-JPEG raws tiled, `dng_ifd::FindTileSize`).
     fn raw_tiling(
         &self,
         dims: gamut_core::Dimensions,
@@ -864,8 +863,10 @@ fn lossless_jpeg_geometry(cols: usize, spp: usize, period: usize) -> (usize, usi
 const LOSSLESS_JPEG_MAX_DIM: usize = 65535;
 
 /// The side of a tile [`DngEncoder::raw_tiling`] picks for a raw no single lossless-JPEG frame
-/// holds: 256, the DNG SDK's own tile size, or — for the raw's short side — that side rounded up
-/// to TIFF 6.0 §15's multiple of 16, so a thin raw is not zero-padded to 256.
+/// holds: 256 — a square far inside T.81's 65535 frame limit whose zero-padded edge tiles stay
+/// small — or, for a side shorter than that, the side rounded up to TIFF 6.0 §15's multiple of
+/// 16, so a thin raw is not zero-padded to 256. (The DNG SDK sizes its tiles from a byte budget
+/// instead; any multiple of 16 is conformant, so the side is this encoder's choice.)
 const AUTO_TILE: u32 = 256;
 
 /// One side of [`DngEncoder::raw_tiling`]'s automatic tile for an image `extent` pixels long.
