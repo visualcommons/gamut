@@ -768,7 +768,7 @@ fn encode_all_one_custom_tables_are_near_lossless() {
     // the caller's tables really drive quantization (any scaled Annex K pair would be far coarser
     // at high frequencies and blow the bound on LCG content).
     use gamut_jpeg::QuantTables;
-    let ones = QuantTables::new([1u8; 64], [1u8; 64]).unwrap();
+    let ones = QuantTables::new([1u16; 64], [1u16; 64]).unwrap();
     let mut worst = 0u8;
     for &(w, h) in DIMS {
         for mode in [Mode::Gray, Mode::C444] {
@@ -812,6 +812,66 @@ fn encode_coarse_custom_tables_decode_parity_gamut_vs_libjpeg() {
     }
     // Exact: max-diff 0 over the battery (2 under the f64 reference IDCT).
     assert_eq!(worst, 0, "coarse custom tables parity max-diff {worst}");
+}
+
+/// Every quantization table a stream's DQT segments define, as `(Pq|Tq byte, value bytes)` in
+/// stream order — independent of how the tables are split across DQT segments, which libjpeg
+/// (one segment per table) and gamut (one segment for all) do differently.
+fn dqt_tables(jpeg: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut tables = Vec::new();
+    let mut pos = 2;
+    while jpeg[pos + 1] != 0xDA {
+        let len = usize::from(u16::from_be_bytes([jpeg[pos + 2], jpeg[pos + 3]]));
+        if jpeg[pos + 1] == 0xDB {
+            let mut payload = &jpeg[pos + 4..pos + 2 + len];
+            while let Some((&pq_tq, rest)) = payload.split_first() {
+                let size = 64 * (1 + usize::from(pq_tq >> 4));
+                tables.push((pq_tq, rest[..size].to_vec()));
+                payload = &rest[size..];
+            }
+        }
+        pos += 2 + len;
+    }
+    tables
+}
+
+#[test]
+fn quality_10_extended_tables_match_cjpeg_and_decode_in_libjpeg_turbo() {
+    // `QuantTables::annex_k().scaled_extended(10)` is cjpeg's default (`-baseline` off) mapping:
+    // its luma maximum is 605, so the luma table is 16-bit and the frame SOF1. The DQT tables must
+    // equal libjpeg-turbo's byte-for-byte, and libjpeg-turbo must decode gamut's stream exactly as
+    // gamut does.
+    use gamut_jpeg::QuantTables;
+    let tables = QuantTables::annex_k().scaled_extended(10);
+    let (w, h) = (33, 31);
+    for mode in [Mode::Gray, Mode::C444, Mode::C420] {
+        let src = lcg_pixels(w, h, mode.channels(), 0x0010_DA7A);
+        let jpeg = gamut_encode_with(
+            JpegEncoder::new().with_quant_tables(tables),
+            mode,
+            &src,
+            w,
+            h,
+        );
+        let params = EncodeParams {
+            quality: 10,
+            gray: matches!(mode, Mode::Gray),
+            subsampling: mode.oracle_subsampling(),
+            ..EncodeParams::default()
+        };
+        let cjpeg = libjpeg_oracle::encode_extended(&src, w, h, &params).expect("oracle encode");
+        let ours = dqt_tables(&jpeg);
+        assert_eq!(ours, dqt_tables(&cjpeg), "{mode:?}: DQT tables differ");
+        assert_eq!(ours[0].0, 0x10, "{mode:?}: luma is a 16-bit table at Tq=0");
+        assert_eq!(
+            JpegDecoder::new().info(&jpeg).unwrap().process,
+            JpegProcess::ExtendedSequential
+        );
+        let reference = libjpeg_oracle::decode(&jpeg).expect("libjpeg-turbo decodes SOF1/Pq=1");
+        let (gw, gh, gamut_px) = gamut_decode(mode, &jpeg);
+        assert_eq!((gw, gh), (w, h));
+        assert_eq!(gamut_px, reference.pixels, "{mode:?}: decode parity");
+    }
 }
 
 // ================================================================================================
@@ -1039,5 +1099,51 @@ fn trellis_composes_with_custom_tables_and_progressive() {
             base_px, prog_px,
             "{rd:?}: progressive coefficients diverged from baseline"
         );
+    }
+}
+
+// ================================================================================================
+// Lossless (SOF3) encode through libjpeg-turbo's lossless decoder.
+// ================================================================================================
+
+#[test]
+fn lossless_encoder_every_predictor_and_point_transform_decodes_in_libjpeg_turbo() {
+    // `cjpeg -lossless psv,Pt`'s whole parameter space at Pt = 0..=2: libjpeg-turbo, an
+    // independent SOF3 decoder, must return the input with its low Pt bits cleared — at a
+    // precision on each of its three sample-width paths (8-, 12- and 16-bit), gray and
+    // three-component, with and without a restart interval (two lines per interval).
+    use gamut_jpeg::lossless::{LosslessEncoder, Predictor};
+    let (w, h) = (13usize, 9usize);
+    for precision in [2u16, 8, 12, 16] {
+        for components in [1usize, 3] {
+            let max = (1u32 << precision) - 1;
+            let mut lcg = Lcg::new(0x1055_1E55 ^ u32::from(precision));
+            let samples: Vec<u16> = (0..w * h * components)
+                .map(|_| (((u32::from(lcg.byte()) << 8) | u32::from(lcg.byte())) & max) as u16)
+                .collect();
+            for predictor in Predictor::ALL {
+                for pt in (0..=2u8).filter(|&pt| u16::from(pt) < precision) {
+                    for ri in [0, 2 * w as u16] {
+                        let jpeg = LosslessEncoder::new()
+                            .with_predictor(predictor)
+                            .with_point_transform(pt)
+                            .with_restart_interval(ri)
+                            .encode(&samples, w, h, components, precision)
+                            .expect("encode");
+                        let case =
+                            format!("P={precision} Nf={components} {predictor:?} Pt={pt} Ri={ri}");
+                        let got = libjpeg_oracle::decode_lossless(&jpeg)
+                            .unwrap_or_else(|e| panic!("{case}: {e}"));
+                        assert_eq!(
+                            (got.width, got.height, got.channels, got.precision),
+                            (w as u32, h as u32, components as u32, precision as u8),
+                            "{case}"
+                        );
+                        let want: Vec<u16> = samples.iter().map(|&s| (s >> pt) << pt).collect();
+                        assert_eq!(got.samples, want, "{case}");
+                    }
+                }
+            }
+        }
     }
 }

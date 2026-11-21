@@ -44,7 +44,8 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 
 **In scope** (issue #28, across the phases below):
 
-- Baseline sequential DCT, Huffman, 8-bit (SOF0) **encode** — grayscale + YCbCr 4:4:4/4:2:2/4:2:0,
+- Baseline sequential DCT, Huffman, 8-bit (SOF0) **encode**, and extended sequential (SOF1)
+  whenever a caller table needs 16-bit entries — grayscale + YCbCr 4:4:4/4:2:2/4:2:0,
   JFIF interchange format (this phase); YCbCr 4:4:0 (luma `1×2`) added by #1014, held by the same
   oracle batteries plus two gates every colour mode shares: libjpeg-turbo's own header parser reads
   back the declared sampling factors, and libjpeg-turbo's decode of gamut's stream stays within
@@ -116,9 +117,17 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   measured libjpeg-turbo's input smoothing (costs rate on clean input) and its ordered
   downsampling bias (negligible): neither ships. Default off (byte-identical); backends vetoed.
 - Caller-supplied quantization tables (P11, issue #332): the validated `QuantTables` pair
-  (natural order, entries `1..=255` by construction) used **verbatim** via
+  (natural order, `u16` entries `1..=65535` by construction) used **verbatim** via
   `JpegEncoder::with_quant_tables`, bypassing — without changing — the frozen quality mapping;
   `QuantTables::annex_k()`/`scaled()` recover the frozen mapping over arbitrary base tables.
+  16-bit tables (issue #1231): a table holding any entry above 255 is written with `Pq = 1` and
+  makes a sequential frame **SOF1** (extended sequential); every table that fits eight bits stays
+  `Pq = 0` under SOF0, and a progressive frame stays SOF2. `QuantTables::scaled_extended()` is
+  `cjpeg`'s default (`force_baseline = FALSE`) mapping, which turns the Annex K luma table 16-bit
+  from quality 23 down. T.81 §B.2.4.1 asks for `Pq = 0` at 8-bit precision; the libjpeg family
+  writes and reads 16-bit tables there regardless, and the encoder follows it. Oracle:
+  `scaled_extended(10)`'s DQT tables equal libjpeg-turbo's at quality 10 without `-baseline`
+  byte-for-byte, and libjpeg-turbo decodes the stream exactly as gamut does (`tests/oracle.rs`).
   `QuantTables::with_xyb_x` (issue #973) adds an optional third table for the XYB colour mode's
   X channel, emitted at DQT destination `Tq = 2` so X can be quantized apart from Y; without it
   the XYB stream is unchanged (X and Y share destination 0), and other modes ignore it.
@@ -131,7 +140,13 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Lossless process (P18, issue #1083): the `lossless` module, T.81 Annex H (SOF3), moved here from
   `gamut-dng`, whose `Compression = 7` it codes. Decode covers the full process-14 reader envelope
   (predictors 1–7, point transform, per-component tables, restarts) over 2- to 16-bit samples;
-  encode writes predictor 1 with one Annex K.2 table fitted per call. The encoder shares the DCT
+  encode is the `LosslessEncoder` builder (issue #1231, replacing the positional
+  `lossless::encode`): any Table H.1 `Predictor`, the §A.4 point transform, and a restart
+  interval that §H.1.1 requires to be whole lines, with one Annex K.2 table fitted per call; its
+  default (predictor 1, no transform, no restarts) is the stream gamut-dng writes, byte-identical
+  to the positional function's. Oracle: libjpeg-turbo's SOF3 decoder reads every predictor at
+  `Pt = 0..=2`, with and without restarts, back to the (point-transformed) input
+  (`tests/oracle.rs`). The encoder shares the DCT
   path's magnitude category and additional bits, entropy-coded-segment writer, marker writers and
   DHT emission, and the decoder its `EXTEND`; the decoder keeps its own marker walk, bit reader
   and decode table, because the DCT decoder's reject an over-subscribed `BITS` list and stray
@@ -347,7 +362,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegCodestreamDecoder`/`JpegCodestreamEncoder` traits over the **whole SOI..EOI interchange stream**, push-order backend registries, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. *Superseded in part by P18:* the bespoke `push_backend` `Arc<Mutex<..>>` registries became `gamut-codec-abi`'s `Registry` behind `with_backend`, and the `backend_declined` late-decline sentinel was removed (`supports()` is the only fall-through). APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
 | P9 | issue #306, #1024 | **Decoder resource limits:** dimension and native-raster byte builders over bounded defaults (65535 × 65535, 64 MiB); checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
 | P10 | T.81 §K.2; issue #331 | **Optimized baseline Huffman tables:** `JpegEncoder::with_optimized_tables(bool)` — the baseline scan is walked twice through one shared coder (`BaselineCoder::gather`/`::emit`), per-destination symbol histograms drive the §K.2 construction, and the resulting luma/chroma DC+AC tables replace the Annex K.3–K.6 typical ones in the same single DHT segment. Default off, so every previously-encodable configuration stays byte-identical | ✅ done |
-| P11 | T.81 §A.3.4, §B.2.4.1; issue #332 | **Caller-supplied quantization tables:** the public `QuantTables` pair — natural order, every entry `1..=255` **by construction** (`new` rejects zero, so the encoder never divides by zero and never emits a DQT its own decoder refuses) — used verbatim via `JpegEncoder::with_quant_tables`, with `annex_k()`/`scaled()` recovering the frozen IJG mapping over arbitrary bases. Quality becomes inert while set; the frozen quality contract still governs the default path; backends are vetoed (a `JpegEncodeRequest` cannot carry tables). Alternate built-in base tables deferred (citation obligation) | ✅ done |
+| P11 | T.81 §A.3.4, §B.2.4.1; issue #332 | **Caller-supplied quantization tables:** the public `QuantTables` pair — natural order, every entry `1..=255` (`u16` `1..=65535` since issue #1231, a 16-bit table making the frame SOF1) **by construction** (`new` rejects zero, so the encoder never divides by zero and never emits a DQT its own decoder refuses) — used verbatim via `JpegEncoder::with_quant_tables`, with `annex_k()`/`scaled()` recovering the frozen IJG mapping over arbitrary bases. Quality becomes inert while set; the frozen quality contract still governs the default path; backends are vetoed (a `JpegEncodeRequest` cannot carry tables). Alternate built-in base tables deferred (citation obligation) | ✅ done |
 | P12 | T.81 §F.1.2, Annex K.5/K.6; issue #333 | **RD-optimized coefficient selection:** the `rd` module's per-block AC trellis — dynamic program over (position, {v, v−1}) nodes with the exact run/size + ZRL + EOB bit cost of the typical AC tables as rate proxy, step-normalized distortion (the quantization table as the perceptual weighting), tuned dimensionless λ (pinned; measured 8.7% battery-wide saving at ≤ 0.35 dB) — plus `TrellisAdaptive` per-block λ modulation `√(energy/Σstep²)` clamped `[¼, 4]`. Opt-in `with_rd_optimization`; DC plain (deferred: cross-block DP through the DC predictor/restarts); default byte-identical; backends vetoed; progressive carries identical coefficients by the shared `quantize_block_rd` seam + configuration-only rate model | ✅ done |
 | P13 | Adobe TN #5116; ISO/IEC 18181-1 (XYB, via the vendored CD + pinned libjxl 0.12.0 constants); issue #334 | **XYB colour mode:** `with_color_mode(JpegColorMode::Xyb)` — sRGB → linear (EOTF LUT) → opsin XYB → scaled-XYB u8 planes (X, Y, B−Y) coded 4:4:4 (B-only subsampling by default since issue #1015) under SOI → APP14 `transform=0` → EXIF/XMP → APP2 `XYB_ICC_PROFILE` → DQT, SOF ids `R`,`G`,`B`, X/Y on the luminance table and B−Y on the chrominance table (placeholder pairing, ledgered above). The 768-byte profile (input class, D50 XYZ PCS, `desc`/`cprt`/`wtpt`/`chad`/`A2B0` mAB with a 2×2×2 CLUT + cube-root parametric M curves + the frozen 0.5·XYZ(D50)·OpsinInverse matrix/`B2A0` no-op) is vendored static and umbrella-pinned; the decoder needs zero changes (RGB passthrough via APP14/ids). Differential: libjpeg-turbo decodes + test-side XYB inversion ≥ 40 dB on the battery; lcms2 reproduces sRGB from real samples (worst 25 codes at the documented near-black X amplification, mean 2.46) | ✅ done |
 | P14 | issue #420; `gamut-metadata` | **Typed metadata wiring** behind the opt-in `metadata` feature: `JpegMetadata::blocks` / `metadata`, `JpegEncoder::with_metadata` / `with_encoded_metadata`; IPTC-IIM / C2PA typed `Unsupported`; pinned by the typed extract → embed → extract equality through the stream. **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no JPEG reader), so "exiv2 reads the embedded APP1/APP2 payloads out of the JPEG" is untested; the located bytes are pinned byte-exact against libjpeg-turbo (ICC, `tests/oracle.rs`) and the leaf crates pin the payloads against exiv2 (#510) | ✅ done |

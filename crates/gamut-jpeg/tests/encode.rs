@@ -478,7 +478,7 @@ fn custom_quant_tables_reach_the_dqt_verbatim_and_quality_is_inert() {
     // Distinct constant tables: a luma/chroma swap or an accidental quality re-scale of either
     // half would change the payload bytes. (Zig-zag re-emission of a non-constant table is pinned
     // by the quant module's own DQT test; constants make the whole 64 assertable here.)
-    let tables = QuantTables::new([7u8; 64], [11u8; 64]).unwrap();
+    let tables = QuantTables::new([7u16; 64], [11u16; 64]).unwrap();
     let rgb = vec![100u8; 16 * 16 * 3];
     let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(16, 16).unwrap()).unwrap();
     let jpeg = JpegEncoder::new()
@@ -514,6 +514,65 @@ fn custom_quant_tables_reach_the_dqt_verbatim_and_quality_is_inert() {
     let mut expected = vec![0x00u8];
     expected.extend_from_slice(&[7u8; 64]);
     assert_eq!(dqt, expected.as_slice());
+}
+
+#[test]
+fn a_table_above_255_is_written_16bit_under_sof1_and_only_when_emitted() {
+    use gamut_jpeg::{JpegDecoder, JpegProcess, QuantTables};
+    const SOF1: u8 = 0xC1;
+    // Luma fits eight bits, chroma does not: the colour stream writes chroma as a Pq=1 table of
+    // big-endian 300s and marks the frame SOF1; the frame header itself is otherwise unchanged.
+    let tables = QuantTables::new([7u16; 64], [300u16; 64]).unwrap();
+    let rgb = vec![100u8; 16 * 16 * 3];
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(16, 16).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_quant_tables(tables)
+        .encode_to_vec(img)
+        .unwrap();
+    let p = parse(&jpeg);
+    let mut expected = vec![0x00u8]; // Pq=0 | Tq=0
+    expected.extend_from_slice(&[7u8; 64]);
+    expected.push(0x11); // Pq=1 | Tq=1
+    expected.extend(std::iter::repeat_n([0x01, 0x2C], 64).flatten());
+    assert_eq!(p.segment(m::DQT).unwrap(), expected.as_slice());
+    assert!(p.segment(m::SOF0).is_none());
+    assert_eq!(p.segment(SOF1).unwrap()[0], 8, "P stays 8");
+    let info = JpegDecoder::new().info(&jpeg).unwrap();
+    assert_eq!(info.process, JpegProcess::ExtendedSequential);
+
+    // Grayscale emits only the 8-bit luma table, so the chroma table cannot drag it off baseline.
+    let gray = ImageRef::<Gray8>::new(&[100u8; 64], Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_quant_tables(tables)
+        .encode_to_vec(gray)
+        .unwrap();
+    let p = parse(&jpeg);
+    assert!(p.segment(m::SOF0).is_some() && p.segment(SOF1).is_none());
+
+    // A 16-bit luma table makes a grayscale frame SOF1 too.
+    let wide = QuantTables::new([300u16; 64], [7u16; 64]).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_quant_tables(wide)
+        .encode_to_vec(gray)
+        .unwrap();
+    let p = parse(&jpeg);
+    assert!(p.segment(m::SOF0).is_none() && p.segment(SOF1).is_some());
+    assert_eq!(p.segment(m::DQT).unwrap()[0], 0x10); // Pq=1 | Tq=0
+}
+
+#[test]
+fn a_16bit_table_leaves_a_progressive_frame_sof2() {
+    use gamut_jpeg::{ProgressiveScript, QuantTables};
+    // Table B.4 admits Pq = 1 under the progressive process, so SOF2 stays SOF2.
+    let wide = QuantTables::new([300u16; 64], [300u16; 64]).unwrap();
+    let gray = ImageRef::<Gray8>::new(&[100u8; 64], Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_quant_tables(wide)
+        .with_process(Process::Progressive(ProgressiveScript::Libjpeg))
+        .encode_to_vec(gray)
+        .unwrap();
+    assert!(jpeg.windows(2).any(|w| w == [0xFF, 0xC2]));
+    assert!(!jpeg.windows(2).any(|w| w == [0xFF, 0xC1]));
 }
 
 #[test]

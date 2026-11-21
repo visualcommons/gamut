@@ -285,6 +285,15 @@ fn info_reports_frame_header() {
 }
 
 #[test]
+fn jpeg_process_discriminants_are_the_sof_marker_index() {
+    // Drift guard for the C-facing tag: each discriminant is permanent and equals the `n` of the
+    // SOFn marker (0xC0 + n) that selects the process.
+    assert_eq!(JpegProcess::Baseline as u8, 0);
+    assert_eq!(JpegProcess::ExtendedSequential as u8, 1);
+    assert_eq!(JpegProcess::Progressive as u8, 2);
+}
+
+#[test]
 fn decode_image_into_reuses_matching_buffers() {
     // A destination whose dimensions match keeps its allocation and holds exactly what a fresh
     // decode_image produces — for both Gray8 and Rgb8 (Cmyk8 is covered by a unit test, which can

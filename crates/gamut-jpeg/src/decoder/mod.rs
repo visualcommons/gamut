@@ -343,15 +343,20 @@ fn scan_mcu_rows(frame: &Frame, scan: &crate::syntax::ScanHeader, height: usize)
 }
 
 /// The DCT process a JPEG stream uses, as reported by [`JpegDecoder::info`].
+///
+/// `#[repr(u8)]` with **permanent, append-only** discriminants, so the value is a stable tag across
+/// the C boundary: each is the `n` of the SOF*n* marker (`0xC0 + n`, T.81 Table B.1) that selects
+/// the process, so a future variant takes its own marker's `n` rather than the next free number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 #[non_exhaustive]
 pub enum JpegProcess {
     /// Baseline sequential DCT (SOF0).
-    Baseline,
+    Baseline = 0,
     /// Extended sequential DCT (SOF1).
-    ExtendedSequential,
+    ExtendedSequential = 1,
     /// Progressive DCT (SOF2).
-    Progressive,
+    Progressive = 2,
 }
 
 /// A lightweight summary of a JPEG stream's frame header, from [`JpegDecoder::info`].

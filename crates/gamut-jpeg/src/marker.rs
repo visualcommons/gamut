@@ -3,9 +3,9 @@
 //! Every marker is the two bytes `0xFF, code`. A *marker segment* (§B.1.1.4) is a marker followed by
 //! a two-byte big-endian length that counts itself but not the marker. This module owns the marker
 //! constants and the segments whose layout is fully determined by their parameters — SOI/EOI, the
-//! JFIF APP0 segment (T.871 §10.1), the SOF0 (baseline) and SOF2 (progressive) frame headers
-//! (§B.2.2), the SOS scan header (§B.2.3, baseline and progressive band forms), DRI (§B.2.4.4), and
-//! the RSTn restart markers (§B.2.1). The DQT and DHT segments live with the table data they
+//! JFIF APP0 segment (T.871 §10.1), the SOF0 (baseline), SOF1 (extended) and SOF2 (progressive)
+//! frame headers (§B.2.2), the SOS scan header (§B.2.3, baseline and progressive band forms), DRI
+//! (§B.2.4.4), and the RSTn restart markers (§B.2.1). The DQT and DHT segments live with the table data they
 //! serialize ([`crate::quant`] and [`crate::huffman`]).
 
 /// Marker codes from T.81 Table B.1. Each is the second byte of the two-byte `0xFF, code` marker.
@@ -132,32 +132,21 @@ pub fn write_app14_adobe(out: &mut Vec<u8>, transform: u8) {
     out.push(transform);
 }
 
-/// Appends the baseline SOF0 frame header (§B.2.2): precision 8, image `height`×`width`, and one
-/// entry per component as `(Ci, Hi, Vi, Tqi)` — the component id, horizontal/vertical sampling
-/// factors, and quantization-table destination.
-pub fn write_sof0(out: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
+/// Appends an 8-bit DCT frame header (§B.2.2) under the SOF`n` marker `sof` (SOF0, SOF1 or SOF2,
+/// whose layouts are identical): precision 8, image `height`×`width`, and one entry per component
+/// as `(Ci, Hi, Vi, Tqi)` — the component id, horizontal/vertical sampling factors, and
+/// quantization-table destination.
+pub fn write_sof(
+    out: &mut Vec<u8>,
+    sof: u8,
+    width: u16,
+    height: u16,
+    components: &[(u8, u8, u8, u8)],
+) {
     // Lf = 8 + 3·Nf (§B.2.2, Table B.2).
     let len = 8 + 3 * components.len();
-    write_segment_header(out, code::SOF0, len);
-    out.push(8); // P: sample precision (bits) — baseline is 8
-    out.extend_from_slice(&height.to_be_bytes()); // Y: number of lines
-    out.extend_from_slice(&width.to_be_bytes()); // X: samples per line
-    out.push(components.len() as u8); // Nf
-    for &(id, h, v, tq) in components {
-        out.push(id);
-        out.push(pack_nibbles(h, v)); // Hi (high nibble) | Vi (low nibble)
-        out.push(tq);
-    }
-}
-
-/// Appends the progressive SOF2 frame header (§B.2.2): identical layout to [`write_sof0`] but with
-/// the SOF2 marker (progressive DCT, Huffman coding). Precision 8, image `height`×`width`, and one
-/// `(Ci, Hi, Vi, Tqi)` entry per component.
-pub fn write_sof2(out: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
-    // Lf = 8 + 3·Nf (§B.2.2, Table B.2).
-    let len = 8 + 3 * components.len();
-    write_segment_header(out, code::SOF2, len);
-    out.push(8); // P: sample precision (bits) — 8-bit progressive
+    write_segment_header(out, sof, len);
+    out.push(8); // P: sample precision (bits) — 8-bit DCT
     out.extend_from_slice(&height.to_be_bytes()); // Y: number of lines
     out.extend_from_slice(&width.to_be_bytes()); // X: samples per line
     out.push(components.len() as u8); // Nf
@@ -286,8 +275,9 @@ mod tests {
         // Colour SOF0: 3 components, so Lf = 8 + 9 = 17; precision 8; height then width big-endian;
         // Y uses 2×2 sampling (4:2:0), chroma 1×1.
         let mut out = Vec::new();
-        write_sof0(
+        write_sof(
             &mut out,
+            code::SOF0,
             640,
             480,
             &[(1, 2, 2, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
@@ -327,8 +317,9 @@ mod tests {
     fn sof2_uses_the_progressive_marker() {
         // Same layout as SOF0 but the marker byte is 0xC2 (progressive DCT).
         let mut out = Vec::new();
-        write_sof2(
+        write_sof(
             &mut out,
+            code::SOF2,
             640,
             480,
             &[(1, 2, 2, 0), (2, 1, 1, 1), (3, 1, 1, 1)],

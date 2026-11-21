@@ -94,7 +94,10 @@ impl JpegEncoder {
     /// and neither spec references the other; APP0 then APP1 is the libjpeg-family convention that
     /// XMP Part 3 §1.1.3 records readers must accept. EXIF, XMP, then ICC — all before the first
     /// SOF, as XMP Part 3 requires.
-    fn write_prologue(&self, out: &mut Vec<u8>, quant_tables: &[(u8, &[u8; 64])]) {
+    ///
+    /// Returns whether the DQT segment carries a 16-bit table ([`quant::emit_dqt`]), which makes a
+    /// sequential frame extended (SOF1) rather than baseline.
+    fn write_prologue(&self, out: &mut Vec<u8>, quant_tables: &[(u8, &[u16; 64])]) -> bool {
         marker::write_marker(out, marker::code::SOI);
         marker::write_app0_jfif(out, self.density_unit, self.x_density, self.y_density);
         if let Some(exif) = &self.exif {
@@ -106,12 +109,14 @@ impl JpegEncoder {
         if let Some(icc) = &self.icc {
             appmeta::write_app2_icc(out, icc);
         }
-        quant::emit_dqt(out, quant_tables);
+        quant::emit_dqt(out, quant_tables)
     }
 
-    /// Writes the whole baseline (SOF0) frame: the frame header, one DHT segment, an optional DRI,
-    /// the scan header, and the entropy-coded scan. The caller has already written the SOI/APP0/DQT
-    /// prologue and appends EOI afterward.
+    /// Writes the whole sequential frame: the frame header, one DHT segment, an optional DRI, the
+    /// scan header, and the entropy-coded scan. The caller has already written the SOI/APP0/DQT
+    /// prologue and appends EOI afterward. The frame is baseline (SOF0) unless `extended` — the
+    /// prologue's DQT carried a 16-bit table, which baseline forbids (T.81 Table B.4) — makes it
+    /// extended sequential (SOF1); nothing else about the frame differs.
     ///
     /// With [`Process::Optimized`] the scan is walked **twice**: a gather pass
     /// counts the symbols each entropy destination will code, those counts drive the Annex K.2
@@ -121,14 +126,19 @@ impl JpegEncoder {
     fn write_baseline_frame(
         &self,
         out: &mut Vec<u8>,
-        width: u16,
-        height: u16,
+        extended: bool,
+        (width, height): (u16, u16),
         sof: &[(u8, u8, u8, u8)],
         sos: &[(u8, u8, u8)],
         components: &[Component],
     ) {
         let (w, h) = (u32::from(width), u32::from(height));
-        marker::write_sof0(out, width, height, sof);
+        let code = if extended {
+            marker::code::SOF1
+        } else {
+            marker::code::SOF0
+        };
+        marker::write_sof(out, code, width, height, sof);
 
         let tables = if self.process == Process::Optimized {
             let mut freq = Histograms::default();
@@ -229,15 +239,15 @@ impl JpegEncoder {
         // X quantizes with its own table at destination 2 when the caller supplied one; otherwise
         // it shares Y's luminance table at destination 0 (the default two-table stream).
         let x_table = self.xyb_x_quant();
-        let x_tq = match &x_table {
-            Some(x) => {
-                quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant), (2, x)]);
-                2
-            }
-            None => {
-                quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant)]);
-                0
-            }
+        let (x_tq, extended) = match &x_table {
+            Some(x) => (
+                2,
+                quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant), (2, x)]),
+            ),
+            None => (
+                0,
+                quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant)]),
+            ),
         };
         let x_quant = x_table.as_ref().unwrap_or(&luma_quant);
 
@@ -314,8 +324,8 @@ impl JpegEncoder {
             ];
             self.write_baseline_frame(
                 out,
-                width,
-                height,
+                extended,
+                (width, height),
                 &[
                     (ids[0], hx, vx, x_tq),
                     (ids[1], hx, vx, 0),
@@ -356,7 +366,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
         let luma_quant = self.luma_quant();
         let luma_rd = self.rd_ctx(false);
 
-        self.write_prologue(out, &[(0, &luma_quant)]);
+        let extended = self.write_prologue(out, &[(0, &luma_quant)]);
         if let Process::Progressive(script) = self.process {
             let comps = [progressive::ProgComponent {
                 id: 1,
@@ -385,7 +395,14 @@ impl EncodeImage<Gray8> for JpegEncoder {
                 dest: 0,
                 rd: luma_rd.as_ref(),
             };
-            self.write_baseline_frame(out, width, height, &[(1, 1, 1, 0)], &[(1, 0, 0)], &[comp]);
+            self.write_baseline_frame(
+                out,
+                extended,
+                (width, height),
+                &[(1, 1, 1, 0)],
+                &[(1, 0, 0)],
+                &[comp],
+            );
         }
 
         marker::write_marker(out, marker::code::EOI);
@@ -443,7 +460,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
         let luma_rd = self.rd_ctx(false);
         let chroma_rd = self.rd_ctx(true);
 
-        self.write_prologue(out, &[(0, &luma_quant), (1, &chroma_quant)]);
+        let extended = self.write_prologue(out, &[(0, &luma_quant), (1, &chroma_quant)]);
         if let Process::Progressive(script) = self.process {
             let comps = [
                 progressive::ProgComponent {
@@ -512,8 +529,8 @@ impl EncodeImage<Rgb8> for JpegEncoder {
             ];
             self.write_baseline_frame(
                 out,
-                width,
-                height,
+                extended,
+                (width, height),
                 &[(1, yh, yv, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
                 &[(1, 0, 0), (2, 1, 1), (3, 1, 1)],
                 &components,

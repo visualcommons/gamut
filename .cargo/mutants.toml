@@ -524,7 +524,7 @@ exclude_re = [
     # IJG quality mapping). The mapping is continuous at the branch point: at q == 50 — the only
     # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
     # the same scale and no input can distinguish the mutant: equivalent.
-    '^crates/gamut-jpeg/src/quant\.rs:162:10: replace < with <= in quality_scale$',
+    '^crates/gamut-jpeg/src/quant\.rs:207:10: replace < with <= in quality_scale$',
     # gamut-dng predictor `undo`: `if channels == 0 || group_cols < 2 { return; }`, relaxed to
     # `&&`, is equivalent. `factor` reaches this line only through
     # `x_factor(predictor).filter(|&f| f > 0)`, so `channels = spp * factor` is zero only when
@@ -542,7 +542,7 @@ exclude_re = [
     # guard is an optimisation, not a behaviour. Equivalent. (This one comparison only: the bare
     # name used to reach every `>` in every function whose name begins `decode`, nineteen others
     # across gamut-dng, gamut-icc, gamut-jpeg and gamut-webp that nobody argued for.)
-    '^crates/gamut-jpeg/src/lossless\.rs:841:11: replace > with >= in decode$',
+    '^crates/gamut-jpeg/src/lossless\.rs:1033:11: replace > with >= in decode$',
     # gamut-dng predictor `x_factor`: deleting the `Predictor::None => Some(0)` arm drops it to
     # `_ => None`, and neither caller can tell the two apart.
     #

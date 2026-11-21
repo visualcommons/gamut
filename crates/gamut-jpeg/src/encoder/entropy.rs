@@ -18,7 +18,7 @@ pub(super) struct Component<'a> {
     /// Vertical sampling factor `Vi`.
     pub(super) v: u8,
     pub(super) plane: &'a Plane,
-    pub(super) quant: &'a [u8; 64],
+    pub(super) quant: &'a [u16; 64],
     /// Entropy-table destination (the SOS `Tdj` = `Taj`): 0 = luma, 1 = chroma.
     pub(super) dest: usize,
     /// The rate–distortion context for this component's class, when RD optimization is enabled.

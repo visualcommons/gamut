@@ -133,7 +133,7 @@ fn activity_factor(ac_energy: i64, sum_step_sq: i64) -> i64 {
 /// DC (`dct[0]`) is always plain nearest rounding. If the rate proxy cannot price a path at all
 /// (a symbol missing from the table — impossible with the standard tables), the block falls back
 /// to plain rounding rather than guessing.
-pub(crate) fn trellis_quantize(dct: &[i32; 64], quant: &[u8; 64], ctx: &RdCtx) -> [i32; 64] {
+pub(crate) fn trellis_quantize(dct: &[i32; 64], quant: &[u16; 64], ctx: &RdCtx) -> [i32; 64] {
     // Per zig-zag position 1..=63: the unquantized coefficient, its step, its nearest-rounding
     // candidate, and the cumulative zeroing distortion prefix P[k] = Σ_{i≤k} (c_i/s_i)² (fixed
     // point) — distortions are normalized by each coefficient's own step (module docs). The raw
@@ -291,7 +291,7 @@ mod tests {
     }
 
     /// Plain §A.3.4 nearest rounding of a raw DCT block — the trellis's λ = 0 reference.
-    fn plain(dct: &[i32; 64], quant: &[u8; 64]) -> [i32; 64] {
+    fn plain(dct: &[i32; 64], quant: &[u16; 64]) -> [i32; 64] {
         let mut q = [0i32; 64];
         for (dst, (&c, &s)) in q.iter_mut().zip(dct.iter().zip(quant.iter())) {
             *dst = round_div_nearest(c, i32::from(s));
@@ -345,7 +345,7 @@ mod tests {
         // |c| = s/2 is the rounding tie: `round_div_nearest(5, 10)` gives 1 and zeroing gives the
         // identical distortion 25. The trellis must resolve the tie the same way plain rounding
         // does (keep the 1), which the nearest-predecessor-first / strict-`<` ordering guarantees.
-        let mut quant = [1u8; 64];
+        let mut quant = [1u16; 64];
         quant[ZIGZAG[5]] = 10;
         let ctx = ctx_with_lambda(0);
         let out = trellis_quantize(&block_at(5, 5), &quant, &ctx);
@@ -376,7 +376,7 @@ mod tests {
         // One coefficient c = 6 at zig-zag 5 with step 10: keeping v = 1 costs normalized
         // distortion (16·2^12)/100 = 655 and rate rs(4,1) = 7 bits; dropping costs (36·2^12)/100
         // = 1474 (EOB is paid either way). The decision flips at λ·7 = 1474 − 655 → λ = 117.
-        let mut quant = [1u8; 64];
+        let mut quant = [1u16; 64];
         quant[ZIGZAG[5]] = 10;
         let dct = block_at(5, 6);
         let keep = trellis_quantize(&dct, &quant, &ctx_with_lambda(110));
@@ -392,7 +392,7 @@ mod tests {
         // rs(4,2) − rs(4,1) = (10+2) − (6+1) = 5 more bits, so above λ·5 = 2007 − 368 → λ = 328
         // the smaller candidate wins (zero only far above: its own threshold is λ = 1404). This
         // pins the v_hi − 1 candidate generation.
-        let mut quant = [1u8; 64];
+        let mut quant = [1u16; 64];
         quant[ZIGZAG[5]] = 10;
         let dct = block_at(5, 17);
         let hi = trellis_quantize(&dct, &quant, &ctx_with_lambda(300));
@@ -408,12 +408,12 @@ mod tests {
         // (11 + 3 = 14 bits). With z − d = 1474 − 655 = 819 the keep threshold is λ < 48 for the
         // run of 15 but λ < 58 for the run of 16 — at λ = 53 the coefficient behind MORE zeros is
         // the one that survives.
-        let mut quant16 = [1u8; 64];
+        let mut quant16 = [1u16; 64];
         quant16[ZIGZAG[16]] = 10;
         let behind_15 = trellis_quantize(&block_at(16, 6), &quant16, &ctx_with_lambda(53));
         assert_eq!(behind_15, [0i32; 64], "run of 15: dropped at λ = 53");
 
-        let mut quant17 = [1u8; 64];
+        let mut quant17 = [1u16; 64];
         quant17[ZIGZAG[17]] = 10;
         let behind_16 = trellis_quantize(&block_at(17, 6), &quant17, &ctx_with_lambda(53));
         assert_eq!(behind_16[ZIGZAG[17]], 1, "run of 16: kept at λ = 53");
@@ -425,7 +425,7 @@ mod tests {
         // and, ending the block, pays no EOB — while dropping it pays the 4-bit EOB. With
         // z − d = 819 the keep condition is λ·(50 − 4) < 819 → λ < 17.8; were EOB wrongly charged
         // at position 63 the bound would be λ < 16.4. λ = 17 sits between the two and must keep.
-        let mut quant = [1u8; 64];
+        let mut quant = [1u16; 64];
         quant[ZIGZAG[63]] = 10;
         let out = trellis_quantize(&block_at(63, 6), &quant, &ctx_with_lambda(17));
         assert_eq!(out[ZIGZAG[63]], 1);
@@ -507,7 +507,7 @@ mod tests {
         // distortion at λ = 0, so the search's tie-breaking discipline (strict `<`, nearest
         // predecessor first, farthest termination first) is what makes the output equal plain
         // rounding — a tie-preference flip anywhere in the DP or termination loop drops one.
-        let mut quant = [1u8; 64];
+        let mut quant = [1u16; 64];
         quant[ZIGZAG[5]] = 10;
         quant[ZIGZAG[6]] = 10;
         let mut dct = [0i32; 64];
@@ -524,7 +524,7 @@ mod tests {
         // Branch: a run of 16 codes as ZRL + (0,1) = 11 + 3 = 14 bits, so with z − d = 819 the
         // keep threshold is λ < 58; were the ZRL branch skipped the rate would be 3 bits and the
         // threshold λ < 273. λ = 100 separates them: the coefficient must be DROPPED.
-        let mut quant17 = [1u8; 64];
+        let mut quant17 = [1u16; 64];
         quant17[ZIGZAG[17]] = 10;
         let dropped = trellis_quantize(&block_at(17, 6), &quant17, &ctx_with_lambda(100));
         assert_eq!(dropped, [0i32; 64], "run of 16 must pay its ZRL at λ = 100");
@@ -532,7 +532,7 @@ mod tests {
         // Multiplication: a run of 33 needs TWO ZRLs — rate = 2·11 + (1,1)'s 4 + 1 = 27 bits,
         // keep threshold λ < 30. A miscounted single ZRL (rate 18 → λ < 45) or a divided one
         // (rate 10 → λ < 81) would keep at λ = 38; the correct cost drops.
-        let mut quant34 = [1u8; 64];
+        let mut quant34 = [1u16; 64];
         quant34[ZIGZAG[34]] = 10;
         let dropped = trellis_quantize(&block_at(34, 6), &quant34, &ctx_with_lambda(38));
         assert_eq!(
@@ -553,7 +553,7 @@ mod tests {
         // activity reference (the clamp at 576) sit on opposite sides of a marginal
         // coefficient's drop threshold (468) — so a miscomputed energy or step sum changes the
         // output, not just an internal number.
-        let quant = [10u8; 64];
+        let quant = [10u16; 64];
         let mut dct = [0i32; 64];
         dct[ZIGZAG[1]] = 250; // big: kept at every λ in play; provides the block's energy
         dct[ZIGZAG[5]] = 9; // marginal: kept at λ = 453, dropped at λ = 576
@@ -593,7 +593,7 @@ mod tests {
             lambda: DEFAULT_LAMBDA,
             adaptive: false,
         };
-        let quant = [10u8; 64];
+        let quant = [10u16; 64];
         let mut dct = [0i32; 64];
         dct[0] = 77;
         dct[ZIGZAG[1]] = 25;

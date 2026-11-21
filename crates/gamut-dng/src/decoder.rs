@@ -1120,7 +1120,9 @@ mod tests {
     fn decode_raw_image_rejects_lossless_jpeg_sample_count_mismatch() {
         // A 4x2, single-component lossless-JPEG strip (8 samples)...
         let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
-        let jpeg = gamut_jpeg::lossless::encode(&samples, 4, 2, 1, 12).expect("encode");
+        let jpeg = gamut_jpeg::lossless::LosslessEncoder::new()
+            .encode(&samples, 4, 2, 1, 12)
+            .expect("encode");
         // ...described by an IFD that claims a 2x2 image (4 samples). Per spec only the *total
         // sample count* must match the strip — the stream's internal width/components are free
         // (real CFA writers halve the width and double the components) — so this fails on the
@@ -1173,7 +1175,9 @@ mod tests {
     fn decode_raw_image_accepts_reshaped_lossless_jpeg_stream() {
         // 8 samples encoded as a 2-wide, 2-component, 2-row stream for a 4x2 one-plane image.
         let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
-        let jpeg = gamut_jpeg::lossless::encode(&samples, 2, 2, 2, 12).expect("encode");
+        let jpeg = gamut_jpeg::lossless::LosslessEncoder::new()
+            .encode(&samples, 2, 2, 2, 12)
+            .expect("encode");
         let mut ifd = Ifd::new();
         ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![4]));
         ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));

@@ -44,7 +44,7 @@ fn dct_block(plane: &Plane, bx: usize, by: usize) -> [i32; 64] {
 /// `(bx, by)` (§A.3.1 / §A.3.3 / §A.3.4), returning the natural-order quantized coefficients. Shared
 /// by the baseline single-pass coder (the entropy stage's `encode_block`) and the progressive encoder
 /// ([`crate::progressive`]), which materializes every block up front before running the scan script.
-pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usize) -> [i32; 64] {
+pub(crate) fn quantize_block(plane: &Plane, quant: &[u16; 64], bx: usize, by: usize) -> [i32; 64] {
     let block = dct_block(plane, bx, by);
     // Quantize (§A.3.4): round-to-nearest divide by the table entry (which is ≥ 1).
     let mut q = [0i32; 64];
@@ -60,7 +60,7 @@ pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usi
 /// and progressive processes, so an RD choice is identical in both.
 pub(crate) fn quantize_block_rd(
     plane: &Plane,
-    quant: &[u8; 64],
+    quant: &[u16; 64],
     bx: usize,
     by: usize,
     rd: Option<&RdCtx>,

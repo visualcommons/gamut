@@ -728,14 +728,15 @@ fn preview_decode_bytes() -> usize {
 /// CFA, three interleaved for `LinearRaw`.
 fn lossless_jpeg_stream(photometry: Photometry) -> Vec<u8> {
     let planes = photometry.planes() as usize;
-    gamut_jpeg::lossless::encode(
-        &sensor_samples(photometry.planes()),
-        WIDTH as usize,
-        HEIGHT as usize,
-        planes,
-        BITS,
-    )
-    .expect("fixture lossless-JPEG stream encodes")
+    gamut_jpeg::lossless::LosslessEncoder::new()
+        .encode(
+            &sensor_samples(photometry.planes()),
+            WIDTH as usize,
+            HEIGHT as usize,
+            planes,
+            BITS,
+        )
+        .expect("fixture lossless-JPEG stream encodes")
 }
 
 /// Prints the byte volumes each measured region moves, so a throughput number can be read against

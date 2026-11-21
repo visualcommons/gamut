@@ -64,7 +64,7 @@ pub(crate) struct ProgComponent<'a> {
     /// The component's sample plane at its own resolution.
     pub plane: &'a Plane,
     /// The component's natural-order quantization table.
-    pub quant: &'a [u8; 64],
+    pub quant: &'a [u16; 64],
     /// The rate–distortion context for this component's class, when RD optimization is enabled.
     /// Shared with the baseline path through the same quantization seam, so the materialized
     /// coefficients — and hence the decoded image — stay identical between the two processes.
@@ -257,7 +257,7 @@ pub(crate) fn encode(
     let (comps, geom) = build_coeffs(components, usize::from(width), usize::from(height));
 
     let sof: Vec<(u8, u8, u8, u8)> = comps.iter().map(|c| (c.id, c.h, c.v, c.tq)).collect();
-    marker::write_sof2(out, width, height, &sof);
+    marker::write_sof(out, marker::code::SOF2, width, height, &sof);
     if restart_interval != 0 {
         marker::write_dri(out, restart_interval);
     }

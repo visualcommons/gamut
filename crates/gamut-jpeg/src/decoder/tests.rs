@@ -106,8 +106,8 @@ fn flat(dc: i32) -> [i32; 64] {
 
 /// A quantization table whose DC step is 8 (so a flat block of quantized DC `d` reconstructs to
 /// the uniform sample `128 + d`) and all other steps 1.
-fn dc8_quant() -> [u8; 64] {
-    let mut q = [1u8; 64];
+fn dc8_quant() -> [u16; 64] {
+    let mut q = [1u16; 64];
     q[0] = 8;
     q
 }
@@ -138,7 +138,7 @@ fn exact_8x8_gray_block() {
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, &quant)]);
-    marker::write_sof0(&mut jpeg, 8, 8, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut jpeg, marker::code::SOF0, 8, 8, &[(1, 1, 1, 0)]);
     huffman::emit_dht(
         &mut jpeg,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -160,9 +160,10 @@ fn ycbcr444_16(grids: &[[[i32; 64]; 4]; 3], interleaved: bool) -> Vec<u8> {
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     marker::write_app0_jfif(&mut jpeg, marker::DensityUnit::AspectRatio, 1, 1);
-    quant::emit_dqt(&mut jpeg, &[(0, &[1u8; 64]), (1, &[1u8; 64])]);
-    marker::write_sof0(
+    quant::emit_dqt(&mut jpeg, &[(0, &[1u16; 64]), (1, &[1u16; 64])]);
+    marker::write_sof(
         &mut jpeg,
+        marker::code::SOF0,
         16,
         16,
         &[(1, 1, 1, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
@@ -216,9 +217,10 @@ fn ycbcr420_16(luma: [[i32; 64]; 4], cb: [i32; 64], cr: [i32; 64], interleaved: 
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     marker::write_app0_jfif(&mut jpeg, marker::DensityUnit::AspectRatio, 1, 1);
-    quant::emit_dqt(&mut jpeg, &[(0, &[1u8; 64]), (1, &[1u8; 64])]);
-    marker::write_sof0(
+    quant::emit_dqt(&mut jpeg, &[(0, &[1u16; 64]), (1, &[1u16; 64])]);
+    marker::write_sof(
         &mut jpeg,
+        marker::code::SOF0,
         16,
         16,
         &[(1, 2, 2, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
@@ -331,8 +333,9 @@ fn four_comp_8x8(d: [i32; 4], app14: Option<u8>) -> Vec<u8> {
         write_app14(&mut jpeg, t);
     }
     quant::emit_dqt(&mut jpeg, &[(0, &quant)]);
-    marker::write_sof0(
+    marker::write_sof(
         &mut jpeg,
+        marker::code::SOF0,
         8,
         8,
         &[(1, 1, 1, 0), (2, 1, 1, 0), (3, 1, 1, 0), (4, 1, 1, 0)],
@@ -441,8 +444,9 @@ fn three_comp_8x8(ids: [u8; 3], d: [i32; 3], jfif: bool, app14: Option<u8>) -> V
         write_app14(&mut jpeg, t);
     }
     quant::emit_dqt(&mut jpeg, &[(0, &quant)]);
-    marker::write_sof0(
+    marker::write_sof(
         &mut jpeg,
+        marker::code::SOF0,
         8,
         8,
         &[(ids[0], 1, 1, 0), (ids[1], 1, 1, 0), (ids[2], 1, 1, 0)],
@@ -515,7 +519,7 @@ fn undefined_table_and_bad_component_are_rejected() {
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, &dc8_quant())]);
-    marker::write_sof0(&mut jpeg, 8, 8, &[(1, 1, 1, 2)]); // Tq=2, never defined
+    marker::write_sof(&mut jpeg, marker::code::SOF0, 8, 8, &[(1, 1, 1, 2)]); // Tq=2, never defined
     huffman::emit_dht(
         &mut jpeg,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -550,7 +554,7 @@ fn ac_index_past_63_is_rejected() {
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, &dc8_quant())]);
-    marker::write_sof0(&mut jpeg, 8, 8, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut jpeg, marker::code::SOF0, 8, 8, &[(1, 1, 1, 0)]);
     huffman::emit_dht(
         &mut jpeg,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -569,7 +573,7 @@ fn gray_stream(x: u16, y_field: u16, blocks: &[[i32; 64]], dnl: Option<(u16, u16
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, &dc8_quant())]);
-    marker::write_sof0(&mut jpeg, x, y_field, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut jpeg, marker::code::SOF0, x, y_field, &[(1, 1, 1, 0)]);
     huffman::emit_dht(
         &mut jpeg,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -882,7 +886,7 @@ fn unsupported_and_structural_markers_are_classified() {
     let sos = base.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
     let mut dup = base.clone();
     let mut extra = Vec::new();
-    marker::write_sof0(&mut extra, 8, 8, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut extra, marker::code::SOF0, 8, 8, &[(1, 1, 1, 0)]);
     dup.splice(sos..sos, extra);
     assert!(matches!(
         <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &dup),
@@ -937,7 +941,7 @@ fn crafted_table_and_scan_segments_are_validated() {
     let mut dht = Vec::new();
     marker::write_marker(&mut dht, marker::code::SOI);
     quant::emit_dqt(&mut dht, &[(0, &dc8_quant())]);
-    marker::write_sof0(&mut dht, 8, 8, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut dht, marker::code::SOF0, 8, 8, &[(1, 1, 1, 0)]);
     // A hand-written DHT segment with Tc=2: length 2 + 1 + 16 + 0 = 19, no values.
     marker::write_segment_header(&mut dht, marker::code::DHT, 19);
     dht.push(0x20); // Tc=2, Th=0
@@ -967,7 +971,13 @@ fn crafted_table_and_scan_segments_are_validated() {
     let mut sos = Vec::new();
     marker::write_marker(&mut sos, marker::code::SOI);
     quant::emit_dqt(&mut sos, &[(0, &dc8_quant())]);
-    marker::write_sof0(&mut sos, 8, 8, &[(1, 1, 1, 0), (2, 1, 1, 0)]);
+    marker::write_sof(
+        &mut sos,
+        marker::code::SOF0,
+        8,
+        8,
+        &[(1, 1, 1, 0), (2, 1, 1, 0)],
+    );
     huffman::emit_dht(
         &mut sos,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -985,7 +995,7 @@ fn crafted_table_and_scan_segments_are_validated() {
     let mut ns0 = Vec::new();
     marker::write_marker(&mut ns0, marker::code::SOI);
     quant::emit_dqt(&mut ns0, &[(0, &dc8_quant())]);
-    marker::write_sof0(&mut ns0, 8, 8, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut ns0, marker::code::SOF0, 8, 8, &[(1, 1, 1, 0)]);
     huffman::emit_dht(
         &mut ns0,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -1059,7 +1069,7 @@ fn missing_block_decodes_from_all_ones_padding() {
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, &dc8_quant())]);
-    marker::write_sof0(&mut jpeg, 8, 16, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut jpeg, marker::code::SOF0, 8, 16, &[(1, 1, 1, 0)]);
     huffman::emit_dht(
         &mut jpeg,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -1114,7 +1124,7 @@ fn gray_restart_stream(blocks: &[[i32; 64]], y_field: u16, dnl: Option<(u16, u16
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, &dc8_quant())]);
-    marker::write_sof0(&mut jpeg, 8, y_field, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut jpeg, marker::code::SOF0, 8, y_field, &[(1, 1, 1, 0)]);
     huffman::emit_dht(
         &mut jpeg,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -1204,9 +1214,10 @@ fn ycbcr420_20x12(interleaved: bool) -> Vec<u8> {
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     marker::write_app0_jfif(&mut jpeg, marker::DensityUnit::AspectRatio, 1, 1);
-    quant::emit_dqt(&mut jpeg, &[(0, &[1u8; 64]), (1, &[1u8; 64])]);
-    marker::write_sof0(
+    quant::emit_dqt(&mut jpeg, &[(0, &[1u16; 64]), (1, &[1u16; 64])]);
+    marker::write_sof(
         &mut jpeg,
+        marker::code::SOF0,
         20,
         12,
         &[(1, 2, 2, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
@@ -1286,12 +1297,9 @@ fn non_aligned_420_non_interleaved_matches_interleaved() {
 // the successive-approximation and EOBRUN edge cases the oracle battery cannot isolate, and
 // exercise the scan-ordering validation corpus.
 
-/// Writes a SOF2 (progressive) frame header — the SOF0 writer with the marker code swapped.
+/// Writes a SOF2 (progressive) frame header.
 fn write_sof2(out: &mut Vec<u8>, w: u16, h: u16, comps: &[(u8, u8, u8, u8)]) {
-    let mut seg = Vec::new();
-    marker::write_sof0(&mut seg, w, h, comps);
-    seg[1] = marker::code::SOF2;
-    out.extend_from_slice(&seg);
+    marker::write_sof(out, marker::code::SOF2, w, h, comps);
 }
 
 /// Writes a progressive SOS header carrying the band `[Ss..=Se]` and precision `(Ah, Al)`.
@@ -1484,7 +1492,7 @@ const PROG_AC: huffman::TableSpec = huffman::TableSpec {
 
 /// A single-component (gray) progressive stream prefix: SOI, DQT, SOF2, DHT (std luma DC + the
 /// given AC table in destination 0).
-fn prog_gray_prefix_ac(quant: &[u8; 64], x: u16, y: u16, ac: &huffman::TableSpec) -> Vec<u8> {
+fn prog_gray_prefix_ac(quant: &[u16; 64], x: u16, y: u16, ac: &huffman::TableSpec) -> Vec<u8> {
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, quant)]);
@@ -1494,18 +1502,18 @@ fn prog_gray_prefix_ac(quant: &[u8; 64], x: u16, y: u16, ac: &huffman::TableSpec
 }
 
 /// The common case: a prefix using the standard luma AC table.
-fn prog_gray_prefix(quant: &[u8; 64], x: u16, y: u16) -> Vec<u8> {
+fn prog_gray_prefix(quant: &[u16; 64], x: u16, y: u16) -> Vec<u8> {
     prog_gray_prefix_ac(quant, x, y, &huffman::STD_LUMA_AC)
 }
 
 /// A single-component (gray) SEQUENTIAL twin over the same coefficient blocks (block column,
 /// top to bottom) — the reference every progressive stream must match exactly.
-fn seq_gray(quant: &[u8; 64], x: u16, y: u16, blocks: &[[i32; 64]]) -> Vec<u8> {
+fn seq_gray(quant: &[u16; 64], x: u16, y: u16, blocks: &[[i32; 64]]) -> Vec<u8> {
     let (ldc, lac, ..) = std_enc();
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, quant)]);
-    marker::write_sof0(&mut jpeg, x, y, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut jpeg, marker::code::SOF0, x, y, &[(1, 1, 1, 0)]);
     huffman::emit_dht(
         &mut jpeg,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -1557,7 +1565,7 @@ fn progressive_successive_approximation_matches_full_precision() {
     // sequential twin. Coefficients are chosen to exercise every refinement path: an even AC
     // (correction bit 0), an odd AC ≥ 2 (correction bit 1), a magnitude-1 AC (newly nonzero in
     // the refinement scan), and a negative AC.
-    let quant = [1u8; 64];
+    let quant = [1u16; 64];
     let mut c = [0i32; 64];
     c[0] = 5; // odd DC
     c[ZIGZAG[1]] = 4; // even, |>>1| = 2 → correction bit 0
@@ -1662,12 +1670,12 @@ fn progressive_ac_scan_restart_resets_eobrun() {
 }
 
 /// A gray sequential twin with a restart interval (one block per MCU column).
-fn seq_gray_restart(quant: &[u8; 64], x: u16, y: u16, blocks: &[[i32; 64]], ri: u16) -> Vec<u8> {
+fn seq_gray_restart(quant: &[u16; 64], x: u16, y: u16, blocks: &[[i32; 64]], ri: u16) -> Vec<u8> {
     let (ldc, lac, ..) = std_enc();
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, quant)]);
-    marker::write_sof0(&mut jpeg, x, y, &[(1, 1, 1, 0)]);
+    marker::write_sof(&mut jpeg, marker::code::SOF0, x, y, &[(1, 1, 1, 0)]);
     huffman::emit_dht(
         &mut jpeg,
         &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
@@ -1692,7 +1700,7 @@ type ScanDesc<'a> = (&'a [(u8, u8, u8)], (u8, u8, u8, u8), Vec<u8>);
 
 /// Assembles a minimal progressive gray stream from raw scan descriptors for the validation
 /// corpus.
-fn prog_scans(quant: &[u8; 64], x: u16, y: u16, scans: &[ScanDesc]) -> Vec<u8> {
+fn prog_scans(quant: &[u16; 64], x: u16, y: u16, scans: &[ScanDesc]) -> Vec<u8> {
     let mut jpeg = prog_gray_prefix(quant, x, y);
     for (comps, (ss, se, ah, al), body) in scans {
         write_sos_prog(&mut jpeg, comps, *ss, *se, *ah, *al);
@@ -1796,7 +1804,7 @@ fn progressive_missing_dc_component_is_rejected() {
     // A three-component progressive frame where only two components receive a DC scan: the third
     // never gets a baseline, so the partial-render policy rejects the frame as InvalidInput.
     let (ldc, ..) = std_enc();
-    let quant = [1u8; 64];
+    let quant = [1u16; 64];
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, &quant)]);
@@ -1820,7 +1828,7 @@ fn progressive_missing_dc_component_is_rejected() {
 fn progressive_zero_height_is_unsupported() {
     // A Y=0 (DNL-deferred height) progressive frame is a clean Unsupported error (see STATUS.md
     // — the coefficient buffers need the full block grid before the first scan), never a panic.
-    let quant = [1u8; 64];
+    let quant = [1u16; 64];
     let mut jpeg = Vec::new();
     marker::write_marker(&mut jpeg, marker::code::SOI);
     quant::emit_dqt(&mut jpeg, &[(0, &quant)]);
@@ -1971,7 +1979,7 @@ fn progressive_ac_refine_newly_nonzero_at_band_end() {
     // A single-coefficient band [Ss=Se=1]: the coefficient (magnitude 1) is zero at the first
     // pass (Al=1) and becomes newly-nonzero in the refinement (Al=0), inserted at k == Se. Pins
     // the `k > se` insertion guard at its boundary (a `>=` mutant would reject the valid insert).
-    let quant = [1u8; 64];
+    let quant = [1u16; 64];
     let mut c = flat(4);
     c[ZIGZAG[1]] = 1; // magnitude-1 AC at the single band position
     let (ldc, lac, ..) = std_enc();
@@ -2041,7 +2049,7 @@ fn progressive_interleaved_dc_matches_sequential_420() {
     let mut prog = Vec::new();
     marker::write_marker(&mut prog, marker::code::SOI);
     marker::write_app0_jfif(&mut prog, marker::DensityUnit::AspectRatio, 1, 1);
-    quant::emit_dqt(&mut prog, &[(0, &[1u8; 64])]);
+    quant::emit_dqt(&mut prog, &[(0, &[1u16; 64])]);
     write_sof2(
         &mut prog,
         32,
@@ -2082,9 +2090,10 @@ fn progressive_interleaved_dc_matches_sequential_420() {
     let mut seq = Vec::new();
     marker::write_marker(&mut seq, marker::code::SOI);
     marker::write_app0_jfif(&mut seq, marker::DensityUnit::AspectRatio, 1, 1);
-    quant::emit_dqt(&mut seq, &[(0, &[1u8; 64])]);
-    marker::write_sof0(
+    quant::emit_dqt(&mut seq, &[(0, &[1u16; 64])]);
+    marker::write_sof(
         &mut seq,
+        marker::code::SOF0,
         32,
         32,
         &[(1, 2, 2, 0), (2, 1, 1, 0), (3, 1, 1, 0)],
