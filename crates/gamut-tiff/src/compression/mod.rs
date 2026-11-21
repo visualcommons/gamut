@@ -20,9 +20,12 @@ pub(crate) use gamut_ifd::tags::Compression;
 /// Reads an on-disk `Compression` code (tag 259) as one of the schemes TIFF assigns.
 ///
 /// The legacy Adobe Deflate code `32946` reads as [`Compression::Deflate`], like the standardised
-/// `8`. The DNG-only codes ([`Compression::LossyJpeg`], [`Compression::JpegXl`]) are not TIFF's
-/// and are refused here like any unassigned code, so [`TiffInfo`](crate::TiffInfo) and
-/// [`deconstruct`](crate::deconstruct) keep treating them as unrecognised.
+/// `8`. The codes libtiff writes beyond the specifications — JPEG 2000 (`34712`), LERC (`34887`),
+/// ZSTD (`50000`) and WebP (`50001`) — are TIFF's too, so [`TiffInfo`](crate::TiffInfo) names
+/// them even though the decoder refuses their data as unsupported. The DNG-only codes
+/// ([`Compression::LossyJpeg`], [`Compression::JpegXl`]) are not TIFF's and are refused here like
+/// any unassigned code, so [`TiffInfo`](crate::TiffInfo) and [`deconstruct`](crate::deconstruct)
+/// keep treating them as unrecognised.
 ///
 /// # Errors
 ///
@@ -43,6 +46,10 @@ pub(crate) fn tiff_compression(code: u32) -> Result<Compression> {
                     | Compression::Jpeg
                     | Compression::Deflate
                     | Compression::PackBits
+                    | Compression::Jp2000
+                    | Compression::Lerc
+                    | Compression::Zstd
+                    | Compression::Webp
             )
         },
         "TIFF: unrecognised Compression tag value",
@@ -53,8 +60,9 @@ pub(crate) fn tiff_compression(code: u32) -> Result<Compression> {
 mod tests {
     use super::*;
 
-    /// TIFF reads exactly its own codes (TIFF 6.0 §8 and Technical Notes 2 and 3) plus the legacy
-    /// Deflate alias; the DNG-only codes, a code past `u16`, and unassigned codes are refused.
+    /// TIFF reads exactly its own codes (TIFF 6.0 §8 and Technical Notes 2 and 3), the four libtiff
+    /// writes beyond them, and the legacy Deflate alias; the DNG-only codes, a code past `u16`, and
+    /// unassigned codes are refused.
     #[test]
     fn tiff_compression_reads_only_tiffs_codes() {
         for (code, c) in [
@@ -68,6 +76,10 @@ mod tests {
             (8, Compression::Deflate),
             (32773, Compression::PackBits),
             (32946, Compression::Deflate),
+            (34712, Compression::Jp2000),
+            (34887, Compression::Lerc),
+            (50000, Compression::Zstd),
+            (50001, Compression::Webp),
         ] {
             assert_eq!(tiff_compression(code).unwrap(), c, "{code}");
         }

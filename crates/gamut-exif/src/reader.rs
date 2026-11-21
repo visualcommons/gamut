@@ -211,12 +211,8 @@ mod tests {
         let mut thumb = Ifd::new();
         thumb.set(0x0103, Value::Short(vec![6])); // Compression = JPEG
 
-        let bytes = write(&TiffFile {
-            order,
-            variant: Variant::Classic,
-            ifds: vec![image, thumb],
-        })
-        .expect("write");
+        let bytes =
+            write(&TiffFile::new(order, Variant::Classic, vec![image, thumb])).expect("write");
         if with_marker {
             let mut out = MARKER.to_vec();
             out.extend(bytes);
@@ -306,11 +302,11 @@ mod tests {
             ExifTag::JpegInterchangeFormatLength.tag_id(),
             Value::Long(vec![16]),
         );
-        let bytes = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image, thumb],
-        })
+        let bytes = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image, thumb],
+        ))
         .expect("write");
 
         // Lenient: the thumbnail survives, minus the bytes it could not have.
@@ -363,11 +359,11 @@ mod tests {
                 Value::Long(vec![4]),
             );
             // ...and deliberately no JpegInterchangeFormatLength.
-            let bytes = write(&TiffFile {
-                order: ByteOrder::LittleEndian,
-                variant: Variant::Classic,
-                ifds: vec![image, thumb],
-            })
+            let bytes = write(&TiffFile::new(
+                ByteOrder::LittleEndian,
+                Variant::Classic,
+                vec![image, thumb],
+            ))
             .expect("write");
 
             let err = ExifReader::new()
@@ -389,11 +385,11 @@ mod tests {
         let mut image = Ifd::new();
         image.set(0x010F, Value::Ascii("Canon".into()));
         image.set(EXIF_IFD_POINTER, Value::Long(vec![0xFFFF]));
-        let bytes = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image],
-        })
+        let bytes = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image],
+        ))
         .expect("write");
 
         // Lenient: the bad pointer is dropped, the rest survives.

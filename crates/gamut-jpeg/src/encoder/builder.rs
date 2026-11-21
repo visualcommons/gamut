@@ -18,8 +18,48 @@ use crate::backend::JpegEncodeRequest;
 use crate::backend::{EncoderRegistry, JpegCodestreamEncoder};
 use crate::huffman::{self, EncTable};
 use crate::marker::DensityUnit;
-use crate::quant::{self, QuantTables};
+use crate::quant::{self, JpegliFrame, QuantTables};
 use crate::rd::RdCtx;
+
+/// The frame layout whose quantization tables [`JpegEncoder::frame_quant`] resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Frame {
+    /// One grayscale component.
+    Gray,
+    /// Y, Cb, Cr; `luma` is Y's `(h, v)` sampling factors (Cb and Cr are 1×1).
+    Ycbcr {
+        /// Y's sampling factors.
+        luma: (u8, u8),
+    },
+    /// The XYB colour mode's X, Y and stored B−Y.
+    Xyb,
+}
+
+/// The quantization tables one frame writes, and the destination (`Tq`) each component reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FrameQuant {
+    /// The DQT tables, natural order: `tables[t]` is destination `t`.
+    tables: Vec<[u16; 64]>,
+    /// Each frame component's destination, in frame component order (grayscale reads `tq[0]`).
+    tq: [u8; 3],
+}
+
+impl FrameQuant {
+    /// The `(Tq, table)` pairs the DQT segment carries, in destination order.
+    pub(super) fn dqt(&self) -> Vec<(u8, &[u16; 64])> {
+        (0u8..).zip(&self.tables).collect()
+    }
+
+    /// The destination frame component `c` reads.
+    pub(super) fn tq(&self, c: usize) -> u8 {
+        self.tq[c]
+    }
+
+    /// The table frame component `c` quantizes with, natural order.
+    pub(super) fn table(&self, c: usize) -> &[u16; 64] {
+        &self.tables[usize::from(self.tq[c])]
+    }
+}
 
 impl JpegEncoder {
     /// Creates an encoder with quality 75, [`ChromaSubsampling::Cs420`], [`Process::Baseline`], no
@@ -28,6 +68,7 @@ impl JpegEncoder {
     pub fn new() -> Self {
         Self {
             quality: 75,
+            distance: None,
             subsampling: ChromaSubsampling::Cs420,
             restart_interval: 0,
             density_unit: DensityUnit::AspectRatio,
@@ -78,9 +119,42 @@ impl JpegEncoder {
     /// Sets the quality, **clamped** to `1..=100` (higher is better/larger). Quality 50 uses the
     /// Annex K tables verbatim; 100 uses all-1 tables. Clamping (rather than rejecting) matches
     /// libjpeg's `jpeg_set_quality`. Ignored when [`Self::with_quant_tables`] is set.
+    ///
+    /// Quality and [`Self::with_distance`] are the two quality controls; whichever is set last
+    /// governs, so this clears a distance set earlier.
     #[must_use]
     pub fn with_quality(mut self, quality: u8) -> Self {
         self.quality = quality.clamp(1, 100);
+        self.distance = None;
+        self
+    }
+
+    /// Selects jpegli's quality control: the quantization tables `jpegli_set_distance` builds for
+    /// a butteraugli `distance` (lower is better/larger), instead of the quality-scaled Annex K
+    /// tables of [`Self::with_quality`].
+    ///
+    /// The tables are jpegli's own (libjxl v0.11.2 `lib/jpegli/quant.cc`, cited in
+    /// `references/jpegli/`), entry for entry what `cjpegli --distance` writes, in every colour
+    /// mode: YCbCr gets three tables — Y, Cb and Cr each at its own destination, the chroma pair
+    /// rescaled for [`ChromaSubsampling::Cs420`] — [`JpegColorMode::Xyb`] one per channel (X, Y,
+    /// B, jpegli's XYB-tuned tables), and grayscale the Annex K luminance table scaled linearly.
+    /// Every entry is clamped to `1..=255` (jpegli's `force_baseline`), so a sequential frame
+    /// stays baseline (SOF0). [`jpegli_quality_to_distance`](crate::jpegli_quality_to_distance)
+    /// maps a `cjpegli -q` quality to its distance.
+    ///
+    /// Only the tables are jpegli's. Coefficients are still chosen by this encoder's own
+    /// quantizer ([`Self::with_rd_optimization`]): jpegli's adaptive quantization is not
+    /// reproduced, so the coded bytes differ from `cjpegli`'s. The tables are computed in `f32`
+    /// with the platform's `powf`, as jpegli's are, so — unlike the frozen quality contract —
+    /// they are not guaranteed byte-stable across platforms.
+    ///
+    /// The distance must be finite and non-negative; anything else fails the encode with
+    /// `InvalidInput` before a byte is written. [`Self::with_quality`] called afterwards replaces
+    /// it, [`Self::with_quant_tables`] overrides it, and pushed backends are not consulted (a
+    /// [`JpegEncodeRequest`] cannot carry it).
+    #[must_use]
+    pub fn with_distance(mut self, distance: f32) -> Self {
+        self.distance = Some(distance);
         self
     }
 
@@ -229,28 +303,58 @@ impl JpegEncoder {
         self
     }
 
-    /// The luminance quantization table (natural order): the caller's table when
-    /// [`Self::with_quant_tables`] is set, otherwise Annex K.1 scaled for the configured quality.
-    pub(super) fn luma_quant(&self) -> [u16; 64] {
-        match &self.quant_tables {
-            Some(tables) => *tables.luma(),
-            None => quant::scale(&quant::LUMINANCE, self.quality),
-        }
-    }
-
-    /// The chrominance quantization table (natural order): the caller's table when
-    /// [`Self::with_quant_tables`] is set, otherwise Annex K.2 scaled for the configured quality.
-    pub(super) fn chroma_quant(&self) -> [u16; 64] {
-        match &self.quant_tables {
-            Some(tables) => *tables.chroma(),
-            None => quant::scale(&quant::CHROMINANCE, self.quality),
-        }
-    }
-
-    /// The separate XYB X-channel table (natural order) when the caller's [`QuantTables`] carry
-    /// one ([`QuantTables::with_xyb_x`]); `None` means X shares the luminance table.
-    pub(super) fn xyb_x_quant(&self) -> Option<[u16; 64]> {
-        self.quant_tables.and_then(|tables| tables.xyb_x().copied())
+    /// The quantization tables a `frame` writes and the destination each of its components reads,
+    /// resolved from the configuration: caller tables ([`Self::with_quant_tables`]) first, then a
+    /// jpegli distance ([`Self::with_distance`]), then the frozen quality mapping.
+    ///
+    /// Fails with `InvalidInput` for a distance that is not finite and non-negative, so the
+    /// encoders call this before writing anything.
+    pub(super) fn frame_quant(&self, frame: Frame) -> Result<FrameQuant> {
+        let tables = match (self.quant_tables, self.distance) {
+            (Some(tables), _) => tables,
+            (None, Some(distance)) => {
+                if !(distance.is_finite() && distance >= 0.0) {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "JPEG: distance must be finite and non-negative",
+                    ));
+                }
+                let jpegli = match frame {
+                    Frame::Gray => JpegliFrame::Gray,
+                    Frame::Ycbcr { luma } => JpegliFrame::Ycbcr {
+                        yuv420: luma == (2, 2),
+                    },
+                    Frame::Xyb => JpegliFrame::Xyb,
+                };
+                // jpegli gives every component a table of its own: destination c for component c.
+                return Ok(FrameQuant {
+                    tables: quant::jpegli_tables(distance, jpegli),
+                    tq: [0, 1, 2],
+                });
+            }
+            (None, None) => QuantTables::annex_k().scaled(self.quality),
+        };
+        let (luma, chroma) = (*tables.luma(), *tables.chroma());
+        Ok(match (frame, tables.xyb_x()) {
+            (Frame::Gray, _) => FrameQuant {
+                tables: vec![luma],
+                tq: [0, 0, 0],
+            },
+            (Frame::Ycbcr { .. }, _) => FrameQuant {
+                tables: vec![luma, chroma],
+                tq: [0, 1, 1],
+            },
+            // X quantizes with its own table at destination 2 when the caller supplied one;
+            // otherwise it shares Y's luminance table at destination 0.
+            (Frame::Xyb, Some(&x)) => FrameQuant {
+                tables: vec![luma, chroma, x],
+                tq: [2, 0, 1],
+            },
+            (Frame::Xyb, None) => FrameQuant {
+                tables: vec![luma, chroma],
+                tq: [0, 0, 1],
+            },
+        })
     }
 
     /// The rate–distortion context for one component class (`chroma` selects the typical AC rate
@@ -346,6 +450,7 @@ mod tests {
         // `Default` must equal `new()`'s configuration: quality 75, 4:2:0, no restart, 1:1 aspect.
         let d = JpegEncoder::default();
         assert_eq!(d.quality, 75);
+        assert_eq!(d.distance, None);
         assert_eq!(d.subsampling, ChromaSubsampling::Cs420);
         assert_eq!(d.restart_interval, 0);
         assert_eq!(d.density_unit, DensityUnit::AspectRatio);
@@ -358,25 +463,101 @@ mod tests {
         assert_eq!((&d.exif, &d.xmp, &d.icc), (&None, &None, &None));
     }
 
+    /// The `(tables, per-component destinations)` `frame_quant` resolves, for whole-value asserts.
+    fn plan(e: &JpegEncoder, frame: Frame) -> (Vec<[u16; 64]>, [u8; 3]) {
+        let fq = e.frame_quant(frame).expect("valid configuration");
+        (fq.dqt().iter().map(|&(_, t)| *t).collect(), fq.tq)
+    }
+
+    const YCBCR_444: Frame = Frame::Ycbcr { luma: (1, 1) };
+
     #[test]
-    fn quant_chokepoints_prefer_custom_tables_and_fall_back_to_the_scaled_annex_k() {
-        // Distinct luma/chroma fixtures: a swapped arm in either chokepoint changes the result.
+    fn frame_quant_prefers_custom_tables_and_falls_back_to_the_scaled_annex_k() {
+        // Distinct luma/chroma fixtures: a swapped arm changes the result.
         let luma = [7u16; 64];
         let chroma = [11u16; 64];
         let tables = QuantTables::new(luma, chroma).expect("nonzero fixtures");
         let custom = JpegEncoder::new().with_quant_tables(tables);
-        assert_eq!(custom.luma_quant(), luma);
-        assert_eq!(custom.chroma_quant(), chroma);
-        // Quality set after (or before) custom tables must not perturb them.
-        assert_eq!(custom.clone().with_quality(5).luma_quant(), luma);
-        assert_eq!(custom.with_quality(5).chroma_quant(), chroma);
+        assert_eq!(plan(&custom, YCBCR_444), (vec![luma, chroma], [0, 1, 1]));
+        assert_eq!(plan(&custom, Frame::Gray), (vec![luma], [0, 0, 0]));
+        // Quality or a distance set after (or before) custom tables must not perturb them.
+        let later = custom.clone().with_quality(5).with_distance(3.0);
+        assert_eq!(plan(&later, YCBCR_444), (vec![luma, chroma], [0, 1, 1]));
         // Default path: the frozen scaled Annex K tables, per configured quality.
         let default = JpegEncoder::new().with_quality(85);
-        assert_eq!(default.luma_quant(), quant::scale(&quant::LUMINANCE, 85));
-        assert_eq!(
-            default.chroma_quant(),
-            quant::scale(&quant::CHROMINANCE, 85)
+        let (l, c) = (
+            quant::scale(&quant::LUMINANCE, 85),
+            quant::scale(&quant::CHROMINANCE, 85),
         );
+        assert_eq!(plan(&default, YCBCR_444), (vec![l, c], [0, 1, 1]));
+        assert_eq!(plan(&default, Frame::Xyb), (vec![l, c], [0, 0, 1]));
+    }
+
+    #[test]
+    fn frame_quant_gives_a_caller_x_table_destination_2_in_xyb_only() {
+        let x = [5u16; 64];
+        let tables = QuantTables::annex_k().with_xyb_x(x).expect("nonzero");
+        let e = JpegEncoder::new().with_quant_tables(tables);
+        assert_eq!(
+            plan(&e, Frame::Xyb),
+            (vec![quant::LUMINANCE, quant::CHROMINANCE, x], [2, 0, 1])
+        );
+        assert_eq!(plan(&e, YCBCR_444).1, [0, 1, 1]);
+        let fq = e.frame_quant(Frame::Xyb).unwrap();
+        assert_eq!(
+            (fq.table(0), fq.table(1), fq.table(2)),
+            (&x, &quant::LUMINANCE, &quant::CHROMINANCE)
+        );
+    }
+
+    #[test]
+    fn frame_quant_takes_jpeglis_tables_for_a_distance() {
+        // One table per component at destination c, built for the frame jpegli would see: 4:2:0
+        // only when Y is 2×2.
+        let e = JpegEncoder::new().with_distance(1.0);
+        let jpegli = |frame| quant::jpegli_tables(1.0, frame);
+        assert_eq!(
+            plan(&e, Frame::Ycbcr { luma: (2, 2) }),
+            (jpegli(JpegliFrame::Ycbcr { yuv420: true }), [0, 1, 2])
+        );
+        for luma in [(1, 1), (2, 1), (1, 2)] {
+            assert_eq!(
+                plan(&e, Frame::Ycbcr { luma }).0,
+                jpegli(JpegliFrame::Ycbcr { yuv420: false })
+            );
+        }
+        assert_eq!(plan(&e, Frame::Xyb), (jpegli(JpegliFrame::Xyb), [0, 1, 2]));
+        assert_eq!(plan(&e, Frame::Gray).0, jpegli(JpegliFrame::Gray));
+        // Quality set afterwards takes the control back; a distance set after quality keeps it.
+        let back = e.clone().with_quality(85);
+        assert_eq!(back.distance, None);
+        assert_eq!(
+            plan(&back, Frame::Gray).0,
+            vec![quant::scale(&quant::LUMINANCE, 85)]
+        );
+        assert_eq!(
+            JpegEncoder::new()
+                .with_quality(85)
+                .with_distance(1.0)
+                .distance,
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn frame_quant_rejects_a_distance_that_is_not_finite_and_non_negative() {
+        for bad in [-0.01, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(
+                JpegEncoder::new()
+                    .with_distance(bad)
+                    .frame_quant(Frame::Gray)
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        // Zero is the finest legal distance: every entry floors at 1.
+        let zero = JpegEncoder::new().with_distance(0.0);
+        assert_eq!(plan(&zero, YCBCR_444).0, vec![[1u16; 64]; 3]);
     }
 
     #[test]
@@ -401,9 +582,10 @@ mod tests {
         // never a placeholder. Anchor entries computed by hand: at q=75 (scale 50),
         // luminance[0]=16 → (16·50+50)/100 = 8; chrominance[0]=17 → (17·50+50)/100 = 9.
         let e = JpegEncoder::new().with_quality(75);
-        assert_eq!(e.luma_quant(), quant::scale(&quant::LUMINANCE, 75));
-        assert_eq!(e.chroma_quant(), quant::scale(&quant::CHROMINANCE, 75));
-        assert_eq!(e.luma_quant()[0], 8);
-        assert_eq!(e.chroma_quant()[0], 9);
+        let fq = e.frame_quant(YCBCR_444).unwrap();
+        assert_eq!(fq.table(0), &quant::scale(&quant::LUMINANCE, 75));
+        assert_eq!(fq.table(1), &quant::scale(&quant::CHROMINANCE, 75));
+        assert_eq!(fq.table(0)[0], 8);
+        assert_eq!(fq.table(2)[0], 9);
     }
 }

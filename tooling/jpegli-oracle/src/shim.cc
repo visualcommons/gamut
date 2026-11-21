@@ -188,6 +188,55 @@ int oracle_jpegli_encode(const uint8_t* rgb, unsigned width, unsigned height, in
   return 0;
 }
 
+// jpegli's own quality -> butteraugli distance mapping (`jpegli_quality_to_distance`, encode.cc).
+float oracle_jpegli_quality_to_distance(int quality) { return jpegli_quality_to_distance(quality); }
+
+// The quantization tables `jpegli_set_distance(distance, force_baseline = TRUE)` — what `cjpegli
+// --distance` calls — stores for a frame, read back from the compressor before any pixel is coded.
+//
+// `space` picks the frame: 0 = grayscale, 1 = YCbCr (from RGB input), 2 = XYB (RGB input under
+// `jpegli_set_xyb_mode`). Sampling factors are set before the distance, as `EncodeJpeg` does, since
+// a 4:2:0 YCbCr frame scales its tables differently: component 0 — and in XYB mode component 1 too,
+// gamut's layout — takes `h0 x v0`, every other component 1x1.
+//
+// Writes the component count to `*num_components`, each component's table destination to `tq[c]`
+// and its table, natural order, to `tables[c * 64 .. c * 64 + 64]` (room for three components).
+// Returns 0 on success, 1 on a jpegli error.
+int oracle_jpegli_distance_tables(int space, int h0, int v0, float distance, int* num_components,
+                                  int* tq, uint16_t* tables) {
+  jpeg_compress_struct cinfo;
+  OracleErrorMgr jerr;
+
+  cinfo.err = jpegli_std_error(&jerr.pub);
+  jerr.pub.error_exit = OracleErrorExit;
+  jerr.pub.emit_message = OracleEmitMessage;
+  if (setjmp(jerr.env)) {
+    jpegli_destroy_compress(&cinfo);
+    return 1;
+  }
+  jpegli_create_compress(&cinfo);
+  cinfo.image_width = 16;
+  cinfo.image_height = 16;
+  cinfo.input_components = space == 0 ? 1 : 3;
+  cinfo.in_color_space = space == 0 ? JCS_GRAYSCALE : JCS_RGB;
+  if (space == 2) jpegli_set_xyb_mode(&cinfo);
+  jpegli_set_defaults(&cinfo);
+  for (int c = 0; c < cinfo.num_components; ++c) {
+    const bool full = c == 0 || (space == 2 && c == 1);
+    cinfo.comp_info[c].h_samp_factor = full ? h0 : 1;
+    cinfo.comp_info[c].v_samp_factor = full ? v0 : 1;
+  }
+  jpegli_set_distance(&cinfo, distance, TRUE);
+  *num_components = cinfo.num_components;
+  for (int c = 0; c < cinfo.num_components && c < 3; ++c) {
+    const int t = cinfo.comp_info[c].quant_tbl_no;
+    tq[c] = t;
+    memcpy(&tables[c * DCTSIZE2], cinfo.quant_tbl_ptrs[t]->quantval, DCTSIZE2 * sizeof(uint16_t));
+  }
+  jpegli_destroy_compress(&cinfo);
+  return 0;
+}
+
 // Decodes `data` with jpegli's defaults (its own colour-space decision, fancy upsampling, float
 // IDCT): a three-component stream with Adobe `transform = 0` or component ids R,G,B — every XYB
 // stream — comes out as its stored samples, untransformed. jpegli applies no ICC profile; the

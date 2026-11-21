@@ -190,7 +190,10 @@ pub enum AuditFinding {
 
 /// A completed structural audit: the parsed tree, the byte-level report, and the walk's
 /// lenient findings.
+///
+/// `#[non_exhaustive]` so the audit can report more; only [`audit`] builds one.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Audit {
     /// The parsed stream, with the spec's pointer tags resolved into sub-IFD groups (like
     /// [`read_tree`](crate::IfdReader::read_tree); a skipped target leaves its group incomplete — see
@@ -231,7 +234,10 @@ pub fn audit<S: ReadAt>(source: S, spec: &dyn AuditSpec) -> Result<Audit> {
 
 /// What [`Auditor::finish`] returns: an [`Audit`] without the tree, which the codec driving the
 /// [`Auditor`] already holds from [`walk`](Auditor::walk).
+///
+/// `#[non_exhaustive]` so the outcome can report more; only [`Auditor::finish`] builds one.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AuditOutcome {
     /// The byte-level verdict: every byte classified, or precisely what was not.
     pub report: SegmentReport,

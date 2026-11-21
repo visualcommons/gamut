@@ -154,6 +154,27 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   (length + digest over six shapes) before the move, and the Adobe DNG SDK differential suite came
   with it. It is not a `JpegDecoder` path: its samples are not the 8-bit pixels the DCT decoder
   presents.
+- jpegli distance quality control (P19, issue #1243): the opt-in `JpegEncoder::with_distance(f32)`
+  swaps the frozen IJG quality mapping for jpegli's own tables (libjxl v0.11.2
+  `lib/jpegli/quant.cc`, vendored and hashed in `references/jpegli/`), as `jpegli_set_distance(..,
+  force_baseline = TRUE)` (what `cjpegli --distance` calls) builds them. YCbCr gets the
+  `kBaseQuantMatrixYCbCr` Y, Cb and Cr tables at destinations 0, 1 and 2, with the 4:2:0
+  rescale when Y is 2×2. XYB gets `kBaseQuantMatrixXYB`'s X, Y and B tables at destinations 0, 1
+  and 2. Grayscale gets the Annex K luminance table scaled by `DistanceToLinearQuality`, jpegli's
+  branch for frames that are neither. Every entry stays in `1..=255`, so a sequential frame stays
+  SOF0. `jpegli_quality_to_distance` is jpegli's quality mapping bit for bit, for every `u8`. The
+  frozen quality contract stays the default: `with_quality` set afterwards takes the control back,
+  caller `QuantTables` override both, and backends are vetoed. A distance that is not finite and
+  non-negative fails the encode as `InvalidInput`. The tables are `f32` arithmetic over the
+  platform's `powf`, as jpegli's are, so unlike the default path they are not promised
+  byte-stable across platforms. Oracle (`tests/oracle_distance.rs`): the DQT tables equal those
+  `jpegli_set_distance` stores (`tooling/jpegli-oracle`) for grayscale, YCbCr
+  4:4:4/4:2:2/4:2:0/4:4:0 and XYB 4:2:0/4:4:4 across 32 distances that straddle every branch of
+  jpegli's scaling, plus the distance of every `cjpegli -q` quality. The mapping matches
+  `jpegli_quality_to_distance` bit for bit at every `u8`. libjpeg-turbo decodes every
+  layout × distance × process to exactly the pixels gamut's own decoder produces. Only the tables
+  are jpegli's: jpegli's adaptive quantization (its per-block zero-bias) is not reproduced (see
+  below).
 
 **Deferred / out of scope** (documented, with reasons):
 
@@ -203,10 +224,11 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   segmentation, APP11 classification (non-C2PA APP11 such as JPEG 360 must stay untouched,
   §15.12.1.2) and exclusion-range scope are recorded in #441. The other carriages under #239 are
   unaffected: PNG, DNG/TIFF and RIFF/WebP need nothing from 19566-5.
-- **XYB-tuned quantization tables.** The XYB mode quantizes X/Y with Annex K.1 and the stored
-  B−Y with K.2 — an honest placeholder (those tables are YCbCr-tuned). jpegli's
-  `kBaseQuantMatrixXYB` needs a quality→distance mapping and a vendored citation; additive later
-  through the `QuantTables` plumbing. Experiment #29 (`experiments/29/RESULTS.md`) measured
+- **XYB-tuned quantization tables on the quality path.** Under `with_quality` the XYB mode
+  quantizes X/Y with Annex K.1 and the stored B−Y with K.2. That pairing is an honest placeholder,
+  because those tables are YCbCr-tuned. jpegli's `kBaseQuantMatrixXYB` ships through
+  `with_distance` (P19), not as the quality path's default, because the frozen quality contract
+  binds the quality path's bytes. Experiment #29 (`experiments/29/RESULTS.md`) measured
   XYB-directed tables through that plumbing. Flat or CSF X/Y tables save 11–12% against this
   pairing at equal sRGB PSNR/SSIM, but no table tried brings XYB near YCbCr 4:2:0 on those
   metrics. The decision waits on a perceptual metric the workspace does not have. A separate,
@@ -217,10 +239,24 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   bit-reproducible across platforms; XYB tests are tolerance/structure based and the vendored ICC
   bytes are static. Not a contract change: the frozen quality/byte contracts bind the default
   path only.
-- **Alternate built-in base tables (flat, mozjpeg/jpegli psychovisual).** Every built-in constant
-  table is a citation obligation under the `references/` policy, and no such table has a vendored
-  source here yet. `QuantTables`' inherent constructors are append-only, so tuned built-ins are
-  additive later; until then callers supply their own bytes. Experiment #29
+- **jpegli's adaptive quantization.** jpegli's `use_adaptive_quantization` (on by default in
+  `cjpegli`) varies a per-block zero-bias from its own image analysis
+  (`lib/jpegli/adaptive_quantization.cc`, and the `kZeroBiasMul*` tables in the vendored
+  `quant.cc`). `with_distance` reproduces jpegli's tables, not that quantizer. Coefficients come
+  from this encoder's rounding or its own trellis (`RdOptimization::TrellisAdaptive` is gamut's
+  adaptive λ, not jpegli's adaptive quantization), so the coded bytes differ from `cjpegli`'s at
+  the same distance. jpegli's PQ/HLG global-scale adjustment (`cicp_transfer_function`) is
+  likewise not offered, because the encoder has no setting that names the input's transfer
+  function. Nor is jpegli's YCbCr standard-table mode (`jpegli_use_standard_quant_tables`, which
+  swaps `kBaseQuantMatrixYCbCr` for the Annex K luminance/chrominance tables scaled linearly by
+  `DistanceToLinearQuality`): it is an opt-in beside jpegli's default, and `with_distance`
+  reproduces that default; grayscale already takes this branch. All three are additive later,
+  tracked in issue #1252.
+- **Alternate built-in base tables beyond jpegli's (flat, mozjpeg psychovisual).** Every built-in
+  constant table is a citation obligation under the `references/` policy. jpegli's are vendored
+  and reachable through `with_distance` (P19), and no other table set has a vendored source here
+  yet. `QuantTables`' inherent constructors are append-only, so other tuned built-ins are additive
+  later. Until then callers supply their own bytes. Experiment #29
   (`experiments/29/RESULTS.md`) measured flat and contrast-sensitivity luma tables through
   `with_quant_tables`. They beat Annex K by 12–14% at equal PSNR/SSIM, and by about 20% combined
   with the trellis. Those metrics favour flat tables by construction, so this is not evidence for
@@ -370,3 +406,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P16 | T.81 §A.2 NOTE; libjpeg-turbo `jdsample.c`; issue #1016 | **Reference chroma upsampling:** the built-in decoder's default `ChromaUpsampling::Interpolated` is libjpeg-turbo's fancy upsampling (h2v1/h1v2/h2v2 triangle filters with the alternating rounding bias and the narrow-component replication fallback, from `gamut_dsp::upsample::libjpeg`); `with_chroma_upsampling(ChromaUpsampling::Nearest)` keeps replication. Oracle: byte-identical to libjpeg-turbo's default decode at 4:2:2/4:2:0/4:4:0 and to `djpeg -nosmooth` under `Nearest` (`tests/oracle.rs`) | ✅ done |
 | P17 | libjxl v0.11.2 `lib/jpegli/encode.cc` (`jpegli_set_colorspace`), `lib/extras/enc/jpegli.cc`; issue #1015 | **XYB parity with jpegli:** `with_subsampling` in XYB mode subsamples the stored B−Y plane alone (X/Y carry the ratio as sampling factors, B stays 1×1), so the default 4:2:0 is jpegli's X 2×2 / Y 2×2 / B 1×1 (a released-behaviour change: XYB output was 4:4:4-only); `JpegDecoder::decode_srgb` behind the opt-in `cmm` feature (embedded RGB profile → gamut-icc's built-in sRGB through gamut-cmm, relative colorimetric, no BPC; profile-less streams pass through). Oracle: `tooling/jpegli-oracle` (jpegli from libjxl v0.11.2 via `jpegxl-src` 0.11.4 — 0.12 no longer carries jpegli — encoding the way `cjpegli --xyb` does, libjxl's own XYB profile included); gamut XYB → jpegli + lcms2 and → `decode_srgb` both reproduce the source and each other, and `decode_srgb` reads jpegli's XYB streams. Kodak SSIMULACRA2/size measurements recorded on the delivering pull request (linked from #1015) | ✅ done |
 | P18 | T.81 Annex H; issue #1083 (pre-freeze, D11/D3/D7/D8/D10/D21) | **Workspace vocabulary and lossless JPEG:** `gamut_color::ChromaSubsampling` (`Cs440` included) replaces the crate's own enum, `with_process(Process)` replaces three setters, `with_limits(DecodeLimits)` the two limit setters, `JpegDecoder::info` / `metadata` (returning `RawMetadata`) the free functions and `JpegMetadata`, `with_convert_policy` / `with_backend` the bare and `&mut` setters; the backend seam runs on `gamut-codec-abi`'s `Registry` with `supports()` as the only fall-through (the late-decline sentinel is gone), behind `JpegCodestreamDecoder` / `JpegCodestreamEncoder` and the `AbiJpegDecoder` / `AbiJpegEncoder` adapters, all at the crate root; `JpegEncoder` is a `MetadataSink`; `JpegInfo::height` / `JpegStreamInfo::height` are `Option<u32>` (`None` = DNL-deferred). The `lossless` module (SOF3) moved in from `gamut-dng` on the shared entropy layer, output pinned byte-for-byte across the move and the Adobe DNG SDK differential suite with it | ✅ done |
+| P19 | libjxl v0.11.2 `lib/jpegli/quant.cc`, `encode.cc` (`references/jpegli/`); issue #1243 | **jpegli distance quality control:** opt-in `JpegEncoder::with_distance(f32)` writing the tables `jpegli_set_distance(.., TRUE)` builds (YCbCr Y/Cb/Cr at destinations 0/1/2 with the 4:2:0 rescale, XYB X/Y/B at 0/1/2, grayscale on the linearly scaled Annex K luminance table), plus `jpegli_quality_to_distance`; the encoder's per-frame table plan (`frame_quant`) replaces the luma/chroma chokepoints. Oracle: DQT equal to jpegli's across every layout and branch-straddling distance, the mapping bit-equal at every `u8`, libjpeg-turbo decoding every layout × distance × process as gamut does. Default path byte-identical; adaptive quantization, PQ/HLG scaling and YCbCr standard-table mode deferred (#1252) | ✅ done |

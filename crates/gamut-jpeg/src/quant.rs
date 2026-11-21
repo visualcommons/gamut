@@ -3,7 +3,8 @@
 //! [`LUMINANCE`] and [`CHROMINANCE`] are the Annex K.1 / K.2 example tables verbatim, in **natural**
 //! (row-major) order. [`scale`] applies the de-facto-standard IJG/libjpeg quality mapping to a base
 //! table, and [`emit_dqt`] serializes the scaled tables into a DQT marker segment (§B.2.4.1) in
-//! zig-zag order.
+//! zig-zag order. The `jpegli` submodule holds the opt-in alternative to the quality mapping:
+//! jpegli's distance-scaled tables ([`jpegli_tables`]).
 //!
 //! # Frozen quality contract
 //!
@@ -36,8 +37,12 @@
 
 use gamut_core::{Error, Result};
 
+pub use self::jpegli::jpegli_quality_to_distance;
+pub(crate) use self::jpegli::{JpegliFrame, jpegli_tables};
 use crate::marker::{self, code, pack_nibbles};
 use crate::zigzag::ZIGZAG;
+
+mod jpegli;
 
 /// The largest entry an 8-bit (`Pq = 0`) table carries (§B.2.4.1, Table B.4) — the ceiling of the
 /// frozen baseline quality mapping.

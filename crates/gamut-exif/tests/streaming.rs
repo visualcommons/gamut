@@ -69,11 +69,11 @@ fn large_file_with_exif() -> Vec<u8> {
     let mut thumb = Ifd::new();
     thumb.set(0x0103, Value::Short(vec![6])); // Compression = JPEG
 
-    let tiff = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![image, thumb],
-    })
+    let tiff = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![image, thumb],
+    ))
     .expect("write");
 
     let mut data = MARKER.to_vec();

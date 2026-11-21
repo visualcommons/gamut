@@ -296,11 +296,7 @@ fn write_tree(order: ByteOrder, ifds: Vec<Ifd>, pin: Option<u64>) -> Result<Vec<
 
 /// A classic-TIFF [`TiffFile`] in `order`.
 fn tiff_file(order: ByteOrder, ifds: Vec<Ifd>) -> TiffFile {
-    TiffFile {
-        order,
-        variant: Variant::Classic,
-        ifds,
-    }
+    TiffFile::new(order, Variant::Classic, ifds)
 }
 
 #[cfg(test)]
@@ -389,11 +385,11 @@ mod tests {
             ExifTag::JpegInterchangeFormatLength.tag_id(),
             Value::Long(vec![123]),
         );
-        let blob = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image, thumb],
-        })
+        let blob = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image, thumb],
+        ))
         .expect("write");
 
         let parsed = Exif::parse(&blob).expect("parse");
