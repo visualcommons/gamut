@@ -32,7 +32,8 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
   robustness corpus. Rate/entropy tuning under the `Effort` ladder landed with issue #32.
 - **M3** — ✅ **done**: Extended container (encode + decode) — `VP8X` feature header + alpha (`ALPH`,
   raw and lossless), simple→extended promotion, RGBA API (`encode_rgba8` / `decode_to_rgba8`).
-  libwebp recovers gamut's exact alpha and gamut recovers libwebp's. Alpha is a flagship still-image
+  libwebp recovers gamut's exact alpha (at the default alpha quality `100`; below it, the
+  level-reduced plane libwebp itself would produce — issue #1206) and gamut recovers libwebp's. Alpha is a flagship still-image
   feature; `VP8X` is its enabler.
 - **M4** — Color & metadata (**in scope**, embed on encode + preserve on decode): `ICCP` ICC
   profiles and `EXIF` / `XMP ` metadata are ✅ **done** (issue #302) — `WebpEncoder::with_icc_profile`
@@ -309,4 +310,5 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | VP8 dead-zone quantizer (AC only; DC stays round-to-nearest) | issue #32 | ✅ | M4 |
 | lossy `quality` → base quantizer along libwebp's `QualityToCompression` curve, libwebp-differential at every `0..=100` (SNS off, one segment) | issue #1204 | ✅ | M4 |
 | near-lossless preprocessing (`NearLossless`, host-side RGB quantization before VP8L) | issue #261 | ✅ | M4 |
+| lossy alpha quality (`WebpConfig::alpha_quality` / `with_alpha_quality`, libwebp `alpha_quality`): below `100` the `ALPH` plane is level-reduced by a port of libwebp's `QuantizeLevels` (`P = 1`) before filtering; byte-identical to libwebp's quantized plane (inline differential + `tests/oracle.rs`). CLI exposure ☐, with the wasm / ffi row below | issue #1206 | ✅ | M4 |
 | wasm / ffi bindings for WebP | gamut-{wasm,ffi} | ☐ | future |
