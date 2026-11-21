@@ -26,6 +26,13 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
   any alphabet of at most 256 symbols (JPEG DC/AC symbols, the lossless-JPEG difference categories
   DNG uses), returned as a [`HuffmanTable`], and [`CanonicalCodes`] the Annex C canonical [`Code`]
   assignment over a `(BITS, HUFFVAL)` pair ([`../../references/jpeg/`](../../references/jpeg)).
+- **Own the length-limited Huffman builder the LSB-first formats share.**
+  [`build_length_limited_lengths`] turns a histogram over any alphabet into Huffman code lengths
+  capped at a caller-chosen maximum, and [`canonical_codes`] assigns each symbol its canonical
+  code from its length (RFC 1951 §3.2.2, [`../../references/deflate/`](../../references/deflate)),
+  most significant bit first. `gamut-webp`'s VP8L prefix coder builds on both. `gamut-deflate`
+  keeps its own copy of the pair, an accepted duplicate: its default build has no dependency at
+  all.
 - **Stay byte-exact with decoders.** Each writer is validated to produce streams real decoders
   (`dav1d`, `avifdec`) accept, since it is derived directly from the decode process.
 - **Stay allocation-conscious.** Writers append into caller buffers and avoid per-symbol heap churn.
@@ -51,7 +58,8 @@ Ships both directions of the AV1 primitives — [`BitReader`] / [`BitWriter`], L
 [`SymbolDecoder`] has no workspace consumer yet. [`BitWriter`] also backs `gamut-tiff`'s CCITT
 coders. The crate further ships the MSB-first sample packing used by `gamut-dng`, and the T.81
 Huffman table side ([`build_optimal_table`], [`CanonicalCodes`]) behind `gamut-jpeg`'s optimized
-tables and `gamut-dng`'s lossless JPEG.
+tables and `gamut-dng`'s lossless JPEG, and the length-limited builder
+([`build_length_limited_lengths`], [`canonical_codes`]) behind `gamut-webp`'s VP8L prefix codes.
 
 No ANS coder and no JPEG XL prefix code ship here, and neither is planned: `gamut-jxl` wraps the
 format's reference implementations rather than coding its entropy layer itself. An entropy coder

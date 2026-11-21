@@ -11,6 +11,15 @@
 //! symbols fits: the JPEG DC/AC run-size symbols (`0..=255`) and the lossless-JPEG difference
 //! categories (`0..=16`, T.81 Table H.2) both use it. Writing the lists into a marker segment is the
 //! format crate's business.
+//!
+//! Alongside it sits a format-neutral builder in the per-symbol-lengths form of RFC 1951 §3.2.2
+//! (`references/deflate/`), which VP8L (RFC 9649 §3.7.2) shares:
+//! [`build_length_limited_lengths`] turns a histogram of any alphabet size into code lengths capped
+//! at a caller-chosen maximum, and [`canonical_codes`] assigns each length its canonical code.
+//! `gamut-webp`'s VP8L prefix coder uses both. `gamut-deflate` keeps its own copy of the same pair
+//! by design: its default build has no dependency at all, so it cannot reach this crate (#1104).
+
+use std::num::Wrapping;
 
 /// A Huffman table in the two-list form of T.81 §B.2.4.2, as [`build_optimal_table`] returns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +241,149 @@ pub fn build_optimal_table<const N: usize>(freq: &[u32; N]) -> HuffmanTable {
         bits: out_bits,
         values,
     }
+}
+
+/// The longest code [`canonical_codes`] assigns, in bits: a code word is a `u16`.
+const MAX_CANONICAL_LEN: usize = 16;
+
+/// Assigns the canonical code of every symbol from its code length, by the RFC 1951 §3.2.2
+/// `bl_count` / `next_code` procedure: codes of one length are consecutive in symbol order, and
+/// every code of a length precedes, as a prefix value, every code of a longer one.
+///
+/// `lengths[s]` is symbol `s`'s code length in bits, `0` for a symbol the code does not carry. The
+/// result holds one code per symbol, in the low `lengths[s]` bits, **most significant bit first**
+/// as the RFC defines it; a format that writes codes into an LSB-first stream (DEFLATE, VP8L)
+/// reverses each one to its length before emitting it. An unused symbol gets code `0`, and so does
+/// a length beyond 16 bits, which no `u16` code can carry. Lengths that over-subscribe the code
+/// space (Kraft sum above 1) are not a prefix code, and their codes are truncated to 16 bits;
+/// [`build_length_limited_lengths`] never produces such lengths.
+///
+/// This is the per-symbol-lengths form; [`CanonicalCodes`] is the T.81 Annex C assignment over a
+/// `(BITS, HUFFVAL)` pair, the same canonical order reached from the other table form.
+#[must_use]
+pub fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
+    // Every count and code below is kept modulo 2^16 (`Wrapping<u16>`): the steps only add and
+    // double, so the low 16 bits of each code are exactly what unbounded arithmetic gives, the
+    // truncation documented above, and no over-subscribed input can overflow and panic. `Wrapping`
+    // rather than `wrapping_add` keeps the `+` and `<<` operators, so the gate still mutates them.
+    //
+    // Step 1: the number of codes of each length. A zero length lands in `bl_count[0]`, which the
+    // RFC clears; a 16-bit count is never read (`next_code[bits]` reads `bl_count[bits - 1]`), so
+    // the array stops short of it and `get_mut` drops it along with every longer length.
+    let mut bl_count = [Wrapping(0u16); MAX_CANONICAL_LEN];
+    for &len in lengths {
+        if let Some(count) = bl_count.get_mut(usize::from(len)) {
+            *count += 1;
+        }
+    }
+    bl_count[0] = Wrapping(0);
+    // Step 2: the smallest code of each length.
+    let mut next_code = [Wrapping(0u16); MAX_CANONICAL_LEN + 1];
+    let mut code = Wrapping(0u16);
+    for bits in 1..=MAX_CANONICAL_LEN {
+        code = (code + bl_count[bits - 1]) << 1;
+        next_code[bits] = code;
+    }
+    // Step 3: hand them out in symbol order. A zero length is skipped by asking exactly that
+    // question; `next_code[0]` would otherwise give a second unused symbol the code 1.
+    let mut codes = vec![0u16; lengths.len()];
+    for (slot, &len) in codes.iter_mut().zip(lengths) {
+        if len != 0
+            && let Some(next) = next_code.get_mut(usize::from(len))
+        {
+            *slot = next.0;
+            *next += 1;
+        }
+    }
+    codes
+}
+
+/// Builds length-limited (`<= max_len`) Huffman code lengths from a symbol `histogram`, one per
+/// symbol (`0` = unused), for [`canonical_codes`] to assign codes to.
+///
+/// An all-zero histogram yields all-zero lengths, and a single nonzero symbol gets length 1 — a
+/// one-symbol code is a format's own special case (VP8L codes it in zero bits, DEFLATE pads it with
+/// a second symbol), so the caller decides what to do with it. Otherwise the lengths form a
+/// complete prefix code (Kraft sum exactly 1).
+///
+/// The maximum length is bounded by raising every present symbol's count to a common floor and
+/// rebuilding until the tree fits (libwebp's approach): a valid code close to, but not always, the
+/// entropy-optimal length-limited one, which a package-merge limiter would reach. The output is
+/// deterministic: ties in the Huffman merge go to the earlier-created node.
+///
+/// The floor sequence is `1, 2, 4, …, 2^31` and then `u32::MAX`, so at most 33 passes run, bounded
+/// by the iteration's own arithmetic rather than by whether a pass fits. The last pass floors every
+/// present symbol to the same weight, so its tree is balanced, of depth `ceil(log2(n))` for `n`
+/// present symbols — the shortest any prefix code over them can have. It is returned
+/// unconditionally, so when `n > 2^max_len` no code fits and the result exceeds `max_len`; a caller
+/// whose alphabet guarantees `n <= 2^max_len` (DEFLATE's and VP8L's all do) never sees that.
+#[must_use]
+pub fn build_length_limited_lengths(histogram: &[u32], max_len: u8) -> Vec<u8> {
+    let depths = (0..32)
+        .map(|k| huffman_pass(histogram, 1 << k))
+        .find(|depths| depths.iter().all(|&d| d <= u32::from(max_len)))
+        .unwrap_or_else(|| huffman_pass(histogram, u32::MAX));
+    depths.iter().map(|&d| d as u8).collect()
+}
+
+/// One Huffman construction pass: per-symbol depths, with each present symbol's weight floored to
+/// `count_min` (raising the floor flattens the tree, capping its depth). Deterministic tie-breaks.
+fn huffman_pass(histogram: &[u32], count_min: u32) -> Vec<u32> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    /// A node in the Huffman tree: a leaf carries its symbol, an internal node its two children.
+    enum Node {
+        Leaf(usize),
+        Internal(usize, usize),
+    }
+
+    let n = histogram.len();
+    let mut lengths = vec![0u32; n];
+    let mut nodes: Vec<Node> = Vec::new();
+    // Min-heap keyed by (weight, creation index), so equal weights pop in a fixed order.
+    let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
+    for (sym, &count) in histogram.iter().enumerate() {
+        if count > 0 {
+            let idx = nodes.len();
+            nodes.push(Node::Leaf(sym));
+            heap.push(Reverse((u64::from(count.max(count_min)), idx)));
+        }
+    }
+    if nodes.len() == 1 {
+        if let Some(sym) = (0..n).find(|&i| histogram[i] > 0) {
+            lengths[sym] = 1;
+        }
+        return lengths;
+    }
+    while heap.len() > 1 {
+        let (Some(Reverse((wa, a))), Some(Reverse((wb, b)))) = (heap.pop(), heap.pop()) else {
+            break;
+        };
+        let idx = nodes.len();
+        nodes.push(Node::Internal(a, b));
+        heap.push(Reverse((wa + wb, idx)));
+    }
+    let Some(Reverse((_, root))) = heap.pop() else {
+        return lengths;
+    };
+    // Assign depths with an explicit stack: the tree can be as deep as the alphabet is wide.
+    let mut stack = vec![(root, 0u32)];
+    while let Some((idx, depth)) = stack.pop() {
+        match nodes.get(idx) {
+            Some(&Node::Leaf(sym)) => {
+                if let Some(slot) = lengths.get_mut(sym) {
+                    *slot = depth;
+                }
+            }
+            Some(&Node::Internal(left, right)) => {
+                stack.push((left, depth + 1));
+                stack.push((right, depth + 1));
+            }
+            None => {}
+        }
+    }
+    lengths
 }
 
 #[cfg(test)]
@@ -459,5 +611,126 @@ mod tests {
         // The alphabet size is not an input to the construction: padding with zero counts changes
         // nothing.
         assert_eq!(build_optimal_table(&wide), HuffmanTable { bits, values });
+    }
+
+    /// The Kraft sum of `lengths`, scaled by `2^16`: exactly `1 << 16` for a complete prefix code.
+    fn kraft_sum(lengths: &[u8]) -> u64 {
+        lengths
+            .iter()
+            .filter(|&&l| l > 0)
+            .map(|&l| 1u64 << (16 - l))
+            .sum()
+    }
+
+    /// Counts growing like the Fibonacci sequence: natural Huffman depths far past 15 bits.
+    fn fibonacci_histogram() -> Vec<u32> {
+        let (mut a, mut b) = (1u32, 1u32);
+        (0..64)
+            .map(|_| {
+                let h = a;
+                (a, b) = (b, a.saturating_add(b));
+                h
+            })
+            .collect()
+    }
+
+    #[test]
+    fn canonical_codes_match_the_rfc1951_example() {
+        // RFC 1951 §3.2.2's worked example: lengths (3, 3, 3, 3, 3, 2, 4, 4) for ABCDEFGH give
+        // codes 010, 011, 100, 101, 110, 00, 1110, 1111.
+        assert_eq!(
+            canonical_codes(&[3, 3, 3, 3, 3, 2, 4, 4]),
+            vec![0b010, 0b011, 0b100, 0b101, 0b110, 0b00, 0b1110, 0b1111]
+        );
+    }
+
+    #[test]
+    fn canonical_codes_ignore_unused_symbols() {
+        // Unused symbols take code 0 and shift no other code, however many there are.
+        assert_eq!(
+            canonical_codes(&[2, 2, 3, 3]),
+            vec![0b00, 0b01, 0b100, 0b101]
+        );
+        assert_eq!(
+            canonical_codes(&[0, 2, 0, 2, 3, 0, 3]),
+            vec![0, 0b00, 0, 0b01, 0b100, 0, 0b101]
+        );
+    }
+
+    #[test]
+    fn canonical_codes_reach_sixteen_bits_and_no_further() {
+        // A complete code with one symbol at each length 1..=15 and two at 16: the 16-bit codes are
+        // the last two code words of the space. A 17-bit length cannot be carried and codes as 0.
+        let mut lengths: Vec<u8> = (1..=16).collect();
+        lengths.push(16);
+        assert_eq!(kraft_sum(&lengths), 1 << 16);
+        lengths.push(17);
+        let codes = canonical_codes(&lengths);
+        assert_eq!(codes[0], 0b0);
+        assert_eq!(codes[1], 0b10);
+        assert_eq!(codes[14], 0b111_1111_1111_1110);
+        assert_eq!(codes[15], 0xFFFE);
+        assert_eq!(codes[16], 0xFFFF);
+        assert_eq!(codes[17], 0);
+    }
+
+    #[test]
+    fn canonical_codes_truncate_over_subscribed_lengths_without_overflow() {
+        // 2^18 - 1 length-1 symbols and 2^14 length-15 ones over-subscribe the code space so far
+        // that the unbounded `next_code` sum passes 2^32. The codes are the low 16 bits of the
+        // unbounded procedure's: length-1 symbol `s` gets `s`, and the length-15 run starts at
+        // `(2^18 - 1) * 2^14 mod 2^16 = 0xC000`.
+        let ones = (1 << 18) - 1;
+        let mut lengths = vec![1u8; ones];
+        lengths.resize(ones + (1 << 14), 15);
+        let codes = canonical_codes(&lengths);
+        assert_eq!(codes[0], 0);
+        assert_eq!(codes[0x1_2345], 0x2345);
+        assert_eq!(codes[ones], 0xC000);
+        assert_eq!(codes[ones + 0x3FFF], 0xFFFF);
+    }
+
+    #[test]
+    fn length_limited_lengths_keep_a_fitting_tree_unflattened() {
+        // Natural Huffman depths already within the limit are the floor-1 pass, returned as is.
+        assert_eq!(
+            build_length_limited_lengths(&[1, 2, 4, 8], 15),
+            vec![3, 3, 2, 1]
+        );
+        // Equal weights merge the earliest-created nodes first: symbols 0 and 1 pair up.
+        assert_eq!(build_length_limited_lengths(&[1, 1, 1], 15), vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn length_limited_lengths_cap_at_the_limit_and_stay_complete() {
+        let lengths = build_length_limited_lengths(&fibonacci_histogram(), 15);
+        // The first floor that fits still reaches the limit: the flat fallback (every weight equal)
+        // would give all 64 symbols length 6.
+        assert_eq!(lengths.iter().max(), Some(&15));
+        assert_eq!(kraft_sum(&lengths), 1 << 16);
+    }
+
+    #[test]
+    fn length_limited_lengths_of_degenerate_histograms() {
+        // Nothing used: no code at all.
+        assert_eq!(build_length_limited_lengths(&[0, 0, 0, 0], 15), vec![0; 4]);
+        // One symbol used: it alone takes a single bit, wherever it sits.
+        assert_eq!(
+            build_length_limited_lengths(&[0, 0, 9, 0], 15),
+            vec![0, 0, 1, 0]
+        );
+        assert_eq!(
+            build_length_limited_lengths(&[5, 0, 0, 0], 15),
+            vec![1, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn length_limited_lengths_fall_back_to_the_flat_code_when_none_fits() {
+        // Five symbols cannot fit in 2 bits; the balanced code over them is returned regardless.
+        assert_eq!(
+            build_length_limited_lengths(&[1, 1, 1, 1, 1], 2),
+            vec![3, 3, 2, 2, 2]
+        );
     }
 }

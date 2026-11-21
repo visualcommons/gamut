@@ -1047,6 +1047,7 @@ version = "0.4.0"
 dependencies = [
  "divan",
  "exiv2-oracle",
+ "gamut-bitstream",
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",

@@ -28,6 +28,13 @@
 //! - [`CanonicalCodes`] — the Annex C canonical [`Code`] of every symbol of a `(BITS, HUFFVAL)`
 //!   pair.
 //!
+//! Plus a format-neutral builder in the per-symbol-lengths form of RFC 1951 §3.2.2, which VP8L
+//! shares:
+//!
+//! - [`build_length_limited_lengths`] — Huffman code lengths over any alphabet's histogram, capped
+//!   at a caller-chosen maximum.
+//! - [`canonical_codes`] — the canonical code of every symbol from its code length.
+//!
 //! No ANS coder or JPEG XL prefix code ships here, and neither is planned: `gamut-jxl` wraps the
 //! format's reference implementations rather than coding its entropy layer itself.
 #![forbid(unsafe_code)]
@@ -46,7 +53,10 @@ mod symbol;
 
 pub use bitreader::BitReader;
 pub use bitwriter::BitWriter;
-pub use huffman::{CanonicalCodes, Code, HuffmanTable, build_optimal_table};
+pub use huffman::{
+    CanonicalCodes, Code, HuffmanTable, build_length_limited_lengths, build_optimal_table,
+    canonical_codes,
+};
 pub use leb128::{leb128_len, write_leb128};
 pub use samplepack::{pack_msb_rows, row_bytes, unpack_msb_rows};
 pub use symbol::{SymbolDecoder, SymbolEncoder};

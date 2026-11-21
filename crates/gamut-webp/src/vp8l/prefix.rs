@@ -19,6 +19,10 @@
 //! [`PrefixCode::read_symbol`] (returns the symbol without reading) honor this, so they stay in
 //! lock-step. An empty alphabet is coded as a single symbol `0`.
 
+// The length-limited builder is gamut-bitstream's (#1104); re-exported so the encoder reaches it
+// beside the rest of the prefix coder.
+pub(crate) use gamut_bitstream::build_length_limited_lengths;
+use gamut_bitstream::canonical_codes;
 use gamut_core::{Error, Result};
 
 use crate::vp8l::bit_io::{BitReader, BitWriter};
@@ -345,138 +349,6 @@ pub fn read_prefix_code_group(
 
 // --- Encoder side ---------------------------------------------------------------------------------
 
-/// Derives the canonical (bit-reversed, ready-to-emit) codes for each symbol from its `lengths`.
-///
-/// Each returned code is reversed to its length so it can be written LSB-first with
-/// [`BitWriter::write_bits`]; unused symbols (length 0) get code 0.
-#[must_use]
-pub fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
-    let mut bl_count = [0u32; MAX_CODE_LENGTH + 1];
-    for &len in lengths {
-        if len > 0 && (len as usize) <= MAX_CODE_LENGTH {
-            bl_count[len as usize] += 1;
-        }
-    }
-    let mut next_code = [0u32; MAX_CODE_LENGTH + 1];
-    let mut code = 0u32;
-    for bits in 1..=MAX_CODE_LENGTH {
-        code = (code + bl_count[bits - 1]) << 1;
-        next_code[bits] = code;
-    }
-    let mut codes = vec![0u16; lengths.len()];
-    for (sym, &len) in lengths.iter().enumerate() {
-        if len > 0 && (len as usize) <= MAX_CODE_LENGTH {
-            let c = next_code[len as usize];
-            next_code[len as usize] += 1;
-            codes[sym] = reverse_bits(c as u16, len);
-        }
-    }
-    codes
-}
-
-/// Builds length-limited (`<= max_len`) canonical Huffman code lengths from a symbol `histogram`.
-///
-/// Returns one length per symbol (`0` = unused). An empty histogram yields all-zero lengths (the
-/// caller codes that as a single symbol `0`); a single nonzero symbol gets length 1. To bound the
-/// maximum length, the histogram counts are raised toward a common floor and the tree rebuilt until
-/// it fits (libwebp's approach) — this yields *a* valid code, not necessarily the optimal one
-/// (density tuning is deferred to issue #31).
-#[must_use]
-pub fn build_length_limited_lengths(histogram: &[u32], max_len: u8) -> Vec<u8> {
-    let n = histogram.len();
-    // `h != 0`, not `h > 0`: identical on a `u32`, but `>` carries a `>=` variant that is true
-    // for every count, and the only thing that changes is whether the two degenerate early returns
-    // below are taken -- and the general path produces exactly what they do, so nothing could tell
-    // the difference (#110). `!=` has no such variant: its `==` mutant counts the unused symbols
-    // and breaks every dense histogram.
-    let used = histogram.iter().filter(|&&h| h != 0).count();
-    if used == 0 {
-        return vec![0u8; n];
-    }
-    if used == 1 {
-        let mut lengths = vec![0u8; n];
-        if let Some(sym) = (0..n).find(|&i| histogram[i] > 0) {
-            lengths[sym] = 1;
-        }
-        return lengths;
-    }
-    let mut count_min = 1u32;
-    loop {
-        let depths = huffman_pass(histogram, count_min);
-        let max_depth = depths.iter().copied().max().unwrap_or(0);
-        if max_depth <= u32::from(max_len) {
-            return depths.iter().map(|&d| d as u8).collect();
-        }
-        count_min = count_min.saturating_mul(2);
-    }
-}
-
-/// One Huffman construction pass; returns per-symbol depths (code lengths) with each present
-/// symbol's weight floored to `count_min` (raising the floor flattens the tree, capping its depth).
-fn huffman_pass(histogram: &[u32], count_min: u32) -> Vec<u32> {
-    use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
-
-    /// A node in the Huffman tree (`sym >= 0` marks a leaf).
-    struct Node {
-        left: i32,
-        right: i32,
-        sym: i32,
-    }
-
-    let n = histogram.len();
-    let mut lengths = vec![0u32; n];
-    let mut nodes: Vec<Node> = Vec::new();
-    // Min-heap keyed by (weight, tie-break index) for deterministic output.
-    let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
-    for (sym, &count) in histogram.iter().enumerate() {
-        if count > 0 {
-            let idx = nodes.len();
-            nodes.push(Node {
-                left: -1,
-                right: -1,
-                sym: sym as i32,
-            });
-            heap.push(Reverse((u64::from(count.max(count_min)), idx)));
-        }
-    }
-    if nodes.len() == 1 {
-        if let Some(sym) = (0..n).find(|&i| histogram[i] > 0) {
-            lengths[sym] = 1;
-        }
-        return lengths;
-    }
-    while heap.len() > 1 {
-        let (Some(Reverse((wa, a))), Some(Reverse((wb, b)))) = (heap.pop(), heap.pop()) else {
-            break;
-        };
-        let idx = nodes.len();
-        nodes.push(Node {
-            left: a as i32,
-            right: b as i32,
-            sym: -1,
-        });
-        heap.push(Reverse((wa + wb, idx)));
-    }
-    let Some(Reverse((_, root))) = heap.pop() else {
-        return lengths;
-    };
-    // Assign depths with an explicit stack (the tree can be up to `used` deep).
-    let mut stack = vec![(root, 0u32)];
-    while let Some((idx, depth)) = stack.pop() {
-        let Some(node) = nodes.get(idx) else { continue };
-        if node.sym >= 0 {
-            if let Some(slot) = lengths.get_mut(node.sym as usize) {
-                *slot = depth;
-            }
-        } else {
-            stack.push((node.left as usize, depth + 1));
-            stack.push((node.right as usize, depth + 1));
-        }
-    }
-    lengths
-}
-
 /// An encoder-side prefix code: per-symbol emit patterns + lengths, with the single-symbol
 /// (0-bit) special case tracked so emission stays in lock-step with [`PrefixCode::read_symbol`].
 #[derive(Debug, Clone)]
@@ -490,7 +362,13 @@ impl PrefixEncoder {
     /// Builds an encoder from per-symbol `lengths`.
     #[must_use]
     pub fn from_lengths(lengths: &[u8]) -> Self {
-        let codes = canonical_codes(lengths);
+        // Canonical codes are defined MSB-first; reversed to their length, each one written into
+        // the LSB-first stream puts its most significant bit on the wire first.
+        let codes = canonical_codes(lengths)
+            .into_iter()
+            .zip(lengths)
+            .map(|(code, &len)| reverse_bits(code, len))
+            .collect();
         let single = lengths.iter().filter(|&&l| l > 0).count() <= 1;
         Self {
             lengths: lengths.to_vec(),
@@ -925,24 +803,20 @@ mod tests {
         ));
     }
 
-    /// An unused symbol must not disturb the code assigned to any used one.
-    ///
-    /// `canonical_codes` counts lengths under `len > 0 && len <= MAX_CODE_LENGTH`. Relaxed to
-    /// `||`, a zero length passes the first test's negation and lands in `bl_count[0]` -- which is
-    /// read back at `bits == 1` as `code = (code + bl_count[0]) << 1`, so every code in the
-    /// alphabet shifts. It survived because the fixtures only ever passed fully dense length
-    /// arrays, and a sparse alphabet is the normal case in VP8L (#110).
+    /// The emitted codes are the canonical ones reversed to their length, so the first bit on the
+    /// LSB-first wire is the code's most significant bit -- and an unused symbol emits as 0.
     #[test]
-    fn an_unused_symbol_does_not_shift_the_others() {
-        // RFC 1951 section 3.2.2 assignment for lengths [2, 2, 3, 3]: first codes per length are
-        // 0 and 4, handed out in symbol order, then reversed to their length for LSB-first
-        // writing: 00 -> 0, 01 -> 10 = 2, 100 -> 001 = 1, 101 -> 101 = 5.
-        assert_eq!(canonical_codes(&[2, 2, 3, 3]), vec![0, 2, 1, 5]);
-
-        // Prepending an unused symbol changes nothing but its own slot, which is 0.
-        let sparse = canonical_codes(&[0, 2, 2, 3, 3]);
-        assert_eq!(sparse[0], 0, "an unused symbol codes as 0");
-        assert_eq!(sparse[1..], *canonical_codes(&[2, 2, 3, 3]).as_slice());
+    fn prefix_encoder_reverses_each_canonical_code_to_its_length() {
+        // RFC 1951 section 3.2.2 assignment for lengths [2, 2, 3, 3]: 00, 01, 100, 101, each
+        // reversed to its length: 00 -> 0, 01 -> 10 = 2, 100 -> 001 = 1, 101 -> 101 = 5.
+        assert_eq!(
+            PrefixEncoder::from_lengths(&[2, 2, 3, 3]).codes,
+            vec![0, 2, 1, 5]
+        );
+        assert_eq!(
+            PrefixEncoder::from_lengths(&[0, 2, 2, 3, 3]).codes,
+            vec![0, 0, 2, 1, 5]
+        );
     }
 
     /// `simple_symbols` decides whether the *simple* code-length description can carry an
@@ -975,15 +849,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_codes_and_decoder_agree_with_unused_symbols() {
+    fn prefix_encoder_and_decoder_agree_with_unused_symbols() {
         use crate::vp8l::bit_io::{BitReader, BitWriter};
         // A complete code (Kraft sum = 1) with gaps (length-0 unused symbols) and several lengths, so
-        // the canonical-code construction's `len > 0 && len <= MAX` filter and the decoder's offset
-        // prefix-sum are exercised. canonical_codes (encoder, LSB-first) and from_code_lengths
+        // the canonical-code construction's handling of unused symbols and the decoder's offset
+        // prefix-sum are exercised. PrefixEncoder (encoder, LSB-first) and from_code_lengths
         // (decoder) are independent implementations of the same canonical algorithm, so writing each
         // symbol's code and reading it back must recover the symbol — pinning both.
         let lengths: &[u8] = &[2, 0, 1, 3, 0, 3]; // 1/2 + 1/4 + 1/8 + 1/8 = 1; symbols 1 and 4 unused
-        let codes = canonical_codes(lengths);
+        let codes = PrefixEncoder::from_lengths(lengths).codes;
         let decoder = PrefixCode::from_code_lengths(lengths).expect("complete code");
         for (sym, &len) in lengths.iter().enumerate() {
             if len == 0 {
@@ -995,7 +869,7 @@ mod tests {
             assert_eq!(
                 decoder.read_symbol(&mut BitReader::new(&bytes)).unwrap() as usize,
                 sym,
-                "symbol {sym} must round-trip through canonical_codes + from_code_lengths"
+                "symbol {sym} must round-trip through PrefixEncoder + from_code_lengths"
             );
         }
     }
@@ -1013,7 +887,7 @@ mod tests {
     }
 
     /// Round-trips a symbol stream through an encoder built from a histogram and a decoder built
-    /// from the same lengths, exercising `build_length_limited_lengths` + `canonical_codes`.
+    /// from the same lengths, exercising `build_length_limited_lengths` + `PrefixEncoder`.
     fn assert_code_round_trips(histogram: &[u32], stream: &[usize], max_len: u8) {
         let lengths = build_length_limited_lengths(histogram, max_len);
         assert!(lengths.iter().all(|&l| l <= max_len), "length exceeds cap");
@@ -1069,29 +943,6 @@ mod tests {
         // Still a usable, complete code.
         let stream: Vec<usize> = (0..64).collect();
         assert_code_round_trips(&hist, &stream, 15);
-    }
-
-    /// The two degenerate histograms `build_length_limited_lengths` documents.
-    ///
-    /// Its contract names both -- "an empty histogram yields all-zero lengths; a single nonzero
-    /// symbol gets length 1" -- and every fixture fed it a dense histogram instead, so the two
-    /// early returns that implement them went unexercised. Counting used symbols with `h >= 0`
-    /// instead of `h > 0` makes `used` the whole alphabet, which skips both (#110).
-    #[test]
-    fn degenerate_histograms_get_the_documented_lengths() {
-        // Nothing used: no code at all.
-        assert_eq!(build_length_limited_lengths(&[0, 0, 0, 0], 15), vec![0; 4]);
-
-        // One symbol used: it takes a single bit, and nothing else takes any.
-        assert_eq!(
-            build_length_limited_lengths(&[0, 0, 9, 0], 15),
-            vec![0, 0, 1, 0]
-        );
-        // Wherever it sits in the alphabet.
-        assert_eq!(
-            build_length_limited_lengths(&[5, 0, 0, 0], 15),
-            vec![1, 0, 0, 0]
-        );
     }
 
     #[test]
