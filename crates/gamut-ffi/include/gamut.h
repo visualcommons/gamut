@@ -27,7 +27,7 @@
  * below locks the two together, so a seam bump fails this build until the value — and the
  * header — are consciously updated.
  */
-#define GAMUT_CODEC_ABI_VERSION 1
+#define GAMUT_CODEC_ABI_VERSION 2
 
 /**
  * `gamut_avif_encoder_set_chroma` value: 4:4:4, full-resolution chroma.
@@ -168,12 +168,13 @@ typedef int32_t GamutAbiStatus;
  * Describes an encode job to an encoder backend: the target codec, a quality knob, and an opaque
  * codec-specific options blob.
  *
- * Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth.
+ * Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth (the
+ * [prefix rule](crate#descriptor-growth-the-struct_size-prefix-rule)).
  */
 typedef struct GamutEncodeConfig {
   /**
-   * `size_of::<EncodeConfig>()` as written by the producer; the ABI version guard for this
-   * descriptor. See [`EncodeConfig::is_abi_current`].
+   * `size_of::<EncodeConfig>()` as the producer was built; the prefix of this descriptor a
+   * reader may trust. See [`EncodeConfig::covers`].
    */
   size_t struct_size;
   /**
@@ -203,12 +204,24 @@ typedef struct GamutEncodeConfig {
  * output** (`out` in [`Decoder::decode`]) the decoder writes reconstructed samples through the
  * plane pointers. In both directions the buffer is caller-allocated and borrowed for the call.
  *
- * Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth.
+ * # Colour signalling
+ *
+ * The trailing [`color_primaries`](Self::color_primaries) /
+ * [`transfer_characteristics`](Self::transfer_characteristics) /
+ * [`matrix_coefficients`](Self::matrix_coefficients) / [`full_range`](Self::full_range) group is
+ * the planes' CICP signalling (ITU-T H.273). As an encode input it is what the host asks the
+ * stream to declare; as a decode output the host seeds it and the decoder overwrites it with what
+ * the codestream declares. [`ImageDesc::new`] fills it with [`UNSIGNALLED`](Self::UNSIGNALLED),
+ * the value every codec defaults to when its stream carries no colour description. It lies past
+ * [`MIN_SIZE`](Self::MIN_SIZE): read it only when [`has_cicp`](Self::has_cicp) holds.
+ *
+ * Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth (the
+ * [prefix rule](crate#descriptor-growth-the-struct_size-prefix-rule)).
  */
 typedef struct GamutImageDesc {
   /**
-   * `size_of::<ImageDesc>()` as written by the producer; the ABI version guard for this
-   * descriptor. See [`ImageDesc::is_abi_current`].
+   * `size_of::<ImageDesc>()` as the producer was built; the prefix of this descriptor a reader
+   * may trust. See [`ImageDesc::covers`].
    */
   size_t struct_size;
   /**
@@ -241,6 +254,28 @@ typedef struct GamutImageDesc {
    * Per-plane row stride in bytes; only the first [`plane_count`](Self::plane_count) are valid.
    */
   size_t strides[GAMUT_MAX_PLANES];
+  /**
+   * CICP `ColourPrimaries` (ITU-T H.273 §8.1); `2` is unspecified. Valid only when
+   * [`has_cicp`](Self::has_cicp) holds.
+   */
+  uint16_t color_primaries;
+  /**
+   * CICP `TransferCharacteristics` (ITU-T H.273 §8.2); `2` is unspecified. Valid only when
+   * [`has_cicp`](Self::has_cicp) holds.
+   */
+  uint16_t transfer_characteristics;
+  /**
+   * CICP `MatrixCoefficients` (ITU-T H.273 §8.3); `2` is unspecified. Valid only when
+   * [`has_cicp`](Self::has_cicp) holds.
+   */
+  uint16_t matrix_coefficients;
+  /**
+   * CICP `VideoFullRangeFlag` (ITU-T H.273 §8.3): `0` limited ("studio") range, any other value
+   * full range — read it through [`is_full_range`](Self::is_full_range). A `u8` rather than a
+   * `bool` so every byte a foreign producer writes is a valid value. Valid only when
+   * [`has_cicp`](Self::has_cicp) holds.
+   */
+  uint8_t full_range;
 } GamutImageDesc;
 
 /**
@@ -293,12 +328,13 @@ typedef struct GamutEncoderVTable {
  * out-of-band configuration (parameter sets, `hvcC`/`av1C` records, …).
  *
  * Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth: a reader
- * trusts only the fields covered by `struct_size`.
+ * trusts only the fields covered by `struct_size` (the
+ * [prefix rule](crate#descriptor-growth-the-struct_size-prefix-rule)).
  */
 typedef struct GamutStreamConfig {
   /**
-   * `size_of::<StreamConfig>()` as written by the producer; the ABI version guard for this
-   * descriptor. See [`StreamConfig::is_abi_current`].
+   * `size_of::<StreamConfig>()` as the producer was built; the prefix of this descriptor a
+   * reader may trust. See [`StreamConfig::covers`].
    */
   size_t struct_size;
   /**
@@ -346,13 +382,15 @@ typedef struct GamutDecoderVTable {
    */
   GamutAbiStatus (*supports)(void *ctx, const struct GamutStreamConfig *cfg);
   /**
-   * Decodes `codestream` into the caller-allocated `out` planes. `ctx` is the backend context.
+   * Decodes `codestream` into the caller-allocated `out` planes and overwrites `out`'s colour
+   * signalling with the codestream's (see [`ImageDesc`]); every other `out` field is the host's
+   * and stays as it was. `ctx` is the backend context.
    */
   GamutAbiStatus (*decode)(void *ctx,
                            const struct GamutStreamConfig *cfg,
                            const uint8_t *codestream,
                            size_t codestream_len,
-                           const struct GamutImageDesc *out);
+                           struct GamutImageDesc *out);
   /**
    * Releases the backend context. Called exactly once, when the host drops the backend.
    */

@@ -561,7 +561,7 @@ impl<D: abi::Decoder> WebpCodestreamDecoder for AbiWebpDecoder<D> {
                 let mut y = vec![0u8; w * h];
                 let mut u = vec![0u8; cw * ch];
                 let mut v = vec![0u8; cw * ch];
-                let desc = abi::ImageDesc::new(
+                let mut desc = abi::ImageDesc::new(
                     pixel_format::I420,
                     dims.width(),
                     dims.height(),
@@ -575,7 +575,7 @@ impl<D: abi::Decoder> WebpCodestreamDecoder for AbiWebpDecoder<D> {
                     ],
                     [w, cw, cw, 0],
                 );
-                let status = self.inner.decode(&cfg, payload, &desc);
+                let status = self.inner.decode(&cfg, payload, &mut desc);
                 if !status.is_ok() {
                     return Err(status_error(
                         status,
@@ -590,7 +590,7 @@ impl<D: abi::Decoder> WebpCodestreamDecoder for AbiWebpDecoder<D> {
             }
             WebpCodestream::Vp8l => {
                 let mut bytes = vec![0u8; w * h * 4];
-                let desc = abi::ImageDesc::new(
+                let mut desc = abi::ImageDesc::new(
                     pixel_format::BGRA,
                     dims.width(),
                     dims.height(),
@@ -604,7 +604,7 @@ impl<D: abi::Decoder> WebpCodestreamDecoder for AbiWebpDecoder<D> {
                     ],
                     [w * 4, 0, 0, 0],
                 );
-                let status = self.inner.decode(&cfg, payload, &desc);
+                let status = self.inner.decode(&cfg, payload, &mut desc);
                 if !status.is_ok() {
                     return Err(status_error(
                         status,

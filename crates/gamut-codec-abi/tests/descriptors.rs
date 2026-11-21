@@ -7,7 +7,7 @@
 mod common;
 
 use common::{TEST_CODEC, one_plane};
-use gamut_codec_abi::{EncodeConfig, StreamConfig};
+use gamut_codec_abi::{EncodeConfig, ImageDesc, StreamConfig};
 
 #[test]
 fn stream_config_new_initialises_every_field() {
@@ -45,6 +45,41 @@ fn image_desc_new_initialises_every_field() {
     assert_eq!(desc.strides[0], 4);
     // Planes past `plane_count` stay null rather than carrying a stale pointer.
     assert!(desc.planes[1].is_null());
+    // No colour signalling was given, so the descriptor says so rather than claiming one.
+    let cicp = (
+        desc.color_primaries,
+        desc.transfer_characteristics,
+        desc.matrix_coefficients,
+        desc.is_full_range(),
+    );
+    assert_eq!(cicp, ImageDesc::UNSIGNALLED);
+    assert_eq!(ImageDesc::UNSIGNALLED, (2, 2, 2, false));
+}
+
+#[test]
+fn image_desc_with_cicp_sets_each_colour_field_and_nothing_else() {
+    let mut buf = [0u8; 8];
+    let plain = one_plane(4, 2, buf.as_mut_ptr(), 4);
+    let desc = plain.with_cicp(9, 16, 10, true);
+
+    assert_eq!(desc.color_primaries, 9);
+    assert_eq!(desc.transfer_characteristics, 16);
+    assert_eq!(desc.matrix_coefficients, 10);
+    assert_eq!(desc.full_range, 1);
+    assert_eq!(desc.struct_size, plain.struct_size);
+    assert_eq!((desc.width, desc.height), (4, 2));
+    assert_eq!(desc.with_cicp(9, 16, 10, false).full_range, 0);
+}
+
+#[test]
+fn image_desc_reads_any_non_zero_range_byte_as_full_range() {
+    let mut desc = one_plane(1, 1, core::ptr::null_mut(), 0);
+
+    desc.full_range = 0;
+    assert!(!desc.is_full_range());
+    // A foreign producer may write any byte; only zero is limited range.
+    desc.full_range = 2;
+    assert!(desc.is_full_range());
 }
 
 #[test]

@@ -394,7 +394,7 @@ impl AbiDecoderTrait for AbiDecodeFixture {
         cfg.codec_id == JXL_CODEC_ID
     }
 
-    fn decode(&mut self, _cfg: &StreamConfig, _stream: &[u8], _out: &ImageDesc) -> Status {
+    fn decode(&mut self, _cfg: &StreamConfig, _stream: &[u8], _out: &mut ImageDesc) -> Status {
         self.0
     }
 }

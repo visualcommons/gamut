@@ -899,7 +899,7 @@ impl abi::Decoder for AbiFakeDecoder {
         &mut self,
         _cfg: &abi::StreamConfig,
         _codestream: &[u8],
-        out: &abi::ImageDesc,
+        out: &mut abi::ImageDesc,
     ) -> abi::Status {
         self.seen_strides = out.strides;
         if !self.status.is_ok() {

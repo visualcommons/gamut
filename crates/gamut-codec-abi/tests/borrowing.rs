@@ -30,7 +30,7 @@ fn run_one_job<D: Decoder>(
     mut backend: D,
     cfg: &StreamConfig,
     codestream: &[u8],
-    out: &ImageDesc,
+    out: &mut ImageDesc,
 ) -> (bool, Status) {
     if !backend.supports(cfg) {
         return (false, Status::UNSUPPORTED);
@@ -60,10 +60,10 @@ fn a_borrowed_decoder_forwards_supports_and_decode_to_its_owner() {
 
     let cfg = StreamConfig::new(TEST_CODEC, 6, 2, 8);
     let mut buf = [0u8; 2];
-    let out = one_plane(6, 2, buf.as_mut_ptr(), 6);
+    let mut out = one_plane(6, 2, buf.as_mut_ptr(), 6);
 
     // `&mut owned` is the backend here, not `owned` itself.
-    let (supported, status) = run_one_job(&mut owned, &cfg, b"stream", &out);
+    let (supported, status) = run_one_job(&mut owned, &cfg, b"stream", &mut out);
 
     assert!(supported);
     assert_eq!(status, Status::OK);
@@ -81,8 +81,8 @@ fn a_borrowed_decoder_forwards_a_rejection_rather_than_accepting_for_its_owner()
     // A codec the owner does not claim. Were the forwarding to answer on its own behalf, this
     // would read as supported and the host would hand it a job no backend can do.
     let foreign_codec = StreamConfig::new(TEST_CODEC + 1, 1, 1, 8);
-    let out = one_plane(1, 1, ptr::null_mut(), 0);
-    let (supported, _status) = run_one_job(&mut owned, &foreign_codec, b"stream", &out);
+    let mut out = one_plane(1, 1, ptr::null_mut(), 0);
+    let (supported, _status) = run_one_job(&mut owned, &foreign_codec, b"stream", &mut out);
 
     assert!(!supported);
 }
@@ -96,13 +96,13 @@ fn lending_a_decoder_does_not_destroy_it() {
 
     let cfg = StreamConfig::new(TEST_CODEC, 6, 2, 8);
     let mut buf = [0u8; 2];
-    let out = one_plane(6, 2, buf.as_mut_ptr(), 6);
+    let mut out = one_plane(6, 2, buf.as_mut_ptr(), 6);
 
     // Two successive loans. If the by-value parameter had moved the owner, the first would have
     // run its teardown and the second would be a use-after-destroy.
-    let _ = run_one_job(&mut owned, &cfg, b"stream", &out);
+    let _ = run_one_job(&mut owned, &cfg, b"stream", &mut out);
     assert_eq!(destroyed.load(Ordering::SeqCst), 0);
-    let _ = run_one_job(&mut owned, &cfg, b"stream", &out);
+    let _ = run_one_job(&mut owned, &cfg, b"stream", &mut out);
     assert_eq!(destroyed.load(Ordering::SeqCst), 0);
 
     // Teardown happens once, when the owner itself goes out of scope.

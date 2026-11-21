@@ -646,8 +646,8 @@ impl<D: AbiDecode> JpegCodestreamDecoder for AbiJpegDecoder<D> {
                 )
             })?;
         let mut samples = vec![0u8; len];
-        let desc = image_desc(width, height, format, samples.as_mut_ptr());
-        let status = self.inner.decode(&stream_config(info), jpeg, &desc);
+        let mut desc = image_desc(width, height, format, samples.as_mut_ptr());
+        let status = self.inner.decode(&stream_config(info), jpeg, &mut desc);
         if status.is_ok() {
             DecodedJpeg::new(width, height, format, samples)
         } else {
