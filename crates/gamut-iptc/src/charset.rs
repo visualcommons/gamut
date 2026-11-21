@@ -17,14 +17,16 @@ use crate::iim::IimBlock;
 /// The coded character set an IIM text value is encoded in.
 ///
 /// Marked `#[non_exhaustive]`: supporting a further ISO 2022 designation later must not be a
-/// breaking change.
+/// breaking change. `#[repr(u8)]` with permanent, append-only discriminants, so the value crosses
+/// a C boundary unchanged; a new charset takes the next free discriminant.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IimCharset {
     /// ISO-8859-1 (Latin-1) — gamut's reading of the spec default when dataset 1:90 is absent.
-    Latin1,
+    Latin1 = 0,
     /// UTF-8 — designated by the `ESC % G` escape in dataset 1:90.
-    Utf8,
+    Utf8 = 1,
 }
 
 impl IimCharset {
@@ -114,6 +116,12 @@ pub(crate) fn encode_latin1(text: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::iim::IimDataSet;
+
+    #[test]
+    fn discriminants_are_the_frozen_c_abi_values() {
+        assert_eq!(IimCharset::Latin1 as u8, 0);
+        assert_eq!(IimCharset::Utf8 as u8, 1);
+    }
 
     fn block_with_190(data: &[u8]) -> IimBlock {
         IimBlock {

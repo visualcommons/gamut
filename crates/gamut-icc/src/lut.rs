@@ -16,12 +16,17 @@ use crate::error::{IccError, Result};
 use crate::primitives::S15Fixed16;
 
 /// The sample precision of a CLUT.
+///
+/// `#[repr(u8)]` with permanent discriminants, so the value crosses a C boundary unchanged. Each
+/// discriminant is the bytes-per-sample value the `lutAToBType`/`lutBToAType` CLUT header's
+/// precision field stores for that width (ICC.1:2022 §10.12.3).
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClutPrecision {
     /// 8-bit samples (full scale 255).
-    U8,
+    U8 = 1,
     /// 16-bit samples (full scale 65535).
-    U16,
+    U16 = 2,
 }
 
 impl ClutPrecision {
@@ -691,6 +696,12 @@ mod tests {
     use super::*;
     use crate::curve::{Curve, ParametricCurve};
     use crate::primitives::U8Fixed8;
+
+    #[test]
+    fn clut_precision_discriminants_are_the_bytes_per_sample() {
+        assert_eq!(ClutPrecision::U8 as u8, 1);
+        assert_eq!(ClutPrecision::U16 as u8, 2);
+    }
 
     fn s15_be(v: f64) -> [u8; 4] {
         S15Fixed16::from_f64(v).0.to_be_bytes()

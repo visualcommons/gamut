@@ -81,21 +81,29 @@ pub struct GpsAltitude {
 }
 
 /// The hemisphere of a latitude (`GPSLatitudeRef`, Exif 3.0 §4.6.7.1.2).
+///
+/// `#[repr(u8)]` with permanent discriminants, so the value crosses a C boundary unchanged. They
+/// are gamut's own ordering, not the tag's ASCII letter.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LatitudeRef {
     /// `N` — northern latitude.
-    North,
+    North = 0,
     /// `S` — southern latitude.
-    South,
+    South = 1,
 }
 
 /// The hemisphere of a longitude (`GPSLongitudeRef`, Exif 3.0 §4.6.7.1.4).
+///
+/// `#[repr(u8)]` with permanent discriminants, so the value crosses a C boundary unchanged. They
+/// are gamut's own ordering, not the tag's ASCII letter.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LongitudeRef {
     /// `E` — eastern longitude.
-    East,
+    East = 0,
     /// `W` — western longitude.
-    West,
+    West = 1,
 }
 
 impl LatitudeRef {
@@ -415,6 +423,14 @@ fn altitude(ifd: &Ifd) -> Option<GpsAltitude> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hemisphere_discriminants_are_the_frozen_c_abi_values() {
+        assert_eq!(LatitudeRef::North as u8, 0);
+        assert_eq!(LatitudeRef::South as u8, 1);
+        assert_eq!(LongitudeRef::East as u8, 0);
+        assert_eq!(LongitudeRef::West as u8, 1);
+    }
 
     fn sample_ifd() -> Ifd {
         let mut ifd = Ifd::new();

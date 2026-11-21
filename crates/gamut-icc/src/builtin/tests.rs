@@ -613,6 +613,10 @@ fn a_grey_gamma_the_ktrc_cannot_carry_is_declined() {
 /// by `source_profile_divergence_is_what_the_docs_quote`.
 #[test]
 fn source_profiles_map_onto_the_builtin_spaces() {
+    // `SourceProfile` is `#[non_exhaustive]`, so the mixture is a named profile with a field
+    // reassigned rather than a struct literal.
+    let mut adobe_primaries_srgb_transfer = SourceProfile::ADOBE_RGB;
+    adobe_primaries_srgb_transfer.transfer = SourceTransfer::Srgb;
     let cases = [
         (SourceProfile::SRGB, Some(BuiltinProfile::Srgb)),
         (SourceProfile::LINEAR_SRGB, Some(BuiltinProfile::LinearSrgb)),
@@ -624,13 +628,7 @@ fn source_profiles_map_onto_the_builtin_spaces() {
             Some(BuiltinProfile::ProPhotoRgb),
         ),
         // A hand-assembled mixture with an uncoded axis names no space: declined.
-        (
-            SourceProfile {
-                transfer: SourceTransfer::Srgb,
-                ..SourceProfile::ADOBE_RGB
-            },
-            None,
-        ),
+        (adobe_primaries_srgb_transfer, None),
     ];
     for (source, expected) in cases {
         let want = expected.and_then(IccProfile::builtin);

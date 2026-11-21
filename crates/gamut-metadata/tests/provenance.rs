@@ -73,3 +73,20 @@ fn store_and_url_is_embedded_and_remote() {
         ProvenanceState::EmbeddedAndRemote(URL.to_owned())
     );
 }
+
+/// The `repr(u8)` tag of each state, read the one way a data-carrying enum's tag can be: through
+/// the primitive-representation layout, whose first byte is the discriminant. This lives here,
+/// not beside the type, because reading it needs `unsafe`, which the crate forbids.
+#[test]
+fn provenance_state_discriminants_are_the_frozen_c_abi_values() {
+    fn tag(state: &ProvenanceState) -> u8 {
+        // SAFETY: `ProvenanceState` is `#[repr(u8)]`, so every variant is laid out as a
+        // `repr(C)` struct whose first field is the `u8` discriminant; reading one byte at the
+        // start of a live, aligned value reads that tag.
+        unsafe { *std::ptr::from_ref(state).cast::<u8>() }
+    }
+    assert_eq!(tag(&ProvenanceState::None), 0);
+    assert_eq!(tag(&ProvenanceState::Remote(URL.to_owned())), 1);
+    assert_eq!(tag(&ProvenanceState::Embedded), 2);
+    assert_eq!(tag(&ProvenanceState::EmbeddedAndRemote(URL.to_owned())), 3);
+}

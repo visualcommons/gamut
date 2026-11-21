@@ -327,40 +327,43 @@ pub(crate) fn text(ifd: &Ifd, tag: u16) -> Option<&str> {
 /// A MakerNote vendor dialect.
 ///
 /// `#[non_exhaustive]`: more vendors — and, later, per-vendor decoding — can be added without a
-/// breaking change.
+/// breaking change. `#[repr(u8)]` with permanent, append-only discriminants, so the value crosses
+/// a C boundary unchanged; a new vendor takes the next free discriminant, after
+/// [`Leica`](Self::Leica), never a slot beside [`Unknown`](Self::Unknown).
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MakerNoteVendor {
     /// Canon.
-    Canon,
+    Canon = 0,
     /// Nikon.
-    Nikon,
+    Nikon = 1,
     /// Sony.
-    Sony,
+    Sony = 2,
     /// Fujifilm.
-    Fujifilm,
+    Fujifilm = 3,
     /// Olympus / OM Digital.
-    Olympus,
+    Olympus = 4,
     /// Panasonic / Lumix.
-    Panasonic,
+    Panasonic = 5,
     /// Apple.
-    Apple,
+    Apple = 6,
     /// An unrecognised or absent vendor.
-    Unknown,
+    Unknown = 7,
     /// Minolta / Konica Minolta.
-    Minolta,
+    Minolta = 8,
     /// Pentax.
-    Pentax,
+    Pentax = 9,
     /// Ricoh (including Ricoh Imaging's Pentax-branded bodies).
-    Ricoh,
+    Ricoh = 10,
     /// Samsung.
-    Samsung,
+    Samsung = 11,
     /// Sigma / Foveon.
-    Sigma,
+    Sigma = 12,
     /// Casio.
-    Casio,
+    Casio = 13,
     /// Leica (`LEICA`, `Leica Camera AG`, `LEICA CAMERA AG`).
-    Leica,
+    Leica = 14,
 }
 
 impl MakerNoteVendor {
@@ -768,6 +771,30 @@ mod tests {
     use MakerNoteVendor as V;
 
     use super::*;
+
+    #[test]
+    fn vendor_discriminants_are_the_frozen_c_abi_values() {
+        let frozen = [
+            (V::Canon, 0),
+            (V::Nikon, 1),
+            (V::Sony, 2),
+            (V::Fujifilm, 3),
+            (V::Olympus, 4),
+            (V::Panasonic, 5),
+            (V::Apple, 6),
+            (V::Unknown, 7),
+            (V::Minolta, 8),
+            (V::Pentax, 9),
+            (V::Ricoh, 10),
+            (V::Samsung, 11),
+            (V::Sigma, 12),
+            (V::Casio, 13),
+            (V::Leica, 14),
+        ];
+        for (vendor, discriminant) in frozen {
+            assert_eq!(vendor as u8, discriminant, "{vendor:?}");
+        }
+    }
 
     /// `header` followed by a one-entry IFD and its next-IFD pointer — the shortest note every
     /// dialect accepts once its header matches.

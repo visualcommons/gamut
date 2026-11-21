@@ -46,9 +46,14 @@
 /// Marked `#[non_exhaustive]` so a further provenance source can be added without a breaking
 /// change; match with a wildcard arm, or use [`is_embedded`](Self::is_embedded) and
 /// [`remote_url`](Self::remote_url), which answer the two underlying questions directly and are
-/// the C-portable surface of this type (a data-carrying enum has no observable tag, and `String`
-/// is not FFI-safe). There is deliberately no `Default`: this is a computed report, and a default
+/// the C-portable surface of this type (a data-carrying enum's tag cannot be read in safe Rust,
+/// and `String` is not FFI-safe). There is deliberately no `Default`: this is a computed report, and a default
 /// of "no provenance" would be a confident answer nobody asked for.
+///
+/// `#[repr(u8)]` with permanent, append-only discriminants: the leading `u8` tag of the layout
+/// that representation defines is `0`–`3` in declaration order, and a new state takes the next
+/// free value.
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ProvenanceState {
@@ -56,19 +61,19 @@ pub enum ProvenanceState {
     /// says, not a validity verdict — the asset may still carry provenance by a route the file
     /// cannot express (see [*What gamut does not do*](Self#what-gamut-does-not-do) on the HTTP
     /// `Link` header).
-    None,
+    None = 0,
     /// No embedded store; the XMP points at an external manifest at this URL (C2PA 2.4 §11.5).
     /// The string is the `dcterms:provenance` value with surrounding whitespace trimmed,
     /// otherwise verbatim — unresolved and unvalidated.
-    Remote(String),
+    Remote(String) = 1,
     /// A manifest store is embedded in the file ([`Metadata::c2pa`](crate::Metadata::c2pa) is
     /// `Some`) and the XMP carries no `dcterms:provenance` URL.
-    Embedded,
+    Embedded = 2,
     /// Both: a manifest store is embedded *and* the XMP carries a `dcterms:provenance` URL. The
     /// URL is reported because the file carries it; §11.5 makes the key external-only, and a
     /// validator that finds an embedded store uses it and does not consult the URL (§15.5.2.1,
     /// §15.5.3.1), so this variant says nothing about which manifest is authoritative.
-    EmbeddedAndRemote(String),
+    EmbeddedAndRemote(String) = 3,
 }
 
 impl ProvenanceState {
