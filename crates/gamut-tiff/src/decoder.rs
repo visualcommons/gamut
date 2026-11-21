@@ -487,7 +487,6 @@ impl IndexedPage {
     }
 
     /// Splits the page into its indices and its colour table, without copying either.
-    #[must_use]
     pub fn into_parts(self) -> (ImageBuf<Indexed8>, Palette) {
         (self.image, self.palette)
     }
