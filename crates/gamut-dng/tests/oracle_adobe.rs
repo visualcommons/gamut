@@ -58,13 +58,15 @@ fn adobe_sdk_validates_full_calibration_profile() {
 }
 
 /// The Adobe SDK must decode the stage-1 samples back to exactly what we packed — the definitive
-/// check that gamut's bit-packing (12/14/16-bit, MSB-first, byte-aligned rows) matches DNG.
+/// check that gamut's bit-packing (10/12/14/16-bit, MSB-first, byte-aligned rows) matches DNG.
+/// The raw is pinned uncompressed: the default lossless-JPEG strip would not be packed at all.
 #[test]
 fn adobe_decodes_packed_cfa_samples_exactly() {
-    for bits in [12u16, 14, 16] {
+    for bits in [10u16, 12, 14, 16] {
         let raw = common::sample_raw(64, 48, bits);
         let mut dng = Vec::new();
         DngEncoder::new()
+            .with_compression(gamut_dng::DngCompression::Uncompressed)
             .encode(&raw, &common::sample_profile(), &mut dng)
             .expect("encode");
         let decoded = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe reads raw");
