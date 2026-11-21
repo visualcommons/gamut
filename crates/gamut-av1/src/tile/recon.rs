@@ -12,6 +12,7 @@ use super::intra::{FILTER_INTRA_MODE_TO_INTRA_DIR, Pred};
 use super::{DC_PRED, FrameEncoder, SbDecisions};
 use crate::filter::FrameFilters;
 use crate::geom::{PlaneGeom, plane_residual_size};
+use crate::policy::QuantMatrix;
 use crate::quant::{ac_q, dequant, quantize};
 use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
 
@@ -479,6 +480,9 @@ impl FrameEncoder<'_> {
     /// The reconstruction a decoder produces for `levels` coded under `tx` over `pred`: dequantize,
     /// inverse-transform, add, clip (§7.12.3, §7.13).
     fn reconstruct(&self, pred: &[i32], levels: &[i32], tx_size: TxSize, tx: TxType) -> Vec<u16> {
+        // The dequantization below is §7.12.3 without step b's matrix weighting, so this pattern
+        // is irrefutable until a matrix variant lands with the §9.5 tables and that step.
+        let QuantMatrix::Off = self.policy.qmatrix;
         let (tw, th) = (tx_size.width(), tx_size.height());
         // dqDenom (§7.12.3) divides the dequantized coefficient by the transform size class. A
         // conformant decoder applies it, so the encoder reconstruction must.
@@ -523,15 +527,15 @@ impl FrameEncoder<'_> {
         }
     }
 
-    /// The sum of squared differences between a `w`-wide block of reconstructed samples and the
-    /// (edge-replicated) source of `plane` at coded `(sx, sy)`: the distortion every
-    /// rate–distortion decision weighs.
+    /// The distortion ([`crate::policy::EncodePolicy::distortion`]) between a `w`-wide block of
+    /// reconstructed samples and the (edge-replicated) source of `plane` at coded `(sx, sy)`: the
+    /// distortion every rate–distortion decision weighs.
     fn sse(&self, plane: usize, sx: usize, sy: usize, w: usize, recon: &[u16]) -> u64 {
         let mut sse = 0u64;
         for (i, row) in recon.chunks_exact(w).enumerate() {
             for (j, &v) in row.iter().enumerate() {
                 let d = i64::from(self.sample(plane, sx + j, sy + i)) - i64::from(v);
-                sse += (d * d) as u64;
+                sse += self.policy.distortion.sample(d);
             }
         }
         sse
@@ -540,14 +544,19 @@ impl FrameEncoder<'_> {
     /// The rate–distortion cost `D + λ·R` of `sse` and `rate` (in [`RATE_ONE`] units), scaled to
     /// an integer.
     ///
-    /// `λ = q² / LAMBDA_DIV` with `q` the frame's AC quantizer step (`base_q_idx`): high-rate
+    /// `λ = q² / LAMBDA_DIV` with `q` an AC quantizer step: high-rate
     /// quantization theory puts the slope of the distortion–rate curve at a fixed multiple of the
     /// squared step, and the step tables already carry the bit depth (a 10-bit step is 4× the
     /// 8-bit one, as a 10-bit error is 4× the 8-bit error), so the one multiple serves every depth.
-    /// One `λ` for the whole frame, rather than one per block quantizer, so that a partition
-    /// decision whose alternatives fall in different segments weighs them on one scale.
+    /// Which step `q` is — the frame's, or the block quantizer's — is the policy's
+    /// [`crate::policy::Lambda`], asked here per block; the default answers with the frame's, so
+    /// that a partition decision whose alternatives fall in different segments weighs them on one
+    /// scale.
     pub(super) fn rd_cost(&self, sse: u64, rate: u32) -> u64 {
-        let q = u64::from(ac_q(self.bit_depth, i32::from(self.qindex)).unsigned_abs());
+        let q = self.policy.lambda.step(
+            u64::from(ac_q(self.bit_depth, i32::from(self.qindex)).unsigned_abs()),
+            u64::from(self.ac_quant.unsigned_abs()),
+        );
         sse * u64::from(RATE_ONE) * LAMBDA_DIV + u64::from(rate) * q * q
     }
 

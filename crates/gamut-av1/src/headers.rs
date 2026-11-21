@@ -2,8 +2,9 @@
 //! all-intra keyframe uncompressed frame header (§5.9.2). Both the lossless M0 config and the lossy
 //! intra path are emitted: `base_q_idx > 0` with CDEF, loop restoration, superres, and uniform
 //! multi-tile (plus per-superblock delta-Q/delta-LF and segmentation, `SEG_LVL_ALT_Q`, under the
-//! test-only [`BlockVariation::SyntaxExercise`]) — all under
-//! `disable_cdf_update = 0` (adapting CDFs, §8.2.6) and `using_qmatrix = 0` (8-bit 4:4:4).
+//! test-only [`crate::tile::BlockVariation::SyntaxExercise`]) — all under
+//! `disable_cdf_update = 0` (adapting CDFs, §8.2.6), with the screen-content, quantizer-matrix and
+//! sharpness fields the frame's [`EncodePolicy`] decides.
 //!
 //! `color_config()` (§5.5.2) is parameterized by [`Av1Color`]: the identity/sRGB default takes the
 //! spec's shortcut, where `color_range` and the subsampling are inferred and no bits are coded,
@@ -14,7 +15,7 @@ use gamut_color::cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, Transfer
 use gamut_core::{Error, Result};
 
 use crate::filter::FrameFilters;
-use crate::tile::BlockVariation;
+use crate::policy::EncodePolicy;
 
 /// `OBU_SEQUENCE_HEADER`.
 const OBU_SEQUENCE_HEADER: u8 = 1;
@@ -673,10 +674,13 @@ fn write_tile_info(w: &mut BitWriter, layout: &TileLayout) {
 /// filters/`tx_mode` emit nothing, so `filters` and `luma_lr` are ignored). `base_q_idx > 0`
 /// selects the lossy path: `TX_MODE_SELECT` (per-block `tx_depth`), the deblocking level and CDEF
 /// strengths `filters` carries, and luma loop restoration `RESTORE_WIENER` when `luma_lr` (some
-/// unit is restored) or `RESTORE_NONE` otherwise. All quantizer deltas are 0 and
-/// `using_qmatrix = 0`. Segmentation and `delta_q`/`delta_lf` are signalled only when `variation`
-/// is [`BlockVariation::SyntaxExercise`] on a lossy frame — the tiles must have been coded with the
-/// same `variation` — and otherwise every block is at `base_q_idx` and the frame loop-filter level.
+/// unit is restored) or `RESTORE_NONE` otherwise. All quantizer deltas are 0.
+///
+/// The tiles must have been coded under the same `policy`, which decides
+/// `allow_screen_content_tools`, `using_qmatrix` and `loop_filter_sharpness`. Segmentation and
+/// `delta_q`/`delta_lf` are signalled only when its block variation is
+/// [`crate::tile::BlockVariation::SyntaxExercise`] on a lossy frame, and otherwise every block is at
+/// `base_q_idx` and the frame loop-filter level.
 ///
 /// The returned bytes precede the tile (symbol-coded) data; together they form the frame OBU
 /// payload (AV1 §5.10).
@@ -687,18 +691,20 @@ pub(crate) fn frame_header_payload(
     monochrome: bool,
     filters: FrameFilters,
     luma_lr: bool,
-    variation: BlockVariation,
+    policy: EncodePolicy,
 ) -> Vec<u8> {
     let lossless = base_q_idx == 0;
-    let block_variation = variation.exercised(base_q_idx);
+    let block_variation = policy.block_variation.exercised(base_q_idx);
+    let screen_content_tools = policy.screen_content.allowed(!lossless);
     let mut w = BitWriter::new();
     // reduced_still_picture_header ⇒ KEY_FRAME, show_frame=1, FrameIsIntra=1 (no bits).
     // disable_cdf_update = 0: every symbol adapts its CDF as it is coded (§8.2.6). The tile encoder
     // performs the identical update, so encoder and decoder track the same probabilities.
     w.put_bit(0); // disable_cdf_update
-    // allow_screen_content_tools = 1 (palette mode is available; intra-block-copy is left off).
-    w.put_bit(u8::from(!lossless)); // allow_screen_content_tools (1 on the lossy path)
-    if !lossless {
+    // allow_screen_content_tools as the policy decides it (palette mode is available; intra-block-
+    // copy is left off). The tiles gate palette on the same answer.
+    w.put_bit(u8::from(screen_content_tools)); // allow_screen_content_tools
+    if screen_content_tools {
         // seq_force_integer_mv == SELECT_INTEGER_MV (reduced still picture) ⇒ force_integer_mv is
         // coded when screen-content tools are on. The value is irrelevant (an intra frame overrides
         // it to 1), so 0 is emitted.
@@ -735,7 +741,7 @@ pub(crate) fn frame_header_payload(
         w.put_bit(0); // DeltaQUDc: delta_coded = 0
         w.put_bit(0); // DeltaQUAc: delta_coded = 0
     }
-    w.put_bit(0); // using_qmatrix = 0
+    w.put_bit(policy.qmatrix as u8); // using_qmatrix
 
     // segmentation_params(): only under the block-variation syntax exercise, enable per-segment
     // alternate quantizers (SEG_LVL_ALT_Q) on a couple of segments so blocks carry their own
@@ -785,7 +791,7 @@ pub(crate) fn frame_header_payload(
             w.put_bits(lf, 6); // loop_filter_level[2] (U)
             w.put_bits(lf, 6); // loop_filter_level[3] (V)
         }
-        w.put_bits(0, 3); // loop_filter_sharpness
+        w.put_bits(u32::from(policy.sharpness as u8), 3); // loop_filter_sharpness
         w.put_bit(0); // loop_filter_delta_enabled = 0
         // cdef_params(): enable_cdef = 1 ⇒ CdefDamping = 3, cdef_bits = 0 (one strength set applied
         // everywhere; cdef_idx is then L(0) = 0 bits in the tile). The secondary strength is signaled
@@ -1219,7 +1225,7 @@ mod tests {
                 false,
                 FrameFilters::default(),
                 true,
-                BlockVariation::Frame,
+                EncodePolicy::default(),
             );
             let fh = FrameHeader::parse(&mut BitReader::new(&frame), &seq).expect("parses");
             let t = &fh.tile_info;

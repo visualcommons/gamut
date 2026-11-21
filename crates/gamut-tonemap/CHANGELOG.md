@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gamut-tonemap)* RGB-aware tone mapping (#1236). The new `ToneMapper` trait sits beside the
+  frozen scalar `ToneCurve`. `CurveToneMapper` applies any curve per channel, from luma, or from
+  max-RGB (`ApplyMode`), normalized so `source_peak` maps onto `target_peak`, with ffmpeg
+  `tonemap`'s desaturation (`DEFAULT_DESAT = 2.0`) and selectable `gamut_core` luma weights.
+  Max-RGB mode is held by a golden test to an `f64` transcription of ffmpeg's `tonemap()`. The
+  BT.2390 EETF (#1254) and BT.2446 Method A (#1255) follow as `ToneMapper`s.
+
 ### Other
 
 - *(gamut-tonemap)* settle `f32` as the one precision (#1102): document that callers narrow

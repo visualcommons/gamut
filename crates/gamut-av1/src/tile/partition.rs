@@ -444,7 +444,7 @@ mod tests {
 
     use super::*;
     use crate::encoder::Effort;
-    use crate::tile::BlockVariation;
+    use crate::policy::EncodePolicy;
     use crate::tile::tests::{Snapshot, at_effort, busy64, dims, flat_chroma_luma, luma16, primed};
     #[test]
     fn partitions_offered_follow_the_search_and_the_layout() {
@@ -603,8 +603,7 @@ mod tests {
         // reconstructed sample it wrote, and must neither code nor adapt anything. The segment id
         // and the deltas are coded only under the block-variation exercise.
         let p = busy64();
-        let mut e = at_effort(&p, 40, Effort::Thorough)
-            .with_block_variation(BlockVariation::SyntaxExercise);
+        let mut e = at_effort(&p, 40, Effort::Thorough).with_policy(EncodePolicy::SYNTAX_EXERCISE);
         e.clear_block_decoded(0, 0);
         e.read_deltas = true;
         let before = Snapshot::of(&e);

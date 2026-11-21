@@ -46,9 +46,11 @@ The list is the one place edges are written; each crate's oracle is kept in the 
   upsampling kernels, and integer arithmetic (rounding, pixel-range clamps). ← nothing.
   Like `gamut-codec-abi`, it depends on no crate at all (`gamut-deflate` does too in its default
   build).
-- **gamut-tonemap** — scalar tone-mapping curves for HDR→SDR pipelines: the `ToneCurve` trait
-  over eight operators (Linear/Clamp/Exposure/Reinhard/ReinhardExtended/ACES/Hable/Drago),
-  between `gamut-color`'s transfer functions and the SDR re-encode. ← core.
+- **gamut-tonemap** — tone-mapping math for HDR→SDR pipelines: the scalar `ToneCurve` trait over
+  eight operators (Linear/Clamp/Exposure/Reinhard/ReinhardExtended/ACES/Hable/Drago) and the
+  RGB-aware `ToneMapper` trait, whose `CurveToneMapper` applies a curve per channel, from luma or
+  from max-RGB between explicit peaks with ffmpeg's desaturation; between `gamut-color`'s
+  transfer functions and the SDR re-encode. ← core.
 - **gamut-codec-abi** — shared codestream-backend seam: `repr(C)` vtables
   (`DecoderVTable`/`EncoderVTable` + `StreamConfig`/`EncodeConfig`/`ImageDesc`) and their
   object-safe Rust twin traits, plus the one `Registry<T>` (behind its `std` feature) that
