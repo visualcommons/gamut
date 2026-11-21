@@ -310,9 +310,11 @@ impl EncodeConfig {
 /// [`matrix_coefficients`](Self::matrix_coefficients) / [`full_range`](Self::full_range) group is
 /// the planes' CICP signalling (ITU-T H.273). As an encode input it is what the host asks the
 /// stream to declare; as a decode output the host seeds it and the decoder overwrites it with what
-/// the codestream declares. [`ImageDesc::new`] fills it with [`UNSIGNALLED`](Self::UNSIGNALLED),
-/// the value every codec defaults to when its stream carries no colour description. It lies past
-/// [`MIN_SIZE`](Self::MIN_SIZE): read it only when [`has_cicp`](Self::has_cicp) holds.
+/// the codestream declares — only when [`struct_size`](Self::struct_size) covers it, since a
+/// decoder writes no field past the prefix the host allocated. [`ImageDesc::new`] fills it with
+/// [`UNSIGNALLED`](Self::UNSIGNALLED), the value every codec defaults to when its stream carries no
+/// colour description. It lies past [`MIN_SIZE`](Self::MIN_SIZE): read or write it only when
+/// [`has_cicp`](Self::has_cicp) holds.
 ///
 /// Leads with [`struct_size`](Self::struct_size) for forward-compatible field growth (the
 /// [prefix rule](crate#descriptor-growth-the-struct_size-prefix-rule)).
@@ -483,9 +485,11 @@ pub struct DecoderVTable {
     /// Reports whether the backend can decode the given stream. `ctx` is the backend context.
     pub supports:
         Option<unsafe extern "C" fn(ctx: *mut c_void, cfg: *const StreamConfig) -> Status>,
-    /// Decodes `codestream` into the caller-allocated `out` planes and overwrites `out`'s colour
-    /// signalling with the codestream's (see [`ImageDesc`]); every other `out` field is the host's
-    /// and stays as it was. `ctx` is the backend context.
+    /// Decodes `codestream` into the caller-allocated `out` planes and, when `out`'s
+    /// `struct_size` covers it ([`ImageDesc::CICP_END`]), overwrites `out`'s colour signalling with
+    /// the codestream's (see [`ImageDesc`]). The backend writes no `out` field its `struct_size`
+    /// does not cover, so it never writes past an older host's shorter descriptor; every other
+    /// `out` field is the host's and stays as it was. `ctx` is the backend context.
     pub decode: Option<
         unsafe extern "C" fn(
             ctx: *mut c_void,

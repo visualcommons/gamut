@@ -139,14 +139,17 @@ gamut_status_t gamut_png_encoder_push_backend(GamutPngEncoder *encoder,
 - Descriptor contract (`GAMUT_CODEC_ABI_VERSION` 2, issue #1228): every `GamutStreamConfig` /
   `GamutEncodeConfig` / `GamutImageDesc` leads with a `struct_size` the producer sets to its
   own `sizeof`, and a reader trusts exactly the prefix that covers — a field is readable when
-  `struct_size >= offsetof(field) + sizeof(field)`. Fields are only ever appended (a revision
-  that appends does not bump the version), so a C backend checks `struct_size` against the end
-  of each field it reads rather than against its own `sizeof`. `GamutImageDesc` ends with the
-  CICP colour group (`color_primaries` / `transfer_characteristics` / `matrix_coefficients` as
-  `uint16_t`, `full_range` as a non-zero-is-full `uint8_t`): as an encode input it is the
-  signalling the stream must declare; as a decode `out` (now non-`const`) the host seeds it with
-  the unsignalled `2/2/2`, limited range, and the backend overwrites it with what the
-  codestream declares, touching no other `out` field.
+  `struct_size >= offsetof(field) + sizeof(field)`. The same bound governs writes: a backend
+  writes an `out` field only when `out->struct_size` covers it, so a backend built against a
+  longer descriptor never writes past an older host's allocation. Fields are only ever appended
+  (a revision that appends does not bump the version), so a C backend checks `struct_size`
+  against the end of each field it reads or writes rather than against its own `sizeof`.
+  `GamutImageDesc` ends with the CICP colour group (`color_primaries` /
+  `transfer_characteristics` / `matrix_coefficients` as `uint16_t`, `full_range` as a
+  non-zero-is-full `uint8_t`): as an encode input it is the signalling the stream must declare;
+  as a decode `out` (now non-`const`) the host seeds it with the unsignalled `2/2/2`, limited
+  range, and the backend — only when `out->struct_size` covers the group — overwrites it with
+  what the codestream declares, touching no other `out` field.
 - Thread contract: pushing asserts the backend is usable from any thread (the Rust registries
   bound `Send`; the bridges are `unsafe impl Send` on exactly that assertion). Handles
   themselves are single-threaded.
