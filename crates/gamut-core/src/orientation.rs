@@ -9,6 +9,7 @@
 /// the displayed width and height relative to the coded dimensions. The default is
 /// [`Orientation::Identity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]
 pub enum Orientation {
     /// No transform (EXIF 1); the default.

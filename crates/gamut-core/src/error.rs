@@ -11,6 +11,7 @@
 /// The discriminants are permanent and append-only so the classification remains mechanically
 /// portable to the C status surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u32)]
 pub enum ErrorKind {
@@ -36,6 +37,10 @@ const _: () = {
 ///
 /// The value is a single boxed pointer, so `Result<T>` stays small on every success path; the one
 /// allocation happens only when an error is constructed.
+///
+/// Unlike the crate's plain-data types it has no `serde` impls, even with that feature on: it is
+/// opaque and may carry a `source` error that has no serial form. Serialize its [`kind`](Self::kind)
+/// — an [`ErrorKind`], which does — instead.
 pub struct Error {
     inner: Box<Inner>,
 }

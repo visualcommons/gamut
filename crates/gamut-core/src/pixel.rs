@@ -115,6 +115,7 @@ pub enum ColorModel {
 ///
 /// Discriminants are explicit and permanent — they are C ABI values; new variants append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u32)]
 pub enum PixelFormat {
