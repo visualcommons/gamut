@@ -259,7 +259,7 @@ exclude_re = [
     # (a TIMEOUT, so a survivor), so `Default` now calls nothing. The `-> Default::default()`
     # replacement of `lossless` is then byte-identical — provably equivalent, unkillable — as for
     # `WebpEncoder::lossless` below; `lossless_is_the_default_mode` pins what it returns.
-    '^crates/gamut-avif/src/encoder\.rs:383:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
+    '^crates/gamut-avif/src/encoder\.rs:384:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
     # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None, 100 }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same

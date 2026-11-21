@@ -73,9 +73,17 @@ pub(crate) struct ConvertArgs {
     avif_speed: u8,
     /// Most threads one AVIF encode may use; `0` means every available core. The output is the
     /// same at every count. Several inputs already convert in parallel, one per core, so each of
-    /// them multiplies this. Ignored for other output formats.
+    /// them multiplies this. A still is coded one thread per tile, so without
+    /// `--avif-auto-tiling` (one tile) only an image's colour and alpha run side by side. Ignored
+    /// for other output formats.
     #[arg(long, default_value_t = 1)]
     avif_threads: usize,
+    /// Split each AVIF still into tiles by its size, as libavif's `autoTiling` does: one tile per
+    /// started 512×512 pixels, at most eight. Tiles let `--avif-threads` code a still in parallel,
+    /// at some cost in size; the output does not depend on the thread count. Ignored for other
+    /// output formats.
+    #[arg(long)]
+    avif_auto_tiling: bool,
     /// Lossy quality of the AVIF alpha channel, 0–100, independent of the colour's `--quality`
     /// (which it follows when omitted). Ignored by lossless AVIF, by input without alpha, and for
     /// other output formats.
@@ -1061,15 +1069,17 @@ fn avif_encoder(args: &ConvertArgs) -> AvifEncoder {
         .nth(usize::from(args.avif_speed))
         .copied()
         .unwrap_or_default();
-    // `0` is "every core", which the encoder spells `None`, exactly what `NonZeroUsize::new` gives.
+    // `0` is "every core": the machine's parallelism, as the encoder's thread type takes it.
+    let threads = NonZeroUsize::new(args.avif_threads)
+        .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN));
     encoder = encoder
         .with_effort(effort)
-        .with_threads(NonZeroUsize::new(args.avif_threads));
+        .with_threads(threads)
+        .with_auto_tiling(args.avif_auto_tiling)
+        // Unset follows the colour quality, as the encoder's own `None` does.
+        .with_alpha_quality(args.avif_alpha_quality);
     if args.avif_clean_alpha {
         encoder = encoder.with_alpha_mode(AlphaMode::CleanOnEncode);
-    }
-    if let Some(quality) = args.avif_alpha_quality {
-        encoder = encoder.with_alpha_quality(quality);
     }
     if let Some(matrix) = args.avif_matrix {
         encoder = encoder.with_matrix(matrix.to_codec());
@@ -1353,14 +1363,23 @@ mod tests {
     #[test]
     fn avif_threads_caps_the_encoder() {
         assert_eq!(
-            avif_with(&["--avif-threads", "3"]).config().threads,
-            NonZeroUsize::new(3)
+            avif_with(&["--avif-threads", "3"]).config().threads.get(),
+            3
         );
     }
 
     #[test]
     fn avif_threads_zero_is_every_core() {
-        assert_eq!(avif_with(&["--avif-threads", "0"]).config().threads, None);
+        assert_eq!(
+            avif_with(&["--avif-threads", "0"]).config().threads,
+            std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
+        );
+    }
+
+    #[test]
+    fn avif_auto_tiling_reaches_the_encoder() {
+        assert!(!avif_with(&[]).config().auto_tiling);
+        assert!(avif_with(&["--avif-auto-tiling"]).config().auto_tiling);
     }
 
     #[test]

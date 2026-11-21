@@ -1048,7 +1048,7 @@ fn backend_stream_must_signal_the_requested_colour() {
         ("bt709-full", AvifEncoder::lossy(50)),
         (
             "bt709-studio",
-            AvifEncoder::lossy(50).with_color_range(ColorRange::Limited),
+            AvifEncoder::lossy(50).with_range(ColorRange::Limited),
         ),
     ] {
         let colour = encoder_colour(&encoder);
@@ -1365,7 +1365,7 @@ fn abi_adapter_lowers_the_requested_colour_signalling() {
             .with_primaries(ColorPrimaries::Bt2020)
             .with_transfer(TransferCharacteristics::Pq)
             .with_matrix(MatrixCoefficients::Bt2020Ncl)
-            .with_color_range(ColorRange::Limited)
+            .with_range(ColorRange::Limited)
             .with_backend(AbiAv1Encoder::new(stub.clone()));
         let result = if bits == BitDepth::Eight {
             encode(&encoder)
