@@ -186,11 +186,10 @@ fn the_full_search_is_not_below_any_pruned_preset_at_the_coarsest_rung() {
 /// (#1011), the full search's greedy, pre-filter choices cost it bits against `Balanced` and `Fast`
 /// at the coarsest rungs of the screen image. Each entry is a drift guard, not an allowance: a loss
 /// that grows past its bound fails, and so does one that is gone, so the list cannot outlive the
-/// defect it records.
-const KNOWN_LOSSES: [(&str, Effort, f64); 2] = [
-    ("screen", Effort::Balanced, 0.5),
-    ("screen", Effort::Fast, 0.75),
-];
+/// defect it records. The loss against `Fast` (bound 0.75%) went once the default layout became
+/// one tile (#1227): the 128-sample corpus had been coded in two tile columns, and at one tile the
+/// full search beats `Fast` by 1.02%.
+const KNOWN_LOSSES: [(&str, Effort, f64); 1] = [("screen", Effort::Balanced, 0.5)];
 
 #[test]
 fn the_full_search_needs_no_more_bits_than_any_pruned_preset() {
