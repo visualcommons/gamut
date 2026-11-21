@@ -524,7 +524,7 @@ exclude_re = [
     # IJG quality mapping). The mapping is continuous at the branch point: at q == 50 — the only
     # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
     # the same scale and no input can distinguish the mutant: equivalent.
-    '^crates/gamut-jpeg/src/quant\.rs:207:10: replace < with <= in quality_scale$',
+    '^crates/gamut-jpeg/src/quant\.rs:212:10: replace < with <= in quality_scale$',
     # gamut-dng predictor `undo`: `if channels == 0 || group_cols < 2 { return; }`, relaxed to
     # `&&`, is equivalent. `factor` reaches this line only through
     # `x_factor(predictor).filter(|&f| f > 0)`, so `channels = spp * factor` is zero only when
