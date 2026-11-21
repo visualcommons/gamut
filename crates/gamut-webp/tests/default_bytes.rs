@@ -31,7 +31,9 @@
 
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy};
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
-use gamut_webp::{ChromaUpsampling, Effort, Exact, WebpDecoder, WebpEncoder};
+use gamut_webp::{
+    ChromaUpsampling, Effort, Exact, LosslessPreset, WebpConfig, WebpDecoder, WebpEncoder,
+};
 
 /// FNV-1a (64-bit) over `bytes` — a dependency-free digest for pinning fixture bytes.
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -109,6 +111,29 @@ fn lossless_rgba_default_bytes_are_unchanged() {
         dims(24, 16),
     );
     assert_bytes("lossless rgba", &file, 178, 0xbc81_86a9_fd2e_b67b);
+}
+
+/// Lossless `quality` drives the VP8L search since issue #1240, and its default `75` at effort 4 is
+/// the search the encoder ran before, so the same pins hold when both are spelled out — directly
+/// or as `cwebp -z 6`, the preset with that pair.
+#[test]
+fn lossless_quality_75_at_effort_4_keeps_the_default_bytes() {
+    let mut config = WebpConfig::default();
+    config.quality = 75;
+    config.effort = Effort::Default;
+    for (what, config) in [
+        ("explicit quality 75", config),
+        (
+            "preset z6",
+            WebpConfig::default().with_lossless_preset(LosslessPreset::Z6),
+        ),
+    ] {
+        let enc = WebpEncoder::from_config(config);
+        let rgb = encode_rgb(&enc, &rgb_fixture(24, 16), dims(24, 16));
+        assert_bytes(what, &rgb, 182, 0x8e85_b274_9b43_e196);
+        let rgba = encode_rgba(&enc, &rgba_fixture(24, 16), dims(24, 16));
+        assert_bytes(what, &rgba, 178, 0xbc81_86a9_fd2e_b67b);
+    }
 }
 
 #[test]
