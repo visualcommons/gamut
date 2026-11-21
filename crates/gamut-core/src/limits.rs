@@ -49,10 +49,6 @@ impl DecodeLimits {
     /// `AVIF_DEFAULT_IMAGE_SIZE_LIMIT`.
     pub const DEFAULT_MAX_PIXELS: u64 = 1 << 28;
 
-    /// The byte budget the default carried before it became opt-in: 64 MiB.
-    #[deprecated(note = "the byte budget is opt-in; set one with `with_max_image_bytes`")]
-    pub const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
-
     /// The default limits: each side at most [`DecodeLimits::DEFAULT_MAX_DIMENSION`], at most
     /// [`DecodeLimits::DEFAULT_MAX_PIXELS`] pixels, and no bound on the decoded bytes.
     #[must_use]
