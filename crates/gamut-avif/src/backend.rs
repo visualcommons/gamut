@@ -594,6 +594,16 @@ impl SeqHeaderParams {
 ///   [`ImageDesc::pixel_format`] carries `Rgb16` rather than `Rgb8` to say so, and `Planar16`
 ///   validates every sample against its depth, so the range is a guarantee and not a convention.
 ///
+/// # Colour
+///
+/// [`Av1EncodeRequest::colour`] crosses as the [`ImageDesc`] colour group —
+/// [`color_primaries`](ImageDesc::color_primaries),
+/// [`transfer_characteristics`](ImageDesc::transfer_characteristics),
+/// [`matrix_coefficients`](ImageDesc::matrix_coefficients) and
+/// [`full_range`](ImageDesc::full_range) — at both depths. It is the same obligation as on the
+/// typed trait: the returned stream's `color_config()` must declare exactly it, and the planes are
+/// GBR when the matrix is identity.
+///
 /// # Status handling
 ///
 /// `supports` reporting [`Status::UNSUPPORTED`] is the one fall-through. Once a backend has
@@ -679,6 +689,17 @@ impl<E: Encoder> std::fmt::Debug for AbiAv1Encoder<E> {
     }
 }
 
+/// `image` carrying the request's colour signalling — the CICP triple and range the returned
+/// stream's `color_config()` must declare — in [`ImageDesc`]'s colour group.
+fn with_colour(image: ImageDesc, colour: Av1Color) -> ImageDesc {
+    image.with_cicp(
+        colour.primaries.code_point(),
+        colour.transfer.code_point(),
+        colour.matrix.code_point(),
+        colour.range == ColorRange::Full,
+    )
+}
+
 /// Maps the wrapped encoder's terminal status onto the result: OK carries `obus`, anything else —
 /// a late [`Status::UNSUPPORTED`] included — is the backend's failure.
 fn encode_status(status: Status, obus: Vec<u8>) -> Result<Vec<u8>> {
@@ -725,6 +746,7 @@ impl<E: Encoder> Av1CodestreamEncoder for AbiAv1Encoder<E> {
             ],
             [stride(0), stride(1), stride(2), 0],
         );
+        let image = with_colour(image, req.colour());
         let mut obus = Vec::new();
         let status = self.inner.encode(&cfg, &image, &mut |chunk: &[u8]| {
             obus.extend_from_slice(chunk);
@@ -764,6 +786,7 @@ impl<E: Encoder> Av1CodestreamEncoder for AbiAv1Encoder<E> {
             ],
             [stride(0), stride(1), stride(2), 0],
         );
+        let image = with_colour(image, req.colour());
         let mut obus = Vec::new();
         let status = self.inner.encode(&cfg, &image, &mut |chunk: &[u8]| {
             obus.extend_from_slice(chunk);

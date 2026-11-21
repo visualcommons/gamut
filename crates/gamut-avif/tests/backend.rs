@@ -8,7 +8,8 @@ use gamut_av1::Av1Color;
 use gamut_avif::{AbiAv1Encoder, Av1CodestreamEncoder, Av1EncodeRequest, AvifEncoder, Effort};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr,
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients, Planar8, Planar16,
+    RgbToYcbcr, TransferCharacteristics,
 };
 use gamut_core::{
     Dimensions, EncodeImage, Error, ErrorKind, Gray8, ImageRef, Result, Rgb8, Rgb16, Rgba8,
@@ -1150,6 +1151,9 @@ struct AbiStub {
     seen_image: Option<SeenImage>,
     /// The whole `extra` blob the adapter passed, whatever its length, captured at `encode` time.
     seen_extra: Option<Vec<u8>>,
+    /// The image's colour group `(primaries, transfer, matrix, full_range)`, captured at `encode`
+    /// time.
+    seen_cicp: Option<(u16, u16, u16, bool)>,
 }
 
 impl AbiStub {
@@ -1161,6 +1165,7 @@ impl AbiStub {
             seen_config: None,
             seen_image: None,
             seen_extra: None,
+            seen_cicp: None,
         }
     }
 
@@ -1197,6 +1202,12 @@ impl Encoder for AbiStub {
             unsafe { std::slice::from_raw_parts(cfg.extra.cast::<u8>(), cfg.extra_len) }.to_vec(),
         );
         assert!(image.is_abi_current());
+        self.seen_cicp = Some((
+            image.color_primaries,
+            image.transfer_characteristics,
+            image.matrix_coefficients,
+            image.is_full_range(),
+        ));
         let first = [0, 1, 2].map(|i| unsafe { *image.planes[i] });
         self.seen_image = Some((
             image.pixel_format,
@@ -1335,6 +1346,39 @@ fn abi_adapter_appends_a_non_thorough_effort_to_the_extra_blob() {
 fn av1_codec_id_is_the_av01_fourcc() {
     assert_eq!(gamut_avif::AV1_CODEC_ID, u32::from_be_bytes(*b"av01"));
     assert_eq!(gamut_avif::AV1_CODEC_ID, 0x6176_3031);
+}
+
+/// The request's colour signalling crosses in the descriptor's colour group at both depths, so a
+/// C backend can declare in `color_config()` exactly what the container's `colr` will say. The
+/// stub fails the encode once it has looked, so no stream has to match the unusual signalling.
+#[test]
+fn abi_adapter_lowers_the_requested_colour_signalling() {
+    for bits in [BitDepth::Eight, BitDepth::Ten] {
+        let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(
+            Status::OK,
+            Status(5),
+            vec![],
+        ))));
+        // Four values distinct from each other's defaults and from the unsignalled 2/2/2/limited.
+        let encoder = AvifEncoder::lossy(50)
+            .with_bit_depth(bits)
+            .with_primaries(ColorPrimaries::Bt2020)
+            .with_transfer(TransferCharacteristics::Pq)
+            .with_matrix(MatrixCoefficients::Bt2020Ncl)
+            .with_color_range(ColorRange::Limited)
+            .with_backend(AbiAv1Encoder::new(stub.clone()));
+        let result = if bits == BitDepth::Eight {
+            encode(&encoder)
+        } else {
+            encode16(&encoder)
+        };
+        assert!(result.is_err(), "{bits:?}: the stub fails the job");
+        assert_eq!(
+            stub.0.lock().unwrap().seen_cicp,
+            Some((9, 16, 9, false)),
+            "{bits:?}: BT.2020 / PQ / BT.2020 NCL, limited range"
+        );
+    }
 }
 
 /// `Status::UNSUPPORTED` from `supports` declines, so the built-in tail runs.

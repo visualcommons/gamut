@@ -161,8 +161,8 @@ impl<D: Decoder> ZlibInflater for AbiZlibInflater<D> {
             ));
         }
         let mut out = vec![0u8; len];
-        let image = desc(info, out.as_mut_ptr(), len);
-        let status = self.decoder.decode(&Self::config(info), zlib, &image);
+        let mut image = desc(info, out.as_mut_ptr(), len);
+        let status = self.decoder.decode(&Self::config(info), zlib, &mut image);
         if status.is_ok() {
             Ok(out)
         } else {

@@ -40,7 +40,7 @@ pub const GAMUT_STATUS_ABI_MISMATCH: GamutStatus = 7;
 /// A literal (not `gamut_codec_abi::ABI_VERSION`) so cbindgen can emit it; the const assert
 /// below locks the two together, so a seam bump fails this build until the value — and the
 /// header — are consciously updated.
-pub const GAMUT_CODEC_ABI_VERSION: u32 = 1;
+pub const GAMUT_CODEC_ABI_VERSION: u32 = 2;
 
 // Permanent, append-only C ABI values (see DESIGN.md) — a change here is an ABI break, not a
 // refactor, and fails the build.

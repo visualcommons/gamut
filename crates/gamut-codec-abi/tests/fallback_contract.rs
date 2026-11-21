@@ -72,11 +72,11 @@ fn an_absent_decode_callback_falls_through_rather_than_failing() {
     let mut foreign = unsafe { ForeignDecoder::new(&empty, ptr::null_mut()) }.expect("ABI matches");
 
     let cfg = StreamConfig::new(TEST_CODEC, 1, 1, 8);
-    let out = one_plane(1, 1, ptr::null_mut(), 0);
+    let mut out = one_plane(1, 1, ptr::null_mut(), 0);
 
     // A null `decode` means "this backend cannot do it", which is the fall-through code — not a
     // terminal error that would strand the host with no backend tried.
-    let status = foreign.decode(&cfg, b"", &out);
+    let status = foreign.decode(&cfg, b"", &mut out);
     assert_eq!(status, Status::UNSUPPORTED);
     assert!(status.is_unsupported());
 }
@@ -149,7 +149,7 @@ fn a_registry_tries_backends_in_push_order_until_one_supports() {
         fn supports(&mut self, _cfg: &StreamConfig) -> bool {
             true
         }
-        fn decode(&mut self, _cfg: &StreamConfig, _bytes: &[u8], _out: &ImageDesc) -> Status {
+        fn decode(&mut self, _cfg: &StreamConfig, _bytes: &[u8], _out: &mut ImageDesc) -> Status {
             Status::OK
         }
     }
@@ -183,7 +183,7 @@ fn a_registry_stops_at_the_first_backend_that_supports_the_job() {
         fn supports(&mut self, _cfg: &StreamConfig) -> bool {
             true
         }
-        fn decode(&mut self, _cfg: &StreamConfig, _bytes: &[u8], _out: &ImageDesc) -> Status {
+        fn decode(&mut self, _cfg: &StreamConfig, _bytes: &[u8], _out: &mut ImageDesc) -> Status {
             Status::OK
         }
     }

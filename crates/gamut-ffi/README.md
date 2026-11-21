@@ -41,7 +41,7 @@ an opaque context — plug into the format crate's backend registry:
 
 static GamutAbiStatus my_decode(void *ctx, const GamutStreamConfig *cfg,
                                 const uint8_t *codestream, size_t codestream_len,
-                                const GamutImageDesc *out) { /* ... */ }
+                                GamutImageDesc *out) { /* ... */ }
 static void my_destroy(void *ctx) { /* ... */ }
 
 const GamutDecoderVTable vtable = {

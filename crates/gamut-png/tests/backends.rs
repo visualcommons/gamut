@@ -819,7 +819,7 @@ impl Decoder for AbiDec {
         cfg.codec_id == ZLIB_CODEC_ID
     }
 
-    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &mut ImageDesc) -> Status {
         self.seen.lock().expect("seen").push((
             cfg.codec_id,
             out.pixel_format,
@@ -1014,7 +1014,7 @@ fn abi_supports_false_skips_the_backend_entirely() {
         fn supports(&mut self, _cfg: &StreamConfig) -> bool {
             false
         }
-        fn decode(&mut self, _: &StreamConfig, _: &[u8], _: &ImageDesc) -> Status {
+        fn decode(&mut self, _: &StreamConfig, _: &[u8], _: &mut ImageDesc) -> Status {
             unreachable!("never accepted")
         }
     }

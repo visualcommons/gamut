@@ -38,7 +38,7 @@ unsafe extern "C" fn decode_shim(
     cfg: *const StreamConfig,
     _codestream: *const u8,
     _codestream_len: usize,
-    out: *const ImageDesc,
+    out: *mut ImageDesc,
 ) -> Status {
     // SAFETY: the adapter allocated plane 0 as `width * height` u16 samples and both
     // descriptors are valid for the duration of the call.

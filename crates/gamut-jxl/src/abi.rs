@@ -289,7 +289,7 @@ impl<D: AbiDecoder> JxlCodestreamDecoder for AbiJxlDecoder<D> {
                 let mut buf = vec![0u8; count];
                 let mut planes = [core::ptr::null_mut(); MAX_PLANES];
                 planes[0] = buf.as_mut_ptr();
-                let desc = ImageDesc::new(
+                let mut desc = ImageDesc::new(
                     info.format() as u32,
                     dims.width(),
                     dims.height(),
@@ -298,14 +298,14 @@ impl<D: AbiDecoder> JxlCodestreamDecoder for AbiJxlDecoder<D> {
                     planes,
                     strides,
                 );
-                run_decode(&mut self.inner, &cfg, codestream, &desc)?;
+                run_decode(&mut self.inner, &cfg, codestream, &mut desc)?;
                 JxlOwnedSamples::U8(buf)
             }
             _ => {
                 let mut buf = vec![0u16; count];
                 let mut planes = [core::ptr::null_mut(); MAX_PLANES];
                 planes[0] = buf.as_mut_ptr().cast::<u8>();
-                let desc = ImageDesc::new(
+                let mut desc = ImageDesc::new(
                     info.format() as u32,
                     dims.width(),
                     dims.height(),
@@ -314,7 +314,7 @@ impl<D: AbiDecoder> JxlCodestreamDecoder for AbiJxlDecoder<D> {
                     planes,
                     strides,
                 );
-                run_decode(&mut self.inner, &cfg, codestream, &desc)?;
+                run_decode(&mut self.inner, &cfg, codestream, &mut desc)?;
                 JxlOwnedSamples::U16(buf)
             }
         };
@@ -328,7 +328,7 @@ fn run_decode<D: AbiDecoder>(
     inner: &mut D,
     cfg: &StreamConfig,
     codestream: &[u8],
-    out: &ImageDesc,
+    out: &mut ImageDesc,
 ) -> Result<()> {
     let status = inner.decode(cfg, codestream, out);
     if status.is_ok() {
@@ -645,7 +645,7 @@ mod tests {
             self.supported
         }
 
-        fn decode(&mut self, cfg: &StreamConfig, _stream: &[u8], out: &ImageDesc) -> Status {
+        fn decode(&mut self, cfg: &StreamConfig, _stream: &[u8], out: &mut ImageDesc) -> Status {
             self.seen_size = Some((cfg.width, cfg.height, cfg.bit_depth));
             if self.status.is_ok() {
                 // Write through the plane pointer exactly as a real backend would; the host

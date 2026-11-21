@@ -1270,7 +1270,7 @@ impl gamut_codec_abi::Decoder for AbiDec {
         self.supports
     }
 
-    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &mut ImageDesc) -> Status {
         if !self.status.is_ok() {
             return self.status;
         }

@@ -106,7 +106,7 @@ pub const GAMUT_MAX_PLANES: usize = 4;
 // must fail this crate's build until the C contract is consciously revisited — header
 // regenerated, status codes re-audited — rather than ship a header that lies.
 const _: () = {
-    assert!(gamut_codec_abi::ABI_VERSION == 1);
+    assert!(gamut_codec_abi::ABI_VERSION == 2);
     assert!(GAMUT_MAX_PLANES == gamut_codec_abi::MAX_PLANES);
     assert!(gamut_codec_abi::Status::OK.0 == 0);
     assert!(gamut_codec_abi::Status::UNSUPPORTED.0 == -1);
