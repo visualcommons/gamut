@@ -81,3 +81,22 @@ fn libtiff_gray_is_decoded_by_gamut() {
         assert_eq!(got.as_samples(), src.as_slice(), "gray mismatch at {w}x{h}");
     }
 }
+
+/// A libtiff-written file under each of the four codes libtiff's `tiff.h` assigns beyond the
+/// specifications: `info` names the scheme, and decoding its data stays `Unsupported`.
+#[test]
+fn libtiff_only_compression_is_named_by_info_and_refused_by_decode() {
+    for (code, scheme) in [
+        (50000, gamut_tiff::Compression::Zstd),
+        (50001, gamut_tiff::Compression::Webp),
+        (34712, gamut_tiff::Compression::Jp2000),
+        (34887, gamut_tiff::Compression::Lerc),
+    ] {
+        let tiff = libtiff_oracle::encode_gray8_raw_strip(4, 2, code, &[0; 8])
+            .expect("libtiff writes the code");
+        let dec = TiffDecoder::new();
+        assert_eq!(dec.info(&tiff).expect("info").compression, scheme, "{code}");
+        let err = DecodeImage::<Gray8>::decode_image(&dec, &tiff).expect_err("decoded");
+        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported, "{code}");
+    }
+}

@@ -768,6 +768,69 @@ fn encode_packed_mode(
     std::fs::read(&path).map_err(|e| e.to_string())
 }
 
+/// Writes a single-strip 8-bit grayscale (`MINISBLACK`) TIFF whose `Compression` tag is
+/// `compression_code` and whose one strip is `strip`, verbatim, through `TIFFWriteRawStrip`.
+///
+/// This reaches the schemes this build of libtiff has no codec for (ZSTD, WebP, LERC, JPEG 2000 are
+/// configured off): libtiff still writes their code and lays out the directory exactly as it would
+/// for an encoded strip, so the file is libtiff-written in every byte but the strip payload, which
+/// the caller supplies and libtiff never inspects.
+///
+/// # Errors
+///
+/// Returns a message if libtiff refuses the code or fails to write.
+pub fn encode_gray8_raw_strip(
+    width: u32,
+    height: u32,
+    compression_code: u16,
+    strip: &[u8],
+) -> Result<Vec<u8>, String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("oracle.tiff");
+    let cpath = c_path(&path)?;
+    let mode = CString::new("w").map_err(|e| e.to_string())?;
+    // SAFETY: `cpath` and `mode` are valid NUL-terminated strings; the handle is closed before the
+    // file is read back, and `strip` outlives the `TIFFWriteRawStrip` call that copies from it.
+    unsafe {
+        let t = sys::TIFFOpen(cpath.as_ptr(), mode.as_ptr());
+        if t.is_null() {
+            return Err("TIFFOpen (write) failed".into());
+        }
+        // uint32 fields take a `u32` vararg; uint16 fields are promoted to `c_int`.
+        sys::TIFFSetField(t, sys::TIFFTAG_IMAGEWIDTH, width);
+        sys::TIFFSetField(t, sys::TIFFTAG_IMAGELENGTH, height);
+        sys::TIFFSetField(t, sys::TIFFTAG_BITSPERSAMPLE, 8 as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_SAMPLESPERPIXEL, 1 as c_int);
+        sys::TIFFSetField(
+            t,
+            sys::TIFFTAG_PHOTOMETRIC,
+            sys::PHOTOMETRIC_MINISBLACK as c_int,
+        );
+        let set = sys::TIFFSetField(t, sys::TIFFTAG_COMPRESSION, compression_code as c_int);
+        sys::TIFFSetField(
+            t,
+            sys::TIFFTAG_PLANARCONFIG,
+            sys::PLANARCONFIG_CONTIG as c_int,
+        );
+        sys::TIFFSetField(t, sys::TIFFTAG_ROWSPERSTRIP, height);
+        let written = if set == 1 {
+            sys::TIFFWriteRawStrip(t, 0, strip.as_ptr() as *mut c_void, strip.len() as _)
+        } else {
+            -1
+        };
+        sys::TIFFClose(t);
+        if set != 1 {
+            return Err(format!(
+                "TIFFSetField(Compression = {compression_code}) failed"
+            ));
+        }
+        if written < 0 {
+            return Err("TIFFWriteRawStrip failed".into());
+        }
+    }
+    std::fs::read(&path).map_err(|e| e.to_string())
+}
+
 /// Encodes 8-bit RGB as a **tiled** TIFF with `tile_w × tile_h` tiles at the given compression.
 ///
 /// # Errors
