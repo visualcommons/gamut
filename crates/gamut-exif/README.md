@@ -178,7 +178,10 @@ the catalogue and vendor enums are `#[non_exhaustive]`):
   note has no view until issue #1033), and Fujifilm's into a `FujifilmMakerNote` view
   (`MakerNote::fujifilm`, issue #981; Leica's Fujifilm-built bodies included, staked in
   `references/exif/fujifilm/`), and Apple's into an `AppleMakerNote` view (`MakerNote::apple`,
-  issue #976; after ExifTool's `Apple.pm`, staked in `references/exif/apple/`); every other
+  issue #976; after ExifTool's `Apple.pm`, staked in `references/exif/apple/`), and Nikon's into a
+  `NikonMakerNote` view (`MakerNote::nikon`, issue #979; all three Nikon dialects, the enciphered
+  `ShotInfo`/`ColorBalance`/`LensData` records kept opaque, staked in `references/exif/nikon/`);
+  every other
   vendor's are not yet — that is the rest of the per-vendor
   work of issue #418. Since issue #263 a parsed model records the
   note's absolute source offset and the writer **pins** the byte range there on a rewrite, so
