@@ -231,6 +231,88 @@ int oracle_jpeg_sampling_factors(const unsigned char *data, size_t len, unsigned
   return 0;
 }
 
+/* Decodes a lossless (SOF3, T.81 Annex H) JPEG of any sample precision 2..16 into interleaved
+ * 16-bit samples, through the scanline API whose sample width covers the frame's precision
+ * (8-bit up to P = 8, 12-bit up to 12, 16-bit above). The output colour space is pinned to the
+ * stream's own, since libjpeg-turbo refuses any colour conversion of a lossless image; the point
+ * transform is undone, so the samples are the reconstructed values shifted back up by Pt.
+ *
+ * Returns 0 on success (and fills the out-params + a malloc'd `*out_samples` of `*out_len`
+ * samples), 1 on a libjpeg error, 2 on allocation failure. */
+int oracle_jpeg_decode_lossless(const unsigned char *data, size_t len, unsigned int *out_width,
+                                unsigned int *out_height, unsigned int *out_channels,
+                                int *out_precision, unsigned short **out_samples,
+                                size_t *out_len) {
+  struct jpeg_decompress_struct cinfo;
+  struct oracle_error_mgr jerr;
+  /* volatile: read again in the longjmp handler, so neither may be cached in a register. */
+  unsigned short *volatile buf = NULL;
+  void *volatile row = NULL;
+
+  cinfo.err = jpeg_std_error(&jerr.pub);
+  jerr.pub.error_exit = oracle_error_exit;
+  jerr.pub.emit_message = oracle_emit_message;
+  if (setjmp(jerr.setjmp_buffer)) {
+    jpeg_destroy_decompress(&cinfo);
+    free(buf);
+    free(row);
+    return 1;
+  }
+
+  jpeg_create_decompress(&cinfo);
+  jpeg_mem_src(&cinfo, data, (unsigned long)len);
+  jpeg_read_header(&cinfo, TRUE);
+  cinfo.out_color_space = cinfo.jpeg_color_space;
+  jpeg_start_decompress(&cinfo);
+
+  int precision = cinfo.data_precision;
+  unsigned int width = cinfo.output_width;
+  unsigned int height = cinfo.output_height;
+  unsigned int channels = (unsigned int)cinfo.output_components;
+  size_t row_len = (size_t)width * channels;
+  size_t total = row_len * height;
+
+  buf = (unsigned short *)malloc((total ? total : 1) * sizeof(unsigned short));
+  /* Wide enough for one row in any of the three sample widths. */
+  row = malloc((row_len ? row_len : 1) * sizeof(unsigned short));
+  if (buf == NULL || row == NULL) {
+    jpeg_destroy_decompress(&cinfo);
+    free(buf);
+    free(row);
+    return 2;
+  }
+
+  while (cinfo.output_scanline < cinfo.output_height) {
+    unsigned short *dst = buf + (size_t)cinfo.output_scanline * row_len;
+    size_t i;
+    if (precision <= 8) {
+      JSAMPROW rowptr = (JSAMPROW)row;
+      jpeg_read_scanlines(&cinfo, &rowptr, 1);
+      for (i = 0; i < row_len; i++) dst[i] = ((JSAMPLE *)row)[i];
+    } else if (precision <= 12) {
+      J12SAMPROW rowptr = (J12SAMPROW)row;
+      jpeg12_read_scanlines(&cinfo, &rowptr, 1);
+      for (i = 0; i < row_len; i++) dst[i] = (unsigned short)((J12SAMPLE *)row)[i];
+    } else {
+      J16SAMPROW rowptr = (J16SAMPROW)row;
+      jpeg16_read_scanlines(&cinfo, &rowptr, 1);
+      for (i = 0; i < row_len; i++) dst[i] = ((J16SAMPLE *)row)[i];
+    }
+  }
+
+  jpeg_finish_decompress(&cinfo);
+  jpeg_destroy_decompress(&cinfo);
+  free(row);
+
+  *out_width = width;
+  *out_height = height;
+  *out_channels = channels;
+  *out_precision = precision;
+  *out_samples = buf;
+  *out_len = total;
+  return 0;
+}
+
 /* oracle_jpeg_encode plus embedded metadata: an optional raw APP1 payload (written verbatim via
  * jpeg_write_marker, e.g. "Exif\0\0" + TIFF) and an optional ICC profile (written via
  * jpeg_write_icc_profile, which produces the APP2 ICC_PROFILE chunk sequence).
@@ -311,15 +393,17 @@ int oracle_jpeg_encode_meta(const unsigned char *pixels, unsigned int width, uns
 
 /* Encodes interleaved 8-bit `pixels` (RGB when gray==0, grayscale when gray!=0) to a JPEG.
  *
- * `quality` is applied with force_baseline=TRUE. `h_samp`/`v_samp` set the luma sampling factors
+ * `quality` is applied with `force_baseline` (nonzero = TRUE, clamping every table entry to 255 as
+ * `cjpeg -baseline` does; zero = cjpeg's default, which keeps entries up to 32767 and so writes
+ * 16-bit Pq=1 tables and an SOF1 frame below quality 25). `h_samp`/`v_samp` set the luma sampling factors
  * (chroma stays 1x1): 1,1 = 4:4:4, 2,1 = 4:2:2, 2,2 = 4:2:0, 1,2 = 4:4:0. `progressive` selects a
  * default progressive script; `restart_interval` and `optimize_coding` map to the like-named cinfo fields.
  *
  * Returns 0 on success (and fills a malloc'd `*out`), 1 on a libjpeg error. */
 int oracle_jpeg_encode(const unsigned char *pixels, unsigned int width, unsigned int height,
-                       int gray, int quality, int h_samp, int v_samp, int progressive,
-                       unsigned int restart_interval, int optimize_coding, unsigned char **out,
-                       size_t *out_len) {
+                       int gray, int quality, int force_baseline, int h_samp, int v_samp,
+                       int progressive, unsigned int restart_interval, int optimize_coding,
+                       unsigned char **out, size_t *out_len) {
   struct jpeg_compress_struct cinfo;
   struct oracle_error_mgr jerr;
   /* volatile: re-read in the longjmp handler (jpeg_mem_dest writes it through the pointer). */
@@ -348,7 +432,7 @@ int oracle_jpeg_encode(const unsigned char *pixels, unsigned int width, unsigned
   }
 
   jpeg_set_defaults(&cinfo);
-  jpeg_set_quality(&cinfo, quality, TRUE);
+  jpeg_set_quality(&cinfo, quality, force_baseline ? TRUE : FALSE);
 
   if (!gray) {
     cinfo.comp_info[0].h_samp_factor = h_samp;

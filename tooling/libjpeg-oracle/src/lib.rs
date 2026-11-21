@@ -2,8 +2,9 @@
 //!
 //! gamut-jpeg's encoder must produce files the canonical reference decoder reads back to the same
 //! pixels, and gamut-jpeg's decoder must reproduce what libjpeg-turbo decodes. This crate wraps the
-//! reference encoder ([`encode`]) and decoder ([`decode`], [`decode_forced_rgb`],
-//! [`decode_nearest`]) behind a small,
+//! reference encoder ([`encode`], and [`encode_extended`] for cjpeg's default non-baseline quality
+//! mapping) and decoder ([`decode`], [`decode_forced_rgb`], [`decode_nearest`], and
+//! [`decode_lossless`] for SOF3 streams of any precision) behind a small,
 //! safe API returning owned buffers.
 //!
 //! libjpeg reports fatal errors via `setjmp`/`longjmp`, which cannot be driven from Rust, so the
@@ -72,12 +73,24 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> c_int;
     #[allow(clippy::too_many_arguments)]
+    fn oracle_jpeg_decode_lossless(
+        data: *const u8,
+        len: usize,
+        out_width: *mut c_uint,
+        out_height: *mut c_uint,
+        out_channels: *mut c_uint,
+        out_precision: *mut c_int,
+        out_samples: *mut *mut u16,
+        out_len: *mut usize,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
     fn oracle_jpeg_encode(
         pixels: *const u8,
         width: c_uint,
         height: c_uint,
         gray: c_int,
         quality: c_int,
+        force_baseline: c_int,
         h_samp: c_int,
         v_samp: c_int,
         progressive: c_int,
@@ -259,6 +272,90 @@ pub fn encode(
     height: u32,
     params: &EncodeParams,
 ) -> Result<Vec<u8>, String> {
+    encode_impl(pixels, width, height, params, true)
+}
+
+/// [`encode`] with `params.quality` applied as `cjpeg` applies it by default —
+/// `jpeg_set_quality(.., force_baseline = FALSE)` — rather than clamped to baseline: quantization
+/// table entries keep values up to 32767, so below quality 25 the stream carries 16-bit (`Pq = 1`)
+/// tables and an extended-sequential (SOF1) frame.
+///
+/// # Errors
+///
+/// As [`encode`].
+pub fn encode_extended(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    params: &EncodeParams,
+) -> Result<Vec<u8>, String> {
+    encode_impl(pixels, width, height, params, false)
+}
+
+/// A lossless (SOF3) JPEG decoded by libjpeg-turbo into interleaved 16-bit samples.
+pub struct DecodedLossless {
+    /// Image width in samples.
+    pub width: u32,
+    /// Image height in lines.
+    pub height: u32,
+    /// Components per sample.
+    pub channels: u32,
+    /// Sample precision `P` in bits, from the frame header.
+    pub precision: u8,
+    /// Interleaved samples (`width * height * channels`), the point transform undone.
+    pub samples: Vec<u16>,
+}
+
+/// Decodes a lossless (SOF3, T.81 Annex H) JPEG of any precision `2..=16` with libjpeg-turbo,
+/// leaving the stream's colour space untouched (libjpeg-turbo converts no lossless image).
+///
+/// # Errors
+///
+/// Returns an error message if libjpeg-turbo rejects the stream.
+pub fn decode_lossless(data: &[u8]) -> Result<DecodedLossless, String> {
+    let (mut width, mut height, mut channels): (c_uint, c_uint, c_uint) = (0, 0, 0);
+    let mut precision: c_int = 0;
+    let mut ptr: *mut u16 = std::ptr::null_mut();
+    let mut len: usize = 0;
+    // SAFETY: `data` is a valid slice and every out-param is a valid pointer. On success the shim
+    // sets `ptr`/`len` to a malloc'd buffer of `len` samples, copied out and freed below.
+    let rc = unsafe {
+        oracle_jpeg_decode_lossless(
+            data.as_ptr(),
+            data.len(),
+            &raw mut width,
+            &raw mut height,
+            &raw mut channels,
+            &raw mut precision,
+            &raw mut ptr,
+            &raw mut len,
+        )
+    };
+    match rc {
+        0 => {
+            // SAFETY: the shim returned a non-null malloc'd buffer of `len` u16 samples.
+            let samples = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+            unsafe { oracle_free(ptr.cast()) };
+            Ok(DecodedLossless {
+                width,
+                height,
+                channels,
+                precision: precision as u8,
+                samples,
+            })
+        }
+        2 => Err("libjpeg-oracle: allocation failed while decoding".to_string()),
+        _ => Err("libjpeg-oracle: libjpeg-turbo rejected the lossless JPEG stream".to_string()),
+    }
+}
+
+fn encode_impl(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    params: &EncodeParams,
+    force_baseline: bool,
+) -> Result<Vec<u8>, String> {
     let channels = if params.gray { 1usize } else { 3usize };
     let needed = width as usize * height as usize * channels;
     if pixels.len() < needed {
@@ -281,6 +378,7 @@ pub fn encode(
             height,
             c_int::from(params.gray),
             params.quality,
+            c_int::from(force_baseline),
             h_samp,
             v_samp,
             c_int::from(params.progressive),
@@ -641,5 +739,29 @@ mod tests {
             decode(truncated).is_err(),
             "truncated stream must decode to Err"
         );
+    }
+
+    #[test]
+    fn extended_quality_writes_sof1_and_baseline_quality_sof0() {
+        // Below quality 25 the unforced mapping leaves luma entries above 255, which libjpeg
+        // writes as a 16-bit table under SOF1; the forced mapping stays baseline (SOF0).
+        let (w, h) = (16, 16);
+        let params = EncodeParams {
+            quality: 10,
+            gray: true,
+            ..EncodeParams::default()
+        };
+        let px = gray_gradient(w, h);
+        let has = |jpeg: &[u8], marker: u8| jpeg.windows(2).any(|m| m == [0xFF, marker]);
+        let extended = encode_extended(&px, w, h, &params).expect("encode");
+        assert!(has(&extended, 0xC1) && !has(&extended, 0xC0));
+        let baseline = encode(&px, w, h, &params).expect("encode");
+        assert!(has(&baseline, 0xC0) && !has(&baseline, 0xC1));
+        assert!(decode(&extended).is_ok());
+    }
+
+    #[test]
+    fn lossless_decode_rejects_garbage() {
+        assert!(decode_lossless(&[0xFF, 0xD8, 0xFF]).is_err());
     }
 }
