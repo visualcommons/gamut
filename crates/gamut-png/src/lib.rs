@@ -140,7 +140,7 @@ pub use filter::{FilterStrategy, FilterType};
 /// [`DecodedPng::palette`]), re-exported so a caller needs no direct `gamut-core`
 /// dependency to spell them.
 pub use gamut_core::{DecodeLimits, Palette, convert::ConvertPolicy};
-/// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
+/// The DEFLATE compression level, accepted by [`PngEncoder::with_level`].
 pub use gamut_deflate::Level;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `PngMetadata::metadata` / `PngEncoder::with_metadata` without a direct dependency.

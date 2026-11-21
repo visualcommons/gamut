@@ -199,7 +199,7 @@ impl PngEncoder {
     /// `false` from [`ZlibDeflater::supports`] is skipped — the only fall-through; one that accepts
     /// and then fails, with any error, propagates it rather than falling back.
     ///
-    /// # Interaction with [`with_compression`](Self::with_compression)
+    /// # Interaction with [`with_level`](Self::with_level)
     ///
     /// A pushed deflater **bypasses the configured [`Level`]** (and the
     /// [`with_deflate_passes`](Self::with_deflate_passes) budget) for every stream it accepts: `Level` is a
@@ -267,7 +267,7 @@ impl PngEncoder {
     /// Sets the DEFLATE compression [`Level`] used for the image data. [`Level::Best`] is the
     /// space-efficient (slow) setting.
     #[must_use]
-    pub fn with_compression(mut self, level: Level) -> Self {
+    pub fn with_level(mut self, level: Level) -> Self {
         self.level = level;
         self
     }
@@ -2084,7 +2084,7 @@ mod tests {
         let src = long_unrepeating_row();
         let img = ImageRef::<Gray8>::new(&src, Dimensions::new(40_000, 1).unwrap()).unwrap();
         let mut png = Vec::new();
-        configure(PngEncoder::new().with_compression(Level::Best))
+        configure(PngEncoder::new().with_level(Level::Best))
             // The optimal parse is the only consumer of the limit, and refinement passes are the
             // expensive part of `Level::Best`; the seed parse alone already spans.
             .with_deflate_passes(0)

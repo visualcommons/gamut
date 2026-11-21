@@ -57,7 +57,7 @@ fn gamut_rgb8_is_decoded_by_libpng() {
             let dims = Dimensions::new(w, h).unwrap();
             let mut png = Vec::new();
             PngEncoder::new()
-                .with_compression(level)
+                .with_level(level)
                 .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
                 .expect("encode");
 
@@ -116,7 +116,7 @@ fn filtering_shrinks_a_gradient() {
         let mut png = Vec::new();
         PngEncoder::new()
             .with_filter(strategy)
-            .with_compression(Level::Best)
+            .with_level(Level::Best)
             .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
             .expect("encode");
         png.len()
@@ -140,7 +140,7 @@ macro_rules! check_8bit {
             .collect();
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_compression(Level::Best)
+            .with_level(Level::Best)
             .encode_image(
                 ImageRef::<$ty>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut png,
@@ -161,7 +161,7 @@ macro_rules! check_16bit {
         let src: Vec<u16> = (0..n).map(|i| (i.wrapping_mul(1009)) as u16).collect();
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_compression(Level::Best)
+            .with_level(Level::Best)
             .encode_image(
                 ImageRef::<$ty>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
                 &mut png,
@@ -209,7 +209,7 @@ fn indexed8_with_palette_and_transparency_round_trips() {
 
     let mut png = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .encode_indexed8(
             ImageRef::<Indexed8>::new(&indices, Dimensions::new(w, h).unwrap()).unwrap(),
             &palette,
@@ -412,7 +412,7 @@ fn bilevel_round_trips_as_1bit_gray() {
         .collect();
     let mut png = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .encode_image(
             ImageRef::<Bilevel>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut png,
@@ -436,7 +436,7 @@ fn ancillary_chunks_are_accepted_by_libpng() {
     let comment = "the quick brown fox ".repeat(20);
     let mut png = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .with_gamma(45_455)
         .with_srgb(SrgbIntent::Perceptual)
         .with_chromaticities(gamut_png::Chromaticities::new(
@@ -521,7 +521,7 @@ fn metadata_chunks_embed_and_image_survives() {
 
     let mut png = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .with_exif(&exif)
         .with_icc_profile_name("test profile")
         .with_icc_profile(&icc)
@@ -608,7 +608,7 @@ fn auto_reduce_cases() -> (Dimensions, [AutoReduceCase; 3]) {
 fn encode_auto_reduced(src: &[u8], dims: Dimensions) -> Vec<u8> {
     let mut out = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .with_auto_reduce(true)
         .encode_image(ImageRef::<Rgba8>::new(src, dims).unwrap(), &mut out)
         .expect("encode");
@@ -665,7 +665,7 @@ fn a_palette_is_chosen_when_it_actually_wins() {
 
     let mut plain = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .encode_image(ImageRef::<Rgba8>::new(&src, dims).unwrap(), &mut plain)
         .expect("encode");
     assert!(
@@ -705,7 +705,7 @@ fn auto_reduce_makes_a_greyscale_image_strictly_smaller() {
     let reduced = encode_auto_reduced(gray, dims);
     let mut full = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .encode_image(ImageRef::<Rgba8>::new(gray, dims).unwrap(), &mut full)
         .expect("encode");
 
@@ -725,7 +725,7 @@ fn extended_auto_reduce_covers_grey_and_sixteen_bit_inputs() {
     let dims = Dimensions::new(w, h).unwrap();
     let encoder = || {
         PngEncoder::new()
-            .with_compression(Level::Best)
+            .with_level(Level::Best)
             .with_auto_reduce(true)
     };
 
@@ -804,7 +804,7 @@ fn extended_auto_reduce_covers_grey_and_sixteen_bit_inputs() {
     // The demotion must beat the unreduced 16-bit encoding.
     let mut full = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .encode_image(ImageRef::<Rgba16>::new(&rgba16, dims).unwrap(), &mut full)
         .expect("encode");
     assert!(
@@ -843,7 +843,7 @@ fn brute_force_filtering_round_trips_and_is_competitive() {
     let encode = |filter| {
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_compression(Level::Best)
+            .with_level(Level::Best)
             .with_auto_reduce(false)
             .with_filter(filter)
             .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
@@ -867,7 +867,7 @@ fn solid_image_round_trips() {
     let src = vec![0x7Fu8; (w * h * 3) as usize];
     let mut png = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .encode_image(
             ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut png,
@@ -965,7 +965,7 @@ fn a_small_palette_is_packed_to_a_sub_byte_index_depth() {
 
     let mut plain = Vec::new();
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .encode_image(ImageRef::<Rgba8>::new(&src, dims).unwrap(), &mut plain)
         .expect("encode");
     assert!(

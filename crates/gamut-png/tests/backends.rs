@@ -195,7 +195,7 @@ fn default_output_is_byte_identical_across_colour_types_and_depths() {
     out.clear();
 
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .with_filter(FilterStrategy::BruteForce)
         .encode_image(
             ImageRef::<Rgb8>::new(&rgb8, dims()).expect("rgb8"),
@@ -206,7 +206,7 @@ fn default_output_is_byte_identical_across_colour_types_and_depths() {
     out.clear();
 
     PngEncoder::new()
-        .with_compression(Level::Fast)
+        .with_level(Level::Fast)
         .encode_image(
             ImageRef::<Rgb8>::new(&rgb8, dims()).expect("rgb8"),
             &mut out,
@@ -351,7 +351,7 @@ impl ZlibDeflater for ScriptedDeflater {
             Act::Work | Act::Produce(_) => {
                 let mut zlib = Vec::new();
                 // Deliberately *not* the encoder's configured level: this is what proves a pushed
-                // backend bypasses `with_compression`.
+                // backend bypasses `with_level`.
                 DeflateEncoder::new()
                     .with_level(Level::Fast)
                     .zlib_compress(raw, &mut zlib);
@@ -610,13 +610,13 @@ fn an_accepted_then_failed_deflater_propagates_and_the_tail_is_not_used() {
 }
 
 #[test]
-fn a_pushed_deflater_bypasses_with_compression_but_the_tail_still_honours_it() {
+fn a_pushed_deflater_bypasses_with_level_but_the_tail_still_honours_it() {
     let rgb8 = rgb8_samples();
     let image = ImageRef::<Rgb8>::new(&rgb8, dims()).expect("rgb8");
 
     // The backend always compresses at Level::Fast, whatever the encoder is configured with.
     let mut accepted = Vec::new();
-    let mut encoder = PngEncoder::new().with_compression(Level::Best);
+    let mut encoder = PngEncoder::new().with_level(Level::Best);
     encoder.push_backend(ScriptedDeflater::new("fast", true, Act::Work, &log()));
     encoder.encode_image(image, &mut accepted).expect("encode");
     assert_eq!(
@@ -629,7 +629,7 @@ fn a_pushed_deflater_bypasses_with_compression_but_the_tail_still_honours_it() {
     // The same encoder, with the backend declining, honours Level::Best again.
     let mut declined = Vec::new();
     let mut encoder = PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .with_filter(FilterStrategy::BruteForce);
     encoder.push_backend(ScriptedDeflater::new("nope", false, Act::Work, &log()));
     encoder.encode_image(image, &mut declined).expect("encode");

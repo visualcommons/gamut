@@ -98,6 +98,7 @@ fn assert_matches_oracle(png: &[u8], context: &str) {
         PngImage::GrayAlpha16(img) => be_bytes(img.as_samples()),
         PngImage::Rgb16(img) => be_bytes(img.as_samples()),
         PngImage::Rgba16(img) => be_bytes(img.as_samples()),
+        other => panic!("{context}: no libpng sample layout for {other:?}"),
     };
     assert_eq!(actual, expected, "{context}: samples");
 }
