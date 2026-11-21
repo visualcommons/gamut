@@ -145,11 +145,11 @@ fn a_strip_past_the_end_of_file_is_not_fully_classified() {
     // built from.
     ifd0.set(273, Value::Long(vec![100_000])); // StripOffsets
     ifd0.set(279, Value::Long(vec![16])); // StripByteCounts
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
 
     let report = deconstruct(&bytes).expect("deconstruct");
@@ -171,11 +171,11 @@ fn unknown_private_tag_is_flagged() {
     // A minimal IFD 0: declare DNGVersion plus a private (unknown) tag.
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     ifd0.set(0x9999, Value::Long(vec![42])); // private/unknown tag
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
@@ -194,11 +194,11 @@ fn unknown_compression_code_is_flagged() {
     let mut ifd0 = gamut_ifd::Ifd::new();
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     ifd0.set(259, Value::Short(vec![999])); // Compression: not a recognised DNG code
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
@@ -266,11 +266,11 @@ fn private_tag_inside_the_raw_sub_ifd_is_flagged() {
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     ifd0.set_sub_ifd(330, vec![raw_ifd]);
     ifd0.set_sub_ifd(34665, vec![exif]);
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
@@ -293,11 +293,11 @@ fn tiled_image_missing_tile_pair_is_flagged() {
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     ifd0.set(256, Value::Short(vec![4])); // ImageWidth
     ifd0.set(322, Value::Short(vec![16])); // TileWidth, but no offsets/counts
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
@@ -366,11 +366,11 @@ fn sub_ifd_skip_reasons_map_to_distinct_details() {
         parent.set_sub_ifd(330, vec![ifd]);
         ifd = parent;
     }
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd],
+    ))
     .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
@@ -390,11 +390,11 @@ fn big_endian_camera_profile_is_walked_cleanly() {
 
     let mut profile = gamut_ifd::Ifd::new();
     profile.set(50936, Value::Ascii("Standard".into())); // ProfileName
-    let mut stream = write(&TiffFile {
-        order: ByteOrder::BigEndian,
-        variant: Variant::Classic,
-        ifds: vec![profile],
-    })
+    let mut stream = write(&TiffFile::new(
+        ByteOrder::BigEndian,
+        Variant::Classic,
+        vec![profile],
+    ))
     .expect("write profile");
     // Patch the TIFF magic (42) to the camera-profile magic (0x4352), big-endian.
     stream[2] = 0x43;
@@ -403,19 +403,19 @@ fn big_endian_camera_profile_is_walked_cleanly() {
     let mut ifd0 = gamut_ifd::Ifd::new();
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     ifd0.set(50933, Value::Long(vec![0])); // ExtraCameraProfiles: patched below
-    let probe = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0.clone()],
-    })
+    let probe = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0.clone()],
+    ))
     .expect("probe");
     let base = gamut_ifd::align_word(probe.len() as u64);
     ifd0.set(50933, Value::Long(vec![base as u32]));
-    let mut bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let mut bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     bytes.resize(base as usize, 0);
     bytes.extend_from_slice(&stream);
@@ -433,11 +433,11 @@ fn missing_strip_byte_counts_is_flagged() {
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     ifd0.set(256, Value::Short(vec![4])); // ImageWidth: an image IFD...
     ifd0.set(273, Value::Long(vec![1000])); // ...with StripOffsets but no StripByteCounts
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
@@ -459,11 +459,11 @@ fn image_ifd_without_pixel_data_warns() {
     let mut ifd0 = gamut_ifd::Ifd::new();
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     ifd0.set(256, Value::Short(vec![4])); // ImageWidth, but neither strips nor tiles
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
@@ -509,11 +509,11 @@ fn unparseable_camera_profile_is_flagged() {
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     // ExtraCameraProfiles pointing at bytes that are not a camera-profile stream.
     ifd0.set(50933, Value::Long(vec![4]));
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
@@ -537,11 +537,11 @@ fn unknown_field_type_entry_is_reported_and_preserved() {
     let mut ifd0 = gamut_ifd::Ifd::new();
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     ifd0.set(0x9999, Value::Long(vec![42]));
-    let mut bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let mut bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     // Entry records start at 10 (header 8 + count 2), sorted by tag — 0x9999 (39321) sorts
     // before DNGVersion (50706), so its type code sits at 10 + 2.
@@ -562,11 +562,11 @@ fn malformed_color_matrix_is_flagged() {
     ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
     // ColorMatrix1 (50721) must be nine rationals; give it three.
     ifd0.set(50721, Value::SRational(vec![(1, 1), (0, 1), (0, 1)]));
-    let bytes = write(&TiffFile {
-        order: ByteOrder::LittleEndian,
-        variant: Variant::Classic,
-        ifds: vec![ifd0],
-    })
+    let bytes = write(&TiffFile::new(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        vec![ifd0],
+    ))
     .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(

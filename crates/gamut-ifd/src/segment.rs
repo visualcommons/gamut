@@ -308,7 +308,11 @@ impl SegmentMap {
 
 /// The result of resolving a [`SegmentMap`]: every byte of the file classified, or the precise
 /// account of what was not.
+///
+/// `#[non_exhaustive]`: a report is the type most likely to grow a field. Only
+/// [`SegmentMap::finish`] builds one.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SegmentReport {
     /// The total size of the file, in bytes.
     pub file_len: u64,

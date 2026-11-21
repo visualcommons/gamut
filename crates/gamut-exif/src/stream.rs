@@ -659,11 +659,11 @@ mod tests {
     fn blob() -> Vec<u8> {
         let mut image = Ifd::new();
         image.set(0x010F, Value::Ascii("Canon".into()));
-        let tiff = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image],
-        })
+        let tiff = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image],
+        ))
         .expect("write");
         let mut out = MARKER.to_vec();
         out.extend(tiff);
@@ -754,11 +754,11 @@ mod tests {
         image.set(0x010F, Value::Ascii("Canon".into()));
         image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
         image.set_sub_ifd(GPS_IFD_POINTER, vec![gps]);
-        let tiff = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image],
-        })
+        let tiff = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image],
+        ))
         .expect("write");
         let mut out = MARKER.to_vec();
         out.extend(tiff);
@@ -806,11 +806,11 @@ mod tests {
         let mut trailing = Ifd::new();
         trailing.set(0x0131, Value::Ascii("trailing".into())); // Software
 
-        let mut tiff = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image, thumb, trailing],
-        })
+        let mut tiff = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image, thumb, trailing],
+        ))
         .expect("write");
 
         // The payload goes after the directories, so the sentinel is patched to where it lands.
@@ -890,11 +890,11 @@ mod tests {
         for (tag, value) in fields {
             thumb.set(*tag, value.clone());
         }
-        let tiff = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image, thumb],
-        })
+        let tiff = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image, thumb],
+        ))
         .expect("write");
         let mut out = MARKER.to_vec();
         out.extend(tiff);
@@ -1392,11 +1392,11 @@ mod tests {
         exif.set_sub_ifd(INTEROP_IFD_POINTER, vec![interop]);
         image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
         image.set_sub_ifd(GPS_IFD_POINTER, vec![gps]);
-        let mut tiff = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image, thumb],
-        })
+        let mut tiff = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image, thumb],
+        ))
         .expect("write");
         let hits: Vec<usize> = tiff
             .windows(POISON.len())
@@ -1604,11 +1604,11 @@ mod tests {
             0x0131,
             Value::Ascii(String::from_utf8(POISON.to_vec()).expect("ascii")),
         );
-        let mut tiff = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image, thumb, trailing],
-        })
+        let mut tiff = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image, thumb, trailing],
+        ))
         .expect("write");
         let hits: Vec<usize> = tiff
             .windows(POISON.len())
@@ -1655,11 +1655,11 @@ mod tests {
         exif.set_sub_ifd(INTEROP_IFD_POINTER, vec![interop]);
         image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
         image.set_sub_ifd(GPS_IFD_POINTER, vec![gps]);
-        let mut tiff = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image, thumb],
-        })
+        let mut tiff = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image, thumb],
+        ))
         .expect("write");
         let [lo, hi] = (DUPLICATE + 1).to_le_bytes();
         let survivor = [lo, hi, 3, 0, 1, 0, 0, 0, 2, 0, 0, 0]; // SHORT, count 1, value 2
@@ -1748,11 +1748,11 @@ mod tests {
         let mut trailing = Ifd::new();
         trailing.set(DUPLICATE, Value::Short(vec![1]));
         trailing.set(DUPLICATE + 1, Value::Short(vec![2]));
-        let mut tiff = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image, Ifd::new(), trailing],
-        })
+        let mut tiff = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image, Ifd::new(), trailing],
+        ))
         .expect("write");
         let at = tiff
             .windows(2)
@@ -1788,11 +1788,11 @@ mod tests {
         let mut image = Ifd::new();
         image.set(0x010F, Value::Ascii("Canon".into()));
         image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
-        let mut tiff = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image],
-        })
+        let mut tiff = write(&TiffFile::new(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![image],
+        ))
         .expect("write");
         let record = |tag: u16| {
             let [lo, hi] = tag.to_le_bytes();
