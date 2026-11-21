@@ -105,13 +105,19 @@ impl JxlSettings {
 /// means the file is lying about its own contents.
 pub(crate) fn decode_chunk(bytes: &[u8], cols: usize, rows: usize, spp: usize) -> Result<Vec<u16>> {
     // The chunk's size is the IFD's tile/strip geometry, which the header is checked against
-    // below, so the decoder is budgeted exactly that raster rather than gamut-jxl's general 64 MiB
-    // default: a single-strip raw can legitimately exceed it, and nothing beyond it is ever asked.
-    let budget = cols
-        .saturating_mul(rows)
-        .saturating_mul(spp)
-        .saturating_mul(2);
-    let decoder = JxlDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(budget));
+    // below, so the decoder is bounded to exactly that raster rather than the workspace's general
+    // default (32768 per side, 16384 × 16384 pixels): a single-strip raw can legitimately exceed
+    // it, and nothing beyond it is ever asked.
+    let side = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    let pixels = cols.saturating_mul(rows);
+    let budget = pixels.saturating_mul(spp).saturating_mul(2);
+    let decoder = JxlDecoder::new().with_limits(
+        DecodeLimits::new()
+            .with_max_width(side(cols))
+            .with_max_height(side(rows))
+            .with_max_pixels(u64::try_from(pixels).unwrap_or(u64::MAX))
+            .with_max_image_bytes(budget),
+    );
     let info = decoder.info(bytes)?;
     if info.is_float {
         return Err(Error::unsupported(
