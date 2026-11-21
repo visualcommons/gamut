@@ -7,7 +7,7 @@
 //! step before the table fills (at 2^width) and the decoder — which lags one entry — widens at
 //! 2^width − 1.
 
-use gamut_bitstream::BitWriter;
+use gamut_bitstream::{BitReader, BitWriter};
 use gamut_core::{Error, Result};
 
 const CLEAR: u32 = 256;
@@ -68,27 +68,6 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// A MSB-first bit reader over LZW-coded bytes.
-struct BitReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl BitReader<'_> {
-    /// Accumulated as `value * 2 + bit`, not `(value << 1) | bit`. Same result, but the bitwise
-    /// form had an equivalent mutant: the shift always leaves a zero in the low bit, where `|` and
-    /// `^` agree, so nothing could tell them apart (#110). Same shape as `ccitt::parse`.
-    fn read(&mut self, n: u32) -> Option<u32> {
-        let mut value = 0u32;
-        for _ in 0..n {
-            let byte = *self.data.get(self.pos / 8)?;
-            value = value * 2 + u32::from((byte >> (7 - (self.pos % 8))) & 1);
-            self.pos += 1;
-        }
-        Some(value)
-    }
-}
-
 /// Builds the initial string table: 256 single bytes plus the two reserved codes.
 fn init_table() -> Vec<Vec<u8>> {
     let mut table: Vec<Vec<u8>> = (0..=255u32).map(|b| vec![b as u8]).collect();
@@ -104,7 +83,7 @@ fn init_table() -> Vec<Vec<u8>> {
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream is truncated, a code is out of range, or the
 /// output is shorter than `expected`.
 pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
-    let mut reader = BitReader { data, pos: 0 };
+    let mut reader = BitReader::new(data);
     // Cap the pre-allocation so a malformed `expected` can't reserve a huge buffer up front; the
     // buffer still grows as the (input-bounded) decode produces bytes.
     let mut out = Vec::with_capacity(expected.min(1 << 16));
@@ -112,7 +91,9 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
     let mut width = 9u32;
     let mut prev: Option<u32> = None;
 
-    while let Some(code) = reader.read(width) {
+    // A final code cut short by the end of the strip ends the decode quietly, as EndOfInformation
+    // would: the read fails without moving the cursor, and the length check below decides.
+    while let Ok(code) = reader.get_bits(width) {
         if code == EOI {
             break;
         }
@@ -133,7 +114,7 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
             // `KwKwK`: the code names the entry being defined this step.
             let p = prev.ok_or_else(|| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "LZW: code before ClearCode")
-                    .with_byte_offset((reader.pos / 8) as u64)
+                    .with_byte_offset((reader.bit_position() / 8) as u64)
             })? as usize;
             let mut s = table[p].clone();
             s.push(table[p][0]);
@@ -141,7 +122,7 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
         } else {
             return Err(
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "LZW: code out of range")
-                    .with_byte_offset((reader.pos / 8) as u64),
+                    .with_byte_offset((reader.bit_position() / 8) as u64),
             );
         };
         out.extend_from_slice(&entry);
@@ -170,7 +151,7 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
             env!("CARGO_PKG_NAME"),
             "LZW: decoded fewer bytes than expected",
         )
-        .with_byte_offset((reader.pos / 8) as u64));
+        .with_byte_offset((reader.bit_position() / 8) as u64));
     }
     out.truncate(expected);
     Ok(out)
@@ -285,6 +266,30 @@ mod tests {
             writer.put_bits(code, 9);
         }
         writer.into_bytes()
+    }
+
+    /// A final code cut short by the end of the strip ends the decode quietly, like
+    /// `EndOfInformation`, and only the length check judges the result.
+    ///
+    /// Strips with no `EndOfInformation`, whose zero padding after the last code is too short to
+    /// hold another, are the case this keeps readable; the leniency is deliberate (#1110), so it is
+    /// pinned here on exact bytes rather than left to the encoder round trips, which always end
+    /// with `EndOfInformation`.
+    #[test]
+    fn a_partial_final_code_ends_the_decode_quietly() {
+        // ClearCode in 9 bits, then 7 padding bits: too few for the next code, so the decode
+        // stops with nothing owed and succeeds.
+        assert_eq!(decode(&[0x80, 0x00], 0).expect("lenient stop"), []);
+
+        // ClearCode, then the literal 0x41, then 6 padding bits. The cut-short third code is not
+        // an error of its own; the strip is short, and that is what is reported, at the byte the
+        // unread code starts in.
+        let error = decode(&[0x80, 0x10, 0x40], 2).unwrap_err();
+        assert_eq!(
+            error.static_message(),
+            Some("LZW: decoded fewer bytes than expected")
+        );
+        assert_eq!(error.byte_offset(), Some(2));
     }
 
     #[test]

@@ -854,19 +854,7 @@ exclude_re = [
     # same node forever — non-terminating, TIMEOUT-only. (`> -> <` truncates real chains and IS
     # caught by the trellis round-trip tests.)
     '^crates/gamut-jpeg/src/rd\.rs:273:19: replace > with (>=|==) in trellis_quantize$',
-    # gamut-tiff LZW `BitReader::read`, stubbed to a constant. It is a cursor-advance function
-    # whose caller loops until the cursor passes a bound, so a constant return removes the only
-    # thing that ends the loop -- non-terminating, and reportable only as a TIMEOUT (exit 3,
-    # gate-failing), never as a catchable behavioural escape. Same shape and justification as the
-    # gamut-jpeg entropy-reader hangs above: `Some(0)`/`Some(1)` is a code that is never EOI, so
-    # `decode`'s loop never reaches its terminating code and the string table grows without bound.
-    #
-    # (Its former sibling, CCITT G4 `reference_changes` stubbed to a constant, is no longer here:
-    # #585 bounded G4 `encode_row` by the changing elements it walks, so a stalled `a0` now runs
-    # out of steps and emits a wrong row that the round-trip tests reject.)
-    #
-    # The anchor names the return type and the two constants, so only these whole-body replacements
-    # match -- `with None`, which ends the loop, and every operator mutation inside the function stay
-    # in the survey.
-    '^crates/gamut-tiff/src/compression/lzw\.rs:82:9: replace BitReader<._>::read -> Option<u32> with Some\((0|1)\)$',
+    # (gamut-tiff's LZW `BitReader::read` stubbed to a constant used to be excluded here as a
+    # TIMEOUT-only hang. #1110 deleted that reader: LZW reads through gamut-bitstream's
+    # `BitReader`, whose mutants are scored by that crate's own tests, so the site is gone.)
 ]

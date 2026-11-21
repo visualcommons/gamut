@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub use g4::{g4_decode_strip, g4_encode_strip};
-use gamut_bitstream::BitWriter;
+use gamut_bitstream::{BitReader, BitWriter};
 use gamut_core::{Error, Result};
 
 /// Parsed code tables: run → (codeword value, bit length) for encoding, and (bit length,
@@ -137,27 +137,12 @@ pub fn mh_encode_strip(packed: &[u8], stored_row_bytes: usize, width: usize) -> 
     Ok(out.into_bytes())
 }
 
-/// A MSB-first bit reader over a strip's coded bytes.
-struct BitReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn read_bit(&mut self) -> Option<u8> {
-        let byte = self.data.get(self.pos / 8)?;
-        let bit = (byte >> (7 - (self.pos % 8))) & 1;
-        self.pos += 1;
-        Some(bit)
-    }
-
-    fn align_to_byte(&mut self) {
-        self.pos = self.pos.div_ceil(8) * 8;
-    }
+/// Skips to the next byte boundary, whatever the skipped fill bits hold: Modified Huffman starts
+/// each row on a byte boundary (TIFF 6.0 §10), and its fill bits carry no meaning. (The shared
+/// reader's `align` is AV1's `byte_alignment()`, which rejects non-zero padding.)
+fn skip_to_byte_boundary(r: &mut BitReader) -> Result<()> {
+    let position = r.bit_position();
+    r.skip_bits(position.next_multiple_of(8) - position)
 }
 
 /// Decodes one run-length code (white or black), returning its run length.
@@ -170,13 +155,13 @@ fn decode_code(r: &mut BitReader, white: bool) -> Result<u16> {
     let mut value = 0u32;
     let mut len = 0u8;
     loop {
-        let bit = r.read_bit().ok_or_else(|| {
+        let bit = r.get_bits(1).map_err(|_| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "CCITT: truncated code")
-                .with_byte_offset((r.pos / 8) as u64)
+                .with_byte_offset((r.bit_position() / 8) as u64)
         })?;
         // `value * 2 + bit`, not `(value << 1) | bit`: the shift leaves a zero in the low bit
         // where `|` and `^` agree, which made the bitwise form an equivalent mutant (#110).
-        value = value * 2 + u32::from(bit);
+        value = value * 2 + bit;
         len += 1;
         if let Some(&run) = dec.get(&(len, value)) {
             return Ok(run);
@@ -184,7 +169,7 @@ fn decode_code(r: &mut BitReader, white: bool) -> Result<u16> {
         if len >= 14 {
             return Err(
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "CCITT: invalid code")
-                    .with_byte_offset((r.pos / 8) as u64),
+                    .with_byte_offset((r.bit_position() / 8) as u64),
             );
         }
     }
@@ -211,7 +196,7 @@ fn decode_run(r: &mut BitReader, white: bool) -> Result<usize> {
 pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>> {
     let stored_row_bytes = width.div_ceil(8);
     let white_bit = 0u8;
-    let mut reader = BitReader { data, pos: 0 };
+    let mut reader = BitReader::new(data);
     let mut out = vec![0u8; stored_row_bytes * rows];
     for row in 0..rows {
         let dst = &mut out[row * stored_row_bytes..(row + 1) * stored_row_bytes];
@@ -226,7 +211,7 @@ pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>
                         env!("CARGO_PKG_NAME"),
                         "CCITT: consecutive zero-length runs make no row progress",
                     )
-                    .with_byte_offset((reader.pos / 8) as u64));
+                    .with_byte_offset((reader.bit_position() / 8) as u64));
                 }
                 previous_run_was_zero = true;
             } else {
@@ -237,7 +222,7 @@ pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>
                     env!("CARGO_PKG_NAME"),
                     "CCITT: run overruns the row",
                 )
-                .with_byte_offset((reader.pos / 8) as u64));
+                .with_byte_offset((reader.bit_position() / 8) as u64));
             }
             // Asked as a bool, not as a colour code compared against 1. With `white_bit` in
             // {0, 1}, `1 - white_bit` yields {1, 0} and the mutation `1 + white_bit` yields
@@ -256,7 +241,7 @@ pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>
             pos += run;
             white = !white;
         }
-        reader.align_to_byte();
+        skip_to_byte_boundary(&mut reader)?;
     }
     Ok(out)
 }
@@ -294,6 +279,21 @@ mod tests {
         roundtrip(&[pack(&alt)], w);
         let starts_black: Vec<u8> = (0..16).map(|i| u8::from(i < 5)).collect();
         roundtrip(&[pack(&starts_black)], w);
+    }
+
+    /// The second row is read from the byte boundary after the first, skipping its fill bits.
+    ///
+    /// The `starts_black` row codes in 17 bits (white 0, black 5, white 11), so the decoder must
+    /// skip 7 fill bits before the next row; every single-row fixture ends its strip there and
+    /// cannot see a wrong skip.
+    #[test]
+    fn rows_after_the_first_start_on_a_byte_boundary() {
+        let starts_black: Vec<u8> = (0..16).map(|i| u8::from(i < 5)).collect();
+        let alt: Vec<u8> = (0..16).map(|i| (i % 2) as u8).collect();
+        let packed = [pack(&starts_black), pack(&alt)].concat();
+        let enc = mh_encode_strip(&packed, 2, 16).expect("encode");
+        assert_eq!(enc[..3], [0b0011_0101, 0b0011_0100, 0b0000_0000]);
+        assert_eq!(mh_decode_strip(&enc, 2, 16).expect("decode"), packed);
     }
 
     /// A run whose length needs the make-up code for exactly 64.
@@ -337,7 +337,8 @@ mod tests {
 
     #[test]
     fn decode_errors_report_exact_byte_offsets() {
-        let mut truncated = BitReader { data: &[], pos: 8 };
+        let mut truncated = BitReader::new(&[0]);
+        truncated.skip_bits(8).expect("one whole byte");
         let error = decode_code(&mut truncated, true).expect_err("truncated code");
         assert_eq!(error.byte_offset(), Some(1));
         assert!(
