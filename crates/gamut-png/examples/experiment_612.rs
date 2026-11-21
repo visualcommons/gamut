@@ -306,7 +306,7 @@ fn inputs() -> Vec<Input> {
 /// `tests/size_contract.rs`'s `gamut_best` settings.
 fn encoder(cleanup: bool) -> PngEncoder {
     PngEncoder::new()
-        .with_compression(Level::Best)
+        .with_level(Level::Best)
         .with_filter(FilterStrategy::BruteForce)
         .with_auto_reduce(true)
         .with_transparent_cleanup(cleanup)

@@ -539,7 +539,7 @@ and depths: a `bKGD` sample is set at the input's depth and mapped exactly as th
 
 ### The effort ladder (issue #484)
 
-`with_compression`, `with_deflate_passes`, `with_filter`, `with_optimal_parse_limit` and
+`with_level`, `with_deflate_passes`, `with_filter`, `with_optimal_parse_limit` and
 `with_auto_reduce` are five independent knobs. Nothing mapped one choice onto a sensible
 combination of them, so a caller wanting the smallest file had to know that it means `Level::Best`
 *and* `FilterStrategy::BruteForce` *and* auto-reduce. `Effort` is that knowledge, named.

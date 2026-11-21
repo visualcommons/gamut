@@ -220,7 +220,8 @@ void gamut_avif_image_free(GamutAvifImage *image);
   primary or alpha item that is derived (`grid`/`iden`/`iovl`) or not AV1 has no single
   codestream and is `GAMUT_STATUS_UNSUPPORTED`.
 - **Not yet exposed**: the encoder knobs the Rust API has shipped since this slice —
-  `AvifEncoder::with_effort` and `with_threads` (issues #654, #655) — have no C setter yet; they
+  `AvifEncoder::with_effort` and `with_threads` (issues #654, #655), and the HDR metadata setters
+  `with_content_light_level` and `with_mastering_display` — have no C setter yet; they
   join with the rest of the consumer boundary (issue #242). AVIF decode waits for a codec-abi
   adapter for `Av1CodestreamDecoder` (above); the Rust registry, `AvifDecoder::with_backend`,
   already exists. Error messages: these entry points

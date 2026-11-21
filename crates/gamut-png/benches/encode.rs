@@ -104,7 +104,7 @@ impl Case {
         cleanup: bool,
     ) -> Vec<u8> {
         let encoder = PngEncoder::new()
-            .with_compression(level)
+            .with_level(level)
             .with_filter(filter)
             .with_auto_reduce(auto_reduce)
             .with_transparent_cleanup(cleanup);
