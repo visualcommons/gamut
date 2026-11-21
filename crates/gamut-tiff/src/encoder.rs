@@ -1355,6 +1355,40 @@ mod tests {
         assert!(out.is_empty(), "a refused encode writes nothing");
     }
 
+    /// Exactly the grey + alpha and RGBA layouts declare an alpha sample — each alternative of the
+    /// alpha match on its own — so no other layout is written with an `ExtraSamples` tag.
+    #[test]
+    fn sample_layout_marks_alpha_on_the_alpha_layouts_only() {
+        let alpha = [
+            SampleLayout::of::<GrayAlpha8>(1).alpha,
+            SampleLayout::of::<Rgba8>(1).alpha,
+            SampleLayout::of::<GrayAlpha16>(1).alpha,
+            SampleLayout::of::<Rgba16>(1).alpha,
+        ];
+        assert_eq!(alpha, [true; 4]);
+        let opaque = [
+            SampleLayout::of::<Gray8>(1).alpha,
+            SampleLayout::of::<Rgb8>(1).alpha,
+            SampleLayout::of::<Cmyk8>(1).alpha,
+            SampleLayout::of::<Bilevel>(1).alpha,
+            SampleLayout::of::<Gray16>(1).alpha,
+            SampleLayout::of::<Rgb16>(1).alpha,
+        ];
+        assert_eq!(opaque, [false; 6]);
+    }
+
+    /// A stored row is `width × samples × bits` rounded up to a byte: a 9-pixel bilevel row pads
+    /// to 2 bytes, and whole-byte rows divide exactly.
+    #[test]
+    fn sample_layout_sizes_a_stored_row_by_width_samples_and_depth() {
+        let rows = [
+            SampleLayout::of::<Bilevel>(9).stored_row_bytes,
+            SampleLayout::of::<Rgba8>(3).stored_row_bytes,
+            SampleLayout::of::<GrayAlpha16>(5).stored_row_bytes,
+        ];
+        assert_eq!(rows, [2, 12, 20]);
+    }
+
     /// Only §14's two predictors are written; the floating-point and DNG-only codes the shared
     /// `Predictor` also names are refused rather than silently encoded unpredicted.
     #[test]
