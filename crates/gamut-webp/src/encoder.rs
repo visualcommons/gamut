@@ -12,7 +12,7 @@ use core::ops::Range;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use gamut_color::{ColorRange, Planar8};
+use gamut_color::{ChromaDownsampling, ColorRange, Planar8};
 use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Pixel, Result, Rgb8, Rgba8};
 use gamut_riff::{
     Chunk, FourCc, MetadataChunks, Vp8xHeader, WebpChunkId, write_extended_preserving,
@@ -418,7 +418,7 @@ impl WebpEncoder {
         clean_under: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         // `from_rgb8_bt601` builds 4:2:0 planes by contract, which `try_from` re-checks.
-        let planar = Planar8::from_rgb8_bt601(rgb, ColorRange::Limited);
+        let planar = Planar8::from_rgb8_bt601(rgb, ColorRange::Limited, ChromaDownsampling::Box);
         let yuv = &match clean_under {
             None => Vp8Planes::try_from(planar)?,
             Some(alpha) => {

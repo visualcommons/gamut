@@ -93,6 +93,23 @@ pub fn libwebp_decode_yuv(webp: &[u8]) -> DecodedYuv {
 /// buffer size or a libwebp error.
 #[must_use]
 pub fn libwebp_rgba_to_yuv(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
+    rgba_to_yuv(rgba, width, height, false)
+}
+
+/// Runs libwebp's **sharp-YUV** RGB→YUV 4:2:0 conversion (`WebPPictureSharpARGBToYUVA`, what
+/// `cwebp -sharp_yuv` applies) on interleaved RGBA, returning the YUV planes. Unlike
+/// [`libwebp_rgba_to_yuv`] this is a bit-exact surface: gamut-color ports the algorithm exactly.
+/// libwebp falls back to its plain conversion below 4 pixels in either dimension
+/// (`kMinDimensionIterativeConversion`), so compare only at or above that. Panics (these are
+/// tests) on a bad buffer size or a libwebp error.
+#[must_use]
+pub fn libwebp_rgba_to_yuv_sharp(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
+    rgba_to_yuv(rgba, width, height, true)
+}
+
+/// The shared body of [`libwebp_rgba_to_yuv`] (`sharp = false`) and
+/// [`libwebp_rgba_to_yuv_sharp`] (`sharp = true`).
+fn rgba_to_yuv(rgba: &[u8], width: u32, height: u32, sharp: bool) -> DecodedYuv {
     let expected = width as usize * height as usize * 4;
     assert_eq!(
         rgba.len(),
@@ -102,7 +119,8 @@ pub fn libwebp_rgba_to_yuv(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
     // SAFETY: the picture is zero-initialised then Init-filled. With the default `use_argb = 0`,
     // `WebPPictureImportRGBA` runs libwebp's RGBA→YUV conversion in-line (see `Import` →
     // `ImportYUVAFromRGBA` in picture_csp_enc.c), filling the y/u/v planes (valid for `rows * stride`
-    // bytes), which we copy out per row before freeing the picture.
+    // bytes), which we copy out per row before freeing the picture. With `use_argb = 1` it fills
+    // the ARGB buffer instead, which `WebPPictureSharpARGBToYUVA` then converts into y/u/v.
     unsafe {
         let mut pic: libwebp_sys::WebPPicture = std::mem::zeroed();
         assert!(
@@ -111,10 +129,17 @@ pub fn libwebp_rgba_to_yuv(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
         );
         pic.width = width as c_int;
         pic.height = height as c_int;
+        pic.use_argb = c_int::from(sharp);
         assert!(
             libwebp_sys::WebPPictureImportRGBA(&mut pic, rgba.as_ptr(), width as c_int * 4) != 0,
             "WebPPictureImportRGBA failed"
         );
+        if sharp {
+            assert!(
+                libwebp_sys::WebPPictureSharpARGBToYUVA(&mut pic) != 0,
+                "WebPPictureSharpARGBToYUVA failed"
+            );
+        }
         let (w, h) = (width as usize, height as usize);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         let copy_plane = |ptr: *const u8, row_stride: usize, pw: usize, ph: usize| {

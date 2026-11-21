@@ -5,8 +5,8 @@ use gamut_core::{Dimensions, Error, Gray8, ImageRef, Result, Rgb8, Rgba8};
 use gamut_dsp::upsample::{libwebp, replicate, taps};
 
 use crate::cicp::ColorRange;
-use crate::format::{ChromaSubsampling, ChromaUpsampling};
-use crate::ycbcr::{RgbToYcbcr, bt601_rgb_to_ycbcr, bt601_ycbcr_to_rgb};
+use crate::format::{ChromaDownsampling, ChromaSubsampling, ChromaUpsampling};
+use crate::ycbcr::{RgbToYcbcr, bt601_rgb_to_ycbcr, bt601_rows, bt601_ycbcr_to_rgb, sharp};
 
 /// The pixel count `width * height` of a plane.
 ///
@@ -488,8 +488,15 @@ impl Planar8 {
     }
 
     /// Converts an interleaved 8-bit RGB image to BT.601 `Y/Cb/Cr` **4:2:0** planes in `range`
-    /// through the libwebp-exact VP8 layer ([`bt601_rgb_to_ycbcr`] per pixel), box-averaging each
-    /// 2×2 block of chroma (a partial edge block averages only the pixels that exist).
+    /// through the libwebp-exact VP8 layer, deriving chroma with `downsampling`.
+    ///
+    /// - [`ChromaDownsampling::Box`] converts each pixel with [`bt601_rgb_to_ycbcr`] and
+    ///   box-averages each 2×2 block of chroma (a partial edge block averages only the pixels that
+    ///   exist).
+    /// - [`ChromaDownsampling::Sharp`] is libwebp's sharp-YUV, byte for byte what
+    ///   `WebPPictureSharpARGBToYUVA` produces at [`ColorRange::Limited`]; at
+    ///   [`ColorRange::Full`] it matrixes with [`bt601_rgb_to_ycbcr`]'s full-range rows instead.
+    ///   It adjusts luma as well as chroma, so the luma plane differs from `Box`'s too.
     ///
     /// This is the WebP lossy path; see the [`ycbcr`](crate::ycbcr) module for why it is kept
     /// apart from the H.273 [`from_rgb8_matrix_subsampled`](Self::from_rgb8_matrix_subsampled).
@@ -497,36 +504,46 @@ impl Planar8 {
     /// # Examples
     ///
     /// ```
-    /// use gamut_color::{ChromaSubsampling, ColorRange, Planar8};
+    /// use gamut_color::{ChromaDownsampling, ChromaSubsampling, ColorRange, Planar8};
     /// use gamut_core::{Dimensions, ImageRef, Rgb8};
     ///
     /// let rgb = vec![128u8; 4 * 4 * 3]; // 4×4 flat gray
     /// let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(4, 4)?)?;
-    /// let yuv = Planar8::from_rgb8_bt601(img, ColorRange::Limited);
+    /// let yuv = Planar8::from_rgb8_bt601(img, ColorRange::Limited, ChromaDownsampling::Box);
     /// assert_eq!(yuv.subsampling(), ChromaSubsampling::Cs420);
     /// let [y, u, _] = yuv.planes();
     /// assert_eq!((y.len(), u.len()), (16, 4)); // full-resolution luma, 2×2-subsampled chroma
     /// # Ok::<(), gamut_core::Error>(())
     /// ```
     #[must_use]
-    pub fn from_rgb8_bt601(img: ImageRef<'_, Rgb8>, range: ColorRange) -> Self {
+    pub fn from_rgb8_bt601(
+        img: ImageRef<'_, Rgb8>,
+        range: ColorRange,
+        downsampling: ChromaDownsampling,
+    ) -> Self {
         let (width, height) = (img.width(), img.height());
         let (w, h) = (width as usize, height as usize);
         let px = img.as_samples();
-        // Full-resolution luma, plus full-resolution chroma averaged down below.
-        let mut y = vec![0u8; w * h];
-        let mut cb = vec![0u8; w * h];
-        let mut cr = vec![0u8; w * h];
-        for (i, rgb) in px.as_chunks::<3>().0.iter().enumerate() {
-            (y[i], cb[i], cr[i]) = bt601_rgb_to_ycbcr(rgb[0], rgb[1], rgb[2], range);
-        }
         let subsampling = ChromaSubsampling::Cs420;
-        let (cw, ch) = subsampling.chroma_dimensions(width, height);
-        let chroma = |p: &[u8]| downsample_box(p, w, h, cw as usize, ch as usize, 2, 2);
+        let planes = match downsampling {
+            ChromaDownsampling::Box => {
+                // Full-resolution luma, plus full-resolution chroma averaged down below.
+                let mut y = vec![0u8; w * h];
+                let mut cb = vec![0u8; w * h];
+                let mut cr = vec![0u8; w * h];
+                for (i, rgb) in px.as_chunks::<3>().0.iter().enumerate() {
+                    (y[i], cb[i], cr[i]) = bt601_rgb_to_ycbcr(rgb[0], rgb[1], rgb[2], range);
+                }
+                let (cw, ch) = subsampling.chroma_dimensions(width, height);
+                let chroma = |p: &[u8]| downsample_box(p, w, h, cw as usize, ch as usize, 2, 2);
+                [y, chroma(&cb), chroma(&cr)]
+            }
+            ChromaDownsampling::Sharp => sharp::rgb8_to_ycbcr420(px, w, h, bt601_rows(range)),
+        };
         Self {
             dims: img.dimensions(),
             subsampling,
-            planes: [y, chroma(&cb), chroma(&cr)],
+            planes,
         }
     }
 
@@ -1109,6 +1126,22 @@ mod tests {
 
     use crate::cicp::ColorRange::{Full, Limited};
 
+    /// `Sharp` routes to the sharp-YUV conversion with the range's own matrix rows, at the 4:2:0
+    /// geometry every `from_rgb8_bt601` buffer has.
+    #[test]
+    fn bt601_sharp_is_the_sharp_conversion_at_420() {
+        let (w, h) = (5usize, 3usize);
+        let rgb: Vec<u8> = (0..w * h * 3).map(|i| (i * 37 % 256) as u8).collect();
+        let img =
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w as u32, h as u32).unwrap()).unwrap();
+        for range in [Full, Limited] {
+            let yuv = Planar8::from_rgb8_bt601(img, range, ChromaDownsampling::Sharp);
+            assert_eq!(yuv.subsampling(), ChromaSubsampling::Cs420);
+            let expected = sharp::rgb8_to_ycbcr420(&rgb, w, h, bt601_rows(range));
+            assert_eq!(yuv.planes(), expected.each_ref().map(Vec::as_slice));
+        }
+    }
+
     #[test]
     fn bt601_box_subsample_matches_reference_for_varying_image() {
         // A spatially-varying 5x3 image (odd dims ⇒ partial edge blocks, incl. a 1-pixel corner) so
@@ -1127,7 +1160,7 @@ mod tests {
         }
         let img =
             ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w as u32, h as u32).unwrap()).unwrap();
-        let yuv = Planar8::from_rgb8_bt601(img, Full);
+        let yuv = Planar8::from_rgb8_bt601(img, Full, ChromaDownsampling::Box);
         let [luma, u, v] = yuv.planes();
         // 5x3 luma ⇒ chroma is ceil(5/2) x ceil(3/2) = 3 x 2, as literals. The odd sizes pin it.
         assert_eq!(yuv.plane_dimensions(1), Some((3, 2)));

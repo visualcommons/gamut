@@ -51,7 +51,7 @@ explicit `code_point`/`from_code_point` API rather than serde's representation.
 Stable at the current major (first released as 1.0 under issue #179); see [`STATUS.md`](STATUS.md) for the phase history, the frozen
 API policies, and the deferrals. Implemented today: 8-bit RGB ↔ identity 4:4:4 conversion
 ([`Planar8::from_rgb8_identity`] / [`Planar8::to_rgb8_identity`]), the CICP tables the AVIF
-`colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP: `Planar8::from_rgb8_bt601` /
+`colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP: `Planar8::from_rgb8_bt601`, with box or libwebp-exact sharp-YUV chroma downsampling (`ChromaDownsampling`) /
 `Planar8::to_rgb8_bt601`), the decoders' `ChromaUpsampling` choice (its reference-exact
 libjpeg-turbo, libwebp and libavif kernels live in `gamut-dsp`'s `upsample` module), the
 general H.273 §8.3 luma–chroma transform in both directions (`RgbToYcbcr` / `YcbcrMatrix`: BT.601 / BT.470 B,G / BT.709 / BT.2020-NCL, both

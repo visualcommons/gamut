@@ -224,7 +224,7 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
     // bit-exact, and chroma differs by ≤2 only because gamut box-averages 2×2 before converting while
     // libwebp sums-then-converts (a rounding-order difference). A regression to full-range — the bug
     // this fix closed — would shift luma by ~17 and fail the `assert_eq` below.
-    use gamut_color::{ColorRange, Planar8};
+    use gamut_color::{ChromaDownsampling, ColorRange, Planar8};
     use libwebp_oracle::libwebp_rgba_to_yuv;
 
     let chroma_max = |a: &[u8], b: &[u8]| {
@@ -239,7 +239,7 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
         let rgb = rgba_to_rgb(&rgba);
         let src =
             ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).expect("dims")).expect("rgb image");
-        let gamut = Planar8::from_rgb8_bt601(src, ColorRange::Limited);
+        let gamut = Planar8::from_rgb8_bt601(src, ColorRange::Limited, ChromaDownsampling::Box);
         let lib = libwebp_rgba_to_yuv(&rgba, w, h);
         assert_eq!(
             gamut.planes()[0],
@@ -254,6 +254,46 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
             chroma_max(gamut.planes()[2], &lib.v) <= 2,
             "V within 2 at {w}x{h}"
         );
+    }
+}
+
+#[test]
+fn gamut_sharp_yuv_matches_libwebp_bit_exactly() {
+    // Sharp-YUV is a port, not a re-derivation, so every plane must equal libwebp's
+    // `WebPPictureSharpARGBToYUVA` byte for byte. Odd widths and heights reach the padding column
+    // and the duplicated last row; the pattern's hard edges drive the working space into its
+    // clamps, and the photo-like content runs the refinement to its early exit. libwebp skips
+    // sharp-YUV below 4 pixels a side, so the matrix starts there.
+    use gamut_color::{ChromaDownsampling, ColorRange, Planar8};
+    use libwebp_oracle::fixtures::pattern_rgba;
+    use libwebp_oracle::libwebp_rgba_to_yuv_sharp;
+
+    for (w, h) in [
+        (4u32, 4u32),
+        (5, 7),
+        (16, 16),
+        (17, 9),
+        (64, 48),
+        (4, 255),
+        (255, 4),
+        (128, 96),
+        (300, 70),
+    ] {
+        for (label, rgba) in [
+            ("pattern", pattern_rgba(w, h)),
+            ("photo", photo_like_rgba(w, h, 0x5eed)),
+        ] {
+            let rgb = rgba_to_rgb(&rgba);
+            let src = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).expect("dims"))
+                .expect("rgb image");
+            let gamut =
+                Planar8::from_rgb8_bt601(src, ColorRange::Limited, ChromaDownsampling::Sharp);
+            let lib = libwebp_rgba_to_yuv_sharp(&rgba, w, h);
+            let [y, u, v] = gamut.planes();
+            assert_eq!(y, lib.y.as_slice(), "{label} Y at {w}x{h}");
+            assert_eq!(u, lib.u.as_slice(), "{label} U at {w}x{h}");
+            assert_eq!(v, lib.v.as_slice(), "{label} V at {w}x{h}");
+        }
     }
 }
 
