@@ -351,14 +351,42 @@ fn idat_stream_violations_are_rejected() {
 }
 
 #[test]
+fn the_default_limits_admit_a_photograph_and_refuse_past_libavifs_caps() {
+    // 6000 x 4000 RGB8 is 72 MB of samples, past the 64 MiB byte budget the default used to
+    // carry; the default now has none, and decodes it.
+    let (width, height) = (6000u32, 4000u32);
+    let row = width as usize * 3 + 1;
+    let photo = png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(width, height, 8, 2, 0)),
+        chunk(b"IDAT", &zlib(&vec![0; row * height as usize])),
+        chunk(b"IEND", &[]),
+    ]);
+    let decoded = decode(&photo).expect("a 6000x4000 RGB8 PNG decodes under the default");
+    assert_eq!(
+        (decoded.header.width, decoded.header.height),
+        (width, height)
+    );
+    // IHDR permits sides to 2^31 - 1 (§11.2.1); the default stops at 32768 per side and at
+    // 16384 x 16384 pixels, refused from the header alone.
+    for (w, h) in [(32769, 1), (1, 32769), (16384, 16385)] {
+        let wide = png_from_chunks(&[
+            chunk(b"IHDR", &ihdr_payload(w, h, 8, 0, 0)),
+            chunk(b"IDAT", &zlib(&[0; 16])),
+            chunk(b"IEND", &[]),
+        ]);
+        assert_unsupported(&wide, "past the default dimension or pixel cap");
+    }
+}
+
+#[test]
 fn bombs_and_limits_are_refused_before_allocation() {
-    // A giant declared image with a tiny IDAT: the default 64 MiB budget refuses it up front.
+    // A giant declared image with a tiny IDAT: the default dimension cap refuses it up front.
     let bomb = png_from_chunks(&[
         chunk(b"IHDR", &ihdr_payload(100_000, 100_000, 8, 2, 0)),
         chunk(b"IDAT", &zlib(&[0; 16])),
         chunk(b"IEND", &[]),
     ]);
-    assert_unsupported(&bomb, "dimension bomb hits the byte budget");
+    assert_unsupported(&bomb, "dimension bomb hits the dimension cap");
     // Arithmetic overflow of the sample count (2³¹−1 squared × RGBA16) must be InvalidInput,
     // not a wrap-around into a small allocation.
     let overflow = png_from_chunks(&[
