@@ -50,6 +50,12 @@
 //! [`exif_to_xmp`] is exiv2's `copyExifToXmp`; with the default
 //! [`ExifConflictPolicy::XmpWins`], [`xmp_to_exif`] is exiv2's `copyXmpToExif`.
 //!
+//! A companion tag ([`xmp_to_exif`] writes `SubSecTime*`, `GPSDateStamp` and the GPS `…Ref`
+//! beside their targets) shares its target's conflict: an EXIF that holds either one keeps both
+//! under [`ExifConflictPolicy::ExifWins`], and under [`ExifConflictPolicy::XmpWins`] a date with
+//! no fraction removes the `SubSecTime*` the EXIF held. exiv2 forces the companions over EXIF in
+//! both modes and leaves a stale `SubSecTime*` beside the new date.
+//!
 //! ```
 //! use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 //! use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
@@ -396,18 +402,48 @@ pub fn exif_to_xmp(exif: &Exif, xmp: &mut XmpMeta, policy: ExifConflictPolicy) {
 /// A tag already in `exif` is overwritten only under [`ExifConflictPolicy::XmpWins`]; a property
 /// whose value cannot be converted is skipped. The companion tags a conversion writes alongside
 /// its target — `SubSecTime*` beside a date, `GPSDateStamp` beside `GPSTimeStamp`, the `…Ref` beside
-/// a GPS coordinate — follow their target. Tags outside the mapping are never touched.
+/// a GPS coordinate — follow their target, so the conflict is decided for the target and its
+/// companion together: under [`ExifConflictPolicy::ExifWins`] the row is skipped when `exif`
+/// holds either of them, and under [`ExifConflictPolicy::XmpWins`] a written date with no
+/// fraction removes the `SubSecTime*` tag `exif` held, which would otherwise pair the new date
+/// with the old fraction. Tags outside the mapping are never touched.
 pub fn xmp_to_exif(xmp: &XmpMeta, exif: &mut Exif, policy: ExifConflictPolicy) {
     for row in ROWS {
-        if policy == ExifConflictPolicy::ExifWins && exif.get_tag(row.tag).is_some() {
+        if policy == ExifConflictPolicy::ExifWins
+            && [Some(row.tag), companion(row)]
+                .into_iter()
+                .flatten()
+                .any(|tag| exif.get_tag(tag).is_some())
+        {
             continue;
         }
         let Some(prop) = xmp.get(row.ns.uri(), row.name) else {
             continue;
         };
-        for (tag, value) in to_exif(prop, row, exif.byte_order()) {
+        let writes = to_exif(prop, row, exif.byte_order());
+        if writes.is_empty() {
+            continue;
+        }
+        // Every `SubSecTime*` tag lives in the Exif IFD. A fraction the date carries is written
+        // back below; checking first keeps a missing Exif IFD from being created empty.
+        if let Date(Some(subsec)) = row.conv
+            && exif.get_tag(subsec).is_some()
+        {
+            exif.exif_ifd_mut().remove(subsec.tag_id());
+        }
+        for (tag, value) in writes {
             exif.set_tag(tag, value);
         }
+    }
+}
+
+/// The companion tag `row`'s conversion writes beside its target, if any.
+fn companion(row: &Row) -> Option<ExifTag> {
+    match row.conv {
+        Date(subsec) => subsec,
+        GpsCoord(reference) => Some(reference),
+        GpsTime => Some(T::GpsDateStamp),
+        Plain(_) | Version | GpsVersion | Flash | Comment => None,
     }
 }
 
@@ -1122,6 +1158,65 @@ mod tests {
         assert_eq!(xmp.get_text(tiff, "Make"), Some("Nikon"));
         exif_to_xmp(&source, &mut xmp, ExifConflictPolicy::ExifWins);
         assert_eq!(xmp.get_text(tiff, "Make"), Some("Canon"));
+    }
+
+    #[test]
+    fn exif_wins_keeps_a_row_whose_companion_alone_the_exif_holds() {
+        let mut xmp = XmpMeta::new();
+        let ns = ExifNs.uri();
+        xmp.set_text(Photoshop.uri(), "DateCreated", "2024-05-06T07:08:09.5");
+        xmp.set_text(ns, "GPSLatitude", "37,46.5N");
+        xmp.set_text(ns, "GPSTimeStamp", "2008-07-19T12:34:56Z");
+
+        let mut target = exif();
+        target.set_tag(T::SubSecTimeOriginal, ascii("25"));
+        target.set_tag(T::GpsLatitudeRef, ascii("S"));
+        target.set_tag(T::GpsDateStamp, ascii("2001:02:03"));
+        xmp_to_exif(&xmp, &mut target, ExifConflictPolicy::ExifWins);
+        assert_eq!(target.get_tag(T::DateTimeOriginal), None);
+        assert_eq!(target.get_tag(T::SubSecTimeOriginal), Some(&ascii("25")));
+        assert_eq!(target.get_tag(T::GpsLatitude), None);
+        assert_eq!(target.get_tag(T::GpsLatitudeRef), Some(&ascii("S")));
+        assert_eq!(target.get_tag(T::GpsTimeStamp), None);
+        assert_eq!(target.get_tag(T::GpsDateStamp), Some(&ascii("2001:02:03")));
+    }
+
+    #[test]
+    fn xmp_wins_removes_the_old_fraction_beside_a_date_without_one() {
+        let mut xmp = XmpMeta::new();
+        xmp.set_text(Photoshop.uri(), "DateCreated", "2024-05-06T07:08:09");
+
+        let mut target = exif();
+        target.set_tag(T::DateTimeOriginal, ascii("2001:02:03 04:05:06"));
+        target.set_tag(T::SubSecTimeOriginal, ascii("25"));
+        xmp_to_exif(&xmp, &mut target, ExifConflictPolicy::XmpWins);
+        assert_eq!(target.datetime_original(), Some("2024:05:06 07:08:09"));
+        assert_eq!(target.get_tag(T::SubSecTimeOriginal), None);
+    }
+
+    #[test]
+    fn a_date_that_does_not_convert_keeps_the_old_fraction() {
+        let mut xmp = XmpMeta::new();
+        xmp.set_text(Photoshop.uri(), "DateCreated", "not a date");
+
+        let mut target = exif();
+        target.set_tag(T::SubSecTimeOriginal, ascii("25"));
+        xmp_to_exif(&xmp, &mut target, ExifConflictPolicy::XmpWins);
+        assert_eq!(target.get_tag(T::SubSecTimeOriginal), Some(&ascii("25")));
+    }
+
+    #[test]
+    fn a_date_without_a_fraction_creates_no_exif_ifd() {
+        let mut xmp = XmpMeta::new();
+        xmp.set_text(Xmp.uri(), "ModifyDate", "2024-05-06T07:08:09");
+
+        let mut target = exif();
+        xmp_to_exif(&xmp, &mut target, ExifConflictPolicy::XmpWins);
+        assert_eq!(
+            target.get_tag(T::DateTime),
+            Some(&ascii("2024:05:06 07:08:09"))
+        );
+        assert!(target.exif_ifd().is_none());
     }
 
     #[test]
