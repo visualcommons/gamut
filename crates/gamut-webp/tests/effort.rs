@@ -565,7 +565,7 @@ fn tiled_rgba(w: u32, h: u32) -> Vec<u8> {
 /// fewer header bits on a worse prediction. Only the VP8L ladder claims monotonicity.
 ///
 /// The lossy RGBA columns also carry the `ALPH` chunk, which is coded at the same rung (#1203):
-/// rungs 0-2 spend a cheaper VP8L search on the alpha plane than the default (rung 0's is far the
+/// rungs 0-3 spend a cheaper VP8L search on the alpha plane than the default (rung 0's is far the
 /// largest), and rungs 5-6 search all four `ALPH` pre-filters.
 #[test]
 fn every_effort_rung_pins_its_output_bytes() {
