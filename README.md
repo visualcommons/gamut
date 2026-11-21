@@ -64,7 +64,11 @@ implementation wins.
 
 ### Author's Remarks
 
-In 2026, `gamut` started when there were no robust, well-tested Rust implementations of various image and color primitives. We want this to be the de-facto, permissivel-licensed choice for most color and image needs, primarily for professional use cases. Implementing this ecosystem of libraries (crates) without commercial backing is also made possible when image formats are spec-driven and LLM agents sufficiently speed up work (when used correctly).
+`gamut` started in 2026, when there were no robust, well-tested Rust implementations of many
+image and colour primitives. We want it to be the de facto, permissively licensed choice for most
+colour and image needs, primarily for professional use cases. Building an ecosystem of crates this
+size without commercial backing is feasible because image formats are spec-driven, and because LLM
+agents, used correctly, speed the work up considerably.
 
 ### Scope
 
