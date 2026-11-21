@@ -220,9 +220,10 @@ impl FilterScan {
 #[non_exhaustive]
 pub enum SkippedFilterScan {
     /// The image the header describes is larger than this reader's byte budget, so the walk
-    /// declined to inflate a stream a decode would refuse to allocate. **Nothing is known to be
-    /// wrong with the file** — it may be a perfectly sound very large PNG, read by raising
-    /// [`DeconstructLimits::max_image_bytes`].
+    /// declined to inflate its stream — a stream a decoder given the same budget would refuse to
+    /// allocate, though a default [`PngDecoder`](crate::PngDecoder), which sets no byte budget,
+    /// may well decode it. **Nothing is known to be wrong with the file** — it may be a perfectly
+    /// sound very large PNG, read by raising [`DeconstructLimits::max_image_bytes`].
     OverBudget = 0,
     /// The IDAT stream is not a valid zlib stream, is truncated, or inflates past the length the
     /// header implies.
