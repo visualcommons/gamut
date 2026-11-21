@@ -181,8 +181,10 @@ impl fmt::Debug for HeifDecoder {
 
 impl HeifDecoder {
     /// A decoder with no backend, the default [`DecodeLimits`], and
-    /// [`ChromaUpsampling::Nearest`] — the nearest-neighbour, co-sited reconstruction this crate
-    /// has always presented with.
+    /// [`ChromaUpsampling::Nearest`] — the nearest-neighbour reconstruction libheif's own default
+    /// decode runs. libheif prefers bilinear but does not insist on it, and its colour pipeline
+    /// then takes the cheaper one-step nearest-neighbour conversion; bilinear runs only when a
+    /// caller forces it (`heif-dec -C bilinear`).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -214,7 +216,8 @@ impl HeifDecoder {
     }
 
     /// Selects how 4:2:0 and 4:2:2 chroma is reconstructed before colour conversion on the RGBA
-    /// surfaces. The default is [`ChromaUpsampling::Nearest`].
+    /// surfaces. The default is [`ChromaUpsampling::Nearest`], libheif's default;
+    /// [`ChromaUpsampling::Interpolated`] is libavif's bilinear filter, not libheif's forced one.
     #[must_use]
     pub fn with_chroma_upsampling(mut self, upsampling: ChromaUpsampling) -> Self {
         self.options = self.options.with_chroma_upsampling(upsampling);
