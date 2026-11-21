@@ -292,13 +292,13 @@ mod tests {
         ifd
     }
 
-    /// Only the first `ExtraSamples` value is reported; an empty list reads as no tag, and a code
-    /// past §18's three is refused, even in second place it would never be read from.
+    /// Only the first `ExtraSamples` value is read — so an unassigned code after it goes unread —
+    /// an empty list reads as no tag, and an unassigned first code is refused.
     #[test]
     fn page_info_reports_the_first_extra_sample() {
         let info = |extra| page_info(&extra_samples_ifd(extra), ByteOrder::LittleEndian);
         assert_eq!(
-            info(vec![1, 0]).unwrap().extra_sample,
+            info(vec![1, 3]).unwrap().extra_sample,
             Some(ExtraSample::AssociatedAlpha)
         );
         assert_eq!(info(vec![]).unwrap().extra_sample, None);
