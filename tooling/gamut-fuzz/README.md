@@ -161,12 +161,12 @@ defect, not a restatement of a documented default:
 
 | target | crate | entry points | configuration |
 |---|---|---|---|
-| `png_decode` | `gamut-png` | `PngDecoder::decode` (the rich path: every ancillary payload inflated) | default — 64 MiB sample budget, 16 MiB metadata budget |
-| `jpeg_decode` | `gamut-jpeg` | `JpegDecoder::metadata`, `DecodeImage<Rgb8>` | default (#1024): a 64 MiB raster budget with dimensions at the format's 16-bit ceiling. The target restates it explicitly through `with_limits`. `permissive` policy, so CMYK/YCCK converts |
-| `webp_decode` | `gamut-webp` | `DecodeImage<Rgba8>` | default — no configurable limit (#1025); the 14-bit frame dimensions bound it, but not inside libFuzzer's 2048 MB RSS limit: a conformant 16 384 × 16 384 lossless frame peaks above it, so an OOM report needs the triage the target's doc gives |
+| `png_decode` | `gamut-png` | `PngDecoder::decode` (the rich path: every ancillary payload inflated) | a 64 MiB sample budget set by the target (the default sets none since #1226), 16 MiB metadata budget |
+| `jpeg_decode` | `gamut-jpeg` | `JpegDecoder::metadata`, `DecodeImage<Rgb8>` | explicit `with_limits`: a 64 MiB raster budget with dimensions at the format's 16-bit ceiling (the default from #1024 until #1226). `permissive` policy, so CMYK/YCCK converts |
+| `webp_decode` | `gamut-webp` | `DecodeImage<Rgba8>` | a 64 MiB frame budget set by the target (#1025's `with_limits`), since the default admits a conformant 16 384 × 16 384 lossless frame that peaks above libFuzzer's 2048 MB RSS limit |
 | `riff_chunks` | `gamut-riff` | `RiffReader` (to `None`), `MetadataChunks::read`, `WebpLayout::parse`, `c2pa_summary` | — |
-| `jxl_decode` | `gamut-jxl` | `info`, `embedded_icc_profile`, `metadata_boxes`, `DecodeImage<Rgba8>`, and `decode_partial` where the full decode fails | default `DecodeLimits` (64 MiB of decoded samples, beneath the fixed `1 << 28`-sample jxl-rs ceiling); `decode` feature only (no libjxl build); `permissive` policy |
-| `av1_inspect` | `gamut-av1` | `Av1Decoder::inspect` | default `DecodeLimits` |
+| `jxl_decode` | `gamut-jxl` | `info`, `embedded_icc_profile`, `metadata_boxes`, `DecodeImage<Rgba8>`, and `decode_partial` where the full decode fails | a 64 MiB `DecodeLimits` byte budget set by the target (beneath the fixed `1 << 28`-sample jxl-rs ceiling); `decode` feature only (no libjxl build); `permissive` policy |
+| `av1_inspect` | `gamut-av1` | `Av1Decoder::inspect` | default `DecodeLimits` (headers only, nothing frame-sized allocated) |
 | `icc_parse` | `gamut-icc` | `IccProfile::parse` | lenient (strict only adds refusals) |
 | `exif_parse` | `gamut-exif` | `ExifReader::parse_with_report`, then `gps`, `thumbnail_bytes`, `MakerNote::canon` | `with_entry_recovery` and `with_byte_audit` on: the widest walk |
 | `xmp_parse` | `gamut-xmp` | `XmpMeta::parse` | — |
@@ -184,11 +184,11 @@ frame decodes to 70 MB of RGBA (about 1 s in a release build), and a 5-byte JPEG
 9717 × 8098 made the partial decode return a zero-filled `HeaderOnly` buffer at those dimensions
 (~314 MB of RGBA, about 1.1 s). Neither is a crash, and neither target narrows its input to avoid
 them: an input the format allows is an input the target searches. The JPEG XL one no longer runs
-slowly: `JxlDecoder` now carries a bounded `DecodeLimits` default (#1026, delivered through
-`with_limits` by #1080), so that header is refused against its 64 MiB budget before any buffer is
-sized. That the WebP decoder offers no caller-set limit at all is the decoder-limits posture
-question #311's audit filed separately, as #1025; the third filing, #1024, gave `JpegDecoder` its
-bounded default.
+slowly: the target sets a 64 MiB `DecodeLimits` byte budget (#1026, delivered through
+`with_limits` by #1080; the decoder's own default since #1226 bounds dimensions and pixels
+instead), so that header is refused before any buffer is sized. The WebP decoder's caller-set
+limit is #1025, which `webp_decode` now sets the same way; the third filing, #1024, gave
+`JpegDecoder` its bounded default.
 
 **A check is only listed here if it can fail — and each target's module doc names the injected
 defect that made *each listed check* fail**, with the message it produced and the command that

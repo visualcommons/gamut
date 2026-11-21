@@ -4,10 +4,11 @@
 //! decoder is gamut's wrapper over the pure-Rust `jxl` crate (jxl-rs): gamut-jxl's own `unsafe` is
 //! confined to its `ffi` module, which wraps the libjxl **encoder** and is not built here — the
 //! dependency is taken with `default-features = false, features = ["decode"]`, so this target needs
-//! no cmake and no C++ toolchain. Its hostile-input bound is `JxlDecoder::new()`'s default
-//! `DecodeLimits` — 64 MiB of decoded samples, checked against the parsed header before any buffer
-//! is sized — beneath the wrapper's fixed `PIXEL_LIMIT` (`1 << 28` samples), both applied to every
-//! decode it starts.
+//! no cmake and no C++ toolchain. Its hostile-input bound is a `DecodeLimits` byte budget of
+//! 64 MiB of decoded samples, which the target sets because the default (32768 per side, 16384²
+//! pixels, no byte budget, #1226) admits rasters past libFuzzer's malloc limit — checked against
+//! the parsed header before any buffer is sized — beneath the wrapper's fixed `PIXEL_LIMIT`
+//! (`1 << 28` samples), both applied to every decode it starts.
 //!
 //! What it searches is therefore the wrapper *and* the decoder underneath, together: a panic, a
 //! hang or an allocation past libFuzzer's malloc limit in either is a defect, and one inside jxl-rs
@@ -32,11 +33,16 @@
 
 use gamut_core::convert::ConvertPolicy;
 use gamut_core::{DecodeImage, Rgba8};
-use gamut_jxl::JxlDecoder;
+use gamut_jxl::{DecodeLimits, JxlDecoder};
 use libfuzzer_sys::fuzz_target;
 
+/// The decoded sample budget the target sets: 64 MiB, the decoder's default before #1226.
+const MAX_IMAGE_BYTES: usize = 64 << 20;
+
 fuzz_target!(|data: &[u8]| {
-    let decoder = JxlDecoder::new().with_convert_policy(ConvertPolicy::permissive());
+    let decoder = JxlDecoder::new()
+        .with_limits(DecodeLimits::new().with_max_image_bytes(MAX_IMAGE_BYTES))
+        .with_convert_policy(ConvertPolicy::permissive());
     let _ = decoder.info(data);
     let _ = decoder.embedded_icc_profile(data);
     let _ = decoder.metadata_boxes(data);

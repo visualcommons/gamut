@@ -115,38 +115,28 @@ fn encoded(encoder: &WebpEncoder, width: u32, height: u32) -> Vec<u8> {
 }
 
 #[test]
-fn default_budget_refuses_the_54_byte_reproducer() {
-    let result: Result<ImageBuf<Rgba8>> = WebpDecoder::new().decode_image(&reproducer());
+fn a_byte_budget_refuses_the_54_byte_reproducer_the_default_admits() {
+    // The default sets no byte budget, so the reproducer's 70 MB frame reaches the decoder; a
+    // caller's 64 MiB budget refuses it from the header alone.
+    assert!(reaches_backend(WebpDecoder::new(), &reproducer()).expect("admitted"));
+    let result: Result<ImageBuf<Rgba8>> = bytes(64 << 20).decode_image(&reproducer());
     assert_refused(result, SIZE_LIMIT);
 }
 
 #[test]
-fn default_budget_is_exactly_a_4096_square_rgba_frame() {
+fn a_64_mib_budget_is_exactly_a_4096_square_rgba_frame() {
     // 4096 × 4096 × 4 = 64 MiB is admitted; one more row is not, and is refused before the backend.
-    assert!(reaches_backend(WebpDecoder::new(), &lossy_header(4096, 4096)).expect("admitted"));
+    assert!(reaches_backend(bytes(64 << 20), &lossy_header(4096, 4096)).expect("admitted"));
     assert_refused(
-        reaches_backend(WebpDecoder::new(), &lossy_header(4096, 4097)),
+        reaches_backend(bytes(64 << 20), &lossy_header(4096, 4097)),
         SIZE_LIMIT,
     );
 }
 
 #[test]
-fn default_dimensions_admit_the_format_maximum() {
-    // Without a byte budget in the way, the default dimension caps admit VP8L's largest frame.
-    // The dimension check runs first, so the default refusing VP8L's largest frame for its *size*
-    // shows its sides admitted it; the exact default is pinned beside the decoder.
-    assert_refused(
-        reaches_backend(WebpDecoder::new(), &lossless_header(16384, 16384)),
-        SIZE_LIMIT,
-    );
-    // With the byte budget lifted, sides at the format bound admit the frame outright.
-    let decoder = WebpDecoder::new().with_limits(
-        DecodeLimits::new()
-            .with_max_width(16384)
-            .with_max_height(16384)
-            .with_max_image_bytes(usize::MAX),
-    );
-    assert!(reaches_backend(decoder, &lossless_header(16384, 16384)).expect("admitted"));
+fn default_limits_admit_the_format_maximum() {
+    // VP8L's largest frame, 16384 × 16384, is exactly the default pixel cap.
+    assert!(reaches_backend(WebpDecoder::new(), &lossless_header(16384, 16384)).expect("admitted"));
 }
 
 /// A decoder whose only binding bound is `bytes` of decoded frame.
@@ -182,6 +172,16 @@ fn max_dimensions_bound_each_side_inclusively() {
     assert_refused(narrow, DIMENSION_LIMIT);
     let short: Result<ImageBuf<Rgb8>> = sides(3, 4).decode_image(&file);
     assert_refused(short, DIMENSION_LIMIT);
+}
+
+#[test]
+fn max_pixels_bound_the_frame_inclusively() {
+    let file = encoded(&WebpEncoder::lossless(), 3, 5);
+    let pixels = |max| WebpDecoder::new().with_limits(DecodeLimits::new().with_max_pixels(max));
+    let at: Result<ImageBuf<Rgb8>> = pixels(15).decode_image(&file);
+    assert!(at.is_ok());
+    let under: Result<ImageBuf<Rgb8>> = pixels(14).decode_image(&file);
+    assert_refused(under, DIMENSION_LIMIT);
 }
 
 #[test]

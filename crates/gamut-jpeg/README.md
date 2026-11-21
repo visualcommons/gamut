@@ -48,11 +48,11 @@ let info = JpegDecoder::new().info(jpeg)?; // dimensions / components / process,
 # }
 ```
 
-`JpegDecoder::new()` bounds untrusted input by default: dimensions up to the format's 65535 × 65535
-ceiling and a 64 MiB native-raster budget. The byte cap counts the JPEG frame's own components,
-independently of the requested presentation type. Tighten either for your domain, or lift the
-budget with `DecodeLimits::new().with_max_image_bytes(usize::MAX)` for trusted input larger than
-64 MiB:
+`JpegDecoder::new()` bounds untrusted input by default with the workspace's `DecodeLimits::new()`:
+each side up to 32768 and at most 16384 × 16384 pixels (libavif's defaults), with no byte budget.
+That refuses a frame with a side between 32769 and the format's 65535 ceiling unless the limits are
+widened. An opt-in byte budget, `with_max_image_bytes`, counts the JPEG frame's own components,
+independently of the requested presentation type. Tighten any of them for your domain:
 
 ```rust
 # use gamut_core::{DecodeImage, ImageBuf, Rgb8};
@@ -109,7 +109,7 @@ APP0 / Adobe APP14 hints), interleaved or non-interleaved scans, spectral select
 approximation, restart intervals, and (for sequential frames) DNL-defined heights — and never panics
 on malformed input. Progressive frames with a deferred (`Y = 0` / DNL) height are rejected as
 unsupported, and a partial progressive stream renders what it has (matching libjpeg).
-`JpegDecoder` bounds hostile input by default (65535 × 65535, 64 MiB native raster), and
+`JpegDecoder` bounds hostile input by default (32768 per side, 16384 × 16384 pixels), and
 `with_limits(DecodeLimits)` tightens or lifts those guards; known SOF geometry is rejected before
 frame-sized allocation, and a sequential DNL-deferred height is bounded while its first scan grows.
 

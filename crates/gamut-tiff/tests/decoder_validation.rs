@@ -6,7 +6,9 @@
 //! flips the colours — all distinguishable from the correct clean rejection.
 
 use gamut_core::{Bilevel, DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_tiff::{ByteOrder, Compression, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags};
+use gamut_tiff::{
+    ByteOrder, Compression, DecodeLimits, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags,
+};
 
 mod common;
 use common::write_image;
@@ -45,7 +47,11 @@ fn patch_inline(tiff: &mut [u8], tag: u16, new: u32) {
 /// The decoder's static message for a file it rejects, for tests that must distinguish *which*
 /// guard fired rather than merely that one did.
 fn err_message(tiff: &[u8]) -> Option<&'static str> {
-    match TiffDecoder::new().decode_page(tiff, 0) {
+    err_message_with(&TiffDecoder::new(), tiff)
+}
+
+fn err_message_with(decoder: &TiffDecoder, tiff: &[u8]) -> Option<&'static str> {
+    match decoder.decode_page(tiff, 0) {
         Ok(_) => panic!("the decoder must reject this file"),
         Err(error) => error.static_message(),
     }
@@ -144,6 +150,11 @@ fn rejects_strip_count_mismatch() {
     assert!(TiffDecoder::new().decode_page(&v, 0).is_err());
 }
 
+/// A decoder with a caller's 64 MiB byte budget; the default sets none.
+fn budgeted() -> TiffDecoder {
+    TiffDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(64 << 20))
+}
+
 #[test]
 fn rejects_an_image_past_the_size_cap() {
     // 8000x8000 RGB declares 192 MB of stored samples against a 64 MiB cap. The assertion is on the
@@ -152,7 +163,26 @@ fn rejects_an_image_past_the_size_cap() {
     let mut v = valid_rgb(8, 8);
     patch_inline(&mut v, tags::IMAGE_WIDTH, 8000);
     patch_inline(&mut v, tags::IMAGE_LENGTH, 8000);
-    assert_eq!(err_message(&v), Some("TIFF: image exceeds the size limit"));
+    assert_eq!(
+        err_message_with(&budgeted(), &v),
+        Some("TIFF: image exceeds the size limit")
+    );
+}
+
+#[test]
+fn the_default_refuses_a_page_past_32768_per_side_or_16384_squared_pixels() {
+    // ImageWidth/ImageLength are LONGs (TIFF 6.0 §8); the workspace default stops at 32768 per side
+    // and 16384² pixels, refused from the tags before any strip is read.
+    for (w, h) in [(32769, 1), (1, 32769), (16384, 16385)] {
+        let mut v = valid_rgb(8, 8);
+        patch_inline(&mut v, tags::IMAGE_WIDTH, w);
+        patch_inline(&mut v, tags::IMAGE_LENGTH, h);
+        assert_eq!(
+            err_message(&v),
+            Some("TIFF: image dimensions exceed the decode limits"),
+            "{w}x{h}"
+        );
+    }
 }
 
 #[test]
@@ -174,7 +204,10 @@ fn rejects_a_tile_past_the_size_cap() {
         .unwrap();
     patch_inline(&mut v, tags::TILE_WIDTH, 8192);
     patch_inline(&mut v, tags::TILE_LENGTH, 8192);
-    assert_eq!(err_message(&v), Some("TIFF: tile exceeds the size limit"));
+    assert_eq!(
+        err_message_with(&budgeted(), &v),
+        Some("TIFF: tile exceeds the size limit")
+    );
 }
 
 /// A structurally valid single-strip grayscale TIFF declaring `bits` bits per sample and, when

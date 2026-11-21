@@ -45,9 +45,9 @@
 //! partly-downloaded or damaged file. Read its documentation before relying on the pixels — "best
 //! effort" can legitimately mean a blank buffer.
 //!
-//! Hostile input is bounded by [`JxlDecoder::with_limits`]: by default an image over
-//! [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`] (64 MiB) of decoded samples is refused before any
-//! pixel buffer is allocated.
+//! Hostile input is bounded by [`JxlDecoder::with_limits`]: by default an image with a side over
+//! 32768 or more than 16384 × 16384 pixels ([`DecodeLimits::new`]) is refused before any pixel
+//! buffer is allocated.
 //!
 //! # Example: lossless round-trip
 //!
