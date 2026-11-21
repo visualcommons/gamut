@@ -20,6 +20,15 @@
 /// this only when [`Drago::is_monotonic`](crate::Drago::is_monotonic) says so.
 /// Behaviour on negative or NaN inputs is operator-defined and outside this contract — linearize
 /// and clamp upstream if a source can produce them.
+///
+/// # Precision
+///
+/// The trait is `f32` by design: a caller holding `f64` linear values (such as `gamut_color`'s
+/// transfer-function outputs) narrows them to `f32` at this boundary. Every built-in operator is
+/// tested, at representative parameters, to stay within `8 · f32::EPSILON` relative error of its
+/// published formula evaluated in `f64`, with an absolute floor only in the subnormal range (and,
+/// for `Hable` and `Drago`, at `4 · f32::EPSILON` near zero); see the crate-level *Precision*
+/// section.
 pub trait ToneCurve {
     /// Map a single non-negative linear-light value `x` to its tone-mapped output.
     ///

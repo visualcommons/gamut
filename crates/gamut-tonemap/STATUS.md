@@ -54,6 +54,23 @@ any of the above would not.
   `bt2020_pq_to_sdr`; the two implementations are proven to agree by a dev-dependency cross-check
   test rather than shared code, so tonemap never becomes a runtime dependency of the colour
   pipeline.
+- **One precision: `f32`, with no f64 twin of `ToneCurve` (#1102, settled).** The documented
+  HDR-to-SDR pipeline runs through `gamut-color`'s `f64` transfer functions, and the caller narrows
+  to `f32` at the `ToneCurve` boundary — documented on the trait and in the crate docs. Narrowing
+  costs at most half an f32 ULP, below any display or 16-bit code step, while an `f64` signature
+  would double the bandwidth of every `map_slice` and break the frozen v1 trait (and every closure
+  curve) for precision no consumer can observe; the `ToneMapper` follow-up (#1236) keeps `f32`
+  too. What the decision answers to is an oracle, not a round-trip: each built-in `map` is
+  compared with an independent `f64` evaluation of its published formula, written without the f32
+  overflow guards, within `8 · f32::EPSILON` relative error plus an absolute floor of four
+  subnormal steps (`4 · 2⁻¹⁴⁹`), raised to `4 · f32::EPSILON` for Hable and Drago alone (their
+  near-zero outputs have no relative digits left in f32: Hable's `partial` cancels and Drago's
+  `ln(x + 1)` rounds `x + 1` to 1) — from 0 through subnormals, every decade, and a dense
+  `[0, 16]` grid to `f32::MAX`, with `+∞` required exactly where the `f64` value exceeds f32. The
+  bound is claimed at representative parameters: degenerate ones the constructors still admit
+  (a Hable white of `1e-30`, a `ReinhardExtended` white below about `1e-8`, where `x²` underflows
+  ahead of the `/white²` that would restore it) keep only the never-NaN contract. A caller who needs `f64` end to end evaluates the published formula directly, as
+  `gamut-color` does.
 - **Numeric contract over literal transcription at f32 extremes.** Every operator is NaN-free
   across the entire f32 input range: `Aces` evaluates at `min(x, 8)` inside its exact saturation
   region, `Hable` clamps its argument where the curve sits within one ULP of its asymptote (both
@@ -93,9 +110,13 @@ any of the above would not.
 Inline unit tests: per-operator fixed points plus independent golden values transcribed from the
 primary sources, monotonicity grids, constructor-rejection cases (including parameters whose
 *derived* math degenerates), one adversarial f32-extremes sweep (never-NaN / non-negative at
-`{0, 1e20, f32::MAX}` for all eight operators), and the Reinhard ↔ `gamut-color` cross-check.
+`{0, 1e20, f32::MAX}` for all eight operators), the Reinhard ↔ `gamut-color` cross-check, and
+one `*_tracks_f64_oracle` test per operator holding its `f32` `map` to an independent `f64`
+evaluation of the published formula across the whole `f32` input range (bound above, under the
+f32 decision).
 
-There is no oracle for this crate, so the `ToneCurve` contract itself is the authority and
+There is no external oracle for this crate's *shape* — the `f64` formula pins values, not the
+laws a custom curve must keep — so the `ToneCurve` contract itself is the authority and
 `src/invariants.rs` states it as executable laws — non-negative and never NaN, monotonic
 non-decreasing, and `map_slice` as elementwise order-independent `map`. Those laws are driven by
 pinned-seed `proptest` properties here and are the attachment point for the out-of-tree fuzz tier
