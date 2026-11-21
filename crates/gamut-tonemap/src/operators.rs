@@ -832,22 +832,34 @@ mod tests {
     // references/tonemap/README.md, not by calling the f32 code, and without any of the f32
     // overflow guards -- at every sample `oracle_inputs` yields.
     //
-    // The bound is `|map(x) - f(x)| <= ORACLE_REL * |f(x)| + ORACLE_ABS`. The relative term is the
-    // precision claim. The absolute term exists only for outputs near zero, where two curves lose
-    // every relative digit to f32 and no f32 evaluation could do better: Hable's `partial` ends in
-    // a cancelling subtraction (`partial(0)` is a sub-ULP residual, not 0), and Drago's `ln(x + 1)`
-    // rounds `x + 1` to 1 for `x ≤ 2⁻²⁴`. Where the exact value exceeds f32 the
-    // contract's saturation applies instead, and the f32 output must be `+inf`.
+    // The bound is `|map(x) - f(x)| <= ORACLE_REL * |f(x)| + floor`. The relative term is the
+    // precision claim. The floor is per operator. For Linear, Clamp, Exposure, Reinhard,
+    // ReinhardExtended and Aces it is `ORACLE_SUBNORMAL`, the f32 subnormal grid: below
+    // `f32::MIN_POSITIVE` f32 has a fixed absolute spacing of 2⁻¹⁴⁹ and no relative precision, so
+    // that is the one place a relative bound cannot hold. For Hable and Drago it is
+    // `ORACLE_CANCEL`, because near zero those two lose every relative digit to f32 and no f32
+    // evaluation could do better: Hable's `partial` ends in a cancelling subtraction
+    // (`partial(0)` is a sub-ULP residual, not 0), and Drago's `ln(x + 1)` rounds `x + 1` to 1
+    // for `x ≤ 2⁻²⁴`. Where the exact value exceeds f32 the contract's saturation applies
+    // instead, and the f32 output must be `+inf`.
 
     /// Relative-error bound of the f64 oracle: 8 f32 ULPs (`8 · f32::EPSILON` ≈ 9.5e-7). The
-    /// measured worst case across every operator and parameter set below stays under 1.5 ULPs
-    /// beside the absolute floor; the rest is headroom for other platforms' `powf`/`ln`/`log10`.
+    /// measured worst case across every operator and parameter set below stays under 2 ULPs
+    /// beside each operator's absolute floor (1.8 for `ReinhardExtended` at white `1e-4`, 1.5 for
+    /// `Aces`); the rest is headroom for other platforms' `powf`/`ln`/`log10`.
     const ORACLE_REL: f64 = 8.0 * f32::EPSILON as f64;
-    /// Absolute floor of the f64 oracle, for outputs near zero: 4 ULPs of `1.0` (≈ 4.8e-7). The
-    /// binding case is Drago: for `x ≤ 2⁻²⁴`, `x + 1` rounds to 1 and `map` returns exactly 0
-    /// while the exact value there already exceeds one ULP (`1.2e-7` at `x = 2.5e-8`,
-    /// `world_max = 1`), so a one-ULP floor fails; four covers the rest of that band.
-    const ORACLE_ABS: f64 = 4.0 * f32::EPSILON as f64;
+    /// Absolute floor for the operators that keep their relative digits down to the subnormal
+    /// range: 4 subnormal ULPs (`4 · 2⁻¹⁴⁹` ≈ 5.6e-45). A subnormal result carries up to half a
+    /// grid step from its own rounding plus whatever its subnormal operands carried in; four
+    /// steps covers each operator's chain with headroom. Above `f32::MIN_POSITIVE` it is
+    /// negligible beside the relative term, so it never loosens a normal output.
+    const ORACLE_SUBNORMAL: f64 = 4.0 * 1.401_298_464_324_817e-45;
+    /// Absolute floor for Hable and Drago only, whose outputs near zero have no relative digits
+    /// left in f32: 4 ULPs of `1.0` (≈ 4.8e-7). The binding case is Drago: for `x ≤ 2⁻²⁴`,
+    /// `x + 1` rounds to 1 and `map` returns exactly 0 while the exact value there already
+    /// exceeds one ULP (`1.2e-7` at `x = 2.5e-8`, `world_max = 1`), so a one-ULP floor fails;
+    /// four covers the rest of that band.
+    const ORACLE_CANCEL: f64 = 4.0 * f32::EPSILON as f64;
 
     /// Every input the f64 oracle probes: zero, the smallest subnormal and normal f32, five
     /// mantissas in every decade from `1e-45` to `1e38`, a dense grid over `[0, 16]` where every
@@ -866,8 +878,9 @@ mod tests {
         xs
     }
 
-    /// Assert `curve` tracks the f64 `oracle` within the stated bound at every oracle input.
-    fn assert_tracks_f64(curve: &impl ToneCurve, oracle: impl Fn(f64) -> f64) {
+    /// Assert `curve` tracks the f64 `oracle` within `ORACLE_REL` relative error plus the absolute
+    /// `floor` at every oracle input.
+    fn assert_tracks_f64(curve: &impl ToneCurve, floor: f64, oracle: impl Fn(f64) -> f64) {
         for x in oracle_inputs() {
             let y = curve.map(x);
             let exact = oracle(f64::from(x));
@@ -881,7 +894,7 @@ mod tests {
             }
             let err = (f64::from(y) - exact).abs();
             assert!(
-                err <= ORACLE_REL * exact.abs() + ORACLE_ABS,
+                err <= ORACLE_REL * exact.abs() + floor,
                 "map({x:e}) = {y:e}, f64 oracle {exact:e}, error {err:e}"
             );
         }
@@ -889,14 +902,14 @@ mod tests {
 
     #[test]
     fn linear_tracks_f64_oracle() {
-        assert_tracks_f64(&Linear, |x| x);
+        assert_tracks_f64(&Linear, ORACLE_SUBNORMAL, |x| x);
     }
 
     #[test]
     fn clamp_tracks_f64_oracle() {
         for max in [SDR_WHITE_NORMALIZED, 2.5, 1e30] {
             let c = Clamp::new(max).expect("valid bound");
-            assert_tracks_f64(&c, |x| x.min(f64::from(max)));
+            assert_tracks_f64(&c, ORACLE_SUBNORMAL, |x| x.min(f64::from(max)));
         }
     }
 
@@ -904,30 +917,37 @@ mod tests {
     fn exposure_tracks_f64_oracle() {
         for scale in [0.6, 2.0, 1e-30, 1e30] {
             let c = Exposure::new(scale).expect("valid gain");
-            assert_tracks_f64(&c, |x| x * f64::from(scale));
+            assert_tracks_f64(&c, ORACLE_SUBNORMAL, |x| x * f64::from(scale));
         }
     }
 
     #[test]
     fn reinhard_tracks_f64_oracle() {
         // Reinhard et al. 2002, Eq (3).
-        assert_tracks_f64(&Reinhard, |x| x / (1.0 + x));
+        assert_tracks_f64(&Reinhard, ORACLE_SUBNORMAL, |x| x / (1.0 + x));
     }
 
     #[test]
     fn reinhard_extended_tracks_f64_oracle() {
         // Reinhard et al. 2002, Eq (4), in its published (unfactored) association.
-        for white in [DEFAULT_REINHARD_WHITE, 4.0, 1e6, 1.7141993e-19, 1.8e19] {
+        //
+        // The whites are representative, not the admitted extremes. Below a white of about 1e-8
+        // the f32 product `x·t ≈ x²` underflows for tiny `x` while `x²/white²` is still a
+        // visible share of the exact value (40% at white `1.7141993e-19`, `x = f32::MIN_POSITIVE`),
+        // so there only the never-NaN contract holds; the #471 saturation tests cover that end.
+        for white in [DEFAULT_REINHARD_WHITE, 4.0, 1e-4, 1e6, 1.8e19] {
             let c = ReinhardExtended::new(white).expect("valid white point");
             let w = f64::from(white);
-            assert_tracks_f64(&c, |x| x * (1.0 + x / (w * w)) / (1.0 + x));
+            assert_tracks_f64(&c, ORACLE_SUBNORMAL, |x| {
+                x * (1.0 + x / (w * w)) / (1.0 + x)
+            });
         }
     }
 
     #[test]
     fn aces_tracks_f64_oracle() {
         // Narkowicz 2016, saturate included, no `min(x, 8)` argument clamp.
-        assert_tracks_f64(&Aces, |x| {
+        assert_tracks_f64(&Aces, ORACLE_SUBNORMAL, |x| {
             ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0)
         });
     }
@@ -942,7 +962,7 @@ mod tests {
         for white in [DEFAULT_HABLE_WHITE, 1.0, 4.0, 100.0] {
             let c = Hable::new(white).expect("valid white point");
             let w = f64::from(white);
-            assert_tracks_f64(&c, |x| partial(x) / partial(w));
+            assert_tracks_f64(&c, ORACLE_CANCEL, |x| partial(x) / partial(w));
         }
     }
 
@@ -960,7 +980,7 @@ mod tests {
                 .and_then(|c| c.with_bias(bias))
                 .expect("valid parameters");
             let (wm, k) = (f64::from(world_max), f64::from(bias).ln() / 0.5_f64.ln());
-            assert_tracks_f64(&c, |x| {
+            assert_tracks_f64(&c, ORACLE_CANCEL, |x| {
                 (1.0 / (wm + 1.0).log10()) * (x + 1.0).ln() / (2.0 + 8.0 * (x / wm).powf(k)).ln()
             });
         }

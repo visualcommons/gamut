@@ -40,8 +40,10 @@
 //! (`f64::from(mapped)`) on the way out. Narrowing costs at most half an `f32` ULP of the linear
 //! value — about 6e-8 relative, far below any display or 16-bit code step — and every built-in
 //! curve is tested against an independent `f64` evaluation of its published formula to within
-//! `8 · f32::EPSILON` relative error (plus `4 · f32::EPSILON` absolute, for outputs near zero),
-//! across the whole `f32` input range at representative parameters. Degenerate parameters the
+//! `8 · f32::EPSILON` relative error across the whole `f32` input range at representative
+//! parameters. The only absolute allowance is a floor where f32 has no relative digits to give:
+//! four subnormal steps (`4 · 2⁻¹⁴⁹`) for every curve, and for `Hable` and `Drago` alone, whose
+//! near-zero outputs cancel or round away in f32, `4 · f32::EPSILON`. Degenerate parameters the
 //! constructors still admit (a Hable white of `1e-30`, say) keep only the never-NaN contract. Where `f64` end to end matters more than throughput — an
 //! encoder-exact reference path — evaluate the published formula in `f64` directly, as
 //! `gamut_color` does for its own PQ-to-SDR conversion.

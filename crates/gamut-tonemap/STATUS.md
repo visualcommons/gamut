@@ -62,11 +62,14 @@ any of the above would not.
   curve) for precision no consumer can observe; the `ToneMapper` follow-up (#1236) keeps `f32`
   too. What the decision answers to is an oracle, not a round-trip: each built-in `map` is
   compared with an independent `f64` evaluation of its published formula, written without the f32
-  overflow guards, within `8 · f32::EPSILON` relative plus `4 · f32::EPSILON` absolute error
-  (the floor is for outputs near zero, where Hable's cancelling `partial` and Drago's
-  `ln(x + 1)` have no relative digits left in f32) — from 0 through subnormals, every decade, and a
-  dense `[0, 16]` grid to `f32::MAX`, with `+∞` required exactly where the `f64` value exceeds
-  f32. A caller who needs `f64` end to end evaluates the published formula directly, as
+  overflow guards, within `8 · f32::EPSILON` relative error plus an absolute floor of four
+  subnormal steps (`4 · 2⁻¹⁴⁹`), raised to `4 · f32::EPSILON` for Hable and Drago alone (their
+  near-zero outputs have no relative digits left in f32: Hable's `partial` cancels and Drago's
+  `ln(x + 1)` rounds `x + 1` to 1) — from 0 through subnormals, every decade, and a dense
+  `[0, 16]` grid to `f32::MAX`, with `+∞` required exactly where the `f64` value exceeds f32. The
+  bound is claimed at representative parameters: degenerate ones the constructors still admit
+  (a Hable white of `1e-30`, a `ReinhardExtended` white below about `1e-8`, where `x²` underflows
+  ahead of the `/white²` that would restore it) keep only the never-NaN contract. A caller who needs `f64` end to end evaluates the published formula directly, as
   `gamut-color` does.
 - **Numeric contract over literal transcription at f32 extremes.** Every operator is NaN-free
   across the entire f32 input range: `Aces` evaluates at `min(x, 8)` inside its exact saturation

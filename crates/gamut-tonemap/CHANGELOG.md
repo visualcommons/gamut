@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(gamut-tonemap)* settle `f32` as the one precision (#1102): document that callers narrow
   `gamut-color`'s `f64` linear values at the `ToneCurve` boundary, and hold every built-in curve
   to an independent `f64` evaluation of its published formula within `8 · f32::EPSILON` relative
-  (plus `4 · f32::EPSILON` absolute near zero) across the whole `f32` input range.
+  error across the whole `f32` input range, at representative parameters (degenerate admitted
+  ones keep only the never-NaN contract); the absolute floor is four subnormal steps, and
+  `4 · f32::EPSILON` near zero for `Hable` and `Drago` alone.
 
 ## [1.1.0](https://github.com/visualcommons/gamut/compare/gamut-tonemap-v1.0.0...gamut-tonemap-v1.1.0) - 2026-10-12
 
