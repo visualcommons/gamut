@@ -374,7 +374,7 @@ fn reader_facade_lenient_and_strict() {
     assert!(gamut_icc::IccReader::new().parse(&bytes).is_ok());
     assert!(
         gamut_icc::IccReader::new()
-            .strict(true)
+            .with_strict(true)
             .parse(&bytes)
             .is_ok()
     );
@@ -384,7 +384,7 @@ fn reader_facade_lenient_and_strict() {
     assert!(gamut_icc::IccReader::new().parse(&poked).is_ok());
     assert!(
         gamut_icc::IccReader::new()
-            .strict(true)
+            .with_strict(true)
             .parse(&poked)
             .is_err()
     );

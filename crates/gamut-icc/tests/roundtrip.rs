@@ -144,7 +144,7 @@ fn from_scratch_profile_round_trips_strictly() {
     };
     let bytes = profile.to_bytes().expect("a fresh header must serialize");
     let reparsed = IccReader::new()
-        .strict(true)
+        .with_strict(true)
         .parse(&bytes)
         .expect("strict parse of a from-scratch profile");
 
@@ -164,12 +164,12 @@ fn duplicate_tags_are_rejected_on_write() {
     assert!(parsed.to_bytes().is_err());
 }
 
-/// `IccWriter::recompute_profile_id` stamps a non-zero, self-consistent MD5 ID into the output.
+/// `IccWriter::with_recompute_profile_id` stamps a non-zero, self-consistent MD5 ID into the output.
 #[test]
 fn writer_recomputes_profile_id() {
     let parsed = IccProfile::parse(&lcms2_oracle::srgb().to_bytes()).unwrap();
     let out = IccWriter::new()
-        .recompute_profile_id(true)
+        .with_recompute_profile_id(true)
         .write(&parsed)
         .unwrap();
 

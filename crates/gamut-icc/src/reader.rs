@@ -6,7 +6,7 @@ use crate::profile::IccProfile;
 /// Reader for an ICC profile, with parse options.
 ///
 /// `IccReader::new().parse(bytes)` is equivalent to [`IccProfile::parse`]. Enable
-/// [`strict`](IccReader::strict) to additionally reject non-conformant inputs that the lenient
+/// [`with_strict`](IccReader::with_strict) to additionally reject non-conformant inputs that the lenient
 /// default tolerates (nonzero reserved header bytes; tags whose data overlaps the header or tag
 /// table).
 #[derive(Debug, Clone, Default)]
@@ -23,7 +23,7 @@ impl IccReader {
 
     /// Sets whether to reject non-conformant inputs in addition to malformed ones.
     #[must_use]
-    pub fn strict(mut self, yes: bool) -> Self {
+    pub fn with_strict(mut self, yes: bool) -> Self {
         self.strict = yes;
         self
     }

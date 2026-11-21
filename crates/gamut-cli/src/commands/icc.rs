@@ -66,7 +66,7 @@ pub(crate) fn run(args: &IccArgs) -> Result<(), CliError> {
     let blob = extract(&data, format, &args.input)?;
 
     let profile = if args.strict {
-        IccReader::new().strict(true).parse(&blob)?
+        IccReader::new().with_strict(true).parse(&blob)?
     } else {
         IccProfile::parse(&blob)?
     };

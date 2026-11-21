@@ -216,8 +216,8 @@
 //! A constructor is a pure function of its arguments: the creation date is
 //! [`DateTime::ZERO`](crate::DateTime::ZERO), the profile ID is left unset, and every
 //! open-registry header field is zero, so the same call always serializes to the same bytes. Stamp
-//! an ID with [`IccWriter::recompute_profile_id`](crate::IccWriter::recompute_profile_id) if one
-//! is wanted.
+//! an ID with [`IccWriter::with_recompute_profile_id`](crate::IccWriter::with_recompute_profile_id)
+//! if one is wanted.
 //!
 //! # Layout
 //!

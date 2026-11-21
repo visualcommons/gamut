@@ -13,7 +13,7 @@ use crate::tags::tag_table_end;
 /// Writer for an ICC profile, with serialization options.
 ///
 /// `IccWriter::new().write(profile)` is equivalent to [`IccProfile::to_bytes`]. Enable
-/// [`recompute_profile_id`](IccWriter::recompute_profile_id) to stamp a freshly computed MD5 ID
+/// [`with_recompute_profile_id`](IccWriter::with_recompute_profile_id) to stamp a freshly computed MD5 ID
 /// (ICC.1:2022 §7.2.18) into the output instead of preserving the header's stored ID.
 #[derive(Debug, Clone, Default)]
 pub struct IccWriter {
@@ -29,7 +29,7 @@ impl IccWriter {
 
     /// Sets whether to recompute and stamp the profile ID into the output.
     #[must_use]
-    pub fn recompute_profile_id(mut self, yes: bool) -> Self {
+    pub fn with_recompute_profile_id(mut self, yes: bool) -> Self {
         self.recompute_profile_id = yes;
         self
     }
