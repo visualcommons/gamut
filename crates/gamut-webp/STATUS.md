@@ -303,7 +303,7 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | `gamut-codec-abi` adapters (`AbiWebpDecoder` / `AbiWebpEncoder`, big-endian `VP8_CODEC_ID` / `VP8L_CODEC_ID`) | issue #241 | ✅ | M6 |
 | `Vp8Planes`: the seam's VP8 raster, 4:2:0 by construction (`from_planes` builds it from samples; `TryFrom<Planar8>` refuses any other layout), carried by `DecodedWebp::Yuv420` / `WebpRasterRef::Yuv420`, whose `dimensions()` are therefore infallible (breaking: they returned `Result<Dimensions>`) | issue #1128 | ✅ | M6 |
 | `Effort` compression ladder (libwebp `method` `0..=6`) on both codestreams | issue #261 | ✅ | M4 |
-| decoder resource limits (`with_limits(DecodeLimits)`, 64 MiB default at 4 B/px, sides at 16384), checked on the `VP8 `/`VP8L` header before allocation and backend dispatch | issue #1025 | ✅ | M6 |
+| decoder resource limits (`with_limits(DecodeLimits)`: the workspace default of 32768 per side and 16384² pixels, issue #1226; an opt-in byte budget at 4 B/px), checked on the `VP8 `/`VP8L` header before allocation and backend dispatch | issue #1025 | ✅ | M6 |
 | VP8L candidate-plan search: transform chain, palette order, cache size, grouping, LZ77 depth | issue #31 | ✅ | M4 |
 | VP8 two-pass entropy: derived coefficient probabilities + measured skip probability | issue #32 | ✅ | M4 |
 | VP8 dead-zone quantizer (AC only; DC stays round-to-nearest) | issue #32 | ✅ | M4 |
