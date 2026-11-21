@@ -367,26 +367,28 @@ everything, and a PNG's would not.
 ## The budgets the walk observes
 
 `gamut inspect` walks with `DeconstructLimits::default().with_max_image_bytes(1 << 30)` — one
-gibibyte — against the PNG decoder's default of `64 << 20`, 64 MiB (a 4096×4096 RGBA8 image).
-`max_chunks` is left at its default, `DEFAULT_MAX_CHUNKS = 1 << 20`.
+gibibyte — against the walk's own default of `64 << 20`, 64 MiB (a 4096×4096 RGBA8 image).
+`max_chunks` is left at its default, `DEFAULT_MAX_CHUNKS = 1 << 20`. The PNG decoder itself sets
+no byte budget by default; it bounds a decode by the workspace's `DecodeLimits` caps, 32768 per
+side and 16384 × 16384 pixels (issue #1226).
 
 They differ because they answer different questions:
 
-- The **decoder's** 64 MiB bounds what a decode of hostile input may allocate. A file past it is
-  refused; refusing is the safe outcome, because nothing downstream needs the pixels.
+- The **walk's default** 64 MiB bounds what a report on hostile input may inflate for a
+  statistic. A file past it is reported unread; nothing downstream needs its filter counts.
 - **Inspection's** whole job is to read the file, and a file it declines to inflate is a file it
   cannot vouch for. At 64 MiB every PNG past 4096×4096 RGBA8 — an ordinary photograph — would be
   reported as intact but not verified. A gibibyte is past any real image and short of unbounded.
 
 The gibibyte bounds the **image the header declares**, not what a small file may inflate to.
-Past the decoder's default budget the walk additionally refuses, before inflating, any stream that
+Past the walk's default budget it additionally refuses, before inflating, any stream that
 would grow to more than sixty-four times its own length (`INFLATION_RATIO`), so a raised image
 budget cannot be spent by a zlib bomb: a megabyte declaring a 16384×16384 header over a zlib
-stream of zeros is refused unread. Inside the decoder's default budget the ratio does not apply —
+stream of zeros is refused unread. Inside the walk's default budget the ratio does not apply —
 a flat image really does compress thousands-fold, and the walk is never a cheaper target than a
-decode of the same header, which allocates the same bytes.
+decode of the same header, which allocates at least the same bytes.
 
-What a hostile file can still cost, therefore: an inflation of up to twice the decoder's default
+What a hostile file can still cost, therefore: an inflation of up to twice the walk's default
 budget (native bytes plus one filter byte per scanline — up to 128 MiB for a degenerate
 one-pixel-wide greyscale column) for free, and anything above that only by paying one input byte
 for every sixty-four bytes inflated.

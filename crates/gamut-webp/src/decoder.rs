@@ -39,18 +39,6 @@ use crate::backend::{
 };
 use crate::vp8l::decoder::{argb_to_rgb8, argb_to_rgba8, decode as decode_vp8l};
 
-/// The format's own dimension bound: VP8L codes `width - 1` and `height - 1` in 14 bits each
-/// (RFC 9649 §3.2), so no WebP bitstream declares a side above 16384; a VP8 key frame's 14-bit
-/// fields stop one short of it (RFC 6386 §9.1).
-const FORMAT_MAX_DIMENSION: u32 = 1 << 14;
-
-/// The default [`DecodeLimits`]: each side at the format's own bound, and the workspace's 64 MiB
-/// ([`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`]) on the decoded frame — a 4096×4096 frame at four
-/// bytes per pixel, the same budget as every other gamut decoder.
-const DEFAULT_LIMITS: DecodeLimits = DecodeLimits::new()
-    .with_max_width(FORMAT_MAX_DIMENSION)
-    .with_max_height(FORMAT_MAX_DIMENSION);
-
 /// Bytes the budget charges per pixel: the 8-bit RGBA frame, the widest layout a WebP decodes to and
 /// the size of the VP8L decoder's own ARGB working buffer.
 const BUDGET_BYTES_PER_PIXEL: u64 = 4;
@@ -68,8 +56,10 @@ const BUDGET_BYTES_PER_PIXEL: u64 = 4;
 ///
 /// A WebP's few header bytes can declare a 16384×16384 frame — 1 GiB of RGBA — so the decoder
 /// bounds what it will decode with a [`DecodeLimits`] ([`with_limits`](Self::with_limits)). The
-/// default accepts every dimension the format allows but caps the decoded frame at 64 MiB; tighten
-/// the dimension caps when the application knows its domain. Every bound is checked against the
+/// default is the workspace's [`DecodeLimits::new`] — 32768 per side and 16384 × 16384 pixels, no
+/// byte budget — which admits every frame the format can declare (VP8L codes each side in 14 bits,
+/// RFC 9649 §3.2, so no side exceeds 16384); set a byte budget, or tighten the dimension caps, when
+/// the application knows its domain. Every bound is checked against the
 /// `VP8 ` key-frame or `VP8L` header before any frame-sized allocation, and before any
 /// [backend](Self::with_backend) is offered the job; a file over any limit is refused with an
 /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
@@ -104,14 +94,14 @@ impl fmt::Debug for WebpDecoder {
 
 impl WebpDecoder {
     /// Creates a decoder with the default configuration: no backends, the lossless
-    /// [`ConvertPolicy`], format-maximum dimensions, a 64 MiB decoded-frame budget, and
+    /// [`ConvertPolicy`], the workspace's default [`DecodeLimits`] (no byte budget), and
     /// [`ChromaUpsampling::Interpolated`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             backends: DecoderRegistry::new(),
             policy: ConvertPolicy::default(),
-            limits: DEFAULT_LIMITS,
+            limits: DecodeLimits::new(),
             upsampling: ChromaUpsampling::default(),
         }
     }
@@ -120,8 +110,8 @@ impl WebpDecoder {
     /// refused with an [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error before
     /// any allocation.
     ///
-    /// The default caps each side at the format's own bound, 16384, and the decoded frame at
-    /// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`] (64 MiB). The frame is charged at **four bytes per
+    /// The default, [`DecodeLimits::new`], caps each side at 32768 and the frame at 16384 × 16384
+    /// pixels, and sets no byte budget. A byte budget charges the frame at **four bytes per
     /// pixel** (`width × height × 4`, the 8-bit RGBA frame) whatever the file turns out to hold:
     /// whether a lossless image is opaque is known only after it is decoded, and the limit has to
     /// be decided from the header alone. So a budget admits the same frames whether they are later
@@ -132,9 +122,10 @@ impl WebpDecoder {
         self
     }
 
-    /// Enforces the dimension and byte-budget limits against the frame a codestream header declares.
+    /// Enforces the dimension, pixel-count and byte-budget limits against the frame a codestream
+    /// header declares.
     fn check_limits(&self, dims: Dimensions) -> Result<()> {
-        if dims.width() > self.limits.max_width() || dims.height() > self.limits.max_height() {
+        if !self.limits.admits_dimensions(dims.width(), dims.height()) {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "WebP: image exceeds the dimension limit",
@@ -422,24 +413,20 @@ mod tests {
                 DecodeLimits::new()
                     .with_max_width(3)
                     .with_max_height(5)
+                    .with_max_pixels(6)
                     .with_max_image_bytes(7),
             )
             .with_chroma_upsampling(ChromaUpsampling::Nearest);
         assert_eq!(
             format!("{decoder:?}"),
             "WebpDecoder { backends: 0, limits: DecodeLimits { max_width: 3, max_height: 5, \
-             max_image_bytes: 7 }, upsampling: Nearest, .. }"
+             max_pixels: 6, max_image_bytes: 7 }, upsampling: Nearest, .. }"
         );
     }
 
     #[test]
-    fn default_limits_are_the_format_bound_and_the_workspace_budget() {
-        assert_eq!(DEFAULT_LIMITS.max_width(), 16384);
-        assert_eq!(DEFAULT_LIMITS.max_height(), 16384);
-        assert_eq!(
-            DEFAULT_LIMITS.max_image_bytes(),
-            DecodeLimits::DEFAULT_MAX_IMAGE_BYTES
-        );
+    fn default_limits_are_the_workspace_default() {
+        assert_eq!(WebpDecoder::new().limits, DecodeLimits::new());
     }
 
     #[test]

@@ -77,7 +77,8 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   accepts and then fails — a codec-abi backend's late `UNSUPPORTED` status included — returns its
   error unchanged.
 - Decoder resource guards (P9, issue #306; default-on since issue #1024): `JpegDecoder::new()`
-  caps dimensions at 65535 × 65535 and the native raster at 64 MiB, and
+  caps each side at 32768 and the frame at 16384 × 16384 pixels with no byte budget (issue #1226;
+  65535 × 65535 and a 64 MiB raster before it), and
   `JpegDecoder::with_limits(DecodeLimits)` overrides them (the workspace's shared limits type,
   issue #1083), enforced before built-in frame allocations and backend selection, while bounding
   sequential DNL-deferred sample-plane growth until the exact height arrives.
@@ -276,14 +277,16 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **DNL (define number of lines, §B.2.5).** The **decoder** parses DNL and resolves a *sequential*
   frame with `Y = 0` by decoding MCU rows until the entropy data ends at a marker (the `Y = 0`
   frame's height then arrives in the following DNL). A DNL after a `Y ≠ 0` frame is advisory and
-  ignored. The dimension and byte caps derive an MCU-row ceiling before this dynamic decode,
+  ignored. The dimension, pixel-count and byte caps derive an MCU-row ceiling before this dynamic decode,
   then the exact resolved height is checked when DNL arrives. The encoder never emits `Y = 0` (it
   always knows its height and writes it in SOF0).
 - **Resource-budget accounting.** `DecodeLimits::max_image_bytes` budgets the native 8-bit interleaved
   raster (`width × height × frame components`), independent of chroma subsampling or requested
-  `Gray8`/`Rgb8`/`Cmyk8` presentation. The default budget is 64 MiB (issue #1024, matching
-  `gamut-png`); a trusted image beyond it needs `with_max_image_bytes(usize::MAX)` on the
-  `DecodeLimits` handed to `with_limits`. SOF limits
+  `Gray8`/`Rgb8`/`Cmyk8` presentation. It is opt-in: the default sets none (issue #1226; it was
+  64 MiB from issue #1024, which refused an ordinary 6000 × 4000 RGB photograph), leaving the
+  32768-per-side and 16384 × 16384-pixel caps as the default guard. A frame with a side over 32768
+  — which T.81 Table B.2 permits up to 65535 — is refused by default and needs widened limits. SOF
+  limits
   run before built-in frame-sized allocation or backend selection; accepted backend output is
   checked again, although the host cannot cap memory internal to an accepted foreign backend.
 - **Progressive + `Y = 0` (deferred height) is rejected as `Unsupported`.** The progressive
@@ -396,7 +399,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14 (landed with P2), CLI `gamut convert → .jpg` (`--quality`/`--jpeg-subsampling`/`--jpeg-restart-interval`/`--jpeg-progressive`), umbrella `jpeg` feature audit, facade mutants scoping, full-workspace gate re-run | ✅ done |
 | P7 | Exif 3.0 §4.7.2; XMP Part 3 §1.1.3; ICC.1:2001-04 Annex B.4 | APP-segment metadata (rawshift requirements, issue #28 follow-up): `metadata()` header-only read of APP1 EXIF/XMP and index-reassembled multi-segment APP2 ICC; `with_exif`/`with_xmp`/`with_icc_profile` encoder builders with pre-write size validation; bidirectional libjpeg-turbo interop (`jpeg_read_icc_profile`/`jpeg_write_icc_profile`/marker capture) and a dev-only `gamut-metadata` `MetadataBlock` round-trip; `decode_image_into` destination reuse | ✅ done |
 | P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegCodestreamDecoder`/`JpegCodestreamEncoder` traits over the **whole SOI..EOI interchange stream**, push-order backend registries, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. *Superseded in part by P18:* the bespoke `push_backend` `Arc<Mutex<..>>` registries became `gamut-codec-abi`'s `Registry` behind `with_backend`, and the `backend_declined` late-decline sentinel was removed (`supports()` is the only fall-through). APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
-| P9 | issue #306, #1024 | **Decoder resource limits:** dimension and native-raster byte builders over bounded defaults (65535 × 65535, 64 MiB); checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
+| P9 | issue #306, #1024 | **Decoder resource limits:** dimension and native-raster byte builders over bounded defaults (32768 per side and 16384 × 16384 pixels with no byte budget since issue #1226; 65535 × 65535 and 64 MiB before it); checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
 | P10 | T.81 §K.2; issue #331 | **Optimized baseline Huffman tables:** `JpegEncoder::with_optimized_tables(bool)` — the baseline scan is walked twice through one shared coder (`BaselineCoder::gather`/`::emit`), per-destination symbol histograms drive the §K.2 construction, and the resulting luma/chroma DC+AC tables replace the Annex K.3–K.6 typical ones in the same single DHT segment. Default off, so every previously-encodable configuration stays byte-identical | ✅ done |
 | P11 | T.81 §A.3.4, §B.2.4.1; issue #332 | **Caller-supplied quantization tables:** the public `QuantTables` pair — natural order, every entry `1..=255` (`u16` `1..=65535` since issue #1231, a 16-bit table making the frame SOF1) **by construction** (`new` rejects zero, so the encoder never divides by zero and never emits a DQT its own decoder refuses) — used verbatim via `JpegEncoder::with_quant_tables`, with `annex_k()`/`scaled()` recovering the frozen IJG mapping over arbitrary bases. Quality becomes inert while set; the frozen quality contract still governs the default path; backends are vetoed (a `JpegEncodeRequest` cannot carry tables). Alternate built-in base tables deferred (citation obligation) | ✅ done |
 | P12 | T.81 §F.1.2, Annex K.5/K.6; issue #333 | **RD-optimized coefficient selection:** the `rd` module's per-block AC trellis — dynamic program over (position, {v, v−1}) nodes with the exact run/size + ZRL + EOB bit cost of the typical AC tables as rate proxy, step-normalized distortion (the quantization table as the perceptual weighting), tuned dimensionless λ (pinned; measured 8.7% battery-wide saving at ≤ 0.35 dB) — plus `TrellisAdaptive` per-block λ modulation `√(energy/Σstep²)` clamped `[¼, 4]`. Opt-in `with_rd_optimization`; DC plain (deferred: cross-block DP through the DC predictor/restarts); default byte-identical; backends vetoed; progressive carries identical coefficients by the shared `quantize_block_rd` seam + configuration-only rate model | ✅ done |

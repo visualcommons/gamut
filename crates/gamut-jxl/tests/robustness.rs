@@ -372,8 +372,12 @@ mod with_streams {
             .unwrap();
 
         // The caller's caps only tighten: the most permissive settings leave the fixed ceiling.
-        let wide_open =
-            JxlDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(usize::MAX));
+        let wide_open = JxlDecoder::new().with_limits(
+            DecodeLimits::new()
+                .with_max_width(u32::MAX)
+                .with_max_height(u32::MAX)
+                .with_max_pixels(u64::MAX),
+        );
         let err = <JxlDecoder as DecodeImage<Rgba8>>::decode_image(&wide_open, &bytes)
             .expect_err("the pixel limit is not raised by the caller's caps");
         assert_eq!(

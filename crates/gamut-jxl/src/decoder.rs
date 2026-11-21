@@ -204,8 +204,8 @@ fn exif_box_tiff_stream(payload: &[u8]) -> Result<&[u8]> {
 ///
 /// Construct it with [`JxlDecoder::new`] or [`Default`], then optionally set
 /// [`JxlDecoder::with_codestream_bit_depth`], [`JxlDecoder::with_convert_policy`], and the
-/// hostile-input [`DecodeLimits`] through [`JxlDecoder::with_limits`] (by default
-/// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`], 64 MiB, of decoded samples, beneath a fixed
+/// hostile-input [`DecodeLimits`] through [`JxlDecoder::with_limits`] (by default the
+/// workspace's 32768 per side and 16384 × 16384 pixels with no byte budget, beneath a fixed
 /// `1 << 28`-sample ceiling in the built-in tail).
 ///
 /// # Backends
@@ -226,7 +226,7 @@ pub struct JxlDecoder {
     codestream_bit_depth: bool,
     /// Which lossy layout conversions a typed decode may perform.
     policy: ConvertPolicy,
-    /// The caller's dimension and byte budget for a decoded raster.
+    /// The caller's dimension, pixel and byte budget for a decoded raster.
     limits: DecodeLimits,
     /// Added codestream backends, tried in push order ahead of the built-in jxl-rs tail.
     backends: DecoderRegistry,
@@ -253,7 +253,7 @@ pub(crate) fn check_limits(
     height: u32,
     bytes_per_pixel: usize,
 ) -> Result<()> {
-    if width > limits.max_width() || height > limits.max_height() {
+    if !limits.admits_dimensions(width, height) {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
             "JXL: image exceeds the dimension limit",
@@ -289,14 +289,15 @@ impl JxlDecoder {
         Self::default()
     }
 
-    /// Sets the hostile-input [`DecodeLimits`]: an image wider, taller, or larger in decoded bytes
-    /// than they allow is refused with an
+    /// Sets the hostile-input [`DecodeLimits`]: an image wider, taller, with more pixels, or larger
+    /// in decoded bytes than they allow is refused with an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error once its header is
     /// parsed, before any pixel buffer is allocated. Returns the updated decoder for chaining.
     ///
-    /// The default is [`DecodeLimits::new`]: any width and height, and
-    /// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`] (64 MiB) of decoded samples. The budgeted
-    /// quantity is `width × height × bytes per pixel` of the wider of the stream's natural layout
+    /// The default is [`DecodeLimits::new`]: each side at most 32768 and at most 16384 × 16384
+    /// pixels, with no byte budget. That refuses a JPEG XL image with a side past 32768, which the
+    /// format's size header can declare, unless the limits are widened. An opt-in byte budget
+    /// ([`DecodeLimits::with_max_image_bytes`]) weighs `width × height × bytes per pixel` of the wider of the stream's natural layout
     /// and the requested one — the largest raster the decode materialises. It bounds the
     /// zero-filled `JxlRender::HeaderOnly` buffer the best-effort `decode_partial` returns for a
     /// stream cut short after its headers, too.
@@ -703,7 +704,7 @@ mod tests {
     fn the_limits_default_to_the_workspace_budget_and_take_part_in_equality() {
         let default = JxlDecoder::new();
         assert_eq!(default.limits(), DecodeLimits::new());
-        assert_eq!(default.limits().max_image_bytes(), 64 << 20);
+        assert_eq!(default.limits().max_image_bytes(), usize::MAX);
 
         let limits = DecodeLimits::new().with_max_width(3).with_max_height(5);
         let capped = JxlDecoder::new().with_limits(limits);
@@ -735,6 +736,9 @@ mod tests {
         assert!(check_limits(limits, 4, 3, 2).is_ok());
         assert_eq!(refusal(check_limits(limits, 5, 3, 1)), DIMENSION);
         assert_eq!(refusal(check_limits(limits, 4, 4, 1)), DIMENSION);
+        let pixels = DecodeLimits::new().with_max_pixels(4 * 3);
+        assert!(check_limits(pixels, 4, 3, 1).is_ok());
+        assert_eq!(refusal(check_limits(pixels, 13, 1, 1)), DIMENSION);
         // Every factor of the byte count is weighed: one more of any exceeds the budget.
         assert_eq!(refusal(check_limits(limits, 4, 3, 3)), SIZE);
         let one_short = limits.with_max_image_bytes(4 * 3 * 2 - 1);
@@ -744,7 +748,10 @@ mod tests {
     #[test]
     fn decode_limits_refuse_a_byte_count_that_overflows() {
         // Unbounded caps still cannot admit a raster whose size `usize` cannot even express.
-        let unbounded = DecodeLimits::new().with_max_image_bytes(usize::MAX);
+        let unbounded = DecodeLimits::new()
+            .with_max_width(u32::MAX)
+            .with_max_height(u32::MAX)
+            .with_max_pixels(u64::MAX);
         assert_eq!(
             refusal(check_limits(unbounded, u32::MAX, u32::MAX, usize::MAX)),
             SIZE

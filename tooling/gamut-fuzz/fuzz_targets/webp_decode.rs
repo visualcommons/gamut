@@ -5,14 +5,13 @@
 //! VP8/VP8L decoders instead of wrapping libwebp — so a hostile file must end in a typed error,
 //! never a panic, a hang, or an allocation past libFuzzer's malloc limit.
 //!
-//! The decoder has no configurable limits (#1025): its only bound is the format's own 14-bit
-//! dimension fields, 16 384 × 16 384 at most. That bound does **not** fit libFuzzer's default
-//! `-rss_limit_mb=2048`: a conformant lossless frame at that size holds its 1 GiB ARGB `Vec<u32>`
-//! and its 1 GiB RGBA output alive together (`WebpDecoder::decode_native`), so an out-of-memory
-//! report here can be a conformant file rather than a mis-sized allocation. Triage one by the
-//! frame size the input declares: a report whose declared frame needs the memory is the missing
-//! limit #1025 tracks, and only one whose frame does not is a defect in this crate. Once #1025
-//! gives the decoder a caller-set limit, this target sets it and the ambiguity goes away.
+//! The decoder's default limits (the workspace's `DecodeLimits`: 32768 per side, 16384² pixels,
+//! no byte budget, #1226) admit every frame the format's 14-bit dimension fields can declare,
+//! 16 384 × 16 384 at most. That does **not** fit libFuzzer's default `-rss_limit_mb=2048`: a
+//! conformant lossless frame at that size holds its 1 GiB ARGB `Vec<u32>` and its 1 GiB RGBA
+//! output alive together (`WebpDecoder::decode_native`). The target therefore sets the 64 MiB byte
+//! budget (#1025, charged at four bytes per pixel) a malloc-limited caller sets, so an
+//! out-of-memory report is a mis-sized allocation in this crate, never a conformant file.
 //!
 //! It decodes to `Rgba8` with the default (lossless) policy: an opaque image widens to it without
 //! permission, so both the lossy `VP8 ` path (with or without an `ALPH` chunk) and the lossless
@@ -25,9 +24,14 @@
 #![no_main]
 
 use gamut_core::{DecodeImage, Rgba8};
-use gamut_webp::WebpDecoder;
+use gamut_webp::{DecodeLimits, WebpDecoder};
 use libfuzzer_sys::fuzz_target;
 
+/// The decoded frame budget the target sets: 64 MiB, a 4096 × 4096 RGBA frame.
+const MAX_IMAGE_BYTES: usize = 64 << 20;
+
 fuzz_target!(|data: &[u8]| {
-    let _ = DecodeImage::<Rgba8>::decode_image(&WebpDecoder::new(), data);
+    let decoder =
+        WebpDecoder::new().with_limits(DecodeLimits::new().with_max_image_bytes(MAX_IMAGE_BYTES));
+    let _ = DecodeImage::<Rgba8>::decode_image(&decoder, data);
 });

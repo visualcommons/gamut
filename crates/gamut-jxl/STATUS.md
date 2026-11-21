@@ -118,7 +118,8 @@ on a hand-written golden bitstream.
   it answers to the same `ConvertPolicy`. The default `DecodeImage` path is unchanged.
 - **Decode policies.** Pixel-limit bound (`1 << 28` samples), the fixed ceiling in the built-in
   tail; beneath it, the workspace's `DecodeLimits` set with `JxlDecoder::with_limits` (issue #1026;
-  #1080 made the default the workspace's 64 MiB of decoded samples, where it was unbounded) are
+  #1080 made the default the workspace's 64 MiB of decoded samples, where it was unbounded; #1226
+  replaced it with the workspace's 32768-per-side and 16384²-pixel caps, the byte budget opt-in) are
   checked against the parsed header before any pixel buffer is sized, on both `DecodeImage` and
   `decode_partial`, and against the raster an added backend returns. Over a cap → `Unsupported`. The header-only
   accessors `info` / `embedded_icc_profile` / `metadata` do not apply them, since they allocate

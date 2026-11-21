@@ -92,27 +92,19 @@ use crate::marker::code;
 use crate::scan::McuRowLimit;
 use crate::syntax::{ColorInfo, Frame};
 
-/// The default [`DecodeLimits`]: each side capped at the format's own 16-bit ceiling (T.81 Table
-/// B.2, `X` and `Y` ≤ 65535), so the default admits every dimension a frame header can declare and
-/// leaves the workspace's 64 MiB byte budget
-/// ([`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`]) as the guard.
-const DEFAULT_LIMITS: DecodeLimits = DecodeLimits::new()
-    .with_max_width(u16::MAX as u32)
-    .with_max_height(u16::MAX as u32);
-
 /// A decoder for sequential (baseline SOF0 / extended SOF1) 8-bit Huffman JPEG streams.
 ///
 /// Cheap to construct; drive it through the [`DecodeImage`] trait. It presents the decoded image as
 /// [`Rgb8`] (grayscale replicated, YCbCr/RGB three-component), [`Gray8`] (single-component streams
 /// only), or [`Cmyk8`] (four-component CMYK/YCCK streams only).
 ///
-/// The defaults bound hostile input the way `gamut-png`'s decoder does: the dimension caps sit at
-/// the format's own 16-bit ceiling (T.81 Table B.2: `X`, `Y` ≤ 65535) and the native interleaved
-/// raster is capped at 64 MiB — the byte budget, not the dimension caps, is the real guard, since a
-/// few-byte SOF declaring 65535 × 65535 × 3 would otherwise ask for ~12.9 GB before any scan is
-/// read. Tighten either with [`with_limits`](Self::with_limits); a caller that trusts its input and
-/// needs a larger raster loosens the budget with
-/// `DecodeLimits::new().with_max_image_bytes(usize::MAX)`.
+/// The defaults bound hostile input the way every gamut decoder does, with the workspace's
+/// [`DecodeLimits::new`]: each side at most 32768 and at most 16384 × 16384 pixels, so a few-byte
+/// SOF declaring 65535 × 65535 × 3 (~12.9 GB) is refused before any scan is read, while a
+/// 6000 × 4000 photograph decodes. That is narrower than the format's own 16-bit ceiling (T.81
+/// Table B.2: `X`, `Y` ≤ 65535): a frame with a side over 32768 is refused by default, and a
+/// caller that trusts its input widens the bounds with [`with_limits`](Self::with_limits). No
+/// byte budget applies unless one is set with [`DecodeLimits::with_max_image_bytes`].
 ///
 /// # Example
 ///
@@ -159,14 +151,14 @@ impl Default for JpegDecoder {
 }
 
 impl JpegDecoder {
-    /// Creates a decoder with the default limits (65535 × 65535 dimensions, 64 MiB of native
-    /// interleaved raster), libjpeg-turbo's fancy chroma upsampling
+    /// Creates a decoder with the default limits ([`DecodeLimits::new`]: 32768 per side,
+    /// 16384 × 16384 pixels, no byte budget), libjpeg-turbo's fancy chroma upsampling
     /// ([`ChromaUpsampling::Interpolated`]) and no pluggable backends: every stream is decoded by
     /// the built-in decoder.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            limits: DEFAULT_LIMITS,
+            limits: DecodeLimits::new(),
             backends: DecoderRegistry::new(),
             policy: ConvertPolicy::lossless(),
             upsampling: ChromaUpsampling::Interpolated,
@@ -175,17 +167,17 @@ impl JpegDecoder {
 
     /// Sets the resource bounds ([`DecodeLimits`]) the decoder enforces.
     ///
-    /// The width and height bounds refuse a wider SOF, or a known taller one, before any
-    /// frame-sized allocation; a DNL-deferred height is bounded while its first scan is decoded and
-    /// checked exactly when the DNL arrives. The byte bound caps the image's **native** interleaved
+    /// The width, height and pixel-count bounds refuse a wider SOF, or a known taller or larger
+    /// one, before any frame-sized allocation; a DNL-deferred height is bounded while its first
+    /// scan is decoded and checked exactly when the DNL arrives. The byte bound caps the image's **native** interleaved
     /// 8-bit raster, `width × height × frame components`, independently of the requested
     /// presentation type: a one-component grayscale JPEG costs one byte per pixel even when decoded
     /// as [`Rgb8`]. For a DNL-deferred height the decoder derives a safe MCU-row ceiling from that
     /// budget before growing its sample planes. A breach is an
     /// [`ErrorKind::Unsupported`](gamut_core::ErrorKind::Unsupported) error.
     ///
-    /// The default caps each side at 65535, the most a frame header can declare, and the raster at
-    /// [`DecodeLimits::DEFAULT_MAX_IMAGE_BYTES`] (64 MiB).
+    /// The default, [`DecodeLimits::new`], caps each side at 32768 and the frame at 16384 × 16384
+    /// pixels, and sets no byte budget.
     #[must_use]
     pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
         self.limits = limits;
@@ -263,7 +255,7 @@ impl JpegDecoder {
     /// Checks dimensions and native raster bytes. A zero `height` is a DNL-deferred SOF: width and
     /// the minimum possible one-row raster are still checked immediately.
     fn check_limits(&self, width: u32, height: u32, components: usize) -> Result<()> {
-        if width > self.limits.max_width() || (height != 0 && height > self.limits.max_height()) {
+        if !self.limits.admits_dimensions(width, height) {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: image exceeds the dimension limit",
@@ -296,7 +288,8 @@ impl JpegDecoder {
     }
 
     /// Caps the number of MCU rows a sequential `Y=0` scan may allocate before its DNL arrives.
-    /// The cap is the tighter of the explicit height and the height implied by the byte budget.
+    /// The cap is the tighter of the height the dimension bounds allow (the explicit height, and
+    /// the pixel count over the width) and the height implied by the byte budget.
     fn deferred_row_limit(
         &self,
         frame: &Frame,
@@ -306,7 +299,11 @@ impl JpegDecoder {
             rows: scan_mcu_rows(
                 frame,
                 scan,
-                usize::try_from(self.limits.max_height()).unwrap_or(usize::MAX),
+                usize::try_from(
+                    (self.limits.max_pixels() / u64::from(frame.x))
+                        .min(u64::from(self.limits.max_height())),
+                )
+                .unwrap_or(usize::MAX),
             ),
             message: "JPEG: image exceeds the dimension limit",
         };

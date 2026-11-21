@@ -27,7 +27,7 @@ use crate::error::map_decode_error;
 /// realistic still image. The limit is deliberately generous and fixed: it is the ceiling, and a
 /// caller with a smaller budget tightens below it through
 /// [`JxlDecoder::with_limits`](crate::JxlDecoder::with_limits), whose
-/// [`DecodeLimits`] (64 MiB of decoded samples by default)
+/// [`DecodeLimits`] (32768 per side and 16384 × 16384 pixels by default)
 /// [`decode_raw`] checks against the parsed header.
 const PIXEL_LIMIT: usize = 1 << 28;
 
