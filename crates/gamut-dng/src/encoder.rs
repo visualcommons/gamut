@@ -829,12 +829,17 @@ impl DngEncoder {
                     ))
                 }
             }
-            DngCompression::Uncompressed => {
-                Ok(bitpack::pack(samples, bits, cols * spp, self.order))
-            }
-            DngCompression::Deflate => {
+            // Both byte-oriented schemes pack first, so the row width is computed at one site.
+            // Deflate is reached only at 8/16 bits, where `pack` ignores the row width, so a
+            // second, Deflate-only copy of `cols * spp` was a mutant no input could kill; the
+            // shared site is killed through the sub-byte uncompressed round trips.
+            DngCompression::Uncompressed | DngCompression::Deflate => {
                 let packed = bitpack::pack(samples, bits, cols * spp, self.order);
-                Ok(compression::deflate(&packed, self.deflate_level))
+                Ok(if self.compression == DngCompression::Deflate {
+                    compression::deflate(&packed, self.deflate_level)
+                } else {
+                    packed
+                })
             }
         }
     }
