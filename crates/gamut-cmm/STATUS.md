@@ -218,11 +218,14 @@ that add behaviour (#325 onward).
   `_cmsReadCHAD`'s rules (`cmsio1.c:94-128`). Differential: `oracle_intents.rs`'s
   `absolute_at_every_adaptation_state_matches_lcms2`, states 0, 0.5 and 1 against
   `cmsCreateExtendedTransform` on two white pairs, worst device |Δ| 5.6e-7, ΔE₀₀ 2.1e-5.
-  Two documented divergences, both on inputs lcms2 itself mishandles: a `chad` white
-  outside Robertson's table is **clamped** to its end temperature (lcms2 fails the
-  transform), and a mixed temperature outside the daylight locus's 4000–25 000 K, or a
-  singular output `chad` at a partial state, is an `UnsupportedProfile` error (lcms2 reads
-  an uninitialised white, or a temperature of 0 K). lcms2 also reads both `chad`s at state
+  A `chad` white beyond either end of Robertson's table is an `UnsupportedProfile` error at
+  a partial state, as lcms2's `cmsTempFromWhitePoint` fails the transform (`cct_from_xy`'s
+  clamp to its end temperatures is rejected here, not used); the one residual difference is
+  a white hotter than 100 000 K but short of the table's 0-mired line, which lcms2
+  interpolates toward infinity and this crate refuses. Two documented divergences, both on
+  inputs lcms2 itself mishandles: a mixed temperature outside the daylight locus's
+  4000–25 000 K, or a singular output `chad` at a partial state, is an `UnsupportedProfile`
+  error (lcms2 reads an uninitialised white, or a temperature of 0 K). lcms2 also reads both `chad`s at state
   1.0 and fails on a v2 display `wtpt` it cannot adapt; at state 1.0 this crate reads
   neither. Media whites come from `wtpt` via
   `_cmsReadMediaWhitePoint`'s quirks (`cmsio1.c:64-90`), replicated verbatim: missing or

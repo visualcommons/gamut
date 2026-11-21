@@ -130,7 +130,7 @@ pub(crate) fn absolute_conversion(
     let undone = mat_mul3(&chad_in_inverse, &scale);
     let temp_src = chad_temperature(&chad_in)?;
     let temp_dst = chad_temperature(&chad_out)?;
-    if is_identity(&scale) && (temp_src - temp_dst).abs() < 0.01 {
+    if is_identity(&scale) && same_temperature(temp_src, temp_dst) {
         return Ok(IDENTITY);
     }
     // Interpolated in kelvin, as lcms2 does, then a CHAD from that daylight white to D50
@@ -149,6 +149,14 @@ fn is_identity(m: &Matrix3) -> bool {
         .flatten()
         .zip(IDENTITY.iter().flatten())
         .all(|(a, b)| (b - a).abs() < 1.0 / 65535.0)
+}
+
+/// lcms2's `fabs(TempSrc - TempDest) < 0.01` in `ComputeAbsoluteIntent`: two adopted whites
+/// within a hundredth of a kelvin, the partial-state branch's identity shortcut. A function of
+/// its own so the boundary is reachable with exact operands (`0.01 - 0.0` is the literal
+/// itself), which a pair of `chad`-derived temperatures cannot hit.
+fn same_temperature(a: f64, b: f64) -> bool {
+    (a - b).abs() < 0.01
 }
 
 /// `m⁻¹`, or the error lcms2's failed `_cmsMAT3inverse` becomes.
@@ -206,12 +214,30 @@ fn read_chad(profile: &IccProfile) -> Result<Matrix3> {
 /// a `chad` adapts *from* — [`LCMS_D50`] carried back through the inverse matrix — by
 /// Robertson's method (`gamut-color`'s [`cct_from_xy`], lcms2's `cmsTempFromWhitePoint` over
 /// the same Wyszecki & Stiles table).
+///
+/// A white beyond either end of the table is refused, as lcms2 refuses it:
+/// `cmsTempFromWhitePoint` (`cmswtpnt.c:143-185`) finds no isotherm crossing and fails the
+/// transform, where [`cct_from_xy`] clamps to the end line's temperature. The clamp is exactly
+/// `1e6 / 600` or `1e6 / 10` K, so a result at either value is the clamp (or a white exactly on
+/// the end isotherm, where lcms2's `di / dj < 0` test fails too) and is rejected here. One
+/// residual divergence remains at the hot end: a white between the table's 0- and 10-mired
+/// isotherms (hotter than 100 000 K) gets a temperature from lcms2, which interpolates toward
+/// infinity, and an error here.
 fn chad_temperature(chad: &Matrix3) -> Result<f64> {
     let white = matvec3(&invert(chad)?, LCMS_D50);
-    cct_from_xy(chromaticity(white)).ok_or(CmmError::UnsupportedProfile(
-        "chromatic adaptation (chad) adopted white has no colour temperature",
-    ))
+    cct_from_xy(chromaticity(white))
+        .filter(|&temp| ROBERTSON_COOLEST < temp && temp < ROBERTSON_HOTTEST)
+        .ok_or(CmmError::UnsupportedProfile(
+            "chromatic adaptation (chad) adopted white has no colour temperature",
+        ))
 }
+
+/// The temperature [`cct_from_xy`] clamps a too-red white to: its table's 600-mired end line.
+const ROBERTSON_COOLEST: f64 = 1.0e6 / 600.0;
+
+/// The temperature [`cct_from_xy`] clamps a too-blue white to: its table's 10-mired line, the
+/// hottest it interpolates to.
+const ROBERTSON_HOTTEST: f64 = 1.0e6 / 10.0;
 
 /// lcms2's `Temp2CHAD` (`cmscnvrt.c:235-245`): the Bradford adaptation from the CIE daylight
 /// white at `temp` kelvin (`gamut-color`'s [`daylight_xy`], lcms2's `cmsWhitePointFromTemp`)
@@ -426,6 +452,38 @@ mod tests {
             let got = absolute_conversion(&src, &dst, state(degree)).unwrap();
             assert_close(&got, &want, 1e-12);
             assert!(!is_identity(&got), "{degree}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn same_temperature_is_strictly_within_a_hundredth_of_a_kelvin() {
+        assert!(same_temperature(6504.0, 6504.0));
+        assert!(same_temperature(0.0099, 0.0));
+        // `0.01 - 0.0` is the bound itself: lcms2's `<` excludes it, in either order.
+        assert!(!same_temperature(0.01, 0.0));
+        assert!(!same_temperature(0.0, 0.01));
+    }
+
+    #[test]
+    fn chad_whites_beyond_robertsons_table_have_no_temperature() {
+        // Whites past the 600-mired (too red) and the 0-mired (too blue) isotherms:
+        // `cct_from_xy` clamps both to its end temperatures, lcms2's `cmsTempFromWhitePoint`
+        // finds no crossing and fails.
+        for [x, y] in [[0.6, 0.38], [0.24, 0.22]] {
+            let white = [x / y, 1.0, (1.0 - x - y) / y];
+            let clamped = cct_from_xy([x, y]).unwrap();
+            assert!(
+                clamped == ROBERTSON_COOLEST || clamped == ROBERTSON_HOTTEST,
+                "{white:?} → {clamped} K"
+            );
+            let chad = bradford(white, LCMS_D50).unwrap();
+            assert!(
+                matches!(
+                    chad_temperature(&chad),
+                    Err(CmmError::UnsupportedProfile(_))
+                ),
+                "{white:?}"
+            );
         }
     }
 
