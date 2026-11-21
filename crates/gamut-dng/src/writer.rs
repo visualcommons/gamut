@@ -55,6 +55,24 @@ pub(crate) fn write_cfa_dng(
     })
 }
 
+/// Serialises a DNG with no preview, whose IFD 0 is itself the raw image and carries `raw`'s
+/// image data.
+///
+/// `ifd0` supplies every field *except* the offset/byte-count pair, which this fills in; the raw
+/// data is laid out after the directory tree.
+pub(crate) fn write_raw_ifd0_dng(
+    order: ByteOrder,
+    variant: Variant,
+    ifd0: Ifd,
+    raw: &ImageBlocks,
+) -> Result<Vec<u8>> {
+    write_with_blocks(order, variant, &[raw.run()], |placed| {
+        let mut ifd0 = ifd0.clone();
+        placed[0].install(&mut ifd0);
+        vec![ifd0]
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use gamut_ifd::Value;

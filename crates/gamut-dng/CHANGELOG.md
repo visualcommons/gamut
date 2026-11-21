@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(gamut-dng)* `DngEncoder::with_preview(DngPreview)` caps the IFD 0 preview's longer side
+  (`DngPreview::Uncompressed { max_dimension }`) or leaves the preview out (`DngPreview::None`,
+  the raw image then being IFD 0 itself); the default is the uncapped preview written before
+  ([#1245](https://github.com/visualcommons/gamut/issues/1245))
+- *(gamut-dng)* [**breaking**] `DngCompression::LosslessJpeg` carries the T.81 predictor it codes
+  with, `LosslessJpeg(LosslessPredictor)`; `LosslessPredictor::Left` reproduces the previous
+  output ([#1245](https://github.com/visualcommons/gamut/issues/1245))
 - *(gamut-dng)* `DngDecoder::metadata` reads a DNG's Exif, XMP, IPTC-IIM and ICC metadata without
   decoding its raw image, so files whose image the decoder cannot handle (lossy JPEG) still yield
   it; the result equals `decode`'s `DecodedDng::metadata` ([#1108](https://github.com/visualcommons/gamut/issues/1108))

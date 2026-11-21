@@ -62,7 +62,9 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
   AnalogBalance, BaselineExposure, profile identity); the full level model (`RawLevels`: the
   BlackLevel repeat pattern with RATIONAL values, `BlackLevelDeltaH/V`, per-plane `WhiteLevel`,
   `LinearizationTable`, `MaskedAreas`), active area, default crop, and 8/10/12/14/16-bit packing;
-  typed `OpcodeList1/2/3` containers (parse + pass-through write); an embedded RGB preview;
+  typed `OpcodeList1/2/3` containers (parse + pass-through write); an embedded uncompressed RGB
+  preview, size-capped or left out (`DngEncoder::with_preview(DngPreview)`, the raw image then
+  being IFD 0 itself);
   EXIF/XMP/IPTC/ICC metadata (`DngEncoder::with_dng_metadata`) — the `ExifIFD` carried whole as
   the shared `Exif` model's Exif sub-IFD, the XMP/IPTC-IIM/ICC payloads verbatim, and, with the optional
   `metadata` feature, `gamut-metadata`'s `TypedMetadata` and `MetadataSink` over them; a **C2PA

@@ -17,15 +17,16 @@ use crate::metadata::DngMetadata;
 use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
 use crate::values::{CalibrationIlluminant, Compression, PhotometricInterpretation};
-use crate::writer::{ImageBlocks, write_cfa_dng};
-use crate::{LosslessPredictor, bitpack, compression, preview, tags};
+use crate::writer::{ImageBlocks, write_cfa_dng, write_raw_ifd0_dng};
+use crate::{DngPreview, LosslessPredictor, bitpack, compression, preview, tags};
 
 /// Encoder for DNG (Adobe Digital Negative) raw images.
 ///
 /// [`encode`](Self::encode) writes a raw image — a CFA mosaic or a demosaiced `LinearRaw` — as a
 /// DNG: an IFD 0 holding a small RGB preview plus the camera/colour-profile tags, and a raw
-/// sub-IFD holding the full-resolution image. Defaults to little-endian (`II`) classic TIFF;
-/// richer compression and metadata are added in later phases (see `STATUS.md`).
+/// sub-IFD holding the full-resolution image — or, with [`DngPreview::None`], an IFD 0 that is
+/// the raw image itself ([`with_preview`](Self::with_preview)). Defaults to little-endian (`II`)
+/// classic TIFF.
 #[derive(Debug, Clone)]
 pub struct DngEncoder {
     order: ByteOrder,
@@ -33,6 +34,7 @@ pub struct DngEncoder {
     backward_version: [u8; 4],
     variant: Variant,
     compression: DngCompression,
+    preview: DngPreview,
     tiling: Option<(u32, u32)>,
     gain_table_map: Option<ProfileGainTableMap>,
     gain_table_map2: Option<ProfileGainTableMap>,
@@ -144,6 +146,7 @@ impl Default for DngEncoder {
             backward_version: [1, 1, 0, 0],
             variant: Variant::Classic,
             compression: DngCompression::Uncompressed,
+            preview: DngPreview::default(),
             tiling: None,
             gain_table_map: None,
             gain_table_map2: None,
@@ -210,11 +213,25 @@ impl DngEncoder {
     /// Each [`DngCompression`] is a scheme the encoder writes, with two encode-time limits:
     /// [`Deflate`](DngCompression::Deflate) needs 8/16-bit samples, and
     /// [`Jxl`](DngCompression::Jxl) needs the `jxl-encode` cargo feature and full-range 16-bit
-    /// samples. JPEG XL's distance and effort travel in that variant's [`JxlSettings`]. The
-    /// preview is always stored uncompressed.
+    /// samples. JPEG XL's distance and effort travel in that variant's [`JxlSettings`], the
+    /// lossless-JPEG predictor in [`LosslessJpeg`](DngCompression::LosslessJpeg)'s payload. The
+    /// raw image alone is compressed: the preview is [`with_preview`](Self::with_preview)'s.
     #[must_use]
     pub fn with_compression(mut self, compression: DngCompression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Returns a copy of this encoder that writes the given IFD 0 preview (default: an uncapped
+    /// [`DngPreview::Uncompressed`]).
+    ///
+    /// [`DngPreview::None`] writes no preview: IFD 0 is then the raw image itself, which the DNG
+    /// spec permits. [`DngPreview::Uncompressed`] with a `max_dimension` bounds the preview's
+    /// longer side, so its uncompressed size no longer grows with the raw's; a zero cap is a typed
+    /// error at encode time.
+    #[must_use]
+    pub fn with_preview(mut self, preview: DngPreview) -> Self {
+        self.preview = preview;
         self
     }
 
@@ -306,7 +323,8 @@ impl DngEncoder {
     ///
     /// `raw` supplies the sensor samples plus the photometry and levels; `profile` supplies the
     /// colour calibration and as-shot white balance. The output is an IFD 0 holding an RGB preview
-    /// plus the DNG/profile tags, with the full-resolution image in a `SubIFDs` sub-IFD.
+    /// plus the DNG/profile tags, with the full-resolution image in a `SubIFDs` sub-IFD — or, with
+    /// [`DngPreview::None`], an IFD 0 holding the full-resolution image beside those tags.
     ///
     /// The store is written last in the file and its entry lives in IFD 0 — the last (and only)
     /// IFD of this encoder's main chain — as C2PA 2.4 §A.3.6 requires. The report's ranges are
@@ -331,7 +349,9 @@ impl DngEncoder {
     /// `MIN_STORE_LEN` (8) bytes — BigTIFF packs a value that short inline in its entry, so it
     /// could not be the out-of-line run at the end of the file §A.3.6 wants; or if, without
     /// BigTIFF, it is longer than a 32-bit `LONG` count describes, or a reservation is longer
-    /// than a buffer can hold. Propagates buffer/validation errors.
+    /// than a buffer can hold. Also an
+    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error, before any pixel
+    /// work, if the [`DngPreview`] size cap is `0`. Propagates buffer/validation errors.
     pub fn encode(
         &self,
         raw: &RawImage,
@@ -340,6 +360,7 @@ impl DngEncoder {
     ) -> Result<DngEncodeReport> {
         let store = self.c2pa_store()?;
         self.metadata.check()?;
+        self.preview.check()?;
         if color_plane_count(raw) != 3 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -395,7 +416,12 @@ impl DngEncoder {
             }
         };
 
-        let (preview_dims, preview_rgb) = preview::raw_preview(raw)?;
+        let preview = match self.preview {
+            DngPreview::None => None,
+            DngPreview::Uncompressed { max_dimension } => {
+                Some(preview::raw_preview(raw, max_dimension)?)
+            }
+        };
         // Effective versions: the backward version per the compatibility rules, and (unless
         // overridden) the minimal DNGVersion covering the features used — never below the
         // backward version, which a reader is entitled to assume.
@@ -408,7 +434,10 @@ impl DngEncoder {
                 required
             }
         });
-        let mut ifd0 = self.build_ifd0(profile, preview_dims, dng_version, backward_version)?;
+        let mut ifd0 = self.build_ifd0(profile, dng_version, backward_version)?;
+        if let Some((preview_dims, _)) = &preview {
+            set_preview_image_tags(&mut ifd0, *preview_dims);
+        }
         // The raw-data integrity digest (P17). `gdng_validate` runs ValidateRawImageDigest, so
         // every oracle-gated test enforces this value against the SDK's own computation. For
         // lossy-compressed storage (JPEG XL) the digest covers the compressed chunks; for
@@ -433,11 +462,6 @@ impl DngEncoder {
         }
         let raw_ifd = build_raw_ifd(self, raw)?;
 
-        let preview_blocks = ImageBlocks {
-            offset_tag: tags::STRIP_OFFSETS,
-            bytecount_tag: tags::STRIP_BYTE_COUNTS,
-            blocks: vec![preview_rgb],
-        };
         let raw_blocks = match self.tiling {
             None => ImageBlocks {
                 offset_tag: tags::STRIP_OFFSETS,
@@ -451,14 +475,31 @@ impl DngEncoder {
             },
         };
 
-        let mut bytes = write_cfa_dng(
-            self.order,
-            self.variant(),
-            ifd0,
-            &preview_blocks,
-            raw_ifd,
-            &raw_blocks,
-        )?;
+        let mut bytes = match preview {
+            Some((_, preview_rgb)) => {
+                let preview_blocks = ImageBlocks {
+                    offset_tag: tags::STRIP_OFFSETS,
+                    bytecount_tag: tags::STRIP_BYTE_COUNTS,
+                    blocks: vec![preview_rgb],
+                };
+                write_cfa_dng(
+                    self.order,
+                    self.variant(),
+                    ifd0,
+                    &preview_blocks,
+                    raw_ifd,
+                    &raw_blocks,
+                )?
+            }
+            // No preview: IFD 0 is the raw image, so the raw IFD's image and level tags join the
+            // DNG/profile tags there (none of them is set on both).
+            None => {
+                for field in raw_ifd.fields() {
+                    ifd0.set(field.tag, field.value.clone());
+                }
+                write_raw_ifd0_dng(self.order, self.variant(), ifd0, &raw_blocks)?
+            }
+        };
         let c2pa = match store {
             Some(store) => Some(append_c2pa_store(&mut bytes, &store)?),
             None => None,
@@ -470,36 +511,18 @@ impl DngEncoder {
         })
     }
 
-    /// Builds IFD 0: the RGB preview's image tags plus the DNG version, camera identity, and the
-    /// colour-calibration profile. The `SubIFDs` pointer and strip offsets are filled in by the
+    /// Builds IFD 0's own tags: the DNG version, camera identity, and the colour-calibration
+    /// profile — no image tags, which are the preview's ([`set_preview_image_tags`]) or, with no
+    /// preview, the raw IFD's. The `SubIFDs` pointer and strip offsets are filled in by the
     /// writer. `backward_version` is the effective (possibly opcode-raised) `DNGBackwardVersion`.
     fn build_ifd0(
         &self,
         profile: &CameraProfile,
-        preview_dims: gamut_core::Dimensions,
         dng_version: [u8; 4],
         backward_version: [u8; 4],
     ) -> Result<Ifd> {
         let mut ifd = Ifd::new();
-        // Preview image (a reduced-resolution RGB thumbnail).
-        ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
-        ifd.set(tags::IMAGE_WIDTH, count_value(preview_dims.width()));
-        ifd.set(tags::IMAGE_LENGTH, count_value(preview_dims.height()));
-        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8, 8, 8]));
-        ifd.set(
-            tags::COMPRESSION,
-            Value::Short(vec![u16::from(Compression::None)]),
-        );
-        ifd.set(
-            tags::PHOTOMETRIC_INTERPRETATION,
-            Value::Short(vec![u16::from(PhotometricInterpretation::Rgb)]),
-        );
         ifd.set(tags::ORIENTATION, Value::Short(vec![1]));
-        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
-        ifd.set(tags::ROWS_PER_STRIP, count_value(preview_dims.height()));
-        ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
-        ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
-        ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
         ifd.set(tags::SOFTWARE, Value::Ascii("gamut-dng".to_owned()));
         ifd.set(
             tags::MODEL,
@@ -828,6 +851,28 @@ fn tile_samples(
         }
     }
     tiles
+}
+
+/// Sets IFD 0's image tags for a `dims` uncompressed 8-bit RGB preview in one strip (the
+/// reduced-resolution primary preview, `NewSubFileType = 1`).
+fn set_preview_image_tags(ifd: &mut Ifd, dims: gamut_core::Dimensions) {
+    ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
+    ifd.set(tags::IMAGE_WIDTH, count_value(dims.width()));
+    ifd.set(tags::IMAGE_LENGTH, count_value(dims.height()));
+    ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8, 8, 8]));
+    ifd.set(
+        tags::COMPRESSION,
+        Value::Short(vec![u16::from(Compression::None)]),
+    );
+    ifd.set(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        Value::Short(vec![u16::from(PhotometricInterpretation::Rgb)]),
+    );
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
+    ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height()));
+    ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
+    ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
+    ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
 }
 
 /// Builds an `SRATIONAL` value from a row-major `3 × 3` colour/calibration matrix.

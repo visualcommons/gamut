@@ -159,6 +159,7 @@ pub use levels::{MAX_BLACK_REPEAT, RawLevels};
 pub use linearize::LinearImage;
 pub use metadata::DngMetadata;
 pub use opcode::{Opcode, OpcodeList, opcode_id};
+pub use preview::DngPreview;
 pub use profile::CameraProfile;
 pub use raw::{RawImage, RawPhotometry, cfa_color};
 pub use rewrite::{DngRewrite, MakerNotePreservation, PreservedSpan, RewrittenDng};
