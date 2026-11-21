@@ -527,7 +527,7 @@ fn alpha_quality_sets_the_alpha_items_coded_base_q_idx() {
     // colour item is exactly what the colour quality codes without the knob.
     for (colour_q, alpha_q) in [(30u8, 90u8), (90, 30), (50, 0), (0, 100)] {
         let (colour, alpha) = item_payloads(&encode_rgba(
-            &AvifEncoder::lossy(colour_q).with_alpha_quality(alpha_q),
+            &AvifEncoder::lossy(colour_q).with_alpha_quality(Some(alpha_q)),
         ));
         let (plain_colour, plain_alpha) =
             item_payloads(&encode_rgba(&AvifEncoder::lossy(colour_q)));
@@ -544,14 +544,14 @@ fn alpha_quality_sets_the_alpha_items_coded_base_q_idx() {
         alpha_stream_at(quality_to_quant(40))
     );
     assert_eq!(
-        encode_rgba(&AvifEncoder::lossy(40).with_alpha_quality(40)),
+        encode_rgba(&AvifEncoder::lossy(40).with_alpha_quality(Some(40))),
         follows
     );
     // Lossless ignores it: alpha stays on the lossless path (`base_q_idx` 0), byte-for-byte.
     let lossless = encode_rgba(&AvifEncoder::lossless());
     assert_eq!(item_payloads(&lossless).1, alpha_stream_at(0));
     assert_eq!(
-        encode_rgba(&AvifEncoder::lossless().with_alpha_quality(10)),
+        encode_rgba(&AvifEncoder::lossless().with_alpha_quality(Some(10))),
         lossless
     );
 }
@@ -591,7 +591,7 @@ fn a_finer_alpha_quality_decodes_closer_to_the_source_through_libavif() {
     };
 
     let fine = decoded_alpha(&encode_rgba(
-        &AvifEncoder::lossy(COLOUR_Q).with_alpha_quality(ALPHA_Q),
+        &AvifEncoder::lossy(COLOUR_Q).with_alpha_quality(Some(ALPHA_Q)),
     ));
     let recon = gamut_av1::encode_still_with_recon(
         &alpha_planes,

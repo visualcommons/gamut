@@ -1,15 +1,15 @@
 //! Encoder configuration: lossless vs. lossy selection, the quality knob, the output colour
-//! encoding, alpha handling, orientation, HDR descriptors, effort and threads — every plain-data
-//! knob of an [`AvifEncoder`](crate::AvifEncoder).
+//! encoding, alpha handling, orientation, HDR descriptors, effort, tiling and threads — every
+//! plain-data knob of an [`AvifEncoder`](crate::AvifEncoder).
 
 use core::num::NonZeroUsize;
 
-use gamut_av1::Effort;
+use gamut_av1::{Effort, Tiling};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
     TransferCharacteristics,
 };
-use gamut_core::Orientation;
+use gamut_core::{Dimensions, Orientation};
 use gamut_isobmff::{ContentLightLevel, MasteringDisplay};
 
 /// How the colour of an RGBA input relates to its alpha, and so what an RGBA encode codes and
@@ -230,9 +230,22 @@ pub struct AvifConfig {
     /// The `gamut-av1` mode-decision search preset every AV1 still of the file is coded at —
     /// colour and alpha alike. Defaults to [`Effort::default`].
     pub effort: Effort,
-    /// The most threads an encode may use; `None` is the machine's available parallelism.
-    /// Defaults to `Some(1)`. The output does not depend on it.
-    pub threads: Option<NonZeroUsize>,
+    /// The `gamut-av1` tile layout every AV1 still of the file is coded in — colour and alpha
+    /// alike — unless [`auto_tiling`](Self::auto_tiling) picks one instead. Defaults to
+    /// [`Tiling::SINGLE`], one tile, as libavif's `tileColsLog2`/`tileRowsLog2` default to.
+    ///
+    /// The layout is what lets [`threads`](Self::threads) code a still in parallel — at most one
+    /// thread per tile — and it changes the stream: more tiles cost some size at tile boundaries.
+    pub tiling: Tiling,
+    /// Whether the encoder picks the tile layout from the frame size, as libavif's `autoTiling`
+    /// does, instead of using [`tiling`](Self::tiling), which it then **ignores**. Defaults to
+    /// `false`. See [`AvifEncoder::with_auto_tiling`](crate::AvifEncoder::with_auto_tiling) for
+    /// the rule; like libavif's, it reads no thread count.
+    pub auto_tiling: bool,
+    /// The most threads an encode may use — `gamut-av1`'s thread type, so
+    /// [`std::thread::available_parallelism`] passes straight in. Defaults to one. The output
+    /// does not depend on it.
+    pub threads: NonZeroUsize,
 }
 
 impl Default for AvifConfig {
@@ -253,8 +266,58 @@ impl Default for AvifConfig {
             content_light_level: None,
             mastering_display: None,
             effort: Effort::default(),
-            threads: Some(NonZeroUsize::MIN),
+            tiling: Tiling::SINGLE,
+            auto_tiling: false,
+            threads: NonZeroUsize::MIN,
         }
+    }
+}
+
+impl AvifConfig {
+    /// The tile layout a still of `dims` is coded in: [`auto_tiling`] over `dims` when
+    /// [`auto_tiling`](Self::auto_tiling) is set, else [`tiling`](Self::tiling) as given.
+    pub(crate) fn tiling_for(&self, dims: Dimensions) -> Tiling {
+        if self.auto_tiling {
+            auto_tiling(dims)
+        } else {
+            self.tiling
+        }
+    }
+}
+
+/// The smallest tile area, in luma samples, [`auto_tiling`] aims for: libavif's `kMinTileArea`,
+/// because small tiles cost image quality.
+const MIN_TILE_AREA: u64 = 512 * 512;
+/// The most tiles [`auto_tiling`] asks for: the fixed `threads = 8` libavif's `autoTiling` passes
+/// to `avifSetTileConfiguration`, whatever its `maxThreads`. libavif's own `kMaxTiles = 32` cap
+/// lies above this one and never binds, so it is not restated.
+const AUTO_TILES: u64 = 8;
+
+/// libavif's `autoTiling` rule for a frame of `dims` (`avifSetTileConfiguration` and
+/// `splitTilesLog2` in `src/write.c`, called with `threads = 8`):
+///
+/// 1. one tile per started 512 × 512 luma samples of area, at most 8, rounded **down** to a
+///    power of two `2^n`;
+/// 2. the shorter side gets `max(n - floor(log2(long / short)), 0) / 2` of the `n` (`long /
+///    short` an integer division), and the longer side the rest — columns when the frame is
+///    square.
+///
+/// So a 4K frame gets 4 × 2 tiles and anything up to 512 × 512 one. The rule reads no thread
+/// count, so the output stays thread-count-invariant. The result is a request `gamut-av1` still
+/// clamps to what the frame and its level allow (see [`Tiling`]).
+fn auto_tiling(dims: Dimensions) -> Tiling {
+    let (width, height) = (dims.width(), dims.height());
+    let area = u64::from(width) * u64::from(height);
+    // `1..=8`: the area is nonzero, so its log2 is `0..=3`.
+    let log2 = area.div_ceil(MIN_TILE_AREA).min(AUTO_TILES).ilog2();
+    let (long, short) = (width.max(height), width.min(height));
+    let short_log2 = log2.saturating_sub((long / short).ilog2()) / 2;
+    let long_log2 = log2 - short_log2;
+    let (short_log2, long_log2) = (short_log2 as u8, long_log2 as u8);
+    if width >= height {
+        Tiling::new(long_log2, short_log2)
+    } else {
+        Tiling::new(short_log2, long_log2)
     }
 }
 
@@ -283,11 +346,58 @@ mod tests {
         assert_eq!(c.content_light_level, None);
         assert_eq!(c.mastering_display, None);
         assert_eq!(c.effort, Effort::default());
+        // One tile, as libavif and libaom default to; auto tiling is opt-in.
+        assert_eq!(c.tiling, Tiling::SINGLE);
+        assert!(!c.auto_tiling);
         // One thread unless asked: an encoder without the knob spawns nothing.
-        assert_eq!(c.threads, Some(NonZeroUsize::MIN));
+        assert_eq!(c.threads, NonZeroUsize::MIN);
         assert_eq!(AvifMode::default(), AvifMode::Lossless);
         assert_eq!(AlphaMode::default(), AlphaMode::Unassociated);
         assert_eq!(OpaqueAlpha::default(), OpaqueAlpha::Drop);
+    }
+
+    /// `(cols_log2, rows_log2)` [`auto_tiling`] picks for a `width`×`height` frame.
+    fn auto(width: u32, height: u32) -> (u8, u8) {
+        let t = auto_tiling(Dimensions::new(width, height).unwrap());
+        (t.cols_log2, t.rows_log2)
+    }
+
+    /// Each row is libavif's `avifSetTileConfiguration(8, w, h, …)` worked by hand.
+    #[test]
+    fn auto_tiling_is_libavifs_rule_at_eight_threads() {
+        // One tile up to 512 × 512; one sample more starts a second, on the longer side.
+        assert_eq!(auto(1, 1), (0, 0));
+        assert_eq!(auto(512, 512), (0, 0));
+        assert_eq!(auto(513, 512), (1, 0));
+        assert_eq!(auto(512, 513), (0, 1));
+        // 4K wants 32 tiles; eight is the cap, split 4 × 2 along the longer side.
+        assert_eq!(auto(3840, 2160), (2, 1));
+        assert_eq!(auto(2160, 3840), (1, 2));
+        // A square frame gives the odd one to the columns.
+        assert_eq!(auto(2048, 2048), (2, 1));
+        // A 2:1 frame still splits both ways; at 4:1 the short side gets none.
+        assert_eq!(auto(2048, 1024), (2, 1));
+        assert_eq!(auto(4096, 1024), (3, 0));
+        assert_eq!(auto(1024, 4096), (0, 3));
+        // Past the point where the ratio exceeds the tile count, the short side never goes
+        // negative.
+        assert_eq!(auto(8192, 512), (3, 0));
+    }
+
+    #[test]
+    fn tiling_for_uses_the_fixed_layout_unless_auto_tiling_is_set() {
+        let dims = Dimensions::new(3840, 2160).unwrap();
+        let fixed = AvifConfig {
+            tiling: Tiling::new(1, 1),
+            ..AvifConfig::default()
+        };
+        assert_eq!(fixed.tiling_for(dims), Tiling::new(1, 1));
+        // Auto ignores the fixed layout.
+        let auto = AvifConfig {
+            auto_tiling: true,
+            ..fixed
+        };
+        assert_eq!(auto.tiling_for(dims), Tiling::new(2, 1));
     }
 
     #[test]

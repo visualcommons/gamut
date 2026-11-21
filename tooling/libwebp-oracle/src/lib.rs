@@ -139,6 +139,74 @@ pub fn libwebp_rgba_to_yuv(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
     }
 }
 
+/// Runs libwebp's `WebPCleanupTransparentArea` — what `WebPEncode` applies to a lossy picture when
+/// `config.exact` is off — on YUV 4:2:0 planes plus a full-resolution alpha plane (the picture's
+/// `use_argb = 0` branch), returning the cleaned `y`/`u`/`v` planes. Plane sizes are `width *
+/// height` for `y` and `alpha` and the ceiling-halved 4:2:0 size for `u` and `v`. Panics (these are
+/// tests) on a bad plane size or a libwebp allocation failure.
+#[must_use]
+pub fn libwebp_cleanup_transparent_area_yuva(
+    planes: [&[u8]; 3],
+    alpha: &[u8],
+    width: u32,
+    height: u32,
+) -> DecodedYuv {
+    let (w, h) = (width as usize, height as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let [y, u, v] = planes;
+    assert_eq!(y.len(), w * h, "luma plane is not width*height bytes");
+    assert_eq!(alpha.len(), w * h, "alpha plane is not width*height bytes");
+    assert_eq!(u.len(), cw * ch, "u plane is not the 4:2:0 chroma size");
+    assert_eq!(v.len(), cw * ch, "v plane is not the 4:2:0 chroma size");
+    // SAFETY: the picture is zero-initialised then Init-filled; `WebPPictureAlloc` with
+    // `use_argb = 0` and `WEBP_YUV420A` allocates y/u/v/a planes of at least `rows * stride` bytes,
+    // every row copy below stays inside both the source slice (asserted above) and that plane, and
+    // the picture is freed after its planes are copied out.
+    unsafe {
+        let mut pic: libwebp_sys::WebPPicture = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPPictureInit(&mut pic) != 0,
+            "WebPPictureInit failed"
+        );
+        pic.width = width as c_int;
+        pic.height = height as c_int;
+        pic.use_argb = 0;
+        pic.colorspace = libwebp_sys::WEBP_YUV420A;
+        assert!(
+            libwebp_sys::WebPPictureAlloc(&mut pic) != 0,
+            "WebPPictureAlloc failed"
+        );
+        let fill = |dst: *mut u8, stride: usize, src: &[u8], pw: usize, ph: usize| {
+            for row in 0..ph {
+                slice::from_raw_parts_mut(dst.add(row * stride), pw)
+                    .copy_from_slice(&src[row * pw..row * pw + pw]);
+            }
+        };
+        fill(pic.y, pic.y_stride as usize, y, w, h);
+        fill(pic.u, pic.uv_stride as usize, u, cw, ch);
+        fill(pic.v, pic.uv_stride as usize, v, cw, ch);
+        fill(pic.a, pic.a_stride as usize, alpha, w, h);
+        libwebp_sys::WebPCleanupTransparentArea(&mut pic);
+        let copy_plane = |ptr: *const u8, stride: usize, pw: usize, ph: usize| {
+            let mut out = vec![0u8; pw * ph];
+            for row in 0..ph {
+                out[row * pw..row * pw + pw]
+                    .copy_from_slice(slice::from_raw_parts(ptr.add(row * stride), pw));
+            }
+            out
+        };
+        let out = DecodedYuv {
+            width,
+            height,
+            y: copy_plane(pic.y, pic.y_stride as usize, w, h),
+            u: copy_plane(pic.u, pic.uv_stride as usize, cw, ch),
+            v: copy_plane(pic.v, pic.uv_stride as usize, cw, ch),
+        };
+        libwebp_sys::WebPPictureFree(&mut pic);
+        out
+    }
+}
+
 /// An RGBA image decoded by libwebp: interleaved 8-bit `R,G,B,A` pixels plus dimensions.
 pub struct DecodedRgba {
     /// Image width in pixels.

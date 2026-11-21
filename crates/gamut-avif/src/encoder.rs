@@ -4,7 +4,8 @@ use core::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{
-    Av1Color, Av1EncodeConfig, Av1StillConfig, Effort, EncodedStill, encode_still, encode_still16,
+    Av1Color, Av1EncodeConfig, Av1StillConfig, Effort, EncodedStill, Tiling, encode_still,
+    encode_still16,
 };
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients, Planar8, Planar16,
@@ -419,6 +420,32 @@ impl AvifEncoder {
         self.config
     }
 
+    /// Selects the bitstream mode — [`AvifMode::Lossless`] or [`AvifMode::Lossy`] — and nothing
+    /// else.
+    ///
+    /// Unlike the [`lossy`](Self::lossy) constructor, this moves no other knob: switching the
+    /// default encoder to lossy keeps its identity matrix, which codes R'G'B' planes at 4:4:4 —
+    /// conformant, but without the luma–chroma decorrelation the lossy preset's BT.709 4:2:0 buys.
+    /// Start from [`lossy`](Self::lossy), or pair this with [`with_matrix`](Self::with_matrix)
+    /// and [`with_chroma`](Self::with_chroma), for that.
+    #[must_use]
+    pub fn with_mode(mut self, mode: AvifMode) -> Self {
+        self.config.mode = mode;
+        self
+    }
+
+    /// Sets the lossy `quality` (`0..=100`, higher = larger output, closer to the source; values
+    /// above `100` are clamped) — the value [`lossy`](Self::lossy) takes, through the same
+    /// mapping, so `lossy(a).with_quality(b)` codes the bytes `lossy(b)` does.
+    ///
+    /// **Ignored by [`AvifMode::Lossless`]**, which codes bit-exactly whatever is set here; it
+    /// selects no mode (see [`with_mode`](Self::with_mode)).
+    #[must_use]
+    pub fn with_quality(mut self, quality: u8) -> Self {
+        self.config.quality = quality;
+        self
+    }
+
     /// Selects the CICP matrix the samples are coded through — the colour half of the
     /// space/quality tradeoff.
     ///
@@ -463,7 +490,7 @@ impl AvifEncoder {
     ///
     /// This is a **tag, not a conversion**: the encoder does not gamut-map anything, so it declares
     /// what the caller's samples already are. Unlike [`with_matrix`](Self::with_matrix) and
-    /// [`with_color_range`](Self::with_color_range) it touches no sample, so it applies to
+    /// [`with_range`](Self::with_range) it touches no sample, so it applies to
     /// [`AvifMode::Lossless`] as well as [`AvifMode::Lossy`].
     ///
     /// The value reaches both the AV1 sequence header's `color_config()` and the container's `colr`
@@ -503,8 +530,11 @@ impl AvifEncoder {
     ///
     /// Ignored by [`AvifMode::Lossless`] (and by an identity-matrix encode generally): AV1's
     /// §5.5.2 sRGB shortcut infers full range for BT.709/sRGB/identity and codes no bit for it.
+    ///
+    /// Named for the [`AvifConfig::range`] field it sets, as `gamut-av1`'s
+    /// [`Av1Color::with_range`] is (this was `with_color_range` before #1233).
     #[must_use]
-    pub fn with_color_range(mut self, range: ColorRange) -> Self {
+    pub fn with_range(mut self, range: ColorRange) -> Self {
         self.config.range = range;
         self
     }
@@ -558,13 +588,14 @@ impl AvifEncoder {
         self
     }
 
-    /// Codes the **alpha auxiliary item** at its own lossy `quality` (`0..=100`, higher = larger
-    /// output, closer to the source; values above `100` are clamped), independent of the colour
-    /// item's.
+    /// Codes the **alpha auxiliary item** at its own lossy `quality` (`Some(0..=100)`, higher =
+    /// larger output, closer to the source; values above `100` are clamped), independent of the
+    /// colour item's — or, with `None`, back at the colour quality.
     ///
     /// The value goes through exactly the mapping [`AvifEncoder::lossy`]'s `quality` does, so
-    /// `lossy(q).with_alpha_quality(q)` codes the same bytes as `lossy(q)`. Without this call
-    /// alpha follows the colour quality (see [`AvifConfig::alpha_quality`]). Opacity edges are
+    /// `lossy(q).with_alpha_quality(Some(q))` codes the same bytes as `lossy(q)`. Without this
+    /// call, or after `with_alpha_quality(None)`, alpha follows the colour quality (see
+    /// [`AvifConfig::alpha_quality`]). Opacity edges are
     /// often more visible than colour error, so a caller trading colour bits for size may want
     /// alpha finer than colour; a mask that is already blocky can go coarser.
     ///
@@ -572,8 +603,8 @@ impl AvifEncoder {
     /// whatever is set here, exactly as it ignores the colour `quality` — and by every input
     /// without an alpha channel, which has no auxiliary item to code.
     #[must_use]
-    pub fn with_alpha_quality(mut self, quality: u8) -> Self {
-        self.config.alpha_quality = Some(quality);
+    pub fn with_alpha_quality(mut self, quality: Option<u8>) -> Self {
+        self.config.alpha_quality = quality;
         self
     }
 
@@ -648,9 +679,43 @@ impl AvifEncoder {
         self
     }
 
-    /// Caps the threads an encode may use: `Some(n)` uses at most `n`, and `None` uses
-    /// [`std::thread::available_parallelism`] (one where the platform cannot report it). The
-    /// default is `Some(1)`: an encoder without this call spawns no thread.
+    /// Selects the tile layout every AV1 still of the file is coded in — colour and alpha alike —
+    /// as a `gamut-av1` [`Tiling`] request, which the encoder clamps per frame to what AV1
+    /// §5.9.15 and the frame's level allow. Defaults to [`Tiling::SINGLE`], one tile, as
+    /// libavif's `tileColsLog2`/`tileRowsLog2` default to.
+    ///
+    /// The layout is what [`with_threads`](Self::with_threads) parallelises a still over — at
+    /// most one thread per tile — and, unlike the thread count, it **changes the stream**: intra
+    /// prediction and entropy coding restart at every tile boundary, so more tiles cost some size.
+    /// A decoder can use the tiles to decode in parallel too.
+    ///
+    /// Ignored while [`with_auto_tiling`](Self::with_auto_tiling) is on, which picks the layout
+    /// itself — as libavif ignores `tileColsLog2`/`tileRowsLog2` under `autoTiling`. A
+    /// [backend](Self::with_backend) is not told the layout.
+    #[must_use]
+    pub fn with_tiling(mut self, tiling: Tiling) -> Self {
+        self.config.tiling = tiling;
+        self
+    }
+
+    /// Lets the encoder pick each still's tile layout from its size, as libavif's `autoTiling`
+    /// does, in place of [`with_tiling`](Self::with_tiling)'s. Off by default.
+    ///
+    /// The rule is libavif's (`avifSetTileConfiguration` with the eight threads its `autoTiling`
+    /// fixes): one tile per started 512 × 512 luma samples, at most eight, rounded down to a
+    /// power of two and split towards the longer side — a frame up to 512 × 512 keeps one tile, a
+    /// 4K frame gets 4 × 2. It reads the frame size only, never the thread budget, so the output
+    /// stays the same at every [`with_threads`](Self::with_threads) count; the budget only
+    /// decides how many of the tiles are coded at once.
+    #[must_use]
+    pub fn with_auto_tiling(mut self, enabled: bool) -> Self {
+        self.config.auto_tiling = enabled;
+        self
+    }
+
+    /// Caps the threads an encode may use at `threads` — `gamut-av1`'s thread type, so
+    /// [`std::thread::available_parallelism`] passes straight in for every core the machine
+    /// reports. The default is one: an encoder without this call spawns no thread.
     ///
     /// **The output does not depend on it.** Every thread count codes exactly the bytes one thread
     /// does, so this is purely a time-for-memory control:
@@ -658,10 +723,12 @@ impl AvifEncoder {
     /// - An RGBA input's colour item and alpha auxiliary are two independent AV1 stills. With two
     ///   or more threads the alpha is coded on a scoped thread while the colour is coded on the
     ///   calling one; the colour gets the larger half of the budget and the alpha the rest.
-    /// - Each still is coded in `gamut-av1`'s tile layout, and its tiles are coded concurrently on
-    ///   that still's share (see [`gamut_av1::Av1EncodeConfig::threads`]). The layout is
-    ///   `gamut-av1`'s default whatever the thread count — it is what decides the bytes — so a
-    ///   still with fewer tiles than threads leaves the extra threads unused.
+    /// - Each still is coded in the [tile layout](Self::with_tiling), and its tiles are coded
+    ///   concurrently on that still's share (see [`gamut_av1::Av1EncodeConfig::threads`]). The
+    ///   layout never depends on the thread count — it is what decides the bytes — so a still
+    ///   with fewer tiles than threads leaves the extra threads unused: the default single tile
+    ///   is one thread per still. Ask for more tiles, or for
+    ///   [`with_auto_tiling`](Self::with_auto_tiling), for a still to scale.
     ///
     /// Each extra thread holds its own copy of the encoder's frame state, so peak memory grows
     /// with the count. A thread the platform refuses to spawn has its work done on the calling
@@ -673,30 +740,24 @@ impl AvifEncoder {
     /// A [backend](Self::with_backend) runs on the calling thread and receives the colour item's
     /// share as [`Av1EncodeRequest::threads`], a hint it may ignore.
     #[must_use]
-    pub fn with_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
+    pub fn with_threads(mut self, threads: NonZeroUsize) -> Self {
         self.config.threads = threads;
         self
     }
 
-    /// The thread budget one encode runs under: the configured cap, or the machine's available
-    /// parallelism for `None`.
-    fn thread_budget(&self) -> NonZeroUsize {
-        self.config
-            .threads
-            .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
-    }
-
-    /// The `gamut-av1` configuration a still is coded under: quantizer `base_q_idx` and signalling
-    /// `colour`, at this encoder's preset, `gamut-av1`'s default tile layout, and `threads`.
+    /// The `gamut-av1` configuration a still of `dims` is coded under: quantizer `base_q_idx` and
+    /// signalling `colour`, at this encoder's preset and tile layout, on `threads`.
     fn av1_config(
         &self,
         base_q_idx: u8,
         colour: Av1Color,
+        dims: Dimensions,
         threads: NonZeroUsize,
     ) -> Av1EncodeConfig {
         Av1EncodeConfig::new(base_q_idx)
             .with_color(colour)
             .with_effort(self.config.effort)
+            .with_tiling(self.config.tiling_for(dims))
             .with_threads(threads)
     }
 
@@ -712,7 +773,7 @@ impl AvifEncoder {
         C: FnOnce(NonZeroUsize) -> Result<EncodedStill>,
         A: Fn(NonZeroUsize) -> Result<EncodedStill> + Sync,
     {
-        let (colour_threads, alpha_threads) = split_threads(self.thread_budget());
+        let (colour_threads, alpha_threads) = split_threads(self.config.threads);
         let Some(alpha_threads) = alpha_threads else {
             return Ok((colour(colour_threads)?, alpha(colour_threads)?));
         };
@@ -807,7 +868,7 @@ impl AvifEncoder {
     /// The colour signalling for a **monochrome** coded item: the caller's primaries and transfer
     /// over `gamut-av1`'s monochrome defaults.
     ///
-    /// Neither [`with_matrix`](Self::with_matrix) nor [`with_color_range`](Self::with_color_range)
+    /// Neither [`with_matrix`](Self::with_matrix) nor [`with_range`](Self::with_range)
     /// applies here, and both are dropped rather than half-honoured. There is no chroma for a
     /// matrix to produce — AV1 §6.4.2 in fact forbids `MC_IDENTITY` on a single-plane stream — and
     /// the encoder scales no samples, so signalling limited range would describe samples it did
@@ -1150,7 +1211,7 @@ impl AvifEncoder {
     /// The planes' declaration replaces the encoder's sample-shaping knobs: the coded matrix and
     /// range are [`RawPlanes::matrix`] / [`RawPlanes::range`], the chroma sampling and depth are
     /// the buffer's own, and [`with_matrix`](Self::with_matrix),
-    /// [`with_color_range`](Self::with_color_range), [`with_chroma`](Self::with_chroma) and
+    /// [`with_range`](Self::with_range), [`with_chroma`](Self::with_chroma) and
     /// [`with_bit_depth`](Self::with_bit_depth) are ignored. `colr nclx`, `av1C`, `pixi` and the
     /// AV1 sequence header all follow from that declaration plus the
     /// [`with_primaries`](Self::with_primaries) / [`with_transfer`](Self::with_transfer) tags, so
@@ -1197,10 +1258,10 @@ impl AvifEncoder {
             RawSamples::Eight(p, alpha) => {
                 let colour_still = |t| self.colour_still(p, dims, q, colour, p.subsampling(), t);
                 match alpha {
-                    None => (colour_still(self.thread_budget())?, None),
+                    None => (colour_still(self.config.threads)?, None),
                     Some(a) => {
                         let (s, a) = self.colour_and_alpha(colour_still, |t| {
-                            monochrome_still(a, &self.av1_config(alpha_q, alpha_colour, t))
+                            monochrome_still(a, &self.av1_config(alpha_q, alpha_colour, dims, t))
                         })?;
                         (s, Some(a))
                     }
@@ -1209,10 +1270,10 @@ impl AvifEncoder {
             RawSamples::High(p, alpha) => {
                 let colour_still = |t| self.colour_still16(p, dims, q, colour, t);
                 match alpha {
-                    None => (colour_still(self.thread_budget())?, None),
+                    None => (colour_still(self.config.threads)?, None),
                     Some(a) => {
                         let (s, a) = self.colour_and_alpha(colour_still, |t| {
-                            monochrome_still16(a, &self.av1_config(alpha_q, alpha_colour, t))
+                            monochrome_still16(a, &self.av1_config(alpha_q, alpha_colour, dims, t))
                         })?;
                         (s, Some(a))
                     }
@@ -1452,7 +1513,7 @@ impl AvifEncoder {
             Some(obus) => {
                 crate::backend::still_from_backend_obus(obus, dims, colour, chroma, BitDepth::Eight)
             }
-            None => encode_still(planes, &self.av1_config(base_q_idx, colour, threads)),
+            None => encode_still(planes, &self.av1_config(base_q_idx, colour, dims, threads)),
         }
     }
 
@@ -1485,7 +1546,7 @@ impl AvifEncoder {
             Some(obus) => {
                 crate::backend::still_from_backend_obus(obus, dims, colour, chroma, bit_depth)
             }
-            None => encode_still16(planes, &self.av1_config(base_q_idx, colour, threads)),
+            None => encode_still16(planes, &self.av1_config(base_q_idx, colour, dims, threads)),
         }
     }
 
@@ -1784,7 +1845,7 @@ impl EncodeImage<Rgb8> for AvifEncoder {
             self.base_q_idx(),
             colour,
             chroma,
-            self.thread_budget(),
+            self.config.threads,
         )?;
         self.emit(&still, dims, None, out)
     }
@@ -1851,7 +1912,12 @@ impl EncodeImage<Rgba8> for AvifEncoder {
             |threads| {
                 monochrome_still(
                     &alpha_planes,
-                    &self.av1_config(self.alpha_base_q_idx(), self.monochrome_colour(), threads),
+                    &self.av1_config(
+                        self.alpha_base_q_idx(),
+                        self.monochrome_colour(),
+                        dims,
+                        threads,
+                    ),
                 )
             },
         )?;
@@ -1885,7 +1951,7 @@ impl EncodeImage<Rgb16> for AvifEncoder {
             dims,
             self.base_q_idx(),
             colour,
-            self.thread_budget(),
+            self.config.threads,
         )?;
         self.emit(&still, dims, None, out)
     }
@@ -1921,7 +1987,12 @@ impl EncodeImage<Rgba16> for AvifEncoder {
             |threads| {
                 monochrome_still16(
                     &alpha_planes,
-                    &self.av1_config(self.alpha_base_q_idx(), self.monochrome_colour(), threads),
+                    &self.av1_config(
+                        self.alpha_base_q_idx(),
+                        self.monochrome_colour(),
+                        dims,
+                        threads,
+                    ),
                 )
             },
         )?;
@@ -1944,7 +2015,8 @@ impl EncodeImage<Gray8> for AvifEncoder {
         let config = self.av1_config(
             self.base_q_idx(),
             self.monochrome_colour(),
-            self.thread_budget(),
+            dims,
+            self.config.threads,
         );
         let still = match self.widened_bit_depth()? {
             None => monochrome_still(&Planar8::from_gray8_view(image), &config)?,
@@ -2177,24 +2249,94 @@ mod tests {
         assert_eq!(follows.alpha_base_q_idx(), 127);
         assert_eq!(follows.alpha_base_q_idx(), follows.base_q_idx());
         // Set: its own value through the same mapping, leaving the colour quantizer alone.
-        let own = AvifEncoder::lossy(50).with_alpha_quality(90);
+        let own = AvifEncoder::lossy(50).with_alpha_quality(Some(90));
         assert_eq!(own.config().alpha_quality, Some(90));
         assert_eq!(own.alpha_base_q_idx(), 25);
         assert_eq!(own.base_q_idx(), 127);
+        // `None` resets it to follow the colour quality again.
+        let reset = own.with_alpha_quality(None);
+        assert_eq!(reset.config().alpha_quality, None);
+        assert_eq!(reset.alpha_base_q_idx(), 127);
         // The clamp is the colour quality's: above 100 behaves as 100.
         assert_eq!(
             AvifEncoder::lossy(50)
-                .with_alpha_quality(200)
+                .with_alpha_quality(Some(200))
                 .alpha_base_q_idx(),
             1
         );
         // Lossless ignores it and codes alpha on the lossless path.
         assert_eq!(
             AvifEncoder::lossless()
-                .with_alpha_quality(10)
+                .with_alpha_quality(Some(10))
                 .alpha_base_q_idx(),
             0
         );
+    }
+
+    #[test]
+    fn with_mode_and_with_quality_set_only_their_own_field() {
+        // `with_quality` is the value `lossy` takes, through the same mapping.
+        let requalified = AvifEncoder::lossy(80).with_quality(50);
+        assert_eq!(requalified.config(), AvifEncoder::lossy(50).config());
+        assert_eq!(requalified.base_q_idx(), 127);
+        // `with_mode` flips the mode and nothing else: the lossless preset's matrix stays.
+        let lossy = AvifEncoder::lossless().with_mode(AvifMode::Lossy);
+        assert_eq!(
+            lossy.config(),
+            AvifConfig {
+                mode: AvifMode::Lossy,
+                ..AvifConfig::default()
+            }
+        );
+        assert_eq!(
+            AvifEncoder::lossy(50)
+                .with_mode(AvifMode::Lossless)
+                .config()
+                .mode,
+            AvifMode::Lossless
+        );
+    }
+
+    #[test]
+    fn tiling_setters_and_range_reach_the_config() {
+        let tiled = AvifEncoder::new().with_tiling(Tiling::new(2, 1));
+        assert_eq!(tiled.config().tiling, Tiling::new(2, 1));
+        assert!(!tiled.config().auto_tiling);
+        let auto = tiled.with_auto_tiling(true);
+        assert!(auto.config().auto_tiling);
+        // Auto tiling leaves the fixed request in place for when it is switched off again.
+        assert_eq!(auto.config().tiling, Tiling::new(2, 1));
+        assert!(!auto.with_auto_tiling(false).config().auto_tiling);
+        assert_eq!(
+            AvifEncoder::lossy(50)
+                .with_range(ColorRange::Limited)
+                .config()
+                .range,
+            ColorRange::Limited
+        );
+    }
+
+    /// The tile layout reaches `gamut-av1` for every still: the fixed request as given, or the
+    /// auto rule over the frame's own dimensions.
+    #[test]
+    fn av1_config_carries_the_tile_layout_for_the_still() {
+        let config = |encoder: AvifEncoder, w, h| {
+            encoder
+                .av1_config(127, Av1Color::DEFAULT, dims(w, h), NonZeroUsize::MIN)
+                .tiling
+        };
+        assert_eq!(config(AvifEncoder::new(), 3840, 2160), Tiling::SINGLE);
+        assert_eq!(
+            config(
+                AvifEncoder::new().with_tiling(Tiling::new(1, 0)),
+                3840,
+                2160
+            ),
+            Tiling::new(1, 0)
+        );
+        let auto = AvifEncoder::new().with_auto_tiling(true);
+        assert_eq!(config(auto.clone(), 3840, 2160), Tiling::new(2, 1));
+        assert_eq!(config(auto, 2160, 3840), Tiling::new(1, 2));
     }
 
     #[test]
@@ -2459,7 +2601,7 @@ mod tests {
             // Studio range reaches `colr` — and can only be signalled outside the §5.5.2 sRGB
             // shortcut, which is why it pairs with a real matrix.
             (
-                AvifEncoder::lossy(50).with_color_range(ColorRange::Limited),
+                AvifEncoder::lossy(50).with_range(ColorRange::Limited),
                 1,
                 13,
                 1,
@@ -2472,7 +2614,7 @@ mod tests {
             (
                 AvifEncoder::lossless()
                     .with_matrix(MatrixCoefficients::Bt709)
-                    .with_color_range(ColorRange::Limited)
+                    .with_range(ColorRange::Limited)
                     .with_chroma(ChromaSubsampling::Cs420),
                 1,
                 13,
@@ -2845,7 +2987,9 @@ mod tests {
             }),
             mastering_display: None,
             effort: Effort::Fastest,
-            threads: NonZeroUsize::new(3),
+            tiling: Tiling::new(1, 2),
+            auto_tiling: true,
+            threads: NonZeroUsize::new(3).unwrap(),
         };
         assert_ne!(config, AvifConfig::default());
         assert_eq!(AvifEncoder::from_config(config).config(), config);
@@ -3026,7 +3170,7 @@ mod tests {
     /// rather than being swallowed or replaced by the join's error.
     #[test]
     fn colour_and_alpha_resumes_an_alpha_thread_panic_on_the_caller() {
-        let encoder = AvifEncoder::lossless().with_threads(NonZeroUsize::new(2));
+        let encoder = AvifEncoder::lossless().with_threads(NonZeroUsize::new(2).unwrap());
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             encoder.colour_and_alpha(
                 |_| {
