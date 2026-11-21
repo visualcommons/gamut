@@ -265,6 +265,8 @@ fn png_only_chunks(png: &PngMetadata) -> Vec<&'static str> {
         (png.chromaticities.is_some(), "cHRM"),
         (png.srgb.is_some(), "sRGB"),
         (png.cicp.is_some(), "cICP"),
+        (png.mastering_display.is_some(), "mDCV"),
+        (png.content_light_level.is_some(), "cLLI"),
         (png.significant_bits.is_some(), "sBIT"),
         (png.background.is_some(), "bKGD"),
         (png.physical_dimensions.is_some(), "pHYs"),

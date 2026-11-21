@@ -15,7 +15,8 @@ Graphics, W3C 3rd edition) images:
 - **Spec-compliant decoding** (issue #249). Every colour type and bit depth, Adam7 interlacing,
   all five filters, and ancillary metadata surfaced as raw payloads (eXIf, inflated iCCP, XMP,
   tEXt/zTXt/iTXt, and the C2PA manifest store in `caBX`) ready for
-  `gamut_metadata::MetadataBlock`, plus parsed gAMA/cHRM/sRGB/cICP values. Hostile input is
+  `gamut_metadata::MetadataBlock`, plus parsed gAMA/cHRM/sRGB/cICP values and the
+  mDCV/cLLI HDR static metadata. Hostile input is
   bounded: configurable dimension caps and byte budgets guard every allocation, and zlib bombs
   (IDAT or metadata) fail cleanly. Inflation uses `gamut-deflate`'s bounded `inflate_zlib`
   over `miniz_oxide`, the workspace's one decode-side inflate.

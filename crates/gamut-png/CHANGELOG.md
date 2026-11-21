@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gamut-png)* read and write the PNG 3rd edition `mDCV` and `cLLI` HDR chunks
+  ([#1244](https://github.com/visualcommons/gamut/issues/1244)): `PngMetadata::mastering_display`
+  (`gamut_core::MasteringDisplay`, re-exported) and `PngMetadata::content_light_level`
+  (`ContentLightLevelInfo`, in the chunk's 0.0001 cd/m² units, with an exact conversion from
+  `gamut_core::ContentLightLevel`); `PngEncoder::with_mastering_display` and
+  `with_content_light_level` write them before `PLTE`, and `with_png_metadata` carries them.
+
 ## [0.2.0](https://github.com/visualcommons/gamut/compare/gamut-png-v0.1.0...gamut-png-v0.2.0) - 2026-10-12
 
 ### Added

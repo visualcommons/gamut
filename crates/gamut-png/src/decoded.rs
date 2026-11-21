@@ -112,6 +112,68 @@ pub struct Cicp {
     pub full_range: bool,
 }
 
+/// The content light level information (cLLI, §11.3.2.8, Table 20): `MaxCLL` and `MaxFALL`, each
+/// in units of 0.0001 cd/m², as the chunk stores them. A zero in either means the value is unknown
+/// or not calculable.
+///
+/// PNG's own type rather than [`gamut_core::ContentLightLevel`], which is the ISOBMFF/HEVC `clli`
+/// shape: that one holds whole cd/m² in a `u16`, and the chunk's four-byte, 0.0001 cd/m² values
+/// are finer and wider, so folding them into it would lose what a file carries. The conversion
+/// *from* it is exact ([`From`]), and [`to_content_light_level`](Self::to_content_light_level)
+/// goes back whenever no information is lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct ContentLightLevelInfo {
+    /// Maximum content light level (`MaxCLL`), in units of 0.0001 cd/m².
+    pub max_content_light_level: u32,
+    /// Maximum frame-average light level (`MaxFALL`), in units of 0.0001 cd/m².
+    pub max_frame_average_light_level: u32,
+}
+
+/// The number of cLLI units (0.0001 cd/m², §11.3.2.8 Table 20) in one cd/m².
+const CLLI_UNITS_PER_NIT: u32 = 10_000;
+
+impl ContentLightLevelInfo {
+    /// `MaxCLL` and `MaxFALL`, each in units of 0.0001 cd/m² — `10_000_000` is 1000 cd/m²
+    /// (§11.3.2.8 Example 13).
+    #[must_use]
+    pub const fn new(max_content_light_level: u32, max_frame_average_light_level: u32) -> Self {
+        Self {
+            max_content_light_level,
+            max_frame_average_light_level,
+        }
+    }
+
+    /// The same levels in the whole-cd/m² [`gamut_core::ContentLightLevel`] that ISOBMFF `clli`
+    /// carries, or `None` when either level is not a whole number of cd/m² or exceeds
+    /// `u16::MAX` cd/m² — the cases that shape cannot hold without rounding or clamping.
+    #[must_use]
+    pub fn to_content_light_level(self) -> Option<gamut_core::ContentLightLevel> {
+        let whole = |level: u32| {
+            level
+                .is_multiple_of(CLLI_UNITS_PER_NIT)
+                .then(|| u16::try_from(level / CLLI_UNITS_PER_NIT).ok())
+                .flatten()
+        };
+        Some(gamut_core::ContentLightLevel {
+            max_content_light_level: whole(self.max_content_light_level)?,
+            max_pic_average_light_level: whole(self.max_frame_average_light_level)?,
+        })
+    }
+}
+
+/// Exact: `u16::MAX` cd/m² is 655 350 000 units, inside both a `u32` and a PNG four-byte unsigned
+/// integer's 2³¹ − 1 (§7.1). `MaxPALL` and `MaxFALL` are the same quantity, the maximum
+/// frame-average light level of CTA-861.3, under the HEVC and PNG names.
+impl From<gamut_core::ContentLightLevel> for ContentLightLevelInfo {
+    fn from(level: gamut_core::ContentLightLevel) -> Self {
+        Self::new(
+            u32::from(level.max_content_light_level) * CLLI_UNITS_PER_NIT,
+            u32::from(level.max_pic_average_light_level) * CLLI_UNITS_PER_NIT,
+        )
+    }
+}
+
 /// The intended pixel size or aspect ratio (pHYs, §11.3.4.3, Table 23) — the field a viewer
 /// scales by, so a re-encode that dropped it would change the printed size of the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,6 +376,14 @@ pub struct PngMetadata {
     pub srgb: Option<SrgbIntent>,
     /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
+    /// mDCV: the mastering display colour volume (§11.3.2.7, Table 19) — primaries and white point
+    /// in units of 0.00002, luminances in units of 0.0001 cd/m², each the stored integer, the
+    /// primaries in stored order (§11.3.2.7 asks for red, green, blue; the reader does not
+    /// enforce it). The 24-byte layout is the ISOBMFF `mdcv` box's, so this is the workspace's
+    /// shared [`MasteringDisplay`](gamut_core::MasteringDisplay).
+    pub mastering_display: Option<gamut_core::MasteringDisplay>,
+    /// cLLI: the content light level information (§11.3.2.8, Table 20).
+    pub content_light_level: Option<ContentLightLevelInfo>,
     /// sBIT: the original number of significant bits per channel (§11.3.2.4, Table 14), one
     /// entry per channel in the order Table 14 lists them — three for a palette image.
     pub significant_bits: Option<Vec<u8>>,
@@ -484,6 +554,12 @@ pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize, header: &Ihdr)
                     });
                 }
             }
+            b"mDCV" if meta.mastering_display.is_none() => {
+                meta.mastering_display = parse_mdcv(data);
+            }
+            b"cLLI" if meta.content_light_level.is_none() => {
+                meta.content_light_level = parse_clli(data);
+            }
             b"sBIT" if meta.significant_bits.is_none() => {
                 meta.significant_bits = parse_sbit(data, header);
             }
@@ -573,6 +649,34 @@ fn parse_chrm(data: &[u8]) -> Option<Chromaticities> {
         green: (coord(4), coord(5)),
         blue: (coord(6), coord(7)),
     })
+}
+
+/// mDCV (§11.3.2.7, Table 19): three `x, y` primaries and an `x, y` white point as PNG two-byte
+/// unsigned integers, then the maximum and minimum luminance as four-byte ones — 24 bytes, every
+/// value kept as stored. Any other length is malformed (§13.1).
+fn parse_mdcv(data: &[u8]) -> Option<gamut_core::MasteringDisplay> {
+    let data: &[u8; 24] = data.try_into().ok()?;
+    let two = |at: usize| u16::from_be_bytes([data[at], data[at + 1]]);
+    let four = |at: usize| u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    Some(gamut_core::MasteringDisplay::new(
+        [[two(0), two(2)], [two(4), two(6)], [two(8), two(10)]],
+        [two(12), two(14)],
+        four(16),
+        four(20),
+    ))
+}
+
+/// cLLI (§11.3.2.8, Table 20): `MaxCLL` then `MaxFALL`, each a PNG four-byte unsigned integer — 8
+/// bytes. Any other length is malformed (§13.1). Neither value is range-checked: a reader that
+/// refused a value past §7.1's 2³¹ − 1 would refuse files the world holds, for no gain.
+fn parse_clli(data: &[u8]) -> Option<ContentLightLevelInfo> {
+    let [c3, c2, c1, c0, f3, f2, f1, f0] = *data else {
+        return None;
+    };
+    Some(ContentLightLevelInfo::new(
+        u32::from_be_bytes([c3, c2, c1, c0]),
+        u32::from_be_bytes([f3, f2, f1, f0]),
+    ))
 }
 
 /// sBIT (§11.3.2.4, Table 14): one entry per channel — three for a palette image, whose entries
@@ -951,6 +1055,103 @@ mod tests {
         assert!(meta.cicp.is_none());
         assert!(meta.texts.is_empty());
         assert!(meta.icc_profile.is_none());
+    }
+
+    /// §11.3.2.7 Examples 5–8: the BT.2100 primaries in red, green, blue order, the D65 white
+    /// point, 4000 cd/m² and 0.0005 cd/m², as their stored big-endian integers.
+    const MDCV_EXAMPLE: [u8; 24] = [
+        0x8A, 0x48, 0x39, 0x08, // red (35400, 14600)
+        0x21, 0x34, 0x9B, 0xAA, // green (8500, 39850)
+        0x19, 0x96, 0x08, 0xFC, // blue (6550, 2300)
+        0x3D, 0x13, 0x40, 0x42, // white (15635, 16450)
+        0x02, 0x62, 0x5A, 0x00, // max 40 000 000
+        0x00, 0x00, 0x00, 0x05, // min 5
+    ];
+
+    /// §11.3.2.8 Examples 13 and 14: `MaxCLL` 1000 cd/m², `MaxFALL` 250 cd/m².
+    const CLLI_EXAMPLE: [u8; 8] = [0x00, 0x98, 0x96, 0x80, 0x00, 0x26, 0x25, 0xA0];
+
+    /// Kills [`parse_mdcv`]'s and [`parse_clli`]'s field offsets — every value differs from every
+    /// other — and the `mDCV`/`cLLI` arms of [`collect`] with their first-wins guards: the second
+    /// chunk of each type differs from the first.
+    #[test]
+    fn hdr_chunks_are_read_in_table_order_and_the_first_wins() {
+        let meta = collect(
+            &[
+                (*b"mDCV", &MDCV_EXAMPLE),
+                (*b"cLLI", &CLLI_EXAMPLE),
+                (*b"mDCV", &[0; 24]),
+                (*b"cLLI", &[0; 8]),
+            ],
+            0,
+        );
+        assert_eq!(
+            meta.mastering_display,
+            Some(gamut_core::MasteringDisplay::new(
+                [[35_400, 14_600], [8_500, 39_850], [6_550, 2_300]],
+                [15_635, 16_450],
+                40_000_000,
+                5,
+            ))
+        );
+        assert_eq!(
+            meta.content_light_level,
+            Some(ContentLightLevelInfo::new(10_000_000, 2_500_000))
+        );
+    }
+
+    /// Table 19 and Table 20 fix the lengths: one byte short or over is malformed and skipped
+    /// (§13.1), and a later well-formed chunk is then the first that counts.
+    #[test]
+    fn hdr_chunks_of_the_wrong_length_are_skipped() {
+        let meta = collect(
+            &[
+                (*b"mDCV", &MDCV_EXAMPLE[..23]),
+                (*b"mDCV", &[MDCV_EXAMPLE.as_slice(), &[0]].concat()),
+                (*b"cLLI", &CLLI_EXAMPLE[..7]),
+                (*b"cLLI", &[CLLI_EXAMPLE.as_slice(), &[0]].concat()),
+            ],
+            0,
+        );
+        assert_eq!(
+            (meta.mastering_display, meta.content_light_level),
+            (None, None)
+        );
+        let meta = collect(
+            &[(*b"cLLI", &CLLI_EXAMPLE[..7]), (*b"cLLI", &CLLI_EXAMPLE)],
+            0,
+        );
+        assert_eq!(
+            meta.content_light_level,
+            Some(ContentLightLevelInfo::new(10_000_000, 2_500_000))
+        );
+    }
+
+    /// The whole-cd/m² shape converts in exactly — the largest `u16` included, which stays inside
+    /// §7.1's 2³¹ − 1 — and back only where nothing is lost: a fractional level or one past
+    /// `u16::MAX` cd/m² in either field is refused.
+    #[test]
+    fn content_light_level_converts_exactly_or_not_at_all() {
+        let whole = gamut_core::ContentLightLevel {
+            max_content_light_level: u16::MAX,
+            max_pic_average_light_level: 250,
+        };
+        let fine = ContentLightLevelInfo::from(whole);
+        assert_eq!(fine, ContentLightLevelInfo::new(655_350_000, 2_500_000));
+        assert_eq!(fine.to_content_light_level(), Some(whole));
+
+        for (cll, fall) in [
+            (10_000_001, 2_500_000),
+            (10_000_000, 2_500_001),
+            (655_360_000, 2_500_000),
+            (10_000_000, 655_360_000),
+        ] {
+            assert_eq!(
+                ContentLightLevelInfo::new(cll, fall).to_content_light_level(),
+                None,
+                "({cll}, {fall})"
+            );
+        }
     }
 
     #[test]

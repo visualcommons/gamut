@@ -219,6 +219,45 @@ fn the_reference_reader_sees_every_carried_chunk() {
     );
 }
 
+/// The HDR static metadata is carried byte for byte: the source's `mDCV` and `cLLI` payloads are
+/// what the reference reader finds in the re-encode, and what this crate reads back.
+///
+/// Kills the `mastering_display` and `content_light_level` arms of `with_png_metadata`. The
+/// source's primaries are in HEVC's green, blue, red order rather than §11.3.2.7's red, green,
+/// blue, so a carry that reordered them, rather than writing what the file held, fails too; and
+/// it carries no `cICP`, so the carry does not hinge on the chunk §11.3.2.7 pairs them with.
+#[test]
+fn hdr_static_metadata_is_carried_verbatim() {
+    let mdcv: Vec<u8> = [
+        8_500u16, 39_850, 6_550, 2_300, 35_400, 14_600, 15_635, 16_450,
+    ]
+    .iter()
+    .flat_map(|v| v.to_be_bytes())
+    .chain(10_000_000u32.to_be_bytes())
+    .chain(50u32.to_be_bytes())
+    .collect();
+    let clli: Vec<u8> = [12_345_678u32, 4_000_001]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .collect();
+    let meta = gamut_png::metadata(&minimal_source(&[
+        chunk(b"mDCV", &mdcv),
+        chunk(b"cLLI", &clli),
+    ]))
+    .unwrap();
+    let png = re_encoded_bytes(|e| e.with_png_metadata(&meta));
+
+    assert_eq!(
+        libpng_oracle::decode(&png).unknown_chunks,
+        [(*b"mDCV", mdcv), (*b"cLLI", clli)]
+    );
+    let re = gamut_png::metadata(&png).unwrap();
+    assert_eq!(
+        (re.mastering_display, re.content_light_level),
+        (meta.mastering_display, meta.content_light_level)
+    );
+}
+
 /// A `zTXt` reaches the reference reader as a `zTXt`, holding the text it held.
 ///
 /// Kills the `CompressedText` routing in `with_metadata_view` together with any defect in the
