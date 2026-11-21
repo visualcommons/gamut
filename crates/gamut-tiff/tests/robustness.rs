@@ -22,8 +22,8 @@ mod common;
 
 /// The byte budget every decoder in this binary carries: 64 MiB of stored samples. The default
 /// `DecodeLimits` bound a page by its dimensions and pixel count alone (32768 per side, 16384²
-/// pixels), which still admits a header-sized reservation of gibibytes; a malloc-limited caller —
-/// this binary, libFuzzer — sets the byte budget it can afford, as here.
+/// pixels), which still admits a page of gibibytes once its blocks decompress to it; a
+/// malloc-limited caller — this binary, libFuzzer — sets the byte budget it can afford, as here.
 const BUDGET: usize = 64 << 20;
 
 /// The largest single allocation this binary grants: four times [`BUDGET`], so no decode that
@@ -162,6 +162,63 @@ fn absent_bits_per_sample_is_not_sized_by_samples_per_pixel() {
         (1, 4_294_967_209)
     );
     assert!(dec.decode_page(ISSUE_949_OOM, 0).is_err());
+}
+
+/// A 16384 × 16384 RGBA16 page — 2 GiB of stored samples, inside the default limits' pixel cap —
+/// whose single uncompressed strip or tile holds only eight bytes: a few-hundred-byte file.
+fn oversized_page_with_one_short_block(tiled: bool) -> Vec<u8> {
+    use gamut_tiff::tags;
+    const SIDE: u32 = 16384;
+    let mut ifd = Ifd::new();
+    ifd.set(tags::IMAGE_WIDTH, Value::Long(vec![SIDE]));
+    ifd.set(tags::IMAGE_LENGTH, Value::Long(vec![SIDE]));
+    ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![16; 4]));
+    ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+    ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![2]));
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![4]));
+    ifd.set(tags::EXTRA_SAMPLES, Value::Short(vec![2]));
+    let blocks = [vec![0u8; 8]];
+    let run = if tiled {
+        ifd.set(tags::TILE_WIDTH, Value::Long(vec![SIDE]));
+        ifd.set(tags::TILE_LENGTH, Value::Long(vec![SIDE]));
+        gamut_ifd::BlockRun::tiles(&blocks)
+    } else {
+        ifd.set(tags::ROWS_PER_STRIP, Value::Long(vec![SIDE]));
+        gamut_ifd::BlockRun::strips(&blocks)
+    };
+    gamut_ifd::write_with_blocks(
+        gamut_ifd::ByteOrder::LittleEndian,
+        gamut_ifd::Variant::Classic,
+        &[run],
+        |placed| {
+            let mut ifd = ifd.clone();
+            placed[0].install(&mut ifd);
+            vec![ifd]
+        },
+    )
+    .expect("write")
+}
+
+/// With no byte budget the default limits admit a 2 GiB page, so neither the strip nor the tile
+/// reader may reserve it from the header: the page grows only as blocks decompress. A reservation
+/// of the declared page is past [`CAP`] and aborts this binary (and panics on a 32-bit target);
+/// the short block is instead refused as invalid input.
+#[test]
+fn a_page_is_not_reserved_from_its_header_alone() {
+    let dec = TiffDecoder::new();
+    for tiled in [false, true] {
+        let file = oversized_page_with_one_short_block(tiled);
+        assert!(file.len() < 512, "{} bytes", file.len());
+        assert_eq!(dec.info(&file).expect("describable").tiled, tiled);
+        let err = dec
+            .decode_page(&file, 0)
+            .expect_err("an eight-byte block cannot hold a 2 GiB page");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::InvalidInput,
+            "tiled {tiled}: {err:?}"
+        );
+    }
 }
 
 #[test]

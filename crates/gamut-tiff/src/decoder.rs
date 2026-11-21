@@ -958,7 +958,11 @@ fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
         ));
     }
     let raws = extent_slices(&offsets, &counts, data, env!("CARGO_PKG_NAME"))?;
-    let mut packed = Vec::with_capacity(l.stored_row_bytes * l.height);
+    // The page grows as its strips decompress rather than being reserved from the header: with no
+    // byte budget set, the default limits still admit a 16384² RGBA16 page (2 GiB), which a
+    // few-hundred-byte file would otherwise reserve up front — past `isize::MAX` on a 32-bit
+    // target. Each strip's decoder is itself bounded by the bytes it is given.
+    let mut packed = Vec::new();
     for (i, raw) in raws.into_iter().enumerate() {
         let rows = rows_per_strip.min(l.height - i * rows_per_strip);
         let want = rows * l.stored_row_bytes;
@@ -1030,30 +1034,35 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
         "TIFF: tile exceeds the size limit",
     )?;
     let raws = extent_slices(&offsets, &counts, data, env!("CARGO_PKG_NAME"))?;
-    let mut packed = vec![0u8; l.stored_row_bytes * l.height];
-    for ty in 0..down {
-        for tx in 0..across {
-            let raw = raws[ty * across + tx];
-            let mut tile = decompress_simple(raw, tile_size, l.compression)?;
-            // Each tile is predicted independently, so the predictor is reversed here — before the
-            // crop-and-blit, while the tile's own rows are still intact.
-            if use_predictor {
-                if l.bps == 16 {
-                    predictor::reverse16(&mut tile, tile_row_bytes, l.spp, l.order);
-                } else {
-                    predictor::reverse(&mut tile, tile_row_bytes, l.spp);
+    // The page grows one band of tiles at a time, and a band's rows are added only once all its
+    // tiles have decompressed, so — as in `decode_strips` — a header alone never reserves the page.
+    let mut packed = Vec::new();
+    for (ty, band) in raws.chunks(across).enumerate() {
+        let tiles = band
+            .iter()
+            .map(|raw| {
+                let mut tile = decompress_simple(raw, tile_size, l.compression)?;
+                // Each tile is predicted independently, so the predictor is reversed here —
+                // before the crop-and-blit, while the tile's own rows are still intact.
+                if use_predictor {
+                    if l.bps == 16 {
+                        predictor::reverse16(&mut tile, tile_row_bytes, l.spp, l.order);
+                    } else {
+                        predictor::reverse(&mut tile, tile_row_bytes, l.spp);
+                    }
                 }
-            }
-            let copy_cols = tw.min(l.width - tx * tw);
-            for r in 0..th {
-                let dst_row = ty * th + r;
-                if dst_row >= l.height {
-                    break;
-                }
+                Ok(tile)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let band_start = packed.len();
+        let band_rows = th.min(l.height - ty * th);
+        packed.resize(band_start + band_rows * l.stored_row_bytes, 0);
+        for (tx, tile) in tiles.iter().enumerate() {
+            let copy_bytes = tw.min(l.width - tx * tw) * pixel_bytes;
+            for r in 0..band_rows {
                 let src = r * tile_row_bytes;
-                let dst = dst_row * l.stored_row_bytes + tx * tw * pixel_bytes;
-                packed[dst..dst + copy_cols * pixel_bytes]
-                    .copy_from_slice(&tile[src..src + copy_cols * pixel_bytes]);
+                let dst = band_start + r * l.stored_row_bytes + tx * tw * pixel_bytes;
+                packed[dst..dst + copy_bytes].copy_from_slice(&tile[src..src + copy_bytes]);
             }
         }
     }
