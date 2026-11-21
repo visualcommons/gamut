@@ -54,7 +54,7 @@ fn exclusions(mime: &str, asset: &[u8]) -> Vec<Range<usize>> {
 }
 
 /// A file-offset range as a `usize` range.
-fn ifd_range(range: Range<u64>) -> Range<usize> {
+fn file_range(range: Range<u64>) -> Range<usize> {
     let start = usize::try_from(range.start).expect("a fixture offset fits usize");
     start..usize::try_from(range.end).expect("a fixture end fits usize")
 }
@@ -121,12 +121,12 @@ fn the_png_summary_reports_the_store_and_chunk_c2pa_rs_wrote() {
 
     assert!(summary.unread.is_empty(), "c2pa-rs writes one `caBX` chunk");
     assert_eq!(
-        store.payload,
+        file_range(store.payload),
         store_span(&asset),
         "the store's offsets and size"
     );
     assert_eq!(
-        vec![store.chunk],
+        vec![file_range(store.chunk)],
         exclusions(PNG_MIME, &asset),
         "the chunk the summary reports is the one range c2pa-rs's data hash excludes"
     );
@@ -179,13 +179,13 @@ fn the_tiff_and_dng_summaries_report_both_ranges_c2pa_rs_wrote() {
             "{mime}: c2pa-rs writes one store"
         );
         assert_eq!(
-            ifd_range(store.exclusions.store()),
+            file_range(store.exclusions.store()),
             store_span(&asset),
             "{mime}: the store's offsets and size"
         );
         let mut reported = vec![
-            ifd_range(store.exclusions.store()),
-            ifd_range(store.exclusions.count_field()),
+            file_range(store.exclusions.store()),
+            file_range(store.exclusions.count_field()),
         ];
         reported.sort_by_key(|range| range.start);
         assert_eq!(

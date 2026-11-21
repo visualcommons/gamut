@@ -90,6 +90,10 @@ impl RawChunk<'_> {
 /// can skip a store this span still names, since a byte accounting has no budget and does not
 /// borrow another reader's. Exclude the span from a hash; read the payload from the decode.
 ///
+/// Both ranges are half-open `Range<u64>` absolute file offsets — the shape `gamut-isobmff`'s
+/// `C2paBox` ranges and `gamut-riff`'s `c2pa_span` report a C2PA region in — so a caller that
+/// excludes or patches a C2PA region across formats handles PNG's spans like theirs.
+///
 /// Non-exhaustive: a later revision may name a further range without a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -98,19 +102,22 @@ pub struct C2paSpan {
     /// `c2pa.hash.data` exclusion must cover (C2PA 2.4 §18.5.4): the store's bytes change when it
     /// is written, the length field when it is resized, and the CRC with either, so a hash that
     /// keeps any of them breaks on the store's first update.
-    pub chunk: Range<usize>,
+    pub chunk: Range<u64>,
     /// The store's bytes alone — the chunk's payload, `chunk.start + 8 .. chunk.end - 4`. What a
     /// signer overwrites when it fills a reservation.
-    pub payload: Range<usize>,
+    pub payload: Range<u64>,
 }
 
 impl C2paSpan {
     /// The span of a `caBX` chunk occupying `chunk` (framing included), single-sourcing the
-    /// framing arithmetic for both reports.
+    /// framing arithmetic for both reports. The one place a PNG's in-memory chunk offsets become
+    /// the `u64` file offsets the span reports; `usize` to `u64` is lossless on every target Rust
+    /// supports.
     pub(crate) fn of(chunk: Range<usize>) -> Self {
+        let (start, end) = (chunk.start as u64, chunk.end as u64);
         Self {
-            payload: chunk.start + 8..chunk.end - 4,
-            chunk,
+            chunk: start..end,
+            payload: start + 8..end - 4,
         }
     }
 }
@@ -375,7 +382,8 @@ impl C2paSummary {
         // Different chunks occupy disjoint ranges, so the lower start is the earlier chunk.
         entries.sort_by_key(|(span, _)| span.chunk.start);
         entries.into_iter().map(|(span, reason)| {
-            let (start, end, size) = (span.chunk.start, span.chunk.end, span.payload.len());
+            let (start, end) = (span.chunk.start, span.chunk.end);
+            let size = span.payload.end - span.payload.start;
             match reason {
                 None => format!(
                     "  caBX chunk at [{start}, {end}): {size}-byte store at [{}, {}) — located, \
@@ -563,8 +571,9 @@ impl<'a> ChunkReader<'a> {
 /// # Errors
 ///
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error and leaves
-/// `png` **unmodified** if `span` runs past the end of `png`, if it does not frame a chunk (its
-/// payload must be `chunk.start + 8 .. chunk.end - 4`), if the bytes it names are not a `caBX`
+/// `png` **unmodified** if `span` runs past the end of `png` (a span whose offsets do not fit
+/// this target's `usize` is refused the same way, never truncated), if it does not frame a chunk
+/// (its payload must be `chunk.start + 8 .. chunk.end - 4`), if the bytes it names are not a `caBX`
 /// chunk, if the span's payload length disagrees with the length the chunk itself declares, or if
 /// `store` is not exactly the reserved length. Every check
 /// runs before the first byte is written, so a rejected call cannot leave a half-filled chunk
@@ -599,19 +608,25 @@ impl<'a> ChunkReader<'a> {
 /// ```
 pub fn fill_c2pa(png: &mut [u8], span: &C2paSpan, store: &[u8]) -> Result<()> {
     let invalid = |message: &'static str| Error::invalid_input(env!("CARGO_PKG_NAME"), message);
-    if span.chunk.end > png.len() {
-        return Err(invalid("PNG: the C2PA span runs past the end of the image"));
+    let past_end = || invalid("PNG: the C2PA span runs past the end of the image");
+    // The span is in `u64` file offsets and `png` is indexed in `usize`. A span that does not fit
+    // the address space cannot lie inside `png`, so it is refused as running past its end —
+    // converted checked, never cast, because a truncated offset could name a real chunk.
+    let (Some(chunk), Some(payload)) = (in_memory(&span.chunk), in_memory(&span.payload)) else {
+        return Err(past_end());
+    };
+    if chunk.end > png.len() {
+        return Err(past_end());
     }
     // The span must frame a chunk: 4 length bytes and 4 type bytes ahead of the payload, 4 CRC
     // bytes behind it. Checked rather than assumed because a caller can build a `C2paSpan`.
-    let frames = span
-        .chunk
+    let frames = chunk
         .start
         .checked_add(8)
-        .zip(span.chunk.end.checked_sub(4))
+        .zip(chunk.end.checked_sub(4))
         .is_some_and(|(payload_start, payload_end)| {
-            span.payload.start == payload_start
-                && span.payload.end == payload_end
+            payload.start == payload_start
+                && payload.end == payload_end
                 && payload_start <= payload_end
         });
     if !frames {
@@ -620,7 +635,7 @@ pub fn fill_c2pa(png: &mut [u8], span: &C2paSpan, store: &[u8]) -> Result<()> {
     // The chunk's eight header bytes, split where §5.3 splits them. Taken as one borrow rather
     // than by indexed reads so that no byte offset is computed here twice: `frames` above already
     // established that these eight bytes are inside the buffer.
-    let (declared, kind) = png[span.chunk.start..span.payload.start].split_at(4);
+    let (declared, kind) = png[chunk.start..payload.start].split_at(4);
     if kind != CABX {
         return Err(invalid("PNG: the C2PA span does not name a caBX chunk"));
     }
@@ -630,7 +645,7 @@ pub fn fill_c2pa(png: &mut [u8], span: &C2paSpan, store: &[u8]) -> Result<()> {
     // longer chunk than the one that is there and write the payload and CRC over whatever follows
     // it, most likely IDAT, and report success.
     let agrees = matches!(
-        u32::try_from(span.payload.len()),
+        u32::try_from(payload.len()),
         Ok(payload_len) if declared == payload_len.to_be_bytes()
     );
     if !agrees {
@@ -638,21 +653,32 @@ pub fn fill_c2pa(png: &mut [u8], span: &C2paSpan, store: &[u8]) -> Result<()> {
             "PNG: the C2PA span disagrees with the chunk's declared length",
         ));
     }
-    if store.len() != span.payload.len() {
+    if store.len() != payload.len() {
         return Err(invalid("PNG: the C2PA store is not the reserved length"));
     }
 
-    png[span.payload.clone()].copy_from_slice(store);
+    png[payload.clone()].copy_from_slice(store);
     let mut crc = Crc32::new();
     crc.update(&CABX);
     crc.update(store);
-    png[span.payload.end..span.chunk.end].copy_from_slice(&crc.finish().to_be_bytes());
+    png[payload.end..chunk.end].copy_from_slice(&crc.finish().to_be_bytes());
     Ok(())
+}
+
+/// `range` as buffer indices, or `None` when either end does not fit this target's `usize`.
+fn in_memory(range: &Range<u64>) -> Option<Range<usize>> {
+    Some(usize::try_from(range.start).ok()?..usize::try_from(range.end).ok()?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A span's `u64` file offsets as indices into a test's own (small) buffer. Cast rather than
+    /// routed through `in_memory`, so the oracle does not share the conversion under test.
+    fn at(range: &Range<u64>) -> Range<usize> {
+        range.start as usize..range.end as usize
+    }
 
     #[test]
     fn iend_chunk_layout() {
@@ -765,10 +791,11 @@ mod tests {
         let span = find_c2pa(&png).expect("a caBX chunk");
         assert_eq!(span.chunk, 33..52);
         assert_eq!(span.payload, 41..48);
-        assert_eq!(&png[span.payload.clone()], b"jumbf!!");
-        assert_eq!(&png[span.chunk.start + 4..span.chunk.start + 8], b"caBX");
+        let (chunk, payload) = (at(&span.chunk), at(&span.payload));
+        assert_eq!(&png[payload], b"jumbf!!");
+        assert_eq!(&png[chunk.start + 4..chunk.start + 8], b"caBX");
         // Nothing but the chunk: the span ends exactly where IEND's length field begins.
-        assert_eq!(&png[span.chunk.end + 4..span.chunk.end + 8], b"IEND");
+        assert_eq!(&png[chunk.end + 4..chunk.end + 8], b"IEND");
     }
 
     /// A PNG carrying a `len`-byte reservation, plus the span naming it.
@@ -791,25 +818,26 @@ mod tests {
         let before = png.clone();
         fill_c2pa(&mut png, &span, b"jumbf!").expect("fill");
 
-        assert_eq!(&png[span.payload.clone()], b"jumbf!");
+        let (chunk, payload) = (at(&span.chunk), at(&span.payload));
+        assert_eq!(&png[payload.clone()], b"jumbf!");
         assert_eq!(png.len(), before.len());
-        for i in (0..png.len()).filter(|i| !span.chunk.contains(i)) {
+        for i in (0..png.len()).filter(|i| !chunk.contains(i)) {
             assert_eq!(png[i], before[i], "byte {i} outside the span changed");
         }
         assert_eq!(
-            png[span.chunk.start..span.payload.start],
-            before[span.chunk.start..span.payload.start],
+            png[chunk.start..payload.start],
+            before[chunk.start..payload.start],
             "the length and type fields are untouched"
         );
         assert_ne!(
-            png[span.payload.end..span.chunk.end],
-            before[span.payload.end..span.chunk.end],
+            png[payload.end..chunk.end],
+            before[payload.end..chunk.end],
             "the CRC followed the payload"
         );
         // The CRC is not merely different, it is right: the walk only returns a CRC-valid chunk.
         let refound = find_c2pa(&png).expect("the filled chunk still verifies");
         assert_eq!(refound, span);
-        assert_eq!(&png[refound.payload], b"jumbf!");
+        assert_eq!(&png[at(&refound.payload)], b"jumbf!");
     }
 
     /// Every argument is validated before a byte is written, each with its own message, and a
@@ -833,7 +861,7 @@ mod tests {
         assert_eq!(long, png);
 
         // A span past the end of the buffer.
-        let mut truncated = png[..span.chunk.end - 1].to_vec();
+        let mut truncated = png[..at(&span.chunk).end - 1].to_vec();
         let error = fill_c2pa(&mut truncated, &span, b"abcd").expect_err("past the end");
         assert!(error.to_string().contains("runs past the end"), "{error}");
 
@@ -899,7 +927,7 @@ mod tests {
         let exact = C2paSpan::of(chunk_start..chunk_start + 12 + 4);
         fill_c2pa(&mut png, &exact, b"good").expect("the declared length matches");
         assert_eq!(
-            find_c2pa(&png).map(|s| png[s.payload].to_vec()),
+            find_c2pa(&png).map(|s| png[at(&s.payload)].to_vec()),
             Some(b"good".to_vec())
         );
 
@@ -915,7 +943,39 @@ mod tests {
         assert!(error.to_string().contains("declared length"), "{error}");
         let whole = C2paSpan::of(wide_start..wide_start + 12 + 300);
         fill_c2pa(&mut wide, &whole, &[9; 300]).expect("the declared length matches");
-        assert_eq!(find_c2pa(&wide).map(|s| wide[s.payload].len()), Some(300));
+        assert_eq!(
+            find_c2pa(&wide).map(|s| wide[at(&s.payload)].len()),
+            Some(300)
+        );
+    }
+
+    /// A span is `u64` file offsets and `png` is indexed in `usize`, so `fill_c2pa` converts —
+    /// checked, never truncating. The span here sits exactly `2^32` bytes past a real `caBX`, so a
+    /// 32-bit cast would land on that chunk, pass every later check and overwrite it; the checked
+    /// conversion (on a 32-bit target) and the bounds check (on a 64-bit one) refuse it with the
+    /// same error and write nothing. A span reaching `u64::MAX` fits no buffer on any target.
+    /// Only a 32-bit run can tell a checked conversion from a truncating cast: on a 64-bit target
+    /// every `u64` fits `usize`, so there this test pins the refused outcome, not the mechanism.
+    #[test]
+    fn filling_refuses_a_span_beyond_the_address_space_rather_than_truncating_it() {
+        let (png, span) = reserved(4);
+        let wrap = 1u64 << 32;
+        let mut mine = png.clone();
+        let aliased = C2paSpan {
+            chunk: span.chunk.start + wrap..span.chunk.end + wrap,
+            payload: span.payload.start + wrap..span.payload.end + wrap,
+        };
+        let error = fill_c2pa(&mut mine, &aliased, b"abcd").expect_err("past 4 GiB");
+        assert!(error.to_string().contains("runs past the end"), "{error}");
+        assert_eq!(mine, png, "a refused span writes nothing");
+
+        let unbounded = C2paSpan {
+            chunk: u64::MAX - 16..u64::MAX,
+            payload: u64::MAX - 8..u64::MAX - 4,
+        };
+        let error = fill_c2pa(&mut mine, &unbounded, b"abcd").expect_err("past any buffer");
+        assert!(error.to_string().contains("runs past the end"), "{error}");
+        assert_eq!(mine, png);
     }
 
     /// The bounds check admits the exact fit: a buffer that ends exactly where the chunk does is
@@ -925,9 +985,9 @@ mod tests {
     #[test]
     fn a_buffer_ending_exactly_where_the_chunk_does_is_in_range() {
         let (mut png, span) = reserved(4);
-        let end = span.chunk.end;
+        let end = at(&span.chunk).end;
         fill_c2pa(&mut png[..end], &span, b"abcd").expect("the chunk ends at the buffer's end");
-        assert_eq!(&png[span.payload], b"abcd");
+        assert_eq!(&png[at(&span.payload)], b"abcd");
     }
 
     /// A zero-length reservation is a legal chunk, and filling it with nothing is a no-op that
@@ -935,7 +995,7 @@ mod tests {
     #[test]
     fn filling_an_empty_reservation_is_lawful() {
         let (mut png, span) = reserved(0);
-        assert_eq!(span.payload.len(), 0);
+        assert!(span.payload.is_empty());
         fill_c2pa(&mut png, &span, &[]).expect("fill");
         assert_eq!(find_c2pa(&png), Some(span));
     }
@@ -974,7 +1034,7 @@ mod tests {
         write_chunk(&mut before_idat, *b"IDAT", b"zz");
         write_chunk(&mut before_idat, *b"IEND", &[]);
         let span = find_c2pa(&before_idat).expect("a store before IDAT");
-        assert_eq!(&before_idat[span.payload], b"appended");
+        assert_eq!(&before_idat[at(&span.payload)], b"appended");
     }
 
     /// The store the span names is the one the decoder reads: a `caBX` whose CRC does not match
@@ -991,8 +1051,8 @@ mod tests {
         write_chunk(&mut png, CABX, b"valid");
         write_chunk(&mut png, *b"IEND", &[]);
         let span = find_c2pa(&png).expect("the CRC-valid caBX");
-        assert_eq!(span.chunk, valid_start..valid_start + 12 + 5);
-        assert_eq!(&png[span.payload], b"valid");
+        assert_eq!(at(&span.chunk), valid_start..valid_start + 12 + 5);
+        assert_eq!(&png[at(&span.payload)], b"valid");
 
         let mut none = SIGNATURE.to_vec();
         write_chunk(&mut none, *b"IHDR", &[0; 13]);
