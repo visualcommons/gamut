@@ -175,7 +175,8 @@ unlocks it.
 - **Extra channels beyond alpha.** Depth, thermal, spot, and other extra channels are ignored on
   decode and unsupported on encode; unlocks with a typed extra-channel model.
 - **Effort 11 ("tectonic plate").** Expert-gated behind `JxlEncoderAllowExpertOptions`; the `Effort`
-  enum caps at 10 by design (also: adding a variant to the exhaustive public enum is semver-major).
+  enum caps at 10 by design. It is `#[non_exhaustive]`, so appending the level later is additive,
+  not semver-major.
 - **Container ownership (follow-up to issue #276).** ISO BMFF box writing and `jbrd` JPEG
   reconstruction metadata are produced *by libjxl* today, which is why the container features are
   vetoed away from pushed backends. Moving that box/`jbrd` writing into gamut-jxl proper — building
