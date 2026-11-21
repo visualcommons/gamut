@@ -1,6 +1,6 @@
 # gamut
 
-> Project Status: Early development, working toward full specs compliance across modern formats (AVIF, JXL, WebP, DNG). API stability is per crate and follows SemVer alone — see [Versioning](#versioning).
+> Project Status: Early development, working toward full spec compliance across modern still-image formats. API stability is per crate and follows SemVer alone — see [Versioning](#versioning).
 
 Memory-safe, specs-compliant, quality-optimized image primitives.
 
@@ -64,31 +64,32 @@ agents, used correctly, speed the work up considerably.
 
 ### Scope
 
-The initial focus is **AVIF, WebP, and JPEG** — the formats with the best
-size-versus-compatibility tradeoff today. **JPEG XL** (`gamut-jxl`) is implemented as an
-encoder + decoder (issue #243) — uniquely, by wrapping the format's reference implementations
-(libjxl for encode, the pure-Rust jxl-rs for decode) rather than clean-slate, a deliberate
-maintainer decision documented in that crate. **TIFF 6.0** (`gamut-tiff`) is implemented at v1
-(issue #107) as a royalty-free, natively still-image format — a good long-term fit for the
-image-first focus — with YCbCr/Lab and JPEG-in-TIFF still deferred, and **DNG** (`gamut-dng`)
-is a raw encoder + decoder built as a TIFF/EP profile over the same `gamut-ifd` container core.
-`gamut-heic` is a decode-only HEIF container, with the HEVC bitstream itself left to a pluggable
-backend rather than decoded here. Of the format crates, only `gamut-vvc` and `gamut-av2` are
-still scaffolding, and they may move or be dropped as the focus sharpens.
+**Formats.** gamut covers the royalty-free still-image formats with the best size-versus-
+compatibility tradeoff today:
 
-Alongside the codecs, gamut ships **shared image-metadata primitives** (issue #34) — EXIF,
-XMP, ICC, and IPTC, plus the TIFF/IFD container core (`gamut-ifd`) that EXIF builds on. These are
-all at v1 or later; EXIF, IPTC and XMP are gated differentially against exiv2 (which bundles
-Adobe's XMPCore), and ICC against Little-CMS. `gamut-cmm` adds the ICC transform engine over the
-profiles `gamut-icc` parses — conformance-gated against Little-CMS, though still well behind it
-on throughput.
+- **AVIF**, **WebP**, **JPEG** and **PNG** — clean-slate encoders and decoders. AVIF decode parses
+  the container natively and hands the AV1 codestream to a pluggable backend, since `gamut-av1`
+  does not reconstruct samples yet.
+- **JPEG XL** — uniquely, a wrapper over the format's reference implementations (libjxl for
+  encode, the pure-Rust jxl-rs for decode) rather than clean-slate, a maintainer decision
+  documented in `gamut-jxl`.
+- **TIFF 6.0** and **DNG 1.7.1** — encoder + decoder pairs on the shared `gamut-ifd` container
+  core, DNG as a TIFF/EP raw profile. TIFF's YCbCr/Lab photometrics and JPEG-in-TIFF are deferred.
+- **HEIC** — decode-only by charter: the HEIF container is parsed here, the HEVC bitstream is left
+  to a pluggable backend.
 
-The long-term goal is de-facto, fully-featured implementations — for EXIF, exiftool-class tag
-coverage — and today's crates do not reach it yet. Which format crates wire the `gamut-metadata`
-facade, and how, is listed in its [consumer integration](crates/gamut-metadata/README.md#consumer-integration)
-section; which MakerNote vendors `gamut-exif` decodes is in its [scope](crates/gamut-exif/README.md#scope).
-The remaining gap is depth — per-vendor MakerNote payloads and tag breadth beyond the standard
-dictionary — and issue #416 tracks it, measured.
+`gamut-av2` and `gamut-vvc` are still placeholders, and may move or be dropped as the focus
+sharpens.
+
+**Metadata and colour.** Shared EXIF, XMP, ICC and IPTC crates, unified by the `gamut-metadata`
+facade, are all at 1.0 or later. EXIF, XMP and IPTC are gated differentially against exiv2 (which
+bundles Adobe's XMPCore), ICC against Little-CMS. `gamut-cmm` adds the ICC transform engine over
+the profiles `gamut-icc` parses, conformance-gated against Little-CMS though still well behind it
+on throughput. The long-term goal is exiftool-class coverage; the remaining gap is depth —
+per-vendor MakerNote payloads and tag breadth beyond the standard dictionary — tracked in issue
+#416. Which format crates wire the facade is listed in its
+[consumer integration](crates/gamut-metadata/README.md#consumer-integration) section, and which
+MakerNote vendors `gamut-exif` decodes in its [scope](crates/gamut-exif/README.md#scope).
 
 **gamut is image-first.** Even where a format's codec (AV1, AV2, VVC, HEVC) is fundamentally a
 video codec, gamut implements only the intra-frame, still-image subset those formats use — no
