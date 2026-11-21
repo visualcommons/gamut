@@ -281,7 +281,26 @@ exclude_re = [
     # size tie `<` keeps raw and `<=` would keep compressed, but both decode to identical alpha (the
     # transform is bijective) and real content never ties, so no non-contrived test can distinguish
     # them. (`< -> >` / `< -> ==` pick the *larger*/wrong encoding and are caught by the round-trip.)
-    '^crates/gamut-webp/src/alpha\.rs:369:28: replace < with <= in write_alph_with_effort$',
+    '^crates/gamut-webp/src/alpha\.rs:377:28: replace < with <= in write_alph_with_effort$',
+    # gamut-webp `alpha::quantize_levels` (#1206) — the k-means stopping rule of libwebp's
+    # `QuantizeLevels`, `if (last_err - err < 1e-4 * N) break;`. The four entries below are one
+    # argument over four statements. Each mutant makes the loop run *past* libwebp's stop: until an
+    # exact fixed point or the six-iteration cap (`* -> /` on the threshold shrinks it to 1e-4 / N;
+    # `* -> /` in the error sum turns every term into `freq` or, at the always-present minimum whose
+    # error is 0, into NaN, so the test never passes; `- -> +` and `< -> ==` never pass it either),
+    # or, for `< -> <=`, stop where the difference equals the threshold exactly. The output differs
+    # only when libwebp stops on a non-zero improvement smaller than 1e-4 per pixel *and* one more
+    # Lloyd step would reassign a value. A search of ~600 000 random planes (uniform, skewed and
+    # clustered histograms, 3 to 40 levels) and 6 000 grainy-shadow (plane, quality) pairs found one
+    # such early stop and no output difference. And what the stop moves is only which level-reduced
+    # plane the encoder emits, which RFC 9649 §2.7.1 leaves to the encoder (`P` is informative; the
+    # decoder never reads it). The sibling `- -> /`, which can stop *earlier* than libwebp once the
+    # threshold exceeds 1, is not excluded: the 160x120 fixture of `quantize_levels_matches_libwebp`
+    # kills it, as it does `< -> >`.
+    '^crates/gamut-webp/src/alpha\.rs:227:41: replace \* with / in quantize_levels$',
+    '^crates/gamut-webp/src/alpha\.rs:(259:39|259:47): replace \* with / in quantize_levels$',
+    '^crates/gamut-webp/src/alpha\.rs:261:21: replace - with \+ in quantize_levels$',
+    '^crates/gamut-webp/src/alpha\.rs:261:27: replace < with (==|<=) in quantize_levels$',
     # gamut-webp VP8 header — behaviourally-equivalent bit packing/branches.
     # write_uncompressed_chunk packs disjoint fields into the frame tag (`version<<1 | 1<<4 |
     # size<<5`, each within its width) and the dimension words (`width | hscale<<14`, width ≤ 0x3FFF);
