@@ -73,10 +73,13 @@ fn rgb16_to_ycbcr_planes(
 /// The samples are **left-justified at the coded depth**: a 10-bit plane holds values in
 /// `0..=1023`, not 16-bit values to be shifted later. Narrowing a wider source is the caller's
 /// decision, made where the loss is visible, and rejected here rather than silently truncated.
+///
+/// As for [`Planar8`](crate::Planar8), the image size is held as a [`Dimensions`] taken from every
+/// constructor's validated input, so a `Planar16` is never zero-sided and
+/// [`dimensions`](Self::dimensions) is infallible.
 #[derive(Debug, Clone)]
 pub struct Planar16 {
-    width: u32,
-    height: u32,
+    dims: Dimensions,
     subsampling: ChromaSubsampling,
     bit_depth: BitDepth,
     planes: [Vec<u16>; 3],
@@ -164,8 +167,7 @@ impl Planar16 {
             ));
         }
         Ok(Self {
-            width,
-            height,
+            dims,
             subsampling,
             bit_depth,
             planes,
@@ -197,8 +199,7 @@ impl Planar16 {
         let (width, height) = (img.width(), img.height());
         let n = width as usize * height as usize;
         Self {
-            width,
-            height,
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs444,
             bit_depth,
             planes: rgb16_to_gbr_planes(img.as_samples(), n, 3, narrowing_shift(bit_depth)),
@@ -220,8 +221,7 @@ impl Planar16 {
         let (width, height) = (img.width(), img.height());
         let n = width as usize * height as usize;
         Self {
-            width,
-            height,
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs444,
             bit_depth,
             planes: rgb16_to_ycbcr_planes(
@@ -270,15 +270,14 @@ impl Planar16 {
         if subsampling == ChromaSubsampling::Cs444 {
             return Ok(full);
         }
-        let (width, height) = (full.width as usize, full.height as usize);
-        let (cw, ch) = subsampling.chroma_dimensions(full.width, full.height);
+        let (width, height) = (full.width() as usize, full.height() as usize);
+        let (cw, ch) = subsampling.chroma_dimensions(full.width(), full.height());
         let f = subsampling.factors();
         let (sx, sy) = (f.width() as usize, f.height() as usize);
         let [y, u, v] = full.planes;
         let chroma = |p: &[u16]| downsample_box(p, width, height, cw as usize, ch as usize, sx, sy);
         Ok(Self {
-            width: full.width,
-            height: full.height,
+            dims: full.dims,
             subsampling,
             bit_depth: full.bit_depth,
             planes: [y, chroma(&u), chroma(&v)],
@@ -293,8 +292,7 @@ impl Planar16 {
         let (width, height) = (img.width(), img.height());
         let n = width as usize * height as usize;
         Self {
-            width,
-            height,
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs444,
             bit_depth,
             planes: rgb16_to_gbr_planes(img.as_samples(), n, 4, narrowing_shift(bit_depth)),
@@ -313,8 +311,7 @@ impl Planar16 {
         let (width, height) = (img.width(), img.height());
         let n = width as usize * height as usize;
         Self {
-            width,
-            height,
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs444,
             bit_depth,
             planes: rgb16_to_ycbcr_planes(
@@ -337,8 +334,7 @@ impl Planar16 {
     pub fn from_rgba16_alpha_view(img: ImageRef<'_, Rgba16>, bit_depth: BitDepth) -> Self {
         let shift = narrowing_shift(bit_depth);
         Self {
-            width: img.width(),
-            height: img.height(),
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs400,
             bit_depth,
             planes: [
@@ -382,8 +378,7 @@ impl Planar16 {
     pub fn from_gray16_view(img: ImageRef<'_, Gray16>, bit_depth: BitDepth) -> Self {
         let shift = narrowing_shift(bit_depth);
         Self {
-            width: img.width(),
-            height: img.height(),
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs400,
             bit_depth,
             planes: [
@@ -424,8 +419,7 @@ impl Planar16 {
     pub fn from_gray8_view(img: ImageRef<'_, Gray8>, bit_depth: BitDepth) -> Self {
         let shift = narrowing_shift(bit_depth);
         Self {
-            width: img.width(),
-            height: img.height(),
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs400,
             bit_depth,
             planes: [
@@ -439,16 +433,23 @@ impl Planar16 {
         }
     }
 
+    /// The image dimensions — the luma plane's size. Never zero-sided, because every constructor
+    /// takes them as a validated [`Dimensions`].
+    #[must_use]
+    pub fn dimensions(&self) -> Dimensions {
+        self.dims
+    }
+
     /// Image width in samples.
     #[must_use]
     pub fn width(&self) -> u32 {
-        self.width
+        self.dims.width()
     }
 
     /// Image height in samples.
     #[must_use]
     pub fn height(&self) -> u32 {
-        self.height
+        self.dims.height()
     }
 
     /// The chroma subsampling of the coded planes.
@@ -475,8 +476,10 @@ impl Planar16 {
     /// [`plane_dimensions`](Self::plane_dimensions).
     #[must_use]
     pub fn plane_extents(&self) -> [(u32, u32); 3] {
-        let chroma = self.subsampling.chroma_dimensions(self.width, self.height);
-        [(self.width, self.height), chroma, chroma]
+        let chroma = self
+            .subsampling
+            .chroma_dimensions(self.dims.width(), self.dims.height());
+        [(self.dims.width(), self.dims.height()), chroma, chroma]
     }
 
     /// The row-major samples of plane `index` (`0 = Y/G, 1 = U/B, 2 = V/R`), or `None` for an
@@ -513,6 +516,7 @@ mod tests {
     fn a_buffer_reports_the_geometry_and_depth_it_was_built_with() {
         let p = planes(BitDepth::Twelve, (0..6).map(|i| i * 500).collect()).unwrap();
         assert_eq!((p.width(), p.height()), (3, 2));
+        assert_eq!(p.dimensions(), dims(3, 2));
         assert_eq!(p.bit_depth(), BitDepth::Twelve);
         assert_eq!(p.subsampling(), ChromaSubsampling::Cs444);
         assert_eq!(p.planes()[0], &[0u16, 500, 1000, 1500, 2000, 2500]);

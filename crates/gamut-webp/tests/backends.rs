@@ -12,7 +12,7 @@ use gamut_core::{
 };
 use gamut_riff::{RiffReader, WebpChunkId};
 use gamut_webp::{
-    AbiWebpDecoder, AbiWebpEncoder, DecodedWebp, WebpCodestream, WebpCodestreamDecoder,
+    AbiWebpDecoder, AbiWebpEncoder, DecodedWebp, Vp8Planes, WebpCodestream, WebpCodestreamDecoder,
     WebpCodestreamEncoder, WebpDecoder, WebpEncodeRequest, WebpEncoder, WebpRasterRef,
     WebpStreamInfo,
 };
@@ -89,9 +89,6 @@ enum Outcome {
     /// Return a YUV raster of the given constant luma over [`scripted_yuv`]'s varying chroma —
     /// used to prove discriminant mismatches are rejected as well as to serve genuine `VP8 ` jobs.
     Yuv(u8),
-    /// Return a mid-grey YUV raster laid out in this subsampling — used to prove a decode backend
-    /// cannot hand VP8 anything but 4:2:0 planes.
-    Planes(ChromaSubsampling),
     /// Return these bytes as the encoded chunk payload.
     Bytes(Vec<u8>),
     /// Fail with this error.
@@ -102,7 +99,7 @@ enum Outcome {
 
 /// The raster a [`Outcome::Yuv`] backend returns: constant `luma`, and chroma that varies from
 /// sample to sample, so interpolating and replicating upsamplers present it differently.
-fn scripted_yuv(width: u32, height: u32, luma: u8) -> Result<Planar8> {
+fn scripted_yuv(width: u32, height: u32, luma: u8) -> Result<Vp8Planes> {
     let (cw, ch) = ChromaSubsampling::Cs420.chroma_dimensions(width, height);
     let (cw, ch) = (cw as usize, ch as usize);
     let u = (0..cw * ch).map(|i| (64 + i * 37 % 128) as u8).collect();
@@ -110,13 +107,14 @@ fn scripted_yuv(width: u32, height: u32, luma: u8) -> Result<Planar8> {
     yuv420(width, height, [vec![luma; (width * height) as usize], u, v])
 }
 
-/// Assembles a 4:2:0 [`Planar8`] from its `[y, u, v]` planes.
-fn yuv420(width: u32, height: u32, planes: [Vec<u8>; 3]) -> Result<Planar8> {
-    Planar8::from_planes_subsampled(
+/// Assembles 4:2:0 [`Vp8Planes`] from its `[y, u, v]` planes, through the public
+/// `TryFrom<Planar8>` a third-party backend uses.
+fn yuv420(width: u32, height: u32, planes: [Vec<u8>; 3]) -> Result<Vp8Planes> {
+    Vp8Planes::try_from(Planar8::from_planes_subsampled(
         Dimensions::new(width, height)?,
         ChromaSubsampling::Cs420,
         planes,
-    )
+    )?)
 }
 
 /// A decode backend that accepts only `accepts` (a codestream, or nothing) and records every call.
@@ -181,19 +179,6 @@ impl WebpCodestreamDecoder for ScriptedDecoder {
                 d.height(),
                 *luma,
             )?)),
-            Outcome::Planes(layout) => {
-                let (cw, ch) = layout.chroma_dimensions(d.width(), d.height());
-                let chroma = vec![128; (cw * ch) as usize];
-                Ok(DecodedWebp::Yuv420(Planar8::from_planes_subsampled(
-                    d,
-                    *layout,
-                    [
-                        vec![128; (d.width() * d.height()) as usize],
-                        chroma.clone(),
-                        chroma,
-                    ],
-                )?))
-            }
             Outcome::Bytes(_) => panic!("byte outcome is encode-only"),
             Outcome::Fail(msg) => Err(Error::invalid_input(env!("CARGO_PKG_NAME"), msg)),
             Outcome::Unsupported(msg) => Err(Error::unsupported(env!("CARGO_PKG_NAME"), msg)),
@@ -395,7 +380,7 @@ fn decode_routing_is_per_codestream() {
     // decoder's chroma upsampling: libwebp's fancy upsampler by default, replication on request.
     let got: ImageBuf<Rgb8> = dec.decode_image(&lossy).expect("lossy via backend");
     assert_eq!(log.ran(), vec!["vp8only"]);
-    let raster = scripted_yuv(16, 16, 200).expect("yuv");
+    let raster = scripted_yuv(16, 16, 200).expect("yuv").into_inner();
     let expected = raster
         .to_rgb8_bt601(ColorRange::Limited, ChromaUpsampling::Interpolated)
         .expect("4:2:0 raster");
@@ -425,28 +410,6 @@ fn decode_routing_is_per_codestream() {
     let _: ImageBuf<Rgb8> = dec2.decode_image(&lossy).expect("lossy via tail");
     assert_eq!(log2.supports(), vec!["vp8lonly"]);
     assert!(log2.ran().is_empty(), "VP8L backend ran on a VP8 stream");
-}
-
-/// A pushed backend's VP8 raster is admitted only as 4:2:0, the layout the `Yuv420` variant
-/// documents, and anything else is refused as invalid input before conversion is attempted.
-#[test]
-fn decode_rejects_a_backends_non_420_vp8_raster_as_invalid_input() {
-    let (file, _) = lossy_fixture();
-    let log = Arc::new(Log::default());
-    let mut dec = WebpDecoder::new();
-    dec = dec.with_backend(ScriptedDecoder::new(
-        "yuv444",
-        Some(WebpCodestream::Vp8),
-        Outcome::Planes(ChromaSubsampling::Cs444),
-        &log,
-    ));
-    let err: Result<ImageBuf<Rgb8>> = dec.decode_image(&file);
-    assert_error(
-        err,
-        ErrorKind::InvalidInput,
-        "WebP: a VP8 raster must be 4:2:0 planes",
-    );
-    assert_eq!(log.ran(), vec!["yuv444"]);
 }
 
 #[test]
@@ -1042,7 +1005,7 @@ fn abi_decode_adapter_round_trips_both_rasters() {
     let info = WebpStreamInfo::new(WebpCodestream::Vp8, dims(4, 2));
     match lossy.decode(&info, &[]).expect("decode") {
         DecodedWebp::Yuv420(yuv) => {
-            assert_eq!((yuv.width(), yuv.height()), (4, 2));
+            assert_eq!(yuv.dimensions(), dims(4, 2));
             let [y, u, v] = yuv.planes();
             assert_eq!(y, vec![0x20u8; 8].as_slice());
             assert_eq!(u, vec![0x21u8; 2].as_slice());

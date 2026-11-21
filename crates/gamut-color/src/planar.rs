@@ -140,15 +140,21 @@ pub(crate) fn downsample_box<T: BoxSample>(
 /// [`Planar8::from_rgb8_matrix`] applies the H.273 transform of [`RgbToYcbcr`].
 ///
 /// The buffer carries its [`ChromaSubsampling`], so the chroma planes need not be full resolution.
-/// Every RGB constructor produces [`Cs444`](ChromaSubsampling::Cs444); subsampled buffers are built
-/// with [`from_planes_subsampled`](Self::from_planes_subsampled). The *format* is stored rather than
+/// The RGB constructors produce [`Cs444`](ChromaSubsampling::Cs444) except
+/// [`from_rgb8_matrix_subsampled`](Self::from_rgb8_matrix_subsampled) (the layout it is given) and
+/// [`from_rgb8_bt601`](Self::from_rgb8_bt601) ([`Cs420`](ChromaSubsampling::Cs420)); the alpha and
+/// grayscale views produce [`Cs400`](ChromaSubsampling::Cs400), and buffers of any layout are
+/// built from planes with [`from_planes_subsampled`](Self::from_planes_subsampled). The *format* is stored rather than
 /// three plane sizes, so there is no inconsistent state to keep in sync —
 /// [`plane_dimensions`](Self::plane_dimensions) derives each plane's geometry from
 /// `(width, height, subsampling)`.
+///
+/// The image size is held as a [`Dimensions`], which every constructor takes either directly or
+/// through the [`ImageRef`] it reads, so a `Planar8` is never zero-sided and
+/// [`dimensions`](Self::dimensions) is infallible.
 #[derive(Debug, Clone)]
 pub struct Planar8 {
-    width: u32,
-    height: u32,
+    dims: Dimensions,
     subsampling: ChromaSubsampling,
     planes: [Vec<u8>; 3],
 }
@@ -182,8 +188,7 @@ impl Planar8 {
             ));
         }
         Ok(Self {
-            width: dims.width(),
-            height: dims.height(),
+            dims,
             subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_gbr_planes(rgb, n, 3),
         })
@@ -199,8 +204,7 @@ impl Planar8 {
         // `usize` (it equals the sample slice's length).
         let n = width as usize * height as usize;
         Self {
-            width,
-            height,
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_gbr_planes(img.as_samples(), n, 3),
         }
@@ -239,8 +243,7 @@ impl Planar8 {
             ));
         }
         Ok(Self {
-            width: dims.width(),
-            height: dims.height(),
+            dims,
             subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_ycbcr_planes(rgb, n, 3, matrix),
         })
@@ -256,8 +259,7 @@ impl Planar8 {
         // `usize` (it equals the sample slice's length).
         let n = width as usize * height as usize;
         Self {
-            width,
-            height,
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_ycbcr_planes(img.as_samples(), n, 3, matrix),
         }
@@ -278,8 +280,7 @@ impl Planar8 {
         // `usize` (it equals the sample slice's length).
         let n = width as usize * height as usize;
         Self {
-            width,
-            height,
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_gbr_planes(img.as_samples(), n, 4),
         }
@@ -292,8 +293,7 @@ impl Planar8 {
         let (width, height) = (img.width(), img.height());
         let n = width as usize * height as usize;
         Self {
-            width,
-            height,
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_ycbcr_planes(img.as_samples(), n, 4, matrix),
         }
@@ -309,8 +309,7 @@ impl Planar8 {
     pub fn from_rgba8_alpha_view(img: ImageRef<'_, Rgba8>) -> Self {
         let px = img.as_samples();
         Self {
-            width: img.width(),
-            height: img.height(),
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs400,
             planes: [
                 px.iter().skip(3).step_by(4).copied().collect(),
@@ -330,8 +329,7 @@ impl Planar8 {
     #[must_use]
     pub fn from_gray8_view(img: ImageRef<'_, Gray8>) -> Self {
         Self {
-            width: img.width(),
-            height: img.height(),
+            dims: img.dimensions(),
             subsampling: ChromaSubsampling::Cs400,
             planes: [img.as_samples().to_vec(), Vec::new(), Vec::new()],
         }
@@ -367,15 +365,14 @@ impl Planar8 {
         if subsampling == ChromaSubsampling::Cs444 {
             return Ok(full);
         }
-        let (width, height) = (full.width as usize, full.height as usize);
-        let (cw, ch) = subsampling.chroma_dimensions(full.width, full.height);
+        let (width, height) = (full.width() as usize, full.height() as usize);
+        let (cw, ch) = subsampling.chroma_dimensions(full.width(), full.height());
         let f = subsampling.factors();
         let (sx, sy) = (f.width() as usize, f.height() as usize);
         let [y, u, v] = full.planes;
         let chroma = |p: &[u8]| downsample_box(p, width, height, cw as usize, ch as usize, sx, sy);
         Ok(Self {
-            width: full.width,
-            height: full.height,
+            dims: full.dims,
             subsampling,
             planes: [y, chroma(&u), chroma(&v)],
         })
@@ -433,8 +430,7 @@ impl Planar8 {
             ));
         }
         Ok(Self {
-            width,
-            height,
+            dims,
             subsampling,
             planes,
         })
@@ -449,7 +445,7 @@ impl Planar8 {
     /// yields gray (`R = G = B = Y`).
     #[must_use]
     pub fn to_rgb8_identity(&self) -> Vec<u8> {
-        let n = self.width as usize * self.height as usize;
+        let n = self.dims.width() as usize * self.dims.height() as usize;
         let (g, b, r) = (&self.planes[0], &self.planes[1], &self.planes[2]);
         let mut out = vec![0u8; n * 3];
         if self.subsampling == ChromaSubsampling::Cs444 {
@@ -471,9 +467,11 @@ impl Planar8 {
         }
         let f = self.subsampling.factors();
         let (sx, sy) = (f.width().trailing_zeros(), f.height().trailing_zeros());
-        let (cw, _) = self.subsampling.chroma_dimensions(self.width, self.height);
-        let (w, cw) = (self.width as usize, cw as usize);
-        for y in 0..self.height as usize {
+        let (cw, _) = self
+            .subsampling
+            .chroma_dimensions(self.dims.width(), self.dims.height());
+        let (w, cw) = (self.dims.width() as usize, cw as usize);
+        for y in 0..self.dims.height() as usize {
             // In bounds without a runtime check: for `x < width`, `x >> sx` is at most
             // `(width - 1) >> sx`, which is strictly less than `ceil(width / (1 << sx))` = `cw`.
             // The same argument bounds the row against the chroma height.
@@ -526,8 +524,7 @@ impl Planar8 {
         let (cw, ch) = subsampling.chroma_dimensions(width, height);
         let chroma = |p: &[u8]| downsample_box(p, w, h, cw as usize, ch as usize, 2, 2);
         Self {
-            width,
-            height,
+            dims: img.dimensions(),
             subsampling,
             planes: [y, chroma(&cb), chroma(&cr)],
         }
@@ -557,11 +554,13 @@ impl Planar8 {
                 "the BT.601 VP8 layer converts 4:2:0 planes only",
             ));
         }
-        let w = self.width as usize;
-        let (cw, ch) = self.subsampling.chroma_dimensions(self.width, self.height);
+        let w = self.dims.width() as usize;
+        let (cw, ch) = self
+            .subsampling
+            .chroma_dimensions(self.dims.width(), self.dims.height());
         let (cw, ch) = (cw as usize, ch as usize);
         let [luma, u, v] = &self.planes;
-        let mut out = vec![0u8; w * self.height as usize * 3];
+        let mut out = vec![0u8; w * self.dims.height() as usize * 3];
         let (mut u_row, mut v_row) = (vec![0u8; w], vec![0u8; w]);
         for (py, line) in out.chunks_exact_mut(w * 3).enumerate() {
             let (near, far) = taps(py, ch);
@@ -590,16 +589,23 @@ impl Planar8 {
         Ok(out)
     }
 
+    /// The image dimensions — the luma plane's size. Never zero-sided, because every constructor
+    /// takes them as a validated [`Dimensions`].
+    #[must_use]
+    pub fn dimensions(&self) -> Dimensions {
+        self.dims
+    }
+
     /// Image width in samples.
     #[must_use]
     pub fn width(&self) -> u32 {
-        self.width
+        self.dims.width()
     }
 
     /// Image height in samples.
     #[must_use]
     pub fn height(&self) -> u32 {
-        self.height
+        self.dims.height()
     }
 
     /// The chroma subsampling of the coded planes.
@@ -621,8 +627,10 @@ impl Planar8 {
     /// that wants every plane, as [`planes`](Self::planes) is for the samples.
     #[must_use]
     pub fn plane_extents(&self) -> [(u32, u32); 3] {
-        let chroma = self.subsampling.chroma_dimensions(self.width, self.height);
-        [(self.width, self.height), chroma, chroma]
+        let chroma = self
+            .subsampling
+            .chroma_dimensions(self.dims.width(), self.dims.height());
+        [(self.dims.width(), self.dims.height()), chroma, chroma]
     }
 
     /// The row-major samples of plane `index` (`0 = Y/G, 1 = U/B, 2 = V/R`), or `None` for an
@@ -683,6 +691,7 @@ mod tests {
         let r: Vec<u8> = (20..26).collect();
         let p = Planar8::from_planes(dims(3, 2), [g.clone(), b.clone(), r.clone()]).unwrap();
         assert_eq!((p.width(), p.height()), (3, 2));
+        assert_eq!(p.dimensions(), dims(3, 2));
         assert_eq!(p.planes(), [&g[..], &b[..], &r[..]]);
         // The valid case above only passes when `n == 3 * 2`: a mutated `width * height` (3 + 2 = 5,
         // 3 / 2 = 1) or an inverted `!=` length check would reject these correctly-sized planes.

@@ -24,7 +24,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use gamut_color::{ChromaUpsampling, ColorRange, Planar8};
+use gamut_color::{ChromaUpsampling, ColorRange};
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
 use gamut_core::{
     DecodeImage, DecodeLimits, Dimensions, Error, ImageBuf, Pixel, PixelFormat, RawMetadata,
@@ -34,7 +34,7 @@ use gamut_riff::{MetadataChunks, WebpChunkId, WebpLayout};
 
 use crate::alpha;
 use crate::backend::{
-    DecodedWebp, DecoderRegistry, WebpCodestream, WebpCodestreamDecoder, WebpStreamInfo,
+    DecodedWebp, DecoderRegistry, Vp8Planes, WebpCodestream, WebpCodestreamDecoder, WebpStreamInfo,
     decode_with_backends, peek_dimensions,
 };
 use crate::vp8l::decoder::{argb_to_rgb8, argb_to_rgba8, decode as decode_vp8l};
@@ -211,15 +211,12 @@ impl WebpDecoder {
         }
     }
 
-    /// Unwraps a lossy decode result with its dimensions.
-    ///
-    /// The built-in tail produces 4:2:0 planes by construction, but a pushed backend's raster is
-    /// admitted only through [`DecodedWebp::dimensions`], which refuses any other layout as
-    /// [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput).
-    fn expect_yuv(raster: DecodedWebp) -> Result<(Dimensions, Planar8)> {
-        let dims = raster.dimensions()?;
+    /// Unwraps a lossy decode result, which is YUV by construction (the registry rejects a backend
+    /// that returns the other variant). Its planes are 4:2:0 by construction too: every way a
+    /// pushed backend can build a [`Vp8Planes`] fixes or checks the layout.
+    fn expect_yuv(raster: DecodedWebp) -> Result<Vp8Planes> {
         match raster {
-            DecodedWebp::Yuv420(yuv) => Ok((dims, yuv)),
+            DecodedWebp::Yuv420(yuv) => Ok(yuv),
             DecodedWebp::Argb { .. } => Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "WebP: VP8 decode produced an ARGB raster",
@@ -347,10 +344,12 @@ impl WebpDecoder {
                 Ok((dims, format, out))
             }
             WebpCodestream::Vp8 => {
-                let (dims, yuv) =
-                    Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
+                let yuv = Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
+                let dims = yuv.dimensions();
                 // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
-                let rgb = yuv.to_rgb8_bt601(ColorRange::Limited, self.upsampling)?;
+                let rgb = yuv
+                    .as_planar()
+                    .to_rgb8_bt601(ColorRange::Limited, self.upsampling)?;
                 // A lossy bitstream carries no alpha of its own: it exists only when the extended
                 // container supplies an `ALPH` chunk.
                 let Some(payload) = layout.alph else {

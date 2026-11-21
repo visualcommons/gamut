@@ -13,7 +13,8 @@
 //! [`WebpCodestreamEncoder`] both carry a [`WebpCodestream`] discriminant, so a backend that handles
 //! only one of the two simply declines the other in `supports`. The decoded raster, by contrast,
 //! *is* split: VP8 reconstructs natively to YCbCr 4:2:0 and VP8L to packed ARGB, and there is no
-//! lossless common form, so [`DecodedWebp`] is an enum.
+//! lossless common form, so [`DecodedWebp`] is an enum. The VP8 side is a [`Vp8Planes`], which is
+//! 4:2:0 by construction, so neither direction re-checks the chroma layout after the seam.
 //!
 //! # `ALPH` is not part of the seam
 //!
@@ -134,6 +135,105 @@ impl WebpStreamInfo {
     }
 }
 
+/// Limited-range BT.601 YCbCr planes laid out [`ChromaSubsampling::Cs420`] — the only layout a VP8
+/// key frame codes (RFC 6386 §9.2) — and the raster of both [`DecodedWebp::Yuv420`] and
+/// [`WebpRasterRef::Yuv420`].
+///
+/// A [`Planar8`] can carry any [`ChromaSubsampling`]; this wrapper is 4:2:0 **by construction**.
+/// There are two ways in: [`from_planes`](Self::from_planes), which builds the 4:2:0 planes
+/// directly from three sample vectors, and the `TryFrom<Planar8>` impl, which admits an existing
+/// buffer and refuses every other layout. So nothing downstream — the built-in VP8 encoder, or the
+/// codec-abi adapter that hands the planes to a foreign backend with 4:2:0 strides — has to check
+/// the layout again or can read past the end of a chroma plane. A `Planar8` is never zero-sided,
+/// so [`dimensions`](Self::dimensions) is infallible.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::{ChromaSubsampling, Planar8};
+/// use gamut_core::Dimensions;
+/// use gamut_webp::Vp8Planes;
+///
+/// let dims = Dimensions::new(2, 2)?;
+/// // Straight from samples: 2x2 luma, 1x1 chroma.
+/// let vp8 = Vp8Planes::from_planes(dims, [vec![16; 4], vec![128], vec![128]])?;
+/// assert_eq!(vp8.planes()[1], &[128]);
+///
+/// // Or from an existing 4:2:0 buffer.
+/// let planes = Planar8::from_planes_subsampled(
+///     dims,
+///     ChromaSubsampling::Cs420,
+///     [vec![16; 4], vec![128], vec![128]],
+/// )?;
+/// let vp8 = Vp8Planes::try_from(planes)?;
+/// assert_eq!(vp8.dimensions(), dims);
+///
+/// // Any other layout is refused.
+/// let full = Planar8::from_planes(dims, [vec![16; 4], vec![128; 4], vec![128; 4]])?;
+/// assert!(Vp8Planes::try_from(full).is_err());
+/// # Ok::<(), gamut_core::Error>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct Vp8Planes(Planar8);
+
+impl Vp8Planes {
+    /// Builds 4:2:0 planes from `[y, u, v]` at `dims`: luma `width * height` samples, and each
+    /// chroma plane the ceiling-halved `ceil(width / 2) * ceil(height / 2)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a plane's
+    /// length does not match that geometry, as [`Planar8::from_planes_subsampled`] does.
+    pub fn from_planes(dims: Dimensions, planes: [Vec<u8>; 3]) -> Result<Self> {
+        Planar8::from_planes_subsampled(dims, ChromaSubsampling::Cs420, planes).map(Self)
+    }
+
+    /// The image dimensions — the luma plane's size.
+    #[must_use]
+    pub fn dimensions(&self) -> Dimensions {
+        self.0.dimensions()
+    }
+
+    /// The three planes `[Y, U, V]`, row-major: luma at [`dimensions`](Self::dimensions) and each
+    /// chroma plane at its ceiling-halved 4:2:0 size.
+    #[must_use]
+    pub fn planes(&self) -> [&[u8]; 3] {
+        self.0.planes()
+    }
+
+    /// Borrows the planes as the general [`Planar8`] buffer they are.
+    #[must_use]
+    pub fn as_planar(&self) -> &Planar8 {
+        &self.0
+    }
+
+    /// Returns the planes as the general [`Planar8`] buffer they are.
+    #[must_use]
+    pub fn into_inner(self) -> Planar8 {
+        self.0
+    }
+}
+
+impl TryFrom<Planar8> for Vp8Planes {
+    type Error = Error;
+
+    /// Admits `planes` as a VP8 raster if they are laid out [`ChromaSubsampling::Cs420`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error for any
+    /// other layout.
+    fn try_from(planes: Planar8) -> Result<Self> {
+        if planes.subsampling() != ChromaSubsampling::Cs420 {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "WebP: a VP8 raster must be 4:2:0 planes",
+            ));
+        }
+        Ok(Self(planes))
+    }
+}
+
 /// A decoded picture in the raster the codestream reconstructs natively.
 ///
 /// The two are irreconcilable without a lossy conversion — VP8 reconstructs YCbCr 4:2:0 (limited
@@ -144,10 +244,8 @@ impl WebpStreamInfo {
 /// converting between the two.
 #[derive(Debug, Clone)]
 pub enum DecodedWebp {
-    /// A `VP8 ` reconstruction: limited-range BT.601 YCbCr planes at visible resolution, laid out
-    /// [`ChromaSubsampling::Cs420`] (any other layout is refused by
-    /// [`dimensions`](Self::dimensions)).
-    Yuv420(Planar8),
+    /// A `VP8 ` reconstruction: limited-range BT.601 YCbCr 4:2:0 planes at visible resolution.
+    Yuv420(Vp8Planes),
     /// A `VP8L` reconstruction: `0xAARRGGBB` pixels in scan order.
     Argb {
         /// The image dimensions; `pixels` holds `width * height` entries.
@@ -168,33 +266,13 @@ impl DecodedWebp {
     }
 
     /// The raster's dimensions.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
-    /// [`Yuv420`](DecodedWebp::Yuv420) raster's planes are not 4:2:0, the only layout VP8
-    /// codes.
-    pub fn dimensions(&self) -> Result<Dimensions> {
+    #[must_use]
+    pub fn dimensions(&self) -> Dimensions {
         match self {
-            DecodedWebp::Yuv420(yuv) => yuv420_dimensions(yuv),
-            DecodedWebp::Argb { dimensions, .. } => Ok(*dimensions),
+            DecodedWebp::Yuv420(yuv) => yuv.dimensions(),
+            DecodedWebp::Argb { dimensions, .. } => *dimensions,
         }
     }
-}
-
-/// The dimensions of a VP8 raster's planes, refusing any layout but 4:2:0.
-///
-/// The one place a [`Planar8`] is admitted as a VP8 raster: the codec-abi encode adapter hands
-/// these planes to a foreign backend with 4:2:0 strides, so a raster of any other layout must be
-/// stopped here rather than read past the end of its chroma planes.
-fn yuv420_dimensions(yuv: &Planar8) -> Result<Dimensions> {
-    if yuv.subsampling() != ChromaSubsampling::Cs420 {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "WebP: a VP8 raster must be 4:2:0 planes",
-        ));
-    }
-    Dimensions::new(yuv.width(), yuv.height())
 }
 
 /// What an encode backend is being asked to produce: which codestream, at what size and quality.
@@ -265,9 +343,8 @@ impl WebpEncodeRequest {
 /// natively — the encode-side mirror of [`DecodedWebp`].
 #[derive(Debug, Clone, Copy)]
 pub enum WebpRasterRef<'a> {
-    /// Limited-range BT.601 YCbCr planes laid out [`ChromaSubsampling::Cs420`], the `VP8 `
-    /// encoder's input (any other layout is refused by [`dimensions`](Self::dimensions)).
-    Yuv420(&'a Planar8),
+    /// Limited-range BT.601 YCbCr 4:2:0 planes, the `VP8 ` encoder's input.
+    Yuv420(&'a Vp8Planes),
     /// `0xAARRGGBB` pixels in scan order, the `VP8L` encoder's input.
     Argb {
         /// The image dimensions; `pixels` holds `width * height` entries.
@@ -288,15 +365,11 @@ impl WebpRasterRef<'_> {
     }
 
     /// The raster's dimensions.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if a
-    /// [`Yuv420`](WebpRasterRef::Yuv420) raster's planes are not 4:2:0, the only layout VP8 codes.
-    pub fn dimensions(&self) -> Result<Dimensions> {
+    #[must_use]
+    pub fn dimensions(&self) -> Dimensions {
         match self {
-            WebpRasterRef::Yuv420(yuv) => yuv420_dimensions(yuv),
-            WebpRasterRef::Argb { dimensions, .. } => Ok(*dimensions),
+            WebpRasterRef::Yuv420(yuv) => yuv.dimensions(),
+            WebpRasterRef::Argb { dimensions, .. } => *dimensions,
         }
     }
 }
@@ -510,9 +583,8 @@ impl<D: abi::Decoder> WebpCodestreamDecoder for AbiWebpDecoder<D> {
                         "WebP: codec-abi decode backend failed",
                     ));
                 }
-                Ok(DecodedWebp::Yuv420(Planar8::from_planes_subsampled(
+                Ok(DecodedWebp::Yuv420(Vp8Planes::from_planes(
                     dims,
-                    ChromaSubsampling::Cs420,
                     [y, u, v],
                 )?))
             }
@@ -598,13 +670,13 @@ impl<E: abi::Encoder> WebpCodestreamEncoder for AbiWebpEncoder<E> {
 
     fn encode(&mut self, req: &WebpEncodeRequest, raster: &WebpRasterRef<'_>) -> Result<Vec<u8>> {
         let cfg = encode_config(req);
-        let dims = raster.dimensions()?;
+        let dims = raster.dimensions();
         // Owned byte staging for the ARGB case; the YUV case borrows the planes in place.
         let mut argb_bytes = Vec::new();
         let desc = match raster {
             WebpRasterRef::Yuv420(yuv) => {
-                // `raster.dimensions()` above refused every layout but 4:2:0, so these strides
-                // describe the planes exactly.
+                // `Vp8Planes` is 4:2:0 by construction, so these strides describe the planes
+                // exactly.
                 let (cw, _) =
                     ChromaSubsampling::Cs420.chroma_dimensions(dims.width(), dims.height());
                 let cw = cw as usize;
@@ -738,62 +810,68 @@ mod tests {
 
     #[test]
     fn rasters_report_their_codestream_and_dimensions() {
-        let yuv = Planar8::from_planes_subsampled(
-            dims(2, 2),
-            ChromaSubsampling::Cs420,
-            [vec![0; 4], vec![0; 1], vec![0; 1]],
-        )
-        .unwrap();
+        // 4x2, so a swapped width/height cannot pass.
+        let yuv = Vp8Planes::from_planes(dims(4, 2), [vec![0; 8], vec![0; 2], vec![0; 2]]).unwrap();
         let raster = DecodedWebp::Yuv420(yuv.clone());
         assert_eq!(raster.codestream(), WebpCodestream::Vp8);
-        assert_eq!(raster.dimensions().unwrap(), dims(2, 2));
+        assert_eq!(raster.dimensions(), dims(4, 2));
 
         let argb = DecodedWebp::Argb {
             dimensions: dims(3, 1),
             pixels: vec![1, 2, 3],
         };
         assert_eq!(argb.codestream(), WebpCodestream::Vp8l);
-        assert_eq!(argb.dimensions().unwrap(), dims(3, 1));
+        assert_eq!(argb.dimensions(), dims(3, 1));
 
         let yref = WebpRasterRef::Yuv420(&yuv);
         assert_eq!(yref.codestream(), WebpCodestream::Vp8);
-        assert_eq!(yref.dimensions().unwrap(), dims(2, 2));
+        assert_eq!(yref.dimensions(), dims(4, 2));
         let pixels = [1u32, 2, 3];
         let aref = WebpRasterRef::Argb {
             dimensions: dims(3, 1),
             pixels: &pixels,
         };
         assert_eq!(aref.codestream(), WebpCodestream::Vp8l);
-        assert_eq!(aref.dimensions().unwrap(), dims(3, 1));
+        assert_eq!(aref.dimensions(), dims(3, 1));
     }
 
     #[test]
-    fn yuv420_rasters_of_any_other_layout_have_no_dimensions() {
+    fn vp8_planes_admit_four_two_zero_and_refuse_every_other_layout() {
         // A `Planar8` cannot be zero-sided, but it can be the wrong layout; the codec-abi adapter
-        // would hand such planes to a foreign backend with 4:2:0 strides, so both raster types
-        // refuse them.
+        // hands a `Vp8Planes` to a foreign backend with 4:2:0 strides, so only 4:2:0 gets in.
+        let planes = [vec![1; 8], vec![2; 2], vec![3; 2]];
+        let yuv =
+            Planar8::from_planes_subsampled(dims(4, 2), ChromaSubsampling::Cs420, planes.clone())
+                .unwrap();
+        let vp8 = Vp8Planes::try_from(yuv).unwrap();
+        assert_eq!(vp8.dimensions(), dims(4, 2));
+        assert_eq!(vp8.planes(), [&planes[0][..], &planes[1], &planes[2]]);
+        assert_eq!(vp8.as_planar().planes(), vp8.planes());
+        assert_eq!(vp8.into_inner().subsampling(), ChromaSubsampling::Cs420);
+
         for (subsampling, chroma) in [
-            (ChromaSubsampling::Cs444, 4),
-            (ChromaSubsampling::Cs422, 2),
-            (ChromaSubsampling::Cs440, 2),
+            (ChromaSubsampling::Cs444, 8),
+            (ChromaSubsampling::Cs422, 4),
+            (ChromaSubsampling::Cs440, 4),
             (ChromaSubsampling::Cs400, 0),
         ] {
             let yuv = Planar8::from_planes_subsampled(
-                dims(2, 2),
+                dims(4, 2),
                 subsampling,
-                [vec![0; 4], vec![0; chroma], vec![0; chroma]],
+                [vec![0; 8], vec![0; chroma], vec![0; chroma]],
             )
             .unwrap();
-            for err in [
-                DecodedWebp::Yuv420(yuv.clone()).dimensions().unwrap_err(),
-                WebpRasterRef::Yuv420(&yuv).dimensions().unwrap_err(),
-            ] {
-                assert_eq!(
-                    err.kind(),
-                    gamut_core::ErrorKind::InvalidInput,
-                    "{subsampling:?}"
-                );
-            }
+            let err = Vp8Planes::try_from(yuv).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                gamut_core::ErrorKind::InvalidInput,
+                "{subsampling:?}"
+            );
+            assert_eq!(
+                err.static_message(),
+                Some("WebP: a VP8 raster must be 4:2:0 planes"),
+                "{subsampling:?}"
+            );
         }
     }
 
