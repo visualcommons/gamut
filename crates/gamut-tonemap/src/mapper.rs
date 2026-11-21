@@ -8,7 +8,7 @@
 //! an explicit source and target peak. [`CurveToneMapper`] is that shape, built on the frozen scalar
 //! trait so every built-in curve (and every closure) is usable as-is; [`ToneMapper`] is the trait a
 //! pixel-level operator implements, which is the extension point operators that are not a scalar
-//! curve in a mode (BT.2390's EETF, BT.2446 Method A) will implement.
+//! curve in a mode (BT.2390's EETF, #1254; BT.2446 Method A, #1255) will implement.
 //!
 //! The formula, with the ffmpeg source it is transcribed from, is recorded in
 //! `references/tonemap/README.md` ("ffmpeg `tonemap`: desaturation and max-RGB application").
