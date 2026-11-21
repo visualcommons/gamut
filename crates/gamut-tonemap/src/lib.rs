@@ -32,6 +32,19 @@
 //! Keeping the boundary here means a curve is just `f32 -> f32` and reusable outside any colour
 //! pipeline.
 //!
+//! # Precision
+//!
+//! Curves compute in **`f32`**, and that is the one precision this crate offers. `gamut_color`'s
+//! transfer functions in steps 1 and 3 work in `f64`, so the caller narrows each linear value to
+//! `f32` (`value as f32`) on the way into [`ToneCurve::map`] and widens the result
+//! (`f64::from(mapped)`) on the way out. Narrowing costs at most half an `f32` ULP of the linear
+//! value — about 6e-8 relative, far below any display or 16-bit code step — and every built-in
+//! curve is tested against an independent `f64` evaluation of its published formula to within
+//! `8 · f32::EPSILON` relative error (plus `4 · f32::EPSILON` absolute, for outputs near zero),
+//! across the whole `f32` input range. Where `f64` end to end matters more than throughput — an
+//! encoder-exact reference path — evaluate the published formula in `f64` directly, as
+//! `gamut_color` does for its own PQ-to-SDR conversion.
+//!
 //! # Example
 //!
 //! ```
