@@ -904,7 +904,8 @@ mod tests {
     fn every_nikon2_tag(order: ByteOrder) -> Vec<Entry> {
         vec![
             shorts(N2_QUALITY, &[2], order),
-            shorts(N2_COLOR_MODE, &[1], order),
+            // Not 1 (colour), which a constant `Some(1)` would also return.
+            shorts(N2_COLOR_MODE, &[7], order),
             shorts(N2_IMAGE_ADJUSTMENT, &[3], order),
             shorts(N2_ISO_SPEED, &[5], order),
             shorts(N2_WHITE_BALANCE, &[6], order),
@@ -922,7 +923,7 @@ mod tests {
             assert_eq!(view.dialect(), MakerNoteDialect::Nikon2);
             let tags = view.nikon2().expect("Nikon2 tags");
             assert_eq!(tags.quality(), Some(2));
-            assert_eq!(tags.color_mode(), Some(1));
+            assert_eq!(tags.color_mode(), Some(7));
             assert_eq!(tags.image_adjustment(), Some(3));
             assert_eq!(tags.iso_speed(), Some(5));
             assert_eq!(tags.white_balance(), Some(6));
