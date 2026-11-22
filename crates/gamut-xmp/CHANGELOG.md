@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-xmp-v2.0.0...gamut-xmp-v3.0.0) - 2026-11-22
+
+### Fixed
+
+- *(gamut-xmp)* refuse XMP nesting more than 256 elements instead of overflowing the stack
+
+### Other
+
+- *(gamut-xmp)* [**breaking**] parse/to_bytes verbs, with_* setters, sidecar on XmpMeta ([#1131](https://github.com/visualcommons/gamut/pull/1131))
+- *(gamut-core)* [**breaking**] opaque Error, private Dimensions fields, shared vocabulary ([#1126](https://github.com/visualcommons/gamut/pull/1126))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ### Fixed
 
 - *(gamut-xmp)* refuse a packet nesting more than 256 elements with the new

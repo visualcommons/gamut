@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/visualcommons/gamut/compare/gamut-isobmff-v3.0.0...gamut-isobmff-v4.0.0) - 2026-11-22
+
+### Added
+
+- *(gamut-png)* read and write the mDCV and cLLI HDR chunks
+- *(gamut-metadata)* [**breaking**] wire the facade into png, webp, avif and tiff ([#866](https://github.com/visualcommons/gamut/pull/866))
+
+### Other
+
+- [**breaking**] unify color spelling, with_* setters and explicit enum repr
+- *(gamut-isobmff)* [**breaking**] parse/to_bytes models, non_exhaustive structs, shared Cicp and Range<u64> ([#1142](https://github.com/visualcommons/gamut/pull/1142))
+- correct per-crate prose that contradicts shipped code ([#1127](https://github.com/visualcommons/gamut/pull/1127))
+- *(gamut-core)* [**breaking**] opaque Error, private Dimensions fields, shared vocabulary ([#1126](https://github.com/visualcommons/gamut/pull/1126))
+- bring repository-wide docs in line with the shipped code ([#1114](https://github.com/visualcommons/gamut/pull/1114))
+
 ### Changed
 
 - *(gamut-isobmff)* `ContentLightLevel` and `MasteringDisplay` are now `gamut-core`'s, re-exported
