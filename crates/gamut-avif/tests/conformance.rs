@@ -347,7 +347,7 @@ fn default_presentation_matches_libavif_default_upsampling() {
                 let enc = AvifEncoder::lossy(60)
                     .with_chroma(chroma)
                     .with_matrix(matrix)
-                    .with_color_range(range);
+                    .with_range(range);
                 let label = format!("gamut {w}x{h} {chroma:?} {matrix:?} {range:?}");
                 cases.push((label, encode(enc, &rgb, w, h)));
             }
@@ -838,7 +838,7 @@ fn self_encoded_lossy() -> [(&'static str, Vec<u8>); 2] {
             encode(
                 AvifEncoder::lossy(50)
                     .with_matrix(MatrixCoefficients::Bt601)
-                    .with_color_range(ColorRange::Limited),
+                    .with_range(ColorRange::Limited),
                 &rgb,
                 w,
                 h,

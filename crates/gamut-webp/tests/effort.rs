@@ -14,7 +14,7 @@
 //! runs inside the coverage and mutation-testing lanes.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
-use gamut_webp::{Effort, WebpDecoder, WebpEncoder};
+use gamut_webp::{Effort, Exact, WebpDecoder, WebpEncoder};
 
 /// Every rung of the ladder, lowest first.
 fn all_efforts() -> Vec<Effort> {
@@ -94,10 +94,14 @@ fn encode_lossless(effort: Effort, px: &[u8], d: Dimensions) -> Vec<u8> {
     out
 }
 
+/// Encodes RGBA lossily at `effort`. The colour under `alpha = 0` is preserved (`Exact::Preserve`)
+/// so these fixtures isolate the effort ladder: the default transparent-colour cleanup (issue
+/// #1207) is pinned in `tests/default_bytes.rs`, and the byte pins here predate it.
 fn encode_lossy(effort: Effort, quality: u8, px: &[u8], d: Dimensions) -> Vec<u8> {
     let mut out = Vec::new();
     WebpEncoder::lossy(quality)
         .with_effort(effort)
+        .with_exact(Exact::Preserve)
         .encode_image(ImageRef::<Rgba8>::new(px, d).expect("fixture"), &mut out)
         .expect("lossy encode");
     out

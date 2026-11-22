@@ -113,7 +113,7 @@ single `av01` item in a conformant MIAF/AVIF container. Lossless codes the ident
 4:4:4, so its output is bit-exact to the input; lossy codes **BT.709 YCbCr at 4:2:0** by default —
 the luma–chroma decorrelation is worth a large fraction of the bitrate, and 4:2:0 is AV1 **Main**
 profile, the only one many hardware still-image decoders accept — with BT.601 / BT.2020-NCL,
-studio range and 4:4:4 / 4:2:2 selectable via `with_matrix` / `with_color_range` / `with_chroma`.
+studio range and 4:4:4 / 4:2:2 selectable via `with_matrix` / `with_range` / `with_chroma`.
 4:2:2 is AV1 Professional profile, which matches no AVIF profile brand, and AV1 forbids
 taller-than-wide partitions there — so it costs the encoder half its rectangular partition set and
 is offered for pipelines that need it rather than as a default. Lossy trades fidelity for size on a

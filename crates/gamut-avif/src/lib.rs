@@ -162,12 +162,15 @@
 //! and **lossy** ([`AvifEncoder::lossy`], `quality` `0..=100`) AV1 intra coding — lossless at
 //! 4:4:4 through the identity matrix, lossy through **BT.709 YCbCr** by default, with BT.601 /
 //! BT.2020-NCL and studio range selectable ([`AvifEncoder::with_matrix`] /
-//! [`AvifEncoder::with_color_range`]) at 4:2:0 (the lossy default), 4:2:2 or 4:4:4
+//! [`AvifEncoder::with_range`]) at 4:2:0 (the lossy default), 4:2:2 or 4:4:4
 //! ([`AvifEncoder::with_chroma`]); a coded depth of 8, 10 or 12 bits
 //! ([`AvifEncoder::with_bit_depth`]); **alpha** as a monochrome auxiliary item with its own
 //! quality and premultiplication mode ([`AvifEncoder::with_alpha_quality`] /
 //! [`AvifEncoder::with_alpha_mode`]); an encode-**effort** preset trading mode-decision search for
-//! time ([`AvifEncoder::with_effort`], `gamut-av1`'s [`Effort`]); `irot`/`imir` display
+//! time ([`AvifEncoder::with_effort`], `gamut-av1`'s [`Effort`]); a **tile layout**, fixed or
+//! libavif's size-picked one ([`AvifEncoder::with_tiling`] over `gamut-av1`'s [`Tiling`] /
+//! [`AvifEncoder::with_auto_tiling`]), that a thread budget ([`AvifEncoder::with_threads`])
+//! codes in parallel without changing a byte; `irot`/`imir` display
 //! orientation ([`AvifEncoder::with_orientation`]); the **colour and metadata surface** — CICP primaries and transfer
 //! ([`AvifEncoder::with_primaries`] / [`AvifEncoder::with_transfer`]), HDR `clli` / `mdcv`
 //! metadata ([`AvifEncoder::with_content_light_level`] /
@@ -230,7 +233,7 @@ pub use decoder::{Av1, AvifDecoder};
 pub use encoder::{AvifEncodeReport, AvifEncoder, RawPlanes};
 // The foreign types this crate's signatures name, so a caller needs no direct dependency to spell
 // them.
-pub use gamut_av1::{ColorConfig, Effort, SequenceHeader};
+pub use gamut_av1::{ColorConfig, Effort, SequenceHeader, Tiling};
 pub use gamut_color::{
     BitDepth, ChromaSubsampling, ChromaUpsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
     Planar8, Planar16, TransferCharacteristics,

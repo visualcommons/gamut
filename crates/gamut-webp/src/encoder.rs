@@ -24,7 +24,8 @@ use crate::backend::{
     EncoderRegistry, Vp8Planes, WebpCodestream, WebpCodestreamEncoder, WebpEncodeRequest,
     WebpRasterRef, encode_with_backends,
 };
-use crate::config::{Effort, NearLossless, WebpConfig, WebpMode};
+use crate::config::{Effort, Exact, NearLossless, WebpConfig, WebpMode};
+use crate::transparent::{cleanup_yuva, clear_transparent_argb};
 use crate::vp8::frame::{EncodeOptions, encode_frame_filtered};
 use crate::vp8l::encoder::encode as encode_vp8l;
 use crate::vp8l::near_lossless;
@@ -154,8 +155,8 @@ impl WebpEncoder {
     }
 
     /// Creates an encoder with every knob [`WebpConfig`] holds — mode, quality, effort,
-    /// near-lossless strength and alpha quality — and no metadata or backends. The inverse of
-    /// [`config`](Self::config).
+    /// near-lossless strength, alpha quality and [`Exact`] — and no metadata or backends. The
+    /// inverse of [`config`](Self::config).
     #[must_use]
     pub fn from_config(config: WebpConfig) -> Self {
         Self {
@@ -294,6 +295,15 @@ impl WebpEncoder {
         self
     }
 
+    /// Sets whether the colour under fully transparent pixels is preserved or cleaned before
+    /// coding — libwebp's `exact` (see [`Exact`]). The default [`Exact::ByMode`] cleans a lossy
+    /// encode and preserves a lossless one; pixels with `alpha > 0` are never touched.
+    #[must_use]
+    pub fn with_exact(mut self, exact: Exact) -> Self {
+        self.config.exact = exact;
+        self
+    }
+
     /// Encodes the lossless codestream, applying near-lossless preprocessing when configured.
     ///
     /// With a strength set, the image is coded **both ways** and the smaller result kept. That
@@ -399,10 +409,30 @@ impl WebpEncoder {
     ///
     /// WebP/VP8 is limited-range BT.601 4:2:0 (what libwebp and browsers decode; see
     /// [`ColorRange`]), so this is the one place the colour conversion happens for both RGB and
-    /// RGBA input.
-    fn encode_vp8_codestream(&self, rgb: ImageRef<'_, Rgb8>) -> Result<Vec<u8>> {
+    /// RGBA input. `clean_under` is the alpha plane whose `alpha = 0` samples have their colour
+    /// cleaned after that conversion (libwebp's `WebPCleanupTransparentArea`), or `None` to code the
+    /// colour as given. Cleaning is host-side, so a backend receives the cleaned planes.
+    fn encode_vp8_codestream(
+        &self,
+        rgb: ImageRef<'_, Rgb8>,
+        clean_under: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
         // `from_rgb8_bt601` builds 4:2:0 planes by contract, which `try_from` re-checks.
-        let yuv = &Vp8Planes::try_from(Planar8::from_rgb8_bt601(rgb, ColorRange::Limited))?;
+        let planar = Planar8::from_rgb8_bt601(rgb, ColorRange::Limited);
+        let yuv = &match clean_under {
+            None => Vp8Planes::try_from(planar)?,
+            Some(alpha) => {
+                let dims = rgb.dimensions();
+                let mut planes = planar.planes().map(<[u8]>::to_vec);
+                cleanup_yuva(
+                    &mut planes,
+                    alpha,
+                    dims.width() as usize,
+                    dims.height() as usize,
+                );
+                Vp8Planes::from_planes(dims, planes)?
+            }
+        };
         let req =
             WebpEncodeRequest::new(WebpCodestream::Vp8, rgb.dimensions(), self.config.quality)
                 .with_effort(self.config.effort);
@@ -516,7 +546,7 @@ impl WebpEncoder {
                 self.wrap(dims, WebpCodestream::Vp8l, &bitstream, None, false)
             }
             WebpMode::Lossy => {
-                let payload = self.encode_vp8_codestream(ImageRef::new(pixels, dims)?)?;
+                let payload = self.encode_vp8_codestream(ImageRef::new(pixels, dims)?, None)?;
                 self.wrap(dims, WebpCodestream::Vp8, &payload, None, false)
             }
         }?;
@@ -537,14 +567,18 @@ impl WebpEncoder {
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         let transparent = pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0xff);
+        let preserve = self.config.exact.preserves(self.config.mode);
         let file = match self.config.mode {
             WebpMode::Lossless => {
-                let argb: Vec<u32> = pixels
+                let mut argb: Vec<u32> = pixels
                     .as_chunks::<4>()
                     .0
                     .iter()
                     .map(|p| make_argb(p[3], p[0], p[1], p[2]))
                     .collect();
+                if !preserve {
+                    clear_transparent_argb(&mut argb);
+                }
                 let bitstream = self.encode_lossless(&argb, dims)?;
                 // A VP8L bitstream carries its own alpha, so there is no `ALPH` chunk — but an
                 // extended file must still advertise the transparency in its `VP8X` header.
@@ -557,9 +591,13 @@ impl WebpEncoder {
                     .iter()
                     .flat_map(|p| [p[0], p[1], p[2]])
                     .collect();
-                let vp8 = self.encode_vp8_codestream(ImageRef::new(&rgb, dims)?)?;
+                let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+                // The colour is cleaned under the source alpha, before `ALPH` level reduction, as
+                // libwebp cleans before it codes (and so quantizes) the alpha plane. An opaque
+                // image is not special-cased: the cleanup finds nothing to clean there.
+                let clean_under = (!preserve).then_some(alpha.as_slice());
+                let vp8 = self.encode_vp8_codestream(ImageRef::new(&rgb, dims)?, clean_under)?;
                 if transparent {
-                    let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
                     // The configured effort reaches the alpha coder too: rungs 5-6 search every
                     // `ALPH` pre-filter, which a default-effort call here would never reach. The
                     // alpha quality decides whether the plane is level-reduced first.
@@ -718,8 +756,18 @@ mod tests {
             effort: Effort::Fast,
             near_lossless: NearLossless::from_libwebp_strength(40),
             alpha_quality: 41,
+            exact: Exact::Clean,
         };
         assert_eq!(WebpEncoder::from_config(config).config(), config);
+    }
+
+    #[test]
+    fn with_exact_sets_the_knob_and_the_last_call_wins() {
+        assert_eq!(WebpEncoder::lossy(40).config().exact, Exact::ByMode);
+        let enc = WebpEncoder::lossless()
+            .with_exact(Exact::Clean)
+            .with_exact(Exact::Preserve);
+        assert_eq!(enc.config().exact, Exact::Preserve);
     }
 
     #[test]

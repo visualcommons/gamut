@@ -168,6 +168,57 @@ pub enum WebpMode {
     Lossy = 1,
 }
 
+/// What the encoder does with the colour under fully transparent (`alpha = 0`) pixels — libwebp's
+/// `WebPConfig::exact` (cwebp's `-exact`, libvips' `exact`), named for what it preserves.
+///
+/// An `alpha = 0` pixel is invisible once composited, but its RGB still costs bits. **Cleaning**
+/// rewrites it so it codes cheaply, as libwebp does when `exact` is off: a lossy encode runs a port
+/// of libwebp's `WebPCleanupTransparentArea` on the YUV planes (each fully transparent 8×8 block is
+/// flattened, and the transparent samples of a partly visible block take the mean luma of its
+/// visible ones); a lossless encode sets every `alpha = 0` pixel to transparent black
+/// (`WebPReplaceTransparentPixels(pic, 0x000000)`). No pixel with `alpha > 0` is ever rewritten.
+/// **Preserving** codes the colour as given, so a lossless decode returns it bit-exactly.
+///
+/// The default, [`Exact::ByMode`], resolves per [`WebpMode`] (see [`preserves`](Self::preserves)):
+/// **clean for [`WebpMode::Lossy`]**, where nothing exact is promised — libwebp's own default — and
+/// **preserve for [`WebpMode::Lossless`]**, so a lossless encode still reproduces every input byte,
+/// including the colour an `Rgba8` decode exposes under `alpha = 0`. That lossless default departs
+/// from libwebp, whose `exact = 0` default cleans lossless input too.
+///
+/// Two consequences worth knowing. Cleaning changes only invisible samples, but VP8's transform and
+/// loop filter mix neighbours, so a cleaned lossy file's visible pixels may decode marginally
+/// differently from an uncleaned one, exactly as libwebp's do. And with `exact` off libwebp's
+/// lossless encoder additionally zeroes the predictor residual of transparent pixels inside VP8L,
+/// which gamut does not yet do (issue #1282), so a cleaned lossless file can still be larger
+/// than libwebp's.
+///
+/// The discriminants are permanent and append-only, so the setting crosses a C or FFI boundary as
+/// its `u8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+pub enum Exact {
+    /// Clean for [`WebpMode::Lossy`], preserve for [`WebpMode::Lossless`] (the default).
+    #[default]
+    ByMode = 0,
+    /// Preserve the colour under transparent pixels in either mode — libwebp's `exact = 1`.
+    Preserve = 1,
+    /// Clean the colour under transparent pixels in either mode — libwebp's `exact = 0`.
+    Clean = 2,
+}
+
+impl Exact {
+    /// Whether an encode in `mode` codes the colour under `alpha = 0` pixels as given (`true`) or
+    /// cleans it first (`false`).
+    #[must_use]
+    pub const fn preserves(self, mode: WebpMode) -> bool {
+        match self {
+            Self::ByMode => matches!(mode, WebpMode::Lossless),
+            Self::Preserve => true,
+            Self::Clean => false,
+        }
+    }
+}
+
 /// Configuration for a [`WebpEncoder`](crate::WebpEncoder).
 ///
 /// `quality` ranges `0..=100` and applies only to [`WebpMode::Lossy`], where it is the usual quality
@@ -238,6 +289,10 @@ pub struct WebpConfig {
     /// predictors already code almost for free, can grow when quantized into steps. libwebp shares
     /// both behaviours.
     pub alpha_quality: u8,
+    /// Whether the colour under fully transparent pixels is preserved or cleaned before coding
+    /// (libwebp's `exact`). The default [`Exact::ByMode`] cleans a [`WebpMode::Lossy`] encode and
+    /// preserves a [`WebpMode::Lossless`] one; see [`Exact`].
+    pub exact: Exact,
 }
 
 impl Default for WebpConfig {
@@ -248,6 +303,7 @@ impl Default for WebpConfig {
             effort: Effort::Default,
             near_lossless: None,
             alpha_quality: 100,
+            exact: Exact::ByMode,
         }
     }
 }
@@ -264,7 +320,30 @@ mod tests {
         assert_eq!(c.effort, Effort::Default);
         assert_eq!(c.near_lossless, None);
         assert_eq!(c.alpha_quality, 100, "alpha is lossless by default");
+        assert_eq!(c.exact, Exact::ByMode);
+        assert_eq!(Exact::default(), Exact::ByMode);
         assert_eq!(WebpMode::default(), WebpMode::Lossless);
+    }
+
+    /// The per-mode default is libwebp's for lossy (clean) and bit-exact for lossless (preserve);
+    /// the explicit settings apply in both modes alike.
+    #[test]
+    fn exact_resolves_per_mode() {
+        for (exact, lossless, lossy) in [
+            (Exact::ByMode, true, false),
+            (Exact::Preserve, true, true),
+            (Exact::Clean, false, false),
+        ] {
+            assert_eq!(exact.preserves(WebpMode::Lossless), lossless, "{exact:?}");
+            assert_eq!(exact.preserves(WebpMode::Lossy), lossy, "{exact:?}");
+        }
+    }
+
+    #[test]
+    fn exact_discriminants_are_permanent() {
+        assert_eq!(Exact::ByMode as u8, 0);
+        assert_eq!(Exact::Preserve as u8, 1);
+        assert_eq!(Exact::Clean as u8, 2);
     }
 
     #[test]
