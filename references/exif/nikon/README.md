@@ -144,6 +144,10 @@ gated on that version (and, for `ShotInfo` `0210`, on the record's length). exiv
 and deciphers nothing. Deciphering is only useful together with the per-version field layouts
 (exiv2 carries sixteen, ExifTool more), which is a separate body of work: issue #1283. A value shorter than its four version bytes is no record:
 the accessor returns `None`, as exiv2's `nikonSelector` refuses it, and the bytes stay in `ifd()`.
+A record stored in a type other than `UNDEFINED` is also no record — gamut's own choice, not
+exiv2's: `nikonSelector` checks only the length and reads the raw bytes of any type, while the view
+keeps a record only where its value is the stored bytes as such (exiv2's table types all three
+`undefined`), so such an entry stays in `ifd()` only.
 
 The record always re-emits byte-identically when unmodified: the view never writes, and the
 `Exif` model keeps the note's bytes verbatim (`tests/oracle_nikon.rs` checks a stream carrying

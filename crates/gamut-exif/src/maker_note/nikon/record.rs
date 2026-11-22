@@ -49,8 +49,11 @@ pub struct NikonRecord<'a> {
 }
 
 impl<'a> NikonRecord<'a> {
-    /// `kind`'s record in `ifd`: an `UNDEFINED` value of at least its four version bytes, as
-    /// exiv2's `nikonSelector` requires; anything else is no record.
+    /// `kind`'s record in `ifd`: an `UNDEFINED` value of at least its four version bytes;
+    /// anything else is no record. The length floor is exiv2's (`nikonSelector` refuses a value
+    /// under four bytes); the type check is gamut's own, since exiv2 reads the raw bytes of any
+    /// type — its tag table types each record `UNDEFINED`, and only that type's value is the
+    /// stored bytes as such, independent of byte order.
     pub(super) fn read(ifd: &'a Ifd, kind: NikonRecordKind) -> Option<Self> {
         let bytes = undefined(ifd, kind.tag())?;
         let version = bytes.first_chunk::<4>()?;

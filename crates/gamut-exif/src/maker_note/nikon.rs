@@ -208,8 +208,10 @@ impl NikonMakerNote {
     }
 
     /// The tags of exiv2's `Nikon3` table, for a `Nikon3` note and for a `Nikon1` note — every
-    /// `Nikon1` tag has the same number, name and type in that table — or `None` for a `Nikon2`
-    /// note.
+    /// `Nikon1` tag this view types has the same number, name and type in that table — or `None`
+    /// for a `Nikon2` note. The claim is the typed tags' only: `Nikon1`'s untyped tags (unnamed
+    /// `0x000a`, `DataDump` `0x0010`, `AFFocusPos` `0x0088` — the last `AFInfo` in the `Nikon3`
+    /// table) are reachable through [`ifd`](Self::ifd) alone.
     #[must_use]
     pub fn nikon3(&self) -> Option<Nikon3Tags<'_>> {
         (self.dialect != MakerNoteDialect::Nikon2).then_some(Nikon3Tags { ifd: &self.ifd })
@@ -224,7 +226,9 @@ impl NikonMakerNote {
 
 /// The tags of exiv2's `Nikon3` table (`Nikon3MakerNote::tagInfo_[]`) that a
 /// [`NikonMakerNote`] types, raw as stored. Every accessor returns `None` for an absent tag or one
-/// stored in another type; a scalar also for a count other than one.
+/// stored in another type than exiv2's, a scalar also for a count other than one — except
+/// [`image_count`](Self::image_count) and [`shutter_count`](Self::shutter_count), whose `LONG`
+/// also reads from a `BYTE` or `SHORT` entry (as `Ifd::get_u32` does).
 #[derive(Debug, Clone, Copy)]
 pub struct Nikon3Tags<'a> {
     ifd: &'a Ifd,
