@@ -527,6 +527,82 @@ mod tests {
         }
     }
 
+    /// The recon-equals-decoder invariant when the segment map is too lopsided to send.
+    ///
+    /// Each segment-tree probability rounds to `255` once the macroblocks off its zero branch are
+    /// about 1 in 510 or fewer, and then the map is not sent and the decoder reads every
+    /// macroblock as segment 0. The encoder must put those few macroblocks in segment 0 as well
+    /// (libwebp's `ResetSegments`), or it quantizes them with a quantizer the decoder never
+    /// applies. Here 575 noisy macroblocks share segment 0 and one flat one is analysed into
+    /// another segment, at libwebp's default quality and SNS strength.
+    #[test]
+    fn encoder_recon_matches_decoder_when_the_segment_map_is_not_sent() {
+        let (w, h) = (384usize, 384usize);
+        let (cw, ch) = (w / 2, h / 2);
+        // Per-sample noise over `64..192` from a fixed mixing function; the plan assertion below
+        // checks that it still lands the frame in the case under test.
+        let noise = |i: usize, plane: u64| -> u8 {
+            let mut v = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (plane << 40);
+            v ^= v >> 29;
+            v = v.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            v ^= v >> 32;
+            (64 + (v & 0xff) / 2) as u8
+        };
+        // Macroblock (10, 10) is flat mid-grey in every plane.
+        let flat = |x: usize, y: usize, mb: usize| x / mb == 10 && y / mb == 10;
+        let y = (0..w * h)
+            .map(|i| {
+                if flat(i % w, i / w, 16) {
+                    128
+                } else {
+                    noise(i, 0)
+                }
+            })
+            .collect();
+        let chroma = |plane| {
+            (0..cw * ch)
+                .map(|i| {
+                    if flat(i % cw, i / cw, 8) {
+                        128
+                    } else {
+                        noise(i, plane)
+                    }
+                })
+                .collect()
+        };
+        let yuv = yuv420(w as u32, h as u32, y, chroma(1), chroma(2));
+        let sns = Sns {
+            quality: 75,
+            strength: 50,
+        };
+
+        // The fixture reaches the case: segmentation is on, and exactly one macroblock is
+        // analysed out of segment 0.
+        let [py, pu, pv] = yuv.planes();
+        let source = crate::vp8::analysis::Source {
+            y: py,
+            u: pu,
+            v: pv,
+            y_stride: w,
+            c_stride: cw,
+            mb_cols: w / 16,
+            mb_rows: h / 16,
+        };
+        let plan = crate::vp8::analysis::plan_segments(&source, sns.quality, sns.strength, false);
+        assert!(plan.count > 1, "segmentation must be on");
+        assert_eq!(plan.map.iter().filter(|&&s| s != 0).count(), 1);
+
+        let (bits, recon) = encode_frame_filtered(&yuv, sns, EncodeOptions::default())
+            .expect("fixture fits the size fields");
+        let decoded = decode_frame(&bits).expect("decode");
+        let (enc, dec) = (recon.to_yuv420().unwrap(), decoded.to_yuv420().unwrap());
+        assert_eq!(
+            enc.planes(),
+            dec.planes(),
+            "unsent segment map desynced recon"
+        );
+    }
+
     #[test]
     fn both_loop_filters_reconstruct_bit_exact() {
         // The simple (luma-only) and normal (luma+chroma) filters must each reconstruct identically

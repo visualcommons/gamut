@@ -712,23 +712,32 @@ pub fn encode_frame_filtered(
         Ok(plan) => {
             header.quant.uv_dc_delta = plan.uv_dc_delta;
             header.quant.uv_ac_delta = plan.uv_ac_delta;
+            let mut map = plan.map;
             if plan.count > 1 {
                 // Delta mode against segment 0's quantizer, which is the frame's base: the
                 // per-segment values libwebp writes absolutely, while every segment keeps the
                 // frame's loop-filter level.
-                let tree_probs = measured_segment_tree_probs(&plan.map);
+                let tree_probs = measured_segment_tree_probs(&map);
+                // Every node measuring `255` means the map is not sent (libwebp's
+                // `SetSegmentProbas`), so the decoder reads every macroblock as segment 0. That
+                // happens not only for an all-zero map but whenever the macroblocks outside
+                // segment 0 are about 1 in 510 or fewer, so those few must be moved to segment 0
+                // here too (`ResetSegments`), or they would be quantized with a quantizer the
+                // decoder never applies to them.
+                let update_map = tree_probs != [255; 3];
+                if !update_map {
+                    map.fill(0);
+                }
                 header.segmentation = Segmentation {
                     enabled: true,
-                    // A map whose every macroblock is in segment 0 is the decoder's default
-                    // and is not sent (libwebp's `SetSegmentProbas`).
-                    update_map: tree_probs != [255; 3],
+                    update_map,
                     abs_delta: false,
                     quantizer: plan.quant.map(|q| (i16::from(q) - i16::from(base_q)) as i8),
                     filter_strength: [0; 4],
                     tree_probs,
                 };
             }
-            plan.map
+            map
         }
         Err(_) => vec![0; recon.mb_rows * recon.mb_cols],
     };
