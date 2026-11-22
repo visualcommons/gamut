@@ -344,6 +344,12 @@ The API was frozen after a full-surface review; the additions and breaks:
   `read`/`write`/`TiffFile` re-exports (gamut-ifd's to expose), the public `write_image`/
   `write_image_tiled`/`write_multipage` and `Palette8`; `c2pa_exclusions`/`c2pa_summary` are
   gamut-ifd's, re-exported under the names `gamut-dng` uses, so they take any `ReadAt` source.
+- **Additions since the freeze (#1106) — the Deflate level.** `TiffEncoder::with_deflate_level`
+  and the root re-export `DeflateLevel` (gamut-deflate's `Level`, so a caller needs no direct
+  gamut-deflate edge to name it). All new items; nothing existing was reshaped. The default is
+  `DeflateLevel::Default`, the level `gamut_deflate::DeflateEncoder::new()` already ran, so
+  default output is byte-identical to before; the level touches only `Compression::Deflate`
+  strips and tiles and is ignored for every other scheme (`encoder::tests`).
 - **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
   on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
   diagnostics whose wording is not contractual.
