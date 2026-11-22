@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(gamut-xmp)* refuse a packet nesting more than 256 elements with the new
+  `XmpError::NestingTooDeep` instead of overflowing the stack (issue #1260). **Narrows the
+  reader:** a packet with more than 256 elements open at once, which previously parsed when the
+  stack allowed, is now refused; standard-schema XMP stays near a dozen levels.
+
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-xmp-v1.0.0...gamut-xmp-v2.0.0) - 2026-10-12
 
 ### Added
