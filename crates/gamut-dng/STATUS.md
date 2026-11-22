@@ -399,7 +399,8 @@ separate path (below).
 
 ## Deflate codec choice (#196)
 
-Encode uses `gamut-deflate` at `Level::Default`; decode uses `gamut_deflate::inflate_zlib` (its
+Encode uses `gamut-deflate` at `Level::Default` unless `DngEncoder::with_deflate_level` picks
+another level (#1106); decode uses `gamut_deflate::inflate_zlib` (its
 `inflate` feature), bounded to the packed length the chunk geometry implies. That inflate is a thin
 bounded wrapper over `miniz_oxide`: `gamut-deflate` deliberately writes no inflater of its own
 (inflating is solved and security-sensitive), so the split between an in-house encoder and a

@@ -119,6 +119,9 @@ pub use gain_map::{GainValues, ProfileGainTableMap};
 // is stated once for TIFF and DNG alike (issue #530).
 pub use gamut_core::Dimensions;
 pub use gamut_core::c2pa::MIN_STORE_LEN;
+// The effort `DngEncoder::with_deflate_level` takes, so a caller needs no direct gamut-deflate
+// dependency; as `DeflateLevel`, matching `gamut-tiff`, so it does not read as a JPEG XL knob.
+pub use gamut_deflate::Level as DeflateLevel;
 // `DngMetadata::exif` is gamut-exif's model, as `gamut-tiff`'s `TiffMetadata::exif` is;
 // re-exported with the tag vocabulary its accessors take so a caller needs no direct gamut-exif
 // dependency.

@@ -7,6 +7,7 @@
 mod c2pa;
 
 use gamut_core::{Error, Result};
+use gamut_deflate::Level;
 use gamut_ifd::{
     ByteOrder, C2paExclusions, Ifd, Value, Variant, append_c2pa_store, reserve_c2pa_entry,
 };
@@ -34,6 +35,7 @@ pub struct DngEncoder {
     backward_version: [u8; 4],
     variant: Variant,
     compression: DngCompression,
+    deflate_level: Level,
     preview: DngPreview,
     tiling: Option<(u32, u32)>,
     gain_table_map: Option<ProfileGainTableMap>,
@@ -149,6 +151,7 @@ impl Default for DngEncoder {
             // Lossless JPEG, as the DNG SDK writes by default: the raw stays exact, every DNG
             // reader decodes it (it needs no newer backward version), and any bit depth codes.
             compression: DngCompression::default(),
+            deflate_level: Level::Default,
             preview: DngPreview::default(),
             tiling: None,
             gain_table_map: None,
@@ -226,6 +229,19 @@ impl DngEncoder {
     #[must_use]
     pub fn with_compression(mut self, compression: DngCompression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Returns a copy of this encoder that runs [`DngCompression::Deflate`] at `level` (default
+    /// [`DeflateLevel::Default`](crate::DeflateLevel::Default)), trading encode time for file size.
+    /// Every level writes a valid zlib stream the DNG SDK inflates; they differ only in ratio.
+    ///
+    /// The level is read only when [`with_compression`](Self::with_compression) selects Deflate,
+    /// and is otherwise ignored rather than refused: the builders compose in any order, and the
+    /// level changes no byte of the file outside the raw image's Deflate strips or tiles.
+    #[must_use]
+    pub fn with_deflate_level(mut self, level: Level) -> Self {
+        self.deflate_level = level;
         self
     }
 
@@ -813,12 +829,17 @@ impl DngEncoder {
                     ))
                 }
             }
-            DngCompression::Uncompressed => {
-                Ok(bitpack::pack(samples, bits, cols * spp, self.order))
-            }
-            DngCompression::Deflate => {
+            // Both byte-oriented schemes pack first, so the row width is computed at one site.
+            // Deflate is reached only at 8/16 bits, where `pack` ignores the row width, so a
+            // second, Deflate-only copy of `cols * spp` was a mutant no input could kill; the
+            // shared site is killed through the sub-byte uncompressed round trips.
+            DngCompression::Uncompressed | DngCompression::Deflate => {
                 let packed = bitpack::pack(samples, bits, cols * spp, self.order);
-                Ok(compression::deflate(&packed))
+                Ok(if self.compression == DngCompression::Deflate {
+                    compression::deflate(&packed, self.deflate_level)
+                } else {
+                    packed
+                })
             }
         }
     }
@@ -1862,6 +1883,57 @@ mod tests {
             enc.variant(),
             Variant::Big,
             "with_compression must keep earlier settings"
+        );
+    }
+
+    #[test]
+    fn with_deflate_level_sets_the_level_and_keeps_other_builder_state() {
+        assert_eq!(DngEncoder::new().deflate_level, Level::Default);
+        let enc = DngEncoder::new()
+            .with_compression(DngCompression::Deflate)
+            .with_deflate_level(Level::Store);
+        assert_eq!(enc.deflate_level, Level::Store);
+        // A reset to `Default::default()` would restore lossless JPEG; the real setter must not.
+        assert_eq!(enc.compression, DngCompression::Deflate);
+    }
+
+    /// `encode_chunk` hands the configured level to the Deflate raw strips: `Store` writes a
+    /// larger file than `Best`, both decode to the same mosaic, the default level writes the bytes
+    /// an encoder that never heard of the knob writes, and another scheme ignores it.
+    #[test]
+    fn the_deflate_level_reaches_the_raw_strips_and_only_the_deflate_strips() {
+        let raw = sample_raw(32, 16, 16);
+        let profile = sample_profile();
+        let encode = |encoder: DngEncoder| {
+            let mut out = Vec::new();
+            encoder
+                .with_preview(DngPreview::None)
+                .encode(&raw, &profile, &mut out)
+                .expect("encode");
+            out
+        };
+        let deflate = DngEncoder::new().with_compression(DngCompression::Deflate);
+        let default = encode(deflate.clone());
+        assert_eq!(
+            encode(deflate.clone().with_deflate_level(Level::Default)),
+            default
+        );
+        let store = encode(deflate.clone().with_deflate_level(Level::Store));
+        let best = encode(deflate.with_deflate_level(Level::Best));
+        assert!(
+            store.len() > best.len(),
+            "{} vs {}",
+            store.len(),
+            best.len()
+        );
+        for dng in [&store, &best] {
+            let decoded = crate::DngDecoder::new().decode(dng).expect("decode");
+            assert_eq!(decoded.raw.samples(), raw.samples());
+        }
+        let uncompressed = DngEncoder::new().with_compression(DngCompression::Uncompressed);
+        assert_eq!(
+            encode(uncompressed.clone().with_deflate_level(Level::Store)),
+            encode(uncompressed)
         );
     }
 

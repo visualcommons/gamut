@@ -1233,7 +1233,7 @@ mod tests {
     #[test]
     fn decode_raw_image_rejects_a_deflate_strip_that_inflates_past_its_geometry() {
         // 2x2 CFA at 16 bits is an 8-byte strip; this one inflates to 4 MiB from ~4 KiB.
-        let bomb = compression::deflate(&vec![0u8; 4 << 20]);
+        let bomb = compression::deflate(&vec![0u8; 4 << 20], gamut_deflate::Level::Default);
         assert!(bomb.len() < 8192, "the bomb must be small on disk");
         let mut ifd = Ifd::new();
         ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
