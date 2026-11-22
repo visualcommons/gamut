@@ -12,7 +12,7 @@
 //! (issue #1163).
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
-use gamut_webp::{ChromaUpsampling, WebpDecoder, WebpEncoder};
+use gamut_webp::{ChromaUpsampling, Exact, WebpDecoder, WebpEncoder};
 use libwebp_oracle::fixtures::{LARGE_DIMENSIONS, pattern_rgba, photo_like_rgba};
 use libwebp_oracle::{libwebp_decode_rgba, libwebp_encode_lossless_rgba, libwebp_get_info};
 
@@ -708,4 +708,209 @@ fn libwebp_decodes_every_effort_levels_lossless_and_alpha() {
             "libwebp did not recover the alpha plane exactly at effort {level}"
         );
     }
+}
+
+#[test]
+fn lossless_presets_match_libwebps_config_lossless_preset() {
+    // Issue #1240: each `cwebp -z` level must set the effort and quality libwebp's own
+    // `WebPConfigLosslessPreset` sets, select lossless as it does, and stop at the same level.
+    use gamut_webp::{LosslessPreset, WebpConfig, WebpMode};
+    use libwebp_oracle::libwebp_lossless_preset;
+
+    for level in 0..=9u8 {
+        let preset = LosslessPreset::from_level(level).expect("0..=9");
+        let (lossless, method, quality) =
+            libwebp_lossless_preset(i32::from(level)).expect("libwebp accepts 0..=9");
+        assert!(lossless, "libwebp's z{level} is not lossless");
+        assert_eq!(
+            i32::from(preset.effort().level()),
+            method,
+            "z{level}: effort differs from libwebp's method"
+        );
+        assert_eq!(
+            f32::from(preset.quality()),
+            quality,
+            "z{level}: quality differs from libwebp's"
+        );
+        let mut lossy = WebpConfig::default();
+        lossy.mode = WebpMode::Lossy;
+        let config = lossy.with_lossless_preset(preset);
+        assert_eq!(config.mode, WebpMode::Lossless, "z{level}");
+        assert_eq!(
+            (config.effort, config.quality),
+            (preset.effort(), preset.quality())
+        );
+    }
+    assert_eq!(libwebp_lossless_preset(10), None);
+    assert_eq!(LosslessPreset::from_level(10), None);
+}
+
+#[test]
+fn libwebp_decodes_every_lossless_presets_encode_bit_exactly() {
+    // The quality refinements reach LZ77 chains and colour-cache sizes no default encode uses, so
+    // each preset's stream is checked through libwebp's decoder, transparent and opaque.
+    use gamut_core::{EncodeImage, ImageRef, Rgba8};
+    use gamut_webp::{LosslessPreset, WebpConfig, WebpEncoder};
+
+    let (w, h) = (32u32, 24u32);
+    let dims = Dimensions::new(w, h).unwrap();
+    // The oracle's fixtures are opaque, so the photo-like one is given a graded alpha to reach the
+    // transparent path too.
+    let mut photo = photo_like_rgba(w, h, 7);
+    for (i, px) in photo.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        px[3] = (i * 5 % 256) as u8;
+    }
+    for (label, rgba) in [("pattern", pattern_rgba(w, h)), ("photo-alpha", photo)] {
+        for level in 0..=9u8 {
+            let preset = LosslessPreset::from_level(level).expect("0..=9");
+            let mut file = Vec::new();
+            WebpEncoder::from_config(WebpConfig::default().with_lossless_preset(preset))
+                .encode_image(
+                    ImageRef::<Rgba8>::new(&rgba, dims).expect("fixture"),
+                    &mut file,
+                )
+                .expect("lossless encode");
+            assert_eq!(
+                libwebp_decode_rgba(&file).rgba,
+                rgba,
+                "{label}: libwebp did not recover the source at z{level}"
+            );
+        }
+    }
+}
+
+/// A 64×64 fixture for the transparent-colour cleanup (issue #1207): a photo-like opaque band down
+/// the left 20 columns, a soft edge of partial alpha, and a large fully transparent region whose
+/// RGB is per-pixel noise — colour that is invisible yet costs bits unless it is cleaned.
+fn noisy_transparent_rgba() -> (Vec<u8>, u32, u32) {
+    let (w, h) = (64u32, 64u32);
+    let photo = photo_like_rgba(w, h, 0x1207);
+    let mut state = 0x1207_u32;
+    let mut noise = move || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 24) as u8
+    };
+    let rgba = photo
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .flat_map(|(i, p)| match i as u32 % w {
+            0..20 => [p[0], p[1], p[2], 0xff],
+            20..24 => [p[0], p[1], p[2], 0x40],
+            _ => [noise(), noise(), noise(), 0],
+        })
+        .collect();
+    (rgba, w, h)
+}
+
+/// Encodes `rgba` with `enc` and returns the file plus its gamut and libwebp RGBA decodes.
+fn encode_and_decode_both(enc: &WebpEncoder, rgba: &[u8], w: u32, h: u32) -> [Vec<u8>; 3] {
+    let file = enc
+        .encode_to_vec(ImageRef::<Rgba8>::new(rgba, Dimensions::new(w, h).unwrap()).unwrap())
+        .expect("gamut rgba encode");
+    let gamut: ImageBuf<Rgba8> = WebpDecoder::new()
+        .decode_image(&file)
+        .expect("gamut decode");
+    let lib = libwebp_decode_rgba(&file).rgba;
+    [file, gamut.as_samples().to_vec(), lib]
+}
+
+/// The pixels of `decoded` that are visible in `source` (`alpha > 0` there), flattened.
+fn visible(decoded: &[u8], source: &[u8]) -> Vec<u8> {
+    decoded
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(source.as_chunks::<4>().0)
+        .filter(|(_, s)| s[3] != 0)
+        .flat_map(|(d, _)| *d)
+        .collect()
+}
+
+#[test]
+fn cleaned_lossless_keeps_visible_pixels_exact_in_both_decoders_and_shrinks() {
+    // Cleaning sets only the colour under `alpha = 0`; every visible pixel still round-trips
+    // bit-exactly, in gamut's decoder and in libwebp's, and the invisible noise stops costing bits.
+    let (rgba, w, h) = noisy_transparent_rgba();
+    let [exact, exact_gamut, exact_lib] =
+        encode_and_decode_both(&WebpEncoder::lossless(), &rgba, w, h);
+    let [clean, clean_gamut, clean_lib] = encode_and_decode_both(
+        &WebpEncoder::lossless().with_exact(Exact::Clean),
+        &rgba,
+        w,
+        h,
+    );
+    assert_eq!(exact_gamut, rgba, "lossless preserves by default");
+    assert_eq!(
+        exact_lib, rgba,
+        "libwebp decodes the preserved file to the source"
+    );
+    assert_eq!(
+        clean_gamut, clean_lib,
+        "gamut and libwebp decode the cleaned file alike"
+    );
+    assert_eq!(visible(&clean_gamut, &rgba), visible(&rgba, &rgba));
+    assert!(
+        clean_gamut
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(rgba.as_chunks::<4>().0)
+            .all(|(d, s)| s[3] != 0 || *d == [0; 4]),
+        "every fully transparent pixel decodes as transparent black"
+    );
+    assert!(
+        clean.len() < exact.len(),
+        "cleaned lossless {} bytes must be below exact {}",
+        clean.len(),
+        exact.len()
+    );
+}
+
+#[test]
+fn cleaned_lossy_keeps_visible_pixels_in_both_decoders_and_shrinks() {
+    // Lossy cleans by default. Both decoders read the cleaned file identically, its visible pixels
+    // stay as close to the source as the uncleaned file's (cleaning moves only samples under
+    // transparency, though VP8's transform and loop filter let that reach the visible edge
+    // slightly), and the invisible noise stops costing bits. #1207 asks for "the same visible
+    // pixels"; for lossy that is not attainable bit for bit, so the bound here is a visible MAE
+    // within 0.5 of the uncleaned file's — the lossless test above stays exact.
+    let (rgba, w, h) = noisy_transparent_rgba();
+    let [exact, exact_gamut, exact_lib] = encode_and_decode_both(
+        &WebpEncoder::lossy(75).with_exact(Exact::Preserve),
+        &rgba,
+        w,
+        h,
+    );
+    let [clean, clean_gamut, clean_lib] =
+        encode_and_decode_both(&WebpEncoder::lossy(75), &rgba, w, h);
+    assert_eq!(
+        exact_gamut, exact_lib,
+        "both decoders agree on the preserved file"
+    );
+    assert_eq!(
+        clean_gamut, clean_lib,
+        "both decoders agree on the cleaned file"
+    );
+    let source = visible(&rgba, &rgba);
+    let mae = |decoded: &[u8]| -> f64 {
+        visible(decoded, &rgba)
+            .iter()
+            .zip(&source)
+            .map(|(a, b)| f64::from(a.abs_diff(*b)))
+            .sum::<f64>()
+            / source.len() as f64
+    };
+    let (clean_mae, exact_mae) = (mae(&clean_gamut), mae(&exact_gamut));
+    assert!(
+        clean_mae <= exact_mae + 0.5,
+        "cleaned visible MAE {clean_mae:.3} strays from uncleaned {exact_mae:.3}"
+    );
+    assert!(
+        clean.len() < exact.len(),
+        "cleaned lossy {} bytes must be below exact {}",
+        clean.len(),
+        exact.len()
+    );
 }

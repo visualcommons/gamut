@@ -193,13 +193,20 @@ fn decode_run(r: &mut BitReader, white: bool) -> Result<usize> {
 ///
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream is truncated, a code is invalid, or a row's runs
 /// do not sum to `width`.
+///
+/// The output grows a row at a time as rows decode rather than being reserved from `rows` up
+/// front: `rows` and `width` come from the file's header, so a strip of a few bytes claiming a
+/// huge height fails on truncation having held only the rows its bytes actually coded (every
+/// row of a non-zero `width` consumes at least one byte, its codes padded to a byte boundary).
 pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>> {
     let stored_row_bytes = width.div_ceil(8);
     let white_bit = 0u8;
     let mut reader = BitReader::new(data);
-    let mut out = vec![0u8; stored_row_bytes * rows];
-    for row in 0..rows {
-        let dst = &mut out[row * stored_row_bytes..(row + 1) * stored_row_bytes];
+    let mut out = Vec::new();
+    for _ in 0..rows {
+        let start = out.len();
+        out.resize(start + stored_row_bytes, 0u8);
+        let dst = &mut out[start..];
         let mut pos = 0;
         let mut white = true;
         let mut previous_run_was_zero = false;
@@ -294,6 +301,21 @@ mod tests {
         let enc = mh_encode_strip(&packed, 2, 16).expect("encode");
         assert_eq!(enc[..3], [0b0011_0101, 0b0011_0100, 0b0000_0000]);
         assert_eq!(mh_decode_strip(&enc, 2, 16).expect("decode"), packed);
+    }
+
+    /// A strip of a few bytes whose header claims a huge height fails on truncation rather than
+    /// reserving every claimed row first (#1261). Two bytes per row times `usize::MAX / 2` rows
+    /// is past `isize::MAX`, so a decoder that sized its output from `rows` up front panics with
+    /// a capacity overflow here instead of returning the error.
+    #[test]
+    fn a_tiny_strip_claiming_huge_rows_fails_on_truncation() {
+        let enc = mh_encode_strip(&pack(&[0; 16]), 2, 16).expect("encode");
+        let error = mh_decode_strip(&enc, usize::MAX / 2, 16).expect_err("truncated strip");
+        assert!(
+            error
+                .static_message()
+                .is_some_and(|message| message.contains("truncated code"))
+        );
     }
 
     /// Fill bits are skipped whatever they hold: Modified Huffman gives them no meaning (TIFF 6.0

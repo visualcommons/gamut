@@ -119,6 +119,26 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   padding, an XML declaration) are still ignored. `XmpMeta::to_sidecar` emits exactly one packet, so
   gamut never produces the refused shape. `XmpError` is `#[non_exhaustive]`, so the new variant is
   additive; the behaviour change is filed as a fix, since the input it now refuses was mis-read.
+- **Element nesting is bounded at 256 (issue #1260).** The reader refuses a packet that has more
+  than 256 elements open at once — the outermost `x:xmpmeta` or `rdf:RDF` counting as one — with
+  `XmpError::NestingTooDeep(256)`, raised in phase 1 as the 257th nested start tag is read.
+  **Why:** XMP Part 1 sets no depth limit, and the input controls two resources the crate cannot
+  otherwise protect: the native stack the recursive interpretation walk (and the drop of the
+  element tree) uses, one frame set per level, so a 180 KB packet nesting 5 000
+  `rdf:parseType="Resource"` structures aborted the process with a stack overflow (an abort, which
+  no caller can catch — not the typed error this `forbid(unsafe_code)` crate promises on hostile
+  input); and `quick-xml`'s `u16` nesting counter, which a packet with more than 65 535 open
+  elements overflows (a panic under overflow checks, silently wrong namespace scoping without).
+  **Why 256:** the deepest structures the registered schemas define stay near a dozen levels — an
+  MWG region's `stArea:x` sits at nine with `rdf:parseType="Resource"` and about twelve with
+  explicit `rdf:Description` nodes — so 256 leaves twentyfold headroom while staying far inside
+  both resources. **What this stops accepting**, named because it narrows a reader: any packet
+  with more than 256 elements open at once, which previously parsed when the stack allowed. Every
+  entry point is covered — `XmpMeta::parse`, `XmpPacket::to_meta`, `XmpMeta::from_sidecar`, and so
+  every format crate's XMP carrier. The writer emits whatever depth the graph holds, so a graph
+  built in code more than 256 levels deep serializes to bytes this reader refuses; no standard
+  schema comes near it. Pinned by `tests/depth.rs` at the bound and one past it. `XmpError` is
+  `#[non_exhaustive]`, so the variant is additive.
 
 ## Phases
 

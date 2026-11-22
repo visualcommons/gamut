@@ -35,8 +35,9 @@ impl XmpMeta {
     /// Returns an [`XmpError`] if the bytes are not valid UTF-8 (or begin with a UTF-16/32
     /// byte-order mark — only UTF-8 packets are supported), the bytes hold more than one
     /// `<?xpacket?>` packet ([`XmpError::MultiplePackets`]: a container hands over one packet, so a
-    /// catenation is refused rather than read as its first), the XML is malformed, there is no
-    /// `rdf:RDF` element, or the RDF/XML uses a construct XMP does not permit.
+    /// catenation is refused rather than read as its first), the XML is malformed or nests more
+    /// than 256 elements ([`XmpError::NestingTooDeep`]), there is no `rdf:RDF` element, or the
+    /// RDF/XML uses a construct XMP does not permit.
     pub fn parse(bytes: &[u8]) -> Result<XmpMeta> {
         XmpPacket::scan(bytes)?.to_meta()
     }
@@ -66,8 +67,9 @@ impl XmpPacket {
     ///
     /// # Errors
     ///
-    /// Returns an [`XmpError`] if the body is malformed XML, has no `rdf:RDF` element, or uses an
-    /// RDF/XML construct XMP does not permit.
+    /// Returns an [`XmpError`] if the body is malformed XML, nests more than 256 elements
+    /// ([`XmpError::NestingTooDeep`]), has no `rdf:RDF` element, or uses an RDF/XML construct XMP
+    /// does not permit.
     pub fn to_meta(&self) -> Result<XmpMeta> {
         interpret(&build_tree(&self.body)?)
     }
@@ -107,6 +109,19 @@ struct Attr {
     value: String,
 }
 
+/// The most elements [`build_tree`] lets be open at once, the outermost counting as one; the
+/// 257th nested start tag is refused with [`XmpError::NestingTooDeep`] (issue #1260).
+///
+/// XMP Part 1 sets no depth limit, so this narrows what the reader accepts. It bounds two things the
+/// input otherwise controls: the native stack the recursive phase-2 walk (and the drop of the
+/// [`Element`] tree) uses, one frame set per level — a 5 000-level packet aborted the process with
+/// a stack overflow — and `quick-xml`'s `u16` nesting counter, which overflows past 65 535 open
+/// elements. **What it stops accepting:** a packet with more than 256 elements open at once, which
+/// previously parsed (up to the stack's limit). Standard-schema XMP stays near a dozen levels — an
+/// MWG region's `stArea:x` sits at nine with `rdf:parseType="Resource"`, about twelve with explicit
+/// `rdf:Description` nodes — so the bound leaves twentyfold headroom for real files.
+const MAX_ELEMENT_DEPTH: usize = 256;
+
 /// Lexes `xml` into the top-level [`Element`] (`x:xmpmeta` or `rdf:RDF`).
 fn build_tree(xml: &str) -> Result<Element> {
     let mut reader = NsReader::from_str(xml);
@@ -123,6 +138,11 @@ fn build_tree(xml: &str) -> Result<Element> {
             break;
         }
         match event {
+            // The stack grows by exactly one per start tag, so it reaches the bound before it
+            // can pass it.
+            Event::Start(_) if stack.len() == MAX_ELEMENT_DEPTH => {
+                return Err(XmpError::NestingTooDeep(MAX_ELEMENT_DEPTH));
+            }
             Event::Start(e) => stack.push(start_element(&reader, &e)?),
             Event::End(_) => {
                 let done = stack

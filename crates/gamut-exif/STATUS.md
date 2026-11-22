@@ -34,6 +34,8 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
 | P16 | — | Leica MakerNote dialects and view (issue #978, a vendor phase of #418): `MakerNoteVendor::Leica` and six `Leica3`–`Leica10` dialects after ExifTool's `MakerNoteLeica*` entries (plus Fujifilm for Leica's Fujifilm-built bodies; `references/exif/leica/README.md`); `MakerNote::leica` / `LeicaMakerNote::read` decode the five IFD dialects, read `Leica4`'s four subdirectories, and type the `Leica4` and `Leica9` tags; `tests/maker_note_leica.rs` holds each to ExifTool 13.59's reading of the two corpus notes (`L1000622.DNG`, `f5381888.dng`), extracted byte for byte into `tests/fixtures/`; values are raw | ✅ |
 | P17 | — | Sony MakerNote view (issue #980, a vendor phase of #418): `MakerNote::sony` / `SonyMakerNote::read` decode a `Sony2` note's IFD through `gamut-ifd` (a bare IFD, file-absolute offsets), keep every entry, and type the sixteen tags staked in `references/exif/sony/README.md`; `tests/oracle_sony.rs` holds each to exiv2's `exif_get`, by staked name and by tag number; values are raw; a `Sony1` (`SONY DSC`) note has a layout but no view yet (#1033, blocked by #1032) | ✅ |
 | P18 | — | Fujifilm MakerNote view (issue #981, a vendor phase of #418): `MakerNote::fujifilm` / `FujifilmMakerNote::read` decode a `Fujifilm` note's IFD through `gamut-ifd` (`FUJIFILM` header, a little-endian IFD whatever the outer order, note-relative offsets), keep every entry, and type the thirty-seven tags staked in `references/exif/fujifilm/README.md`; Leica's Fujifilm-built bodies read through the same view; `tests/oracle_fujifilm.rs` holds each to exiv2's `exif_get`, by staked name and by tag number, in outer streams of both byte orders; values are raw | ✅ |
+| P19 | — | Apple MakerNote view (issue #976, a vendor phase of #418): `MakerNote::apple` / `AppleMakerNote::read` decode an `Apple` note's IFD through `gamut-ifd` (`Apple iOS\0` header, the IFD at byte 14 in the order of the mark at byte 12, note-relative offsets), keep every entry, and type the thirty-four tags staked in `references/exif/apple/README.md` after ExifTool 13.59's `Apple.pm` (exiv2 has no Apple module); `tests/maker_note_apple.rs` holds each tag the iPhone 12 Pro corpus note carries to ExifTool's reading of it, extracted byte for byte into `tests/fixtures/`; values are raw and the binary plists (`AEMatrix`, `RunTime`) undecoded | ✅ |
+| P20 | — | Nikon MakerNote view (issue #979, a vendor phase of #418): `MakerNote::nikon` / `NikonMakerNote::read` decode a `Nikon1`, `Nikon2` or `Nikon3` note's IFD through `gamut-ifd` (a `Nikon3` note in its embedded TIFF header's order with offsets from that header, the others file-absolute), keep every entry, and type the thirty-eight `Nikon3Tags` (which a `Nikon1` note shares) and eight `Nikon2Tags` staked in `references/exif/nikon/README.md`; `tests/oracle_nikon.rs` holds each to exiv2's `exif_get`, by staked name and by tag number; values are raw; the enciphered `ShotInfo`/`ColorBalance`/`LensData` records are kept opaque as a `NikonRecord` (kind, version, verbatim bytes), deciphering them being #1283 | ✅ |
 
 ## P10 — what the catalogue now covers
 
@@ -145,13 +147,13 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
 
 ## Intentionally deferred (additive under the `#[non_exhaustive]` surface)
 
-- **Per-vendor MakerNote tag decoding** beyond Canon, Leica, Sony type 2 and Fujifilm (Nikon/…; the per-vendor
-  sub-issues of #418, #976, #979 and #982–#988, plus #1033 (Sony type 1), plus #989 for the note Adobe DNG Converter moves into
+- **Per-vendor MakerNote tag decoding** beyond Canon, Leica, Sony type 2, Fujifilm, Apple and Nikon (Olympus/…; the per-vendor
+  sub-issues of #418, #982–#988, plus #1033 (Sony type 1), plus #1283 (Nikon's enciphered records), plus #989 for the note Adobe DNG Converter moves into
   `DNGPrivateData`, which is also what Canon's DNG corpus coverage waits on).
   The crate preserves the block verbatim — and, since issue #263, pins its byte range at the
   source offset on rewrites so vendor-absolute internal offsets stay valid — detects the vendor
   from `Make`, and since P14 resolves the block's dispatch layout; since P15 it decodes Canon's
-  tags, since P16 Leica's, since P17 Sony's and since P18 Fujifilm's, and no other vendor's (documented on `MakerNote`).
+  tags, since P16 Leica's, since P17 Sony's, since P18 Fujifilm's, since P19 Apple's and since P20 Nikon's, and no other vendor's (documented on `MakerNote`).
   Within Sony, a `Sony1` (`SONY DSC \0\0\0`) note gets its layout but no view, because its IFD
   ends without a next-IFD pointer, which `gamut-ifd` cannot read yet (#1032, then #1033); value
   interpretation, the binary arrays exiv2 splits (`0x0114`, `0x2010`, `0x3000`, the enciphered
@@ -159,6 +161,14 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
   Within Fujifilm, value interpretation, the untyped tags (reachable through `ifd()`), the
   face-detection text tags and the RAF-only `FujiIFD` (`0xf000`) subdirectory are not promised
   (`references/exif/fujifilm/README.md`).
+  Within Apple, value interpretation, the binary-plist contents (`AEMatrix`, `RunTime` and the
+  plist tags with no typed accessor), and the tags `Apple.pm` leaves unnamed (reachable through
+  `ifd()`) are not promised (`references/exif/apple/README.md`).
+  Within Nikon, value interpretation, the contents of the version-gated `ShotInfo`,
+  `ColorBalance` and `LensData` records (kept opaque behind `NikonRecord`; deciphering and
+  decoding them is #1283), the other binary arrays exiv2 splits, the `Preview` subdirectory and
+  the Nikon Capture tags (reachable through `ifd()`) are not promised
+  (`references/exif/nikon/README.md`).
   Within Canon, the
   interpretation of values and the binary arrays beyond `CameraSettings`/`ShotInfo` are not
   promised (`references/exif/canon/README.md`). Within Leica, the `LEICA\0\0\0` and

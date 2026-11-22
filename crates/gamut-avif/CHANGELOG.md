@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gamut-avif)* `AvifEncoder::with_tiling(Tiling)` and `with_auto_tiling(bool)` (fields
+  `AvifConfig::tiling` / `auto_tiling`, `Tiling` re-exported): a tile layout for every AV1 still,
+  so `with_threads` can code one still in parallel. Auto tiling is libavif's `autoTiling` rule and
+  is off by default; the default stays one tile, so default output is unchanged (issue #1233).
+- *(gamut-avif)* `AvifEncoder::with_quality(u8)` and `with_mode(AvifMode)`, the two
+  `AvifConfig` fields that had no setter (issue #1233).
+
+### Changed
+
+- *(gamut-avif)* [**breaking**] `AvifEncoder::with_color_range` is renamed `with_range`, after the
+  `AvifConfig::range` field it sets and `gamut-av1`'s `Av1Color::with_range` (issue #1233).
+- *(gamut-avif)* [**breaking**] `AvifEncoder::with_alpha_quality` takes `Option<u8>`, so `None`
+  resets alpha to follow the colour quality; write `with_alpha_quality(Some(q))` for the previous
+  call (issue #1233).
+- *(gamut-avif)* [**breaking**] `AvifEncoder::with_threads` and `AvifConfig::threads` take
+  `gamut-av1`'s `NonZeroUsize` rather than `Option<NonZeroUsize>`; pass
+  `std::thread::available_parallelism()` where `None` meant every core (issue #1233).
+
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-avif-v1.1.0...gamut-avif-v2.0.0) - 2026-10-12
 
 ### Added

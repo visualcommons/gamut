@@ -54,6 +54,7 @@ tooling/gamut-fuzz/corpus/**
 !tooling/gamut-fuzz/corpus/avif_parse_decode/grid-2x2-limits-6.avif
 !tooling/gamut-fuzz/corpus/avif_parse_decode/overlay-two-inputs-limits-100px.avif
 !tooling/gamut-fuzz/corpus/av1_inspect/identity-444-5x3.obu
+!tooling/gamut-fuzz/corpus/cmm_transform/xyb-srgb.icc
 !tooling/gamut-fuzz/corpus/deflate_inflate_zlib/noise-stored.bin
 !tooling/gamut-fuzz/corpus/deflate_inflate_zlib/short-fixed.bin
 !tooling/gamut-fuzz/corpus/deflate_inflate_zlib/text-dynamic.bin
@@ -86,6 +87,7 @@ tooling/gamut-fuzz/corpus/**
 !tooling/gamut-fuzz/corpus/isobmff_boxes/avif-single-item.avif
 !tooling/gamut-fuzz/corpus/jpeg_decode/color_baseline.jpg
 !tooling/gamut-fuzz/corpus/jpeg_decode/color_progressive.jpg
+!tooling/gamut-fuzz/corpus/metadata_extract/exif-xmp-iim.bin
 !tooling/gamut-fuzz/corpus/png_decode/rgb8-5x3.png
 !tooling/gamut-fuzz/corpus/png_decode/rgba8-5x3.png
 !tooling/gamut-fuzz/corpus/riff_chunks/vp8x-exif-xmp.webp

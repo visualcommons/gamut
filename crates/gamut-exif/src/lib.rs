@@ -106,9 +106,11 @@ pub use gamut_ifd::{ByteOrder, FieldType, Ifd, Value};
 #[cfg(feature = "geocoordinates")]
 pub use gps::GpsConversionError;
 pub use gps::{GpsAltitude, GpsInfo, GpsLatitude, GpsLongitude, LatitudeRef, LongitudeRef};
+pub use maker_note::apple::AppleMakerNote;
 pub use maker_note::canon::CanonMakerNote;
 pub use maker_note::fujifilm::FujifilmMakerNote;
 pub use maker_note::leica::{Leica4Tags, Leica9Tags, LeicaMakerNote};
+pub use maker_note::nikon::{Nikon2Tags, Nikon3Tags, NikonMakerNote, NikonRecord, NikonRecordKind};
 pub use maker_note::sony::SonyMakerNote;
 pub use maker_note::{MakerNote, MakerNoteDialect, MakerNoteLayout, MakerNoteVendor, OffsetBase};
 pub use reader::{ExifReader, ReadOutcome};

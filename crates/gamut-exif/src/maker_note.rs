@@ -1,8 +1,10 @@
 //! The vendor-specific `MakerNote` block (Exif tag `0x927C`).
 
+pub mod apple;
 pub mod canon;
 pub mod fujifilm;
 pub mod leica;
+pub mod nikon;
 pub mod sony;
 
 use gamut_ifd::{AuditFinding, ByteOrder, Ifd, IfdReader, RawIfd, ReadAt, Rebased, Value, Variant};
@@ -33,6 +35,10 @@ const ONE_ENTRY_IFD: usize = 14;
 /// - **Fujifilm** — [`FujifilmMakerNote`](fujifilm::FujifilmMakerNote), through
 ///   [`MakerNote::fujifilm`] (issue #981), for the [`Fujifilm`](MakerNoteDialect::Fujifilm)
 ///   dialect, Leica's Fujifilm-built bodies included.
+/// - **Apple** — [`AppleMakerNote`](apple::AppleMakerNote), through [`MakerNote::apple`]
+///   (issue #976).
+/// - **Nikon** — [`NikonMakerNote`](nikon::NikonMakerNote), through [`MakerNote::nikon`]
+///   (issue #979), for all three Nikon dialects; the enciphered records stay opaque.
 ///
 /// Every other vendor's tags stay undecoded; their views are the remainder of issue #418 and can
 /// be added without breaking this API (every MakerNote enum and the layout struct are

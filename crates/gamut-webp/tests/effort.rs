@@ -7,6 +7,7 @@
 //! 2. **Size is non-increasing in effort.** The VP8L ladder guarantees this *by construction* — a
 //!    rung's candidate plans are a superset of the rung below's, and ties resolve to the earlier
 //!    plan — so it is asserted exactly, with no tolerance.
+//!    Lossless quality is the second axis of the same guarantee (issue #1240).
 //! 3. **Encoding is deterministic.** Two encodes at the same rung are byte-identical, which is what
 //!    catches floating point or hash-iteration order leaking into an encoder decision.
 //!
@@ -14,7 +15,7 @@
 //! runs inside the coverage and mutation-testing lanes.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
-use gamut_webp::{Effort, WebpDecoder, WebpEncoder};
+use gamut_webp::{Effort, Exact, LosslessPreset, WebpConfig, WebpDecoder, WebpEncoder};
 
 /// Every rung of the ladder, lowest first.
 fn all_efforts() -> Vec<Effort> {
@@ -94,10 +95,14 @@ fn encode_lossless(effort: Effort, px: &[u8], d: Dimensions) -> Vec<u8> {
     out
 }
 
+/// Encodes RGBA lossily at `effort`. The colour under `alpha = 0` is preserved (`Exact::Preserve`)
+/// so these fixtures isolate the effort ladder: the default transparent-colour cleanup (issue
+/// #1207) is pinned in `tests/default_bytes.rs`, and the byte pins here predate it.
 fn encode_lossy(effort: Effort, quality: u8, px: &[u8], d: Dimensions) -> Vec<u8> {
     let mut out = Vec::new();
     WebpEncoder::lossy(quality)
         .with_effort(effort)
+        .with_exact(Exact::Preserve)
         .encode_image(ImageRef::<Rgba8>::new(px, d).expect("fixture"), &mut out)
         .expect("lossy encode");
     out
@@ -150,6 +155,64 @@ fn lossless_size_is_non_increasing_in_effort() {
             );
         }
     }
+}
+
+/// Encodes RGBA losslessly under `config`.
+fn encode_lossless_config(config: WebpConfig, px: &[u8], d: Dimensions) -> Vec<u8> {
+    let mut out = Vec::new();
+    WebpEncoder::from_config(config)
+        .encode_image(ImageRef::<Rgba8>::new(px, d).expect("fixture"), &mut out)
+        .expect("lossless encode");
+    out
+}
+
+#[test]
+fn lossless_size_is_non_increasing_in_quality_and_across_presets() {
+    // Issue #1240's guarantee on the second axis: within an effort level a higher quality only adds
+    // candidates, so the shortest can only shrink — asserted exactly, like effort. The `cwebp -z`
+    // presets raise neither dial, so their sizes fall too. Every encode stays bit-exact.
+    let mut refined = false;
+    for (label, px, d) in corpus() {
+        let mut sizes = Vec::new();
+        for quality in [0u8, 25, 50, 75, 90, 100] {
+            let mut config = WebpConfig::default();
+            config.quality = quality;
+            sizes.push((quality, encode_lossless_config(config, &px, d).len()));
+        }
+        for pair in sizes.windows(2) {
+            let [(lo_q, lo), (hi_q, hi)] = pair else {
+                unreachable!()
+            };
+            assert!(
+                hi <= lo,
+                "{label}: quality {hi_q} grew to {hi} from {lo} at {lo_q}"
+            );
+        }
+        refined |= sizes.last().map(|s| s.1) < sizes.first().map(|s| s.1);
+
+        let mut previous = usize::MAX;
+        for level in 0..=9u8 {
+            let preset = LosslessPreset::from_level(level).expect("0..=9");
+            let file =
+                encode_lossless_config(WebpConfig::default().with_lossless_preset(preset), &px, d);
+            let decoded: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).expect("decode");
+            assert_eq!(
+                decoded.as_samples(),
+                px.as_slice(),
+                "{label}: z{level} is not bit-exact"
+            );
+            assert!(
+                file.len() <= previous,
+                "{label}: z{level} grew to {} from {previous}",
+                file.len()
+            );
+            previous = file.len();
+        }
+    }
+    assert!(
+        refined,
+        "lossless quality reached no fixture's encode: quality 100 never beat quality 0"
+    );
 }
 
 #[test]

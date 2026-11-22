@@ -35,8 +35,8 @@
 //! - **Lossy quality** — the `0..=100` quality maps coarsely onto the VP8 base quantizer. The
 //!   encoder has no rate-distortion mode search, so quality is a quantizer dial rather than a
 //!   rate target; [`Effort`] tunes how hard it looks within that dial.
-//! - **Lossless** — reproduces the input exactly and ignores the quality value, unless
-//!   [`NearLossless`] preprocessing is configured (see below).
+//! - **Lossless** — reproduces the input exactly, unless [`NearLossless`] preprocessing is
+//!   configured (see below); the quality value is the search budget there, not a fidelity dial.
 //!
 //! # Compression effort and near-lossless
 //!
@@ -46,7 +46,12 @@
 //! harder. On the lossless side the rungs race candidate encodings — transform chain, palette
 //! ordering, colour-cache size, entropy grouping, LZ77 depth — and keep the smallest; each rung's
 //! candidates are a superset of the rung below's, so **output size is non-increasing in effort by
-//! construction**. On the lossy side the rungs add 4×4 prediction search, coefficient
+//! construction**. Lossless [`quality`](WebpConfig::quality) is the second dial libwebp ties to
+//! the same search: within a rung it caps how deep each candidate's LZ77 parse goes and how far
+//! its colour-cache size strays, so size is non-increasing in quality too, and the default `75` is
+//! the historical search. [`WebpConfig::with_lossless_preset`] sets both dials from a
+//! [`LosslessPreset`], libwebp's `cwebp -z 0..=9` table. On the lossy side the rungs add 4×4
+//! prediction search, coefficient
 //! probabilities derived from the coded frame, a measured skip probability, and a dead-zone
 //! quantizer.
 //!
@@ -69,6 +74,15 @@
 //! libwebp's own level quantizer, so the decoded alpha is byte for byte the plane libwebp would
 //! produce. See [`WebpConfig::alpha_quality`] for the level mapping and the size trade-off. A
 //! lossless encode carries alpha inside its VP8L bitstream and keeps it bit-exact regardless.
+//!
+//! # Colour under transparent pixels
+//!
+//! The RGB of an `alpha = 0` pixel is invisible but still costs bits. [`WebpEncoder::with_exact`]
+//! — libwebp's `exact` — chooses whether it is preserved or cleaned before coding. The default,
+//! [`Exact::ByMode`], **cleans a lossy encode** (libwebp's default, by a port of its
+//! `WebPCleanupTransparentArea`) and **preserves a lossless one**, so lossless stays bit-exact
+//! including the invisible colour; [`Exact::Clean`] clears it to transparent black in lossless too,
+//! and [`Exact::Preserve`] keeps it in lossy. Pixels with `alpha > 0` are never touched.
 //!
 //! # Embedded metadata
 //!
@@ -140,6 +154,7 @@ mod config;
 mod decoder;
 mod encoder;
 mod metadata;
+mod transparent;
 mod vp8;
 mod vp8l;
 
@@ -148,7 +163,7 @@ pub use backend::{
     WebpCodestream, WebpCodestreamDecoder, WebpCodestreamEncoder, WebpEncodeRequest, WebpRasterRef,
     WebpStreamInfo,
 };
-pub use config::{Effort, NearLossless, WebpConfig, WebpMode};
+pub use config::{Effort, Exact, LosslessPreset, NearLossless, WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
 pub use encoder::{WebpEncodeReport, WebpEncoder};
 // The shared vocabulary types this crate's signatures take and return, so a caller needs no direct

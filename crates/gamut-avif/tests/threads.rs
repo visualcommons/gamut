@@ -1,9 +1,10 @@
-//! The thread cap (issue #655): `AvifEncoder::with_threads` codes an RGBA input's colour and alpha
-//! stills concurrently, and each still's tiles on `gamut-av1`'s tile-parallel path, and the file
-//! is byte-identical at every thread count. `gamut-av1`'s default layout is one tile (libaom's
-//! default, #1227) and `AvifEncoder` has no tiling knob yet (#1233), so here only the colour/alpha
-//! split runs concurrently; `gamut-av1` pins its tile-parallel path at explicit layouts. A conformant reader (libavif over dav1d) reconstructs
-//! the multi-threaded file to exactly the AV1 encoder's own reconstruction.
+//! The thread cap (issue #655) and the tile layout it parallelises over (#1233):
+//! `AvifEncoder::with_threads` codes an RGBA input's colour and alpha stills concurrently, and
+//! each still's tiles on `gamut-av1`'s tile-parallel path, and the file is byte-identical at every
+//! thread count — at the default single tile, and at a multi-tile layout from
+//! `AvifEncoder::with_tiling`, where each still's tiles do run concurrently. A conformant reader
+//! (libavif over dav1d) reconstructs the multi-threaded, multi-tile file to exactly the AV1
+//! encoder's own reconstruction at that layout.
 //!
 //! libavif is linked in from the `third_party/libavif` + `third_party/dav1d` submodules via the
 //! `libavif-oracle` dev-dependency (`mise run fetch-av1-oracles` fetches dav1d).
@@ -11,13 +12,13 @@
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1Color, Av1EncodeConfig};
+use gamut_av1::{Av1Color, Av1EncodeConfig, Tiling};
 use gamut_avif::{Av1CodestreamEncoder, Av1EncodeRequest, AvifEncoder};
 use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr};
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Result, Rgb8, Rgba8, Rgba16};
 
-/// The fixture's width, two and a half superblocks: wide enough that a tile layout split into
-/// columns codes more than one, once `AvifEncoder` can ask for one (#1233).
+/// The fixture's width, two and a half superblocks: wide enough that [`two_columns`] codes two
+/// tile columns.
 const W: u32 = 160;
 const H: u32 = 40;
 
@@ -25,17 +26,28 @@ fn dims() -> Dimensions {
     Dimensions::new(W, H).unwrap()
 }
 
+/// A request for two tile columns: three superblock columns split into tiles two wide, so two
+/// tiles for every still of the fixture.
+fn two_columns() -> Tiling {
+    Tiling::new(1, 0)
+}
+
 /// `AvifEncoder::lossy(50)`'s `base_q_idx`: `(100 - 50) * 255 / 100`.
 const Q50: u8 = 127;
 
 /// The thread counts every determinism check compares against one thread: an even and an odd
 /// split, more threads than the two stills have tiles, and the machine's own parallelism.
-fn caps() -> [Option<NonZeroUsize>; 5] {
-    [threads(2), threads(3), threads(4), threads(16), None]
+fn caps() -> [NonZeroUsize; 5] {
+    [threads(2), threads(3), threads(4), threads(16), available()]
 }
 
-fn threads(n: usize) -> Option<NonZeroUsize> {
-    Some(NonZeroUsize::new(n).unwrap())
+fn threads(n: usize) -> NonZeroUsize {
+    NonZeroUsize::new(n).unwrap()
+}
+
+/// The machine's parallelism, the value a caller passes for "every core".
+fn available() -> NonZeroUsize {
+    std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
 }
 
 /// A textured RGBA source with structured, non-opaque alpha.
@@ -104,7 +116,6 @@ where
 fn threads_default_to_one_and_report_the_chosen_cap() {
     assert_eq!(AvifEncoder::new().config().threads, threads(1));
     assert_eq!(AvifEncoder::lossy(50).config().threads, threads(1));
-    assert_eq!(AvifEncoder::new().with_threads(None).config().threads, None);
     assert_eq!(
         AvifEncoder::new().with_threads(threads(6)).config().threads,
         threads(6)
@@ -116,6 +127,19 @@ fn rgba8_codes_the_same_bytes_at_every_thread_count() {
     let px = source_rgba8();
     assert_thread_count_invariant::<Rgba8>(&AvifEncoder::lossy(50), &px);
     assert_thread_count_invariant::<Rgba8>(&AvifEncoder::lossless(), &px);
+}
+
+/// At two tile columns each still's tiles are coded concurrently on its share, and the file is
+/// still the one-thread file — which is not the single-tile file, so the layout reached the
+/// stream.
+#[test]
+fn a_multi_tile_rgba8_encode_codes_the_same_bytes_at_every_thread_count() {
+    let px = source_rgba8();
+    for base in [AvifEncoder::lossy(50), AvifEncoder::lossless()] {
+        let tiled = base.clone().with_tiling(two_columns());
+        assert_thread_count_invariant::<Rgba8>(&tiled, &px);
+        assert_ne!(encode::<Rgba8>(&tiled, &px), encode::<Rgba8>(&base, &px));
+    }
 }
 
 #[test]
@@ -143,9 +167,14 @@ fn gray8_codes_the_same_bytes_at_every_thread_count() {
 }
 
 #[test]
-fn libavif_reconstructs_a_multithreaded_rgba_encode_to_the_av1_reconstruction() {
+fn libavif_reconstructs_a_multithreaded_multi_tile_rgba_encode_to_the_av1_reconstruction() {
     let px = source_rgba8();
-    let avif = encode::<Rgba8>(&AvifEncoder::lossy(50).with_threads(threads(4)), &px);
+    let avif = encode::<Rgba8>(
+        &AvifEncoder::lossy(50)
+            .with_tiling(two_columns())
+            .with_threads(threads(4)),
+        &px,
+    );
 
     let image = ImageRef::<Rgba8>::new(&px, dims()).unwrap();
     let bt709 =
@@ -156,6 +185,7 @@ fn libavif_reconstructs_a_multithreaded_rgba_encode_to_the_av1_reconstruction() 
         Av1EncodeConfig::new(Q50)
             .with_color(colour)
             .with_effort(AvifEncoder::lossy(50).config().effort)
+            .with_tiling(two_columns())
     };
     let colour_recon = gamut_av1::encode_still_with_recon(&colour_planes, &config(colour))
         .unwrap()
@@ -220,11 +250,38 @@ fn a_backend_is_offered_the_whole_budget_for_an_image_without_alpha() {
         offered::<Rgb8>(AvifEncoder::lossy(50).with_threads(threads(5)), &px),
         [5]
     );
-    let available = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+}
+
+/// Auto tiling over a frame just past one 512 × 512 tile area: libavif's rule asks for two tile
+/// columns, so the file is exactly the explicit two-column file at every thread count — and not
+/// the single-tile one — and libavif decodes it bit-exactly.
+#[test]
+fn auto_tiling_codes_libavifs_layout_and_libavif_decodes_it() {
+    let (w, h) = (520u32, 512u32);
+    let px: Vec<u8> = (0..w * h)
+        .map(|i| ((i % w) * 3 + (i / w) * 5) as u8)
+        .collect();
+    let image = ImageRef::<Gray8>::new(&px, Dimensions::new(w, h).unwrap()).unwrap();
+    let encode = |encoder: AvifEncoder| encoder.encode_to_vec(image).unwrap();
+
+    let auto = encode(AvifEncoder::lossless().with_auto_tiling(true));
     assert_eq!(
-        offered::<Rgb8>(AvifEncoder::lossy(50).with_threads(None), &px),
-        [available]
+        auto,
+        encode(AvifEncoder::lossless().with_tiling(Tiling::new(1, 0)))
     );
+    assert_ne!(auto, encode(AvifEncoder::lossless()));
+    assert_eq!(
+        encode(
+            AvifEncoder::lossless()
+                .with_auto_tiling(true)
+                .with_threads(threads(8))
+        ),
+        auto
+    );
+
+    let decoded = libavif_oracle::decode_avif(&auto).expect("libavif decodes the file");
+    let source: Vec<u16> = px.iter().map(|&s| u16::from(s)).collect();
+    assert_eq!(decoded.planes[0], source);
 }
 
 #[test]

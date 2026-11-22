@@ -557,7 +557,7 @@ gamut_status_t gamut_avif_encoder_set_transfer(struct GamutAvifEncoder *encoder,
 
 /**
  * Selects the signal range by its H.273 `full_range` flag (`0` limited, `1` full;
- * `AvifEncoder::with_color_range`). Ignored by a lossless encoder.
+ * `AvifEncoder::with_range`). Ignored by a lossless encoder.
  *
  * Returns `GAMUT_STATUS_INVALID_INPUT` for any other flag value,
  * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.

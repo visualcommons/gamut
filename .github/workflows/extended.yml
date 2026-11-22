@@ -165,6 +165,10 @@ jobs:
           - exif_parse
           - xmp_parse
           - iptc_read_irb
+          # The layers above the byte parsers (#311's audit): gamut-cmm's profile linking and
+          # evaluation, and gamut-metadata's cross-carrier reconciliation.
+          - cmm_transform
+          - metadata_extract
     env:
       MISE_TASK_RUN_AUTO_INSTALL: false
     steps:

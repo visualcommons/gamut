@@ -325,8 +325,9 @@ impl WebpEncodeRequest {
         self.dimensions
     }
 
-    /// The requested quality on the `0..=100` scale. Ignored by the lossless codestream, which
-    /// always reproduces its input exactly.
+    /// The requested quality on the `0..=100` scale. For the lossy codestream it is the quality
+    /// factor; for the lossless one, which always reproduces its input exactly, it is the search
+    /// budget (libwebp's `quality` under `lossless = 1`), which a backend may honour or ignore.
     #[must_use]
     pub const fn quality(&self) -> u8 {
         self.quality

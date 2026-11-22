@@ -259,12 +259,12 @@ exclude_re = [
     # (a TIMEOUT, so a survivor), so `Default` now calls nothing. The `-> Default::default()`
     # replacement of `lossless` is then byte-identical — provably equivalent, unkillable — as for
     # `WebpEncoder::lossless` below; `lossless_is_the_default_mode` pins what it returns.
-    '^crates/gamut-avif/src/encoder\.rs:383:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
+    '^crates/gamut-avif/src/encoder\.rs:384:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
-    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None, 100 }`); replacing the body with the
+    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None, 100, Exact::ByMode }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
     # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
-    '^crates/gamut-webp/src/encoder\.rs:143:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
+    '^crates/gamut-webp/src/encoder\.rs:144:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `transform::fwht4x4` negative-bias correction `x += i32::from(x < 0)`: the only value
     # where `<` and `<=` disagree is x == 0, where the extra +1 is absorbed by the subsequent
     # `(x + 3) >> 3` (both yield 0), so the four `< -> <=` mutations are unobservable. (The `+=`→`-=`,
@@ -281,7 +281,7 @@ exclude_re = [
     # size tie `<` keeps raw and `<=` would keep compressed, but both decode to identical alpha (the
     # transform is bijective) and real content never ties, so no non-contrived test can distinguish
     # them. (`< -> >` / `< -> ==` pick the *larger*/wrong encoding and are caught by the round-trip.)
-    '^crates/gamut-webp/src/alpha\.rs:396:28: replace < with <= in write_alph_with_effort$',
+    '^crates/gamut-webp/src/alpha\.rs:399:28: replace < with <= in write_alph_with_effort$',
     # gamut-webp VP8 header — behaviourally-equivalent bit packing/branches.
     # write_uncompressed_chunk packs disjoint fields into the frame tag (`version<<1 | 1<<4 |
     # size<<5`, each within its width) and the dimension words (`width | hscale<<14`, width ≤ 0x3FFF);
@@ -348,7 +348,7 @@ exclude_re = [
     #   pick_cache_bits / assign_groups — the colour-cache size and the meta-Huffman block grouping
     #   (both deferred-optimization knobs, issue #31; any choice is faithfully signalled);
     '^crates/gamut-webp/src/vp8l/encoder\.rs:\d+:\d+: .* in pick_cache_bits$',
-    '^crates/gamut-webp/src/vp8l/encoder\.rs:689:5: replace pick_cache_bits -> u32 with .*$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:695:5: replace pick_cache_bits -> u32 with .*$',
     #   (`assign_groups`' whole-body `-> Default::default()` has no entry: `GroupAssignment` has no
     #   `Default`, so that mutant does not build and scores unviable, not survived. The entry had
     #   been anchored above the body and matched nothing, #1162.)
@@ -397,7 +397,7 @@ exclude_re = [
     '^crates/gamut-webp/src/vp8l/bit_io\.rs:45:19: replace \|\| with && in BitWriter::write_bits$',
     # GroupAssignment::group_at `if num_groups <= 1 || width == 0`: for a single group the function
     # returns 0 anyway (the only group), so skipping the early return via `&&` yields the same 0.
-    '^crates/gamut-webp/src/vp8l/encoder\.rs:489:33: replace \|\| with && in GroupAssignment::group_at$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:495:33: replace \|\| with && in GroupAssignment::group_at$',
     # (The write_normal_prefix_code `len < CODE_LENGTH_CODES` entry is gone with the comparison; the
     # encode_block sign test and the encode_spatial `- 2` it duplicated are the walk_block and
     # encode_spatial entries further down.)
@@ -712,7 +712,7 @@ exclude_re = [
     # separates the two. The *predictor* transform's identical expression is NOT excluded: plans
     # emit it at 2, 3, 4, 5 and 6, and the effort byte-pins kill it there (the path-and-name anchor
     # this replaced matched it as well).
-    '^crates/gamut-webp/src/vp8l/encoder\.rs:243:37: replace - with / in encode_spatial$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:249:37: replace - with / in encode_spatial$',
     # gamut-webp VP8L `single_group` (encoder.rs) — the degenerate assignment puts every
     # meta-block in one prefix-code group, and a `GroupAssignment` with `num_groups == 1` never has
     # its grid consulted: `group_of` returns 0 before touching `grid_width` or `block_group`
@@ -720,8 +720,8 @@ exclude_re = [
     # `block_group` only iterated, when `num_groups > 1`. The grid arithmetic these mutants corrupt
     # is therefore unobservable through any input. The same expressions in `assign_groups`, where
     # the grid *is* read, stay killed by the effort byte-pins.
-    '^crates/gamut-webp/src/vp8l/encoder\.rs:(510:44|511:46): replace << with >> in single_group$',
-    '^crates/gamut-webp/src/vp8l/encoder\.rs:512:44: replace \* with (\+|/) in single_group$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:(516:44|517:46): replace << with >> in single_group$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:518:44: replace \* with (\+|/) in single_group$',
     # gamut-webp VP8L zero-length-match guard (encoder.rs `nonempty_match`) — the comparison
     # defends the parse cursor against a length `BackwardRefs::find` never returns, so `>` and
     # `>=` admit exactly the same candidates on every input. That is what makes the mutant
@@ -729,7 +729,7 @@ exclude_re = [
     # non-terminating loop, which produces no output to check. Isolated in its own function so it
     # cannot be confused with the observable `>` in the deferral probe, which the lazy-parse tests
     # kill.
-    '^crates/gamut-webp/src/vp8l/encoder\.rs:683:38: replace > with >= in nonempty_match$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:689:38: replace > with >= in nonempty_match$',
     # gamut-deflate `Matcher::walk` (lz77.rs) — the improvement test `len > best_len` relaxed to
     # `>=`. Equivalent, because the prune in front of it already rules out `len == best_len`: a
     # candidate is measured only when `data[c + best_len] == data[pos + best_len]`, and
@@ -784,7 +784,7 @@ exclude_re = [
     # the same way by `*= 1`. Its `-=` siblings terminate too -- they underflow and panic -- so they
     # stay in the survey, and one of them is what caught this reasoning being checked rather than
     # assumed.
-    '^crates/gamut-webp/src/vp8l/encoder\.rs:(637:15|648:19|664:15): replace \+= with \*= in tokenize$',
+    '^crates/gamut-webp/src/vp8l/encoder\.rs:(643:15|654:19|670:15): replace \+= with \*= in tokenize$',
     # `BoolDecoder::get_tree_start` descends a tree until it reaches a leaf, which `i <= 0` marks.
     # That test is the descent's only exit, so reversing it keeps the loop going at every leaf --
     # confirmed by applying it against a 120s cap, which the suite exceeds rather than failing. It
