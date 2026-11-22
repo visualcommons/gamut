@@ -100,16 +100,17 @@ list, is in its issue. "Index", "arith" and "cast" are the `indexing_slicing`,
 | `gamut-deflate` | #1275 | Pass | 79 | 99 | 20 | 10 | `deflate_inflate_zlib` clean |
 | `gamut-icc` | #1276 | Not applicable as a decode budget | 29 | 28 | 36 | 36 | `icc_parse` clean, `cmm_transform` clean |
 | `gamut-exif` | #1277 | Not applicable | 6 | 5 | 5 | 4 | `exif_parse` clean |
-| `gamut-xmp` | #1278 | Fail | 6 | 18 | 0 | 0 | `xmp_parse` clean, `metadata_extract` clean |
+| `gamut-xmp` | #1278 | Pass (nesting capped at 256: #1260) | 6 | 18 | 0 | 0 | `xmp_parse` clean, `metadata_extract` clean |
 | `gamut-iptc` | #1279 | Not applicable | 14 | 19 | 3 | 1 | `iptc_read_irb` clean, `metadata_extract` clean |
 | `gamut-metadata` | #1280 | Inherited from the carrier parsers | 0 | 7 | 4 | 0 | `metadata_extract` clean |
 | `gamut-cmm` | #1281 | Pass by construction | 201 | 161 | 4 | 17 | `cmm_transform` clean |
 
 **Defects confirmed** by the audit:
 
-- **#1260** — `gamut-xmp`: element nesting is unbounded. A 180 KB packet of 5 000 nested
-  `rdf:parseType="Resource"` levels overflows the stack. Past 65 535 levels, quick-xml's `u16`
-  nesting counter overflows.
+- **#1260** — `gamut-xmp`: element nesting was unbounded. A 180 KB packet of 5 000 nested
+  `rdf:parseType="Resource"` levels overflowed the stack, and past 65 535 levels quick-xml's
+  `u16` nesting counter overflowed. That is fixed: `XmpMeta::parse` refuses the 257th nested
+  start tag with `XmpError::NestingTooDeep` before either is at risk.
 - `gamut-tiff`: the CCITT strip decoders (`compression/ccitt/mod.rs`, `compression/ccitt/g4.rs`)
   size their output as `width.div_ceil(8) * rows` from the header before decoding a byte, so a
   tiny strip can reserve a zeroed buffer of up to 32 MiB under the default caps. That is bounded

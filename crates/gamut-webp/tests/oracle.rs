@@ -800,6 +800,75 @@ fn libwebp_decodes_every_effort_levels_lossless_and_alpha() {
     }
 }
 
+#[test]
+fn lossless_presets_match_libwebps_config_lossless_preset() {
+    // Issue #1240: each `cwebp -z` level must set the effort and quality libwebp's own
+    // `WebPConfigLosslessPreset` sets, select lossless as it does, and stop at the same level.
+    use gamut_webp::{LosslessPreset, WebpConfig, WebpMode};
+    use libwebp_oracle::libwebp_lossless_preset;
+
+    for level in 0..=9u8 {
+        let preset = LosslessPreset::from_level(level).expect("0..=9");
+        let (lossless, method, quality) =
+            libwebp_lossless_preset(i32::from(level)).expect("libwebp accepts 0..=9");
+        assert!(lossless, "libwebp's z{level} is not lossless");
+        assert_eq!(
+            i32::from(preset.effort().level()),
+            method,
+            "z{level}: effort differs from libwebp's method"
+        );
+        assert_eq!(
+            f32::from(preset.quality()),
+            quality,
+            "z{level}: quality differs from libwebp's"
+        );
+        let mut lossy = WebpConfig::default();
+        lossy.mode = WebpMode::Lossy;
+        let config = lossy.with_lossless_preset(preset);
+        assert_eq!(config.mode, WebpMode::Lossless, "z{level}");
+        assert_eq!(
+            (config.effort, config.quality),
+            (preset.effort(), preset.quality())
+        );
+    }
+    assert_eq!(libwebp_lossless_preset(10), None);
+    assert_eq!(LosslessPreset::from_level(10), None);
+}
+
+#[test]
+fn libwebp_decodes_every_lossless_presets_encode_bit_exactly() {
+    // The quality refinements reach LZ77 chains and colour-cache sizes no default encode uses, so
+    // each preset's stream is checked through libwebp's decoder, transparent and opaque.
+    use gamut_core::{EncodeImage, ImageRef, Rgba8};
+    use gamut_webp::{LosslessPreset, WebpConfig, WebpEncoder};
+
+    let (w, h) = (32u32, 24u32);
+    let dims = Dimensions::new(w, h).unwrap();
+    // The oracle's fixtures are opaque, so the photo-like one is given a graded alpha to reach the
+    // transparent path too.
+    let mut photo = photo_like_rgba(w, h, 7);
+    for (i, px) in photo.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        px[3] = (i * 5 % 256) as u8;
+    }
+    for (label, rgba) in [("pattern", pattern_rgba(w, h)), ("photo-alpha", photo)] {
+        for level in 0..=9u8 {
+            let preset = LosslessPreset::from_level(level).expect("0..=9");
+            let mut file = Vec::new();
+            WebpEncoder::from_config(WebpConfig::default().with_lossless_preset(preset))
+                .encode_image(
+                    ImageRef::<Rgba8>::new(&rgba, dims).expect("fixture"),
+                    &mut file,
+                )
+                .expect("lossless encode");
+            assert_eq!(
+                libwebp_decode_rgba(&file).rgba,
+                rgba,
+                "{label}: libwebp did not recover the source at z{level}"
+            );
+        }
+    }
+}
+
 /// A 64×64 fixture for the transparent-colour cleanup (issue #1207): a photo-like opaque band down
 /// the left 20 columns, a soft edge of partial alpha, and a large fully transparent region whose
 /// RGB is per-pixel noise — colour that is invisible yet costs bits unless it is cleaned.

@@ -248,8 +248,8 @@ impl WebpEncoder {
 
     /// Sets (or, with `None`, clears) near-lossless preprocessing.
     ///
-    /// Applies to [`WebpMode::Lossless`] only; a lossy encoder ignores it, exactly as a lossless
-    /// encoder ignores [`quality`](WebpConfig::quality). The coded stream stays a conformant,
+    /// Applies to [`WebpMode::Lossless`] only; a lossy encoder ignores it. The coded stream stays a
+    /// conformant,
     /// bit-exact VP8L stream — what changes is its *input*, which is quantized in smooth regions
     /// first. Red, green and blue move by at most
     /// [`NearLossless::max_deviation`]; **alpha is never touched**. Calling this twice keeps the
@@ -399,7 +399,7 @@ impl WebpEncoder {
         };
         match encode_with_backends(&self.backends, &req, &raster)? {
             Some(payload) => Ok(payload),
-            None => encode_vp8l(argb, dims, self.config.effort),
+            None => encode_vp8l(argb, dims, self.config.effort, self.config.quality),
         }
     }
 
