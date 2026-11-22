@@ -39,18 +39,23 @@
 //!   JPEG convention. Kept for callers that genuinely want full-range BT.601; it is **not** what a
 //!   WebP file should carry.
 //!
-//! Chroma is box-subsampled (2×2 average) on the way down. On the way up,
+//! On the way down, [`Planar8::from_rgb8_bt601`](crate::Planar8::from_rgb8_bt601) takes a
+//! [`ChromaDownsampling`](crate::ChromaDownsampling): `Box` averages each 2×2 block of chroma, and
+//! `Sharp` is libwebp's iterative sharp-YUV, ported exactly (`cwebp -sharp_yuv`). On the way up,
 //! [`Planar8::to_rgb8_bt601`](crate::Planar8::to_rgb8_bt601) takes a
 //! [`ChromaUpsampling`](crate::ChromaUpsampling). `Interpolated` is libwebp's fancy upsampler,
 //! ported exactly (`gamut_dsp::upsample::libwebp`), so RGB from a WebP decode is byte-identical to
 //! `dwebp`'s default output. `Nearest` replicates each chroma sample across its
-//! 2×2 luma block (`dwebp -nofancy`). Sharp-YUV downsampling on the encode side is not implemented.
+//! 2×2 luma block (`dwebp -nofancy`).
 //! This conversion is deliberately *not* on the VP8 codec's bit-exact path (the codec operates on
 //! YCbCr planes directly); it backs the public RGB API.
+
+pub(crate) mod sharp;
 
 use gamut_core::luminance::BT601_LUMA_WEIGHTS;
 use gamut_core::{Error, Result};
 use gamut_dsp::math::{clip_pixel, clip_pixel8};
+use sharp::MatrixRow;
 
 use crate::cicp::{ColorRange, MatrixCoefficients};
 use crate::format::BitDepth;
@@ -73,10 +78,6 @@ const LUMA_G: i32 = BT601_LUMA_WEIGHTS[1] as i32;
 const LUMA_B: i32 = BT601_LUMA_WEIGHTS[2] as i32;
 /// Rounding addend (`0.5` in the fixed-point scale).
 const HALF: i32 = 1 << (FIX - 1);
-/// The chroma offset (`128`) pre-scaled to the fixed-point domain, with rounding folded in.
-const CHROMA_BIAS: i32 = (128 << FIX) + HALF;
-/// The limited-range luma offset (`16`) pre-scaled to the fixed-point domain.
-const LUMA_BIAS_LIMITED: i32 = 16 << FIX;
 /// Fractional bits of libwebp's YUV→RGB inverse (`YUV_FIX2` in `src/dsp/yuv.h`).
 const FIX2: i32 = 6;
 /// In-range mask for libwebp's `VP8Clip8` fast path (`YUV_MASK2 = (256 << YUV_FIX2) - 1`).
@@ -110,21 +111,32 @@ fn vp8_clip8(v: i32) -> u8 {
 #[must_use]
 pub fn bt601_rgb_to_ycbcr(r: u8, g: u8, b: u8, range: ColorRange) -> (u8, u8, u8) {
     let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
+    let [y, cb, cr] = bt601_rows(range)
+        .map(|row| clip_pixel8((row[0] * r + row[1] * g + row[2] * b + row[3] + HALF) >> FIX));
+    (y, cb, cr)
+}
+
+/// The full-range BT.601 rows `[y, cb, cr]`: Q16 coefficients and the 8-bit offset in Q16.
+const BT601_FULL_ROWS: [MatrixRow; 3] = [
+    [LUMA_R, LUMA_G, LUMA_B, 0],
+    [-11059, -21709, 32768, 128 << FIX],
+    [32768, -27439, -5329, 128 << FIX],
+];
+
+/// libwebp's limited-range rows (src/dsp/yuv.h `VP8RGBToY/U/V`, and sharp-YUV's `kWebpMatrix`):
+/// studio swing, a `+16` luma offset.
+const BT601_LIMITED_ROWS: [MatrixRow; 3] = [
+    [16839, 33059, 6420, 16 << FIX],
+    [-9719, -19081, 28800, 128 << FIX],
+    [28800, -24116, -4684, 128 << FIX],
+];
+
+/// The RGB → YCbCr rows of the VP8 layer in `range` — the one place they are written, read by
+/// both [`bt601_rgb_to_ycbcr`] and the sharp-YUV conversion.
+pub(crate) const fn bt601_rows(range: ColorRange) -> [MatrixRow; 3] {
     match range {
-        ColorRange::Full => {
-            let y = (LUMA_R * r + LUMA_G * g + LUMA_B * b + HALF) >> FIX;
-            let cb = (-11059 * r - 21709 * g + 32768 * b + CHROMA_BIAS) >> FIX;
-            let cr = (32768 * r - 27439 * g - 5329 * b + CHROMA_BIAS) >> FIX;
-            (clip_pixel8(y), clip_pixel8(cb), clip_pixel8(cr))
-        }
-        // libwebp's per-pixel coefficients (src/dsp/yuv.h `VP8RGBToY/U/V`): studio swing, +16 luma
-        // offset; chroma uses the same `(128 << FIX) + HALF` bias as the full-range path.
-        ColorRange::Limited => {
-            let y = (16839 * r + 33059 * g + 6420 * b + LUMA_BIAS_LIMITED + HALF) >> FIX;
-            let cb = (-9719 * r - 19081 * g + 28800 * b + CHROMA_BIAS) >> FIX;
-            let cr = (28800 * r - 24116 * g - 4684 * b + CHROMA_BIAS) >> FIX;
-            (clip_pixel8(y), clip_pixel8(cb), clip_pixel8(cr))
-        }
+        ColorRange::Full => BT601_FULL_ROWS,
+        ColorRange::Limited => BT601_LIMITED_ROWS,
     }
 }
 

@@ -246,7 +246,7 @@ exclude_re = [
     # gamut-color `vp8_clip8`: the `else if v < 0` branch is reached only when `v` is out of range
     # (`v == 0` takes the `v & !MASK2 == 0` fast path), so `v != 0` always holds there and `v < 0`
     # is equivalent to `v <= 0`. (`v < 0 → v == 0` *is* observable and is killed by a test.)
-    '^crates/gamut-color/src/ycbcr\.rs:94:17: replace < with <= in vp8_clip8$',
+    '^crates/gamut-color/src/ycbcr\.rs:95:17: replace < with <= in vp8_clip8$',
     # gamut-color `prophoto_rgb_eotf_standard`: the ROMM toe `x/16` and the power curve `x^1.8` are
     # equal at the x = 1/32 breakpoint (both 2^-9), so the curve is continuous and `x < 1/32` vs
     # `x <= 1/32` choose between two identical values there — unobservable. (`1.0/32.0 → 1.0%32.0`
@@ -261,10 +261,10 @@ exclude_re = [
     # `WebpEncoder::lossless` below; `lossless_is_the_default_mode` pins what it returns.
     '^crates/gamut-avif/src/encoder\.rs:384:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
-    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None, 100, Exact::ByMode }`); replacing the body with the
+    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None, 100, Exact::ByMode, ChromaDownsampling::Box, 50 }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
     # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
-    '^crates/gamut-webp/src/encoder\.rs:144:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
+    '^crates/gamut-webp/src/encoder\.rs:120:9: replace WebpEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `transform::fwht4x4` negative-bias correction `x += i32::from(x < 0)`: the only value
     # where `<` and `<=` disagree is x == 0, where the extra +1 is absorbed by the subsequent
     # `(x + 3) >> 3` (both yield 0), so the four `< -> <=` mutations are unobservable. (The `+=`→`-=`,
@@ -309,21 +309,21 @@ exclude_re = [
     # oracle confirms every variant round-trips, so no correctness test can distinguish them; pinning a
     # specific choice would test an encoder heuristic (rate-distortion search is issue #32), not a spec
     # requirement. Each function below feeds only an encoder decision:
-    #   mb_luma_mean — per-macroblock luma average, used only to choose a quantizer segment;
-    '^crates/gamut-webp/src/vp8/encoder\.rs:\d+:\d+: .* in mb_luma_mean$',
-    '^crates/gamut-webp/src/vp8/encoder\.rs:110:5: replace mb_luma_mean -> u32 with .*$',
+    #   (`mb_luma_mean`, the luma-mean segment picker, and its two entries went with it when #1017
+    #   replaced it by libwebp's analysis in `vp8/analysis.rs`, which the libwebp per-macroblock
+    #   quantizer oracle pins and so earns no exclusion.)
     #   block_sad — the prediction-cost proxy for mode selection;
     '^crates/gamut-webp/src/vp8/encoder\.rs:\d+:\d+: .* in block_sad$',
     #   select_luma_mode / select_chroma_mode — lowest-SAD whole-block mode pickers (any mode is legal);
     '^crates/gamut-webp/src/vp8/encoder\.rs:\d+:\d+: .* in select_luma_mode$',
-    '^crates/gamut-webp/src/vp8/encoder\.rs:313:5: replace select_luma_mode -> usize with .*$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:354:5: replace select_luma_mode -> usize with .*$',
     '^crates/gamut-webp/src/vp8/encoder\.rs:\d+:\d+: .* in select_chroma_mode$',
-    '^crates/gamut-webp/src/vp8/encoder\.rs:339:5: replace select_chroma_mode -> usize with .*$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:380:5: replace select_chroma_mode -> usize with .*$',
     #   encode_bpred_luma — the submode tie-break (`sad < best`) and the running prediction-cost
     #   accumulator (`total_sad +=`, used only for the B_PRED-vs-whole-block decision); both pick
     #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
-    '^crates/gamut-webp/src/vp8/encoder\.rs:462:20: replace < with <= in encode_bpred_luma$',
-    '^crates/gamut-webp/src/vp8/encoder\.rs:468:19: replace \+= with \*= in encode_bpred_luma$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:503:20: replace < with <= in encode_bpred_luma$',
+    '^crates/gamut-webp/src/vp8/encoder\.rs:509:19: replace \+= with \*= in encode_bpred_luma$',
     #   (Line anchors on `SEGMENT_QUANT_DELTAS`' two signs and on `encode_frame_filtered`'s segment
     #   assignment, segment-map index and B_PRED threshold had drifted off their lines and matched
     #   nothing. #1054 re-surveyed those operators where they now stand — the deltas, the `/ 64`

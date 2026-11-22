@@ -32,9 +32,11 @@
 //!   alone does not thread them through.
 //! - **Animation** — `ANIM` / `ANMF` multi-frame sequences are out of scope under the image-first
 //!   charter. Each frame is an independent key frame, but assembling them needs a non-trait API.
-//! - **Lossy quality** — the `0..=100` quality maps coarsely onto the VP8 base quantizer. The
-//!   encoder has no rate-distortion mode search, so quality is a quantizer dial rather than a
-//!   rate target; [`Effort`] tunes how hard it looks within that dial.
+//! - **Lossy quality** — the `0..=100` quality maps onto the VP8 base quantizer along libwebp's
+//!   curve, and spatial noise shaping ([`WebpConfig::sns_strength`]) spreads it over up to four
+//!   macroblock segments exactly as libwebp does. The encoder has no rate-distortion mode search,
+//!   so quality is a quantizer dial rather than a rate target; [`Effort`] tunes how hard it looks
+//!   within that dial. Sharp-YUV chroma ([`WebpConfig::chroma_downsampling`]) is opt-in.
 //! - **Lossless** — reproduces the input exactly, unless [`NearLossless`] preprocessing is
 //!   configured (see below); the quality value is the search budget there, not a fidelity dial.
 //!
@@ -168,7 +170,7 @@ pub use decoder::WebpDecoder;
 pub use encoder::{WebpEncodeReport, WebpEncoder};
 // The shared vocabulary types this crate's signatures take and return, so a caller needs no direct
 // dependency on gamut-color, gamut-core or gamut-riff to name them.
-pub use gamut_color::{ChromaUpsampling, Planar8};
+pub use gamut_color::{ChromaDownsampling, ChromaUpsampling, Planar8};
 pub use gamut_core::{DecodeLimits, Dimensions, RawMetadata};
 // The facade types named in the `metadata`-feature surface, so a caller can spell
 // `WebpEncoder::with_metadata` and read a `RawMetadata` as a `Metadata` without a direct

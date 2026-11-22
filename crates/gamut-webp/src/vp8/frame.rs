@@ -28,7 +28,7 @@
 pub(crate) use super::decoder::decode_frame;
 #[cfg(test)]
 pub(crate) use super::encoder::encode_frame;
-pub(crate) use super::encoder::{EncodeOptions, encode_frame_filtered};
+pub(crate) use super::encoder::{EncodeOptions, Sns, encode_frame_filtered};
 /// Re-exported so the frame tests carry the loop-filter delta type next to [`EncodeOptions`].
 #[cfg(test)]
 pub(crate) use super::header::LoopFilterDeltas;
@@ -164,19 +164,20 @@ pub(super) mod fixtures {
         yuv420(width, height, y, u, v)
     }
 
-    /// Four horizontal bands, one per quantizer segment, each lightly textured.
+    /// Four horizontal luma bands, each lightly textured, over wrapping chroma ramps.
     ///
-    /// Segments are assigned by macroblock luma mean (`(mean / 64).min(3)`), so a fixture only
-    /// exercises the per-macroblock segment lookup if its macroblocks land in *different* buckets.
-    /// `pattern`'s wrapping ramp does not: it sweeps the whole 0..255 range inside every
-    /// macroblock, so each one averages near 128 and the segment map comes out uniform -- and a
-    /// uniform map makes any index into it indistinguishable from any other.
+    /// Segments are assigned by libwebp's analysis (`analysis::plan_segments`): k-means over each
+    /// macroblock's prediction-residual "alpha", a texture score, not its brightness. A fixture
+    /// only exercises the per-macroblock segment lookup if its macroblocks land in *different*
+    /// segments, and a uniform map makes any index into it indistinguishable from any other.
     ///
-    /// The bands average about 23, 87, 151 and 215, one per segment, and they are *horizontal* so
-    /// the difference falls between macroblock rows -- what a wrong row stride gets wrong. All
-    /// four matter: with only the outer two, the quantizer deltas for segments 1 and 2 are never
-    /// applied and changing either goes unnoticed. The `i % 16` texture keeps blocks from being
-    /// flat enough to skip entirely.
+    /// Here the score varies along both axes. Down the frame, the band steps fall on macroblock
+    /// row boundaries -- what a wrong row stride gets wrong -- so a macroblock's top edge predicts
+    /// it from another band, and the top row has no edge at all. Across it, the chroma ramps
+    /// (`i * 5`, `i * 11`) wrap at positions that differ from one macroblock to the next, which
+    /// moves the chroma residual between columns. At 64x64 the top row comes out in another segment
+    /// from the rows under it and several segments are in use. The `i % 16` texture keeps blocks
+    /// from being flat enough to skip entirely.
     ///
     /// `height` should cover four macroblock rows (64) so every band gets one.
     pub(in crate::vp8) fn banded(width: u32, height: u32) -> Vp8Planes {
@@ -494,17 +495,18 @@ mod tests {
     /// `segmented_stream_is_byte_stable` below for why nothing consistency-shaped can.
     #[test]
     fn encoder_recon_matches_decoder_with_segmentation() {
-        let opts = EncodeOptions {
-            segmented: true,
-            ..EncodeOptions::default()
-        };
+        let opts = EncodeOptions::default();
         // Sizes spanning more than one macroblock row, so `mb_y` is not always 0 -- at one row the
         // row-stride arithmetic cannot be distinguished from anything.
         for &(w, h) in &[(64u32, 48u32), (33, 41)] {
-            for &q in &[10u8, 60] {
+            for &q in &[90u8, 30] {
                 let yuv = banded(w, h);
+                let sns = Sns {
+                    quality: q,
+                    strength: 100,
+                };
                 let (bits, recon) =
-                    encode_frame_filtered(&yuv, q, opts).expect("fixture fits the size fields");
+                    encode_frame_filtered(&yuv, sns, opts).expect("fixture fits the size fields");
                 let decoded = decode_frame(&bits).expect("decode");
                 let (enc, dec) = (recon.to_yuv420().unwrap(), decoded.to_yuv420().unwrap());
                 assert_eq!(
@@ -526,6 +528,82 @@ mod tests {
         }
     }
 
+    /// The recon-equals-decoder invariant when the segment map is too lopsided to send.
+    ///
+    /// Each segment-tree probability rounds to `255` once the macroblocks off its zero branch are
+    /// about 1 in 510 or fewer, and then the map is not sent and the decoder reads every
+    /// macroblock as segment 0. The encoder must put those few macroblocks in segment 0 as well
+    /// (libwebp's `ResetSegments`), or it quantizes them with a quantizer the decoder never
+    /// applies. Here 575 noisy macroblocks share segment 0 and one flat one is analysed into
+    /// another segment, at libwebp's default quality and SNS strength.
+    #[test]
+    fn encoder_recon_matches_decoder_when_the_segment_map_is_not_sent() {
+        let (w, h) = (384usize, 384usize);
+        let (cw, ch) = (w / 2, h / 2);
+        // Per-sample noise over `64..192` from a fixed mixing function; the plan assertion below
+        // checks that it still lands the frame in the case under test.
+        let noise = |i: usize, plane: u64| -> u8 {
+            let mut v = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (plane << 40);
+            v ^= v >> 29;
+            v = v.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            v ^= v >> 32;
+            (64 + (v & 0xff) / 2) as u8
+        };
+        // Macroblock (10, 10) is flat mid-grey in every plane.
+        let flat = |x: usize, y: usize, mb: usize| x / mb == 10 && y / mb == 10;
+        let y = (0..w * h)
+            .map(|i| {
+                if flat(i % w, i / w, 16) {
+                    128
+                } else {
+                    noise(i, 0)
+                }
+            })
+            .collect();
+        let chroma = |plane| {
+            (0..cw * ch)
+                .map(|i| {
+                    if flat(i % cw, i / cw, 8) {
+                        128
+                    } else {
+                        noise(i, plane)
+                    }
+                })
+                .collect()
+        };
+        let yuv = yuv420(w as u32, h as u32, y, chroma(1), chroma(2));
+        let sns = Sns {
+            quality: 75,
+            strength: 50,
+        };
+
+        // The fixture reaches the case: segmentation is on, and exactly one macroblock is
+        // analysed out of segment 0.
+        let [py, pu, pv] = yuv.planes();
+        let source = crate::vp8::analysis::Source {
+            y: py,
+            u: pu,
+            v: pv,
+            y_stride: w,
+            c_stride: cw,
+            mb_cols: w / 16,
+            mb_rows: h / 16,
+        };
+        let plan = crate::vp8::analysis::plan_segments(&source, sns.quality, sns.strength, false);
+        assert!(plan.count > 1, "segmentation must be on");
+        assert_eq!(plan.map.iter().filter(|&&s| s != 0).count(), 1);
+
+        let (bits, recon) = encode_frame_filtered(&yuv, sns, EncodeOptions::default())
+            .expect("fixture fits the size fields");
+        let decoded = decode_frame(&bits).expect("decode");
+        let (enc, dec) = (recon.to_yuv420().unwrap(), decoded.to_yuv420().unwrap());
+        assert_eq!(
+            enc.planes(),
+            dec.planes(),
+            "unsent segment map desynced recon"
+        );
+    }
+
     #[test]
     fn both_loop_filters_reconstruct_bit_exact() {
         // The simple (luma-only) and normal (luma+chroma) filters must each reconstruct identically
@@ -536,7 +614,6 @@ mod tests {
                 let yuv = detailed(48, 32);
                 let opts = EncodeOptions {
                     simple_filter: simple,
-                    segmented: false,
                     partitions: 1,
                     ..Default::default()
                 };
@@ -557,17 +634,20 @@ mod tests {
 
     #[test]
     fn segmentation_round_trips_bit_exact() {
-        // Four quantizer segments (assigned by macroblock luma mean) must reconstruct identically in
-        // the encoder and the decoder across a range of base quantizers.
-        for &q in &[10u8, 40, 90] {
+        // SNS quantizer segments must reconstruct identically in the encoder and the decoder
+        // across a range of qualities.
+        for &q in &[90u8, 60, 10] {
             let yuv = detailed(64, 48);
             let opts = EncodeOptions {
                 simple_filter: false,
-                segmented: true,
                 partitions: 1,
                 ..Default::default()
             };
-            let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
+            let sns = Sns {
+                quality: q,
+                strength: 50,
+            };
+            let (bits, recon) = encode_frame_filtered(&yuv, sns, opts)
                 .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
             let (enc, dec) = (recon.to_yuv420().unwrap(), dec.to_yuv420().unwrap());
@@ -585,7 +665,6 @@ mod tests {
             let yuv = detailed(32, 160);
             let opts = EncodeOptions {
                 simple_filter: false,
-                segmented: false,
                 partitions,
                 ..Default::default()
             };

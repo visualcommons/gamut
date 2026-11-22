@@ -15,6 +15,8 @@
 // `decoder` and `reconstruct` halves it is split into.
 pub(crate) mod frame;
 
+pub(crate) mod analysis;
+
 pub(crate) mod bool_coder;
 pub(crate) mod cost;
 mod decoder;

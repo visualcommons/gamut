@@ -94,6 +94,23 @@ pub fn libwebp_decode_yuv(webp: &[u8]) -> DecodedYuv {
 /// buffer size or a libwebp error.
 #[must_use]
 pub fn libwebp_rgba_to_yuv(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
+    rgba_to_yuv(rgba, width, height, false)
+}
+
+/// Runs libwebp's **sharp-YUV** RGB→YUV 4:2:0 conversion (`WebPPictureSharpARGBToYUVA`, what
+/// `cwebp -sharp_yuv` applies) on interleaved RGBA, returning the YUV planes. Unlike
+/// [`libwebp_rgba_to_yuv`] this is a bit-exact surface: gamut-color ports the algorithm exactly.
+/// libwebp falls back to its plain conversion below 4 pixels in either dimension
+/// (`kMinDimensionIterativeConversion`), so compare only at or above that. Panics (these are
+/// tests) on a bad buffer size or a libwebp error.
+#[must_use]
+pub fn libwebp_rgba_to_yuv_sharp(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
+    rgba_to_yuv(rgba, width, height, true)
+}
+
+/// The shared body of [`libwebp_rgba_to_yuv`] (`sharp = false`) and
+/// [`libwebp_rgba_to_yuv_sharp`] (`sharp = true`).
+fn rgba_to_yuv(rgba: &[u8], width: u32, height: u32, sharp: bool) -> DecodedYuv {
     let expected = width as usize * height as usize * 4;
     assert_eq!(
         rgba.len(),
@@ -103,7 +120,8 @@ pub fn libwebp_rgba_to_yuv(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
     // SAFETY: the picture is zero-initialised then Init-filled. With the default `use_argb = 0`,
     // `WebPPictureImportRGBA` runs libwebp's RGBA→YUV conversion in-line (see `Import` →
     // `ImportYUVAFromRGBA` in picture_csp_enc.c), filling the y/u/v planes (valid for `rows * stride`
-    // bytes), which we copy out per row before freeing the picture.
+    // bytes), which we copy out per row before freeing the picture. With `use_argb = 1` it fills
+    // the ARGB buffer instead, which `WebPPictureSharpARGBToYUVA` then converts into y/u/v.
     unsafe {
         let mut pic: libwebp_sys::WebPPicture = std::mem::zeroed();
         assert!(
@@ -112,10 +130,17 @@ pub fn libwebp_rgba_to_yuv(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
         );
         pic.width = width as c_int;
         pic.height = height as c_int;
+        pic.use_argb = c_int::from(sharp);
         assert!(
             libwebp_sys::WebPPictureImportRGBA(&mut pic, rgba.as_ptr(), width as c_int * 4) != 0,
             "WebPPictureImportRGBA failed"
         );
+        if sharp {
+            assert!(
+                libwebp_sys::WebPPictureSharpARGBToYUVA(&mut pic) != 0,
+                "WebPPictureSharpARGBToYUVA failed"
+            );
+        }
         let (w, h) = (width as usize, height as usize);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         let copy_plane = |ptr: *const u8, row_stride: usize, pw: usize, ph: usize| {
@@ -421,6 +446,82 @@ pub fn libwebp_encode_lossy_rgba_config(
         assert!(ok != 0, "WebPEncode failed for {cfg:?}");
     }
     out
+}
+
+/// Encodes YUV 4:2:0 planes (`y` is `width * height`, `u`/`v` the ceiling-halved size, rows
+/// packed) to a lossy WebP under `cfg`, returning the file bytes and the quantizer index libwebp
+/// coded each macroblock at, in raster order (`WebPPicture::extra_info` with
+/// `extra_info_type = 3`: `dqm_[segment].quant_`). Feeding planes rather than RGB keeps libwebp's
+/// own RGB→YUV conversion out of the comparison, so this pins gamut's macroblock analysis and
+/// spatial noise shaping per macroblock. Panics (these are tests) on a bad plane size or a
+/// libwebp error.
+#[must_use]
+pub fn libwebp_encode_yuv_mb_quants(
+    planes: [&[u8]; 3],
+    width: u32,
+    height: u32,
+    cfg: &LibwebpLossyConfig,
+) -> (Vec<u8>, Vec<u8>) {
+    let (w, h) = (width as usize, height as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    assert_eq!(planes[0].len(), w * h, "Y plane is not width*height bytes");
+    assert_eq!(planes[1].len(), cw * ch, "U plane is not the 4:2:0 size");
+    assert_eq!(planes[2].len(), cw * ch, "V plane is not the 4:2:0 size");
+    let mut mb_quant = vec![0u8; w.div_ceil(16) * h.div_ceil(16)];
+    let mut out: Vec<u8> = Vec::new();
+    // SAFETY: the config and picture are zero-initialised then `*Init`-filled; with
+    // `use_argb = 0` `WebPPictureAlloc` allocates y/u/v planes of `rows * stride` bytes, each
+    // filled row by row within those bounds below. `extra_info` points at `mb_quant`, sized to the
+    // macroblock grid libwebp writes, and `custom_ptr` at `out`; both outlive `WebPEncode`.
+    unsafe {
+        let mut config: libwebp_sys::WebPConfig = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPConfigInit(&mut config) != 0,
+            "WebPConfigInit failed (version mismatch?)"
+        );
+        config.quality = cfg.quality;
+        config.filter_type = cfg.filter_type;
+        config.segments = cfg.segments;
+        config.method = cfg.method;
+        config.filter_strength = cfg.filter_strength;
+        config.sns_strength = cfg.sns_strength;
+        assert!(
+            libwebp_sys::WebPValidateConfig(&config) != 0,
+            "WebPValidateConfig rejected {cfg:?}"
+        );
+
+        let mut pic: libwebp_sys::WebPPicture = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPPictureInit(&mut pic) != 0,
+            "WebPPictureInit failed (version mismatch?)"
+        );
+        pic.width = width as c_int;
+        pic.height = height as c_int;
+        pic.use_argb = 0;
+        assert!(
+            libwebp_sys::WebPPictureAlloc(&mut pic) != 0,
+            "WebPPictureAlloc failed"
+        );
+        let fill = |dst: *mut u8, stride: c_int, src: &[u8], pw: usize, ph: usize| {
+            for row in 0..ph {
+                let dst = slice::from_raw_parts_mut(dst.add(row * stride as usize), pw);
+                dst.copy_from_slice(&src[row * pw..(row + 1) * pw]);
+            }
+        };
+        fill(pic.y, pic.y_stride, planes[0], w, h);
+        fill(pic.u, pic.uv_stride, planes[1], cw, ch);
+        fill(pic.v, pic.uv_stride, planes[2], cw, ch);
+        pic.extra_info_type = 3;
+        pic.extra_info = mb_quant.as_mut_ptr();
+        pic.writer = Some(collect_writer);
+        pic.custom_ptr = std::ptr::from_mut(&mut out).cast::<c_void>();
+
+        let ok = libwebp_sys::WebPEncode(&config, &mut pic);
+        pic.extra_info = std::ptr::null_mut();
+        libwebp_sys::WebPPictureFree(&mut pic);
+        assert!(ok != 0, "WebPEncode failed for {cfg:?}");
+    }
+    (out, mb_quant)
 }
 
 /// Encodes interleaved RGBA to a lossy WebP via libwebp's advanced `WebPEncode` API at `quality`

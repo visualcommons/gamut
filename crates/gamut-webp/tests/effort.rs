@@ -97,12 +97,15 @@ fn encode_lossless(effort: Effort, px: &[u8], d: Dimensions) -> Vec<u8> {
 
 /// Encodes RGBA lossily at `effort`. The colour under `alpha = 0` is preserved (`Exact::Preserve`)
 /// so these fixtures isolate the effort ladder: the default transparent-colour cleanup (issue
-/// #1207) is pinned in `tests/default_bytes.rs`, and the byte pins here predate it.
+/// #1207) is pinned in `tests/default_bytes.rs`, and the byte pins here predate it. Spatial noise
+/// shaping (issue #1017) is off for the same reason: the default strength is pinned there, its
+/// per-rung analysis against libwebp in the `vp8::analysis` tests.
 fn encode_lossy(effort: Effort, quality: u8, px: &[u8], d: Dimensions) -> Vec<u8> {
     let mut out = Vec::new();
     WebpEncoder::lossy(quality)
         .with_effort(effort)
         .with_exact(Exact::Preserve)
+        .with_sns_strength(0)
         .encode_image(ImageRef::<Rgba8>::new(px, d).expect("fixture"), &mut out)
         .expect("lossy encode");
     out
@@ -413,6 +416,7 @@ fn near_lossless_is_ignored_by_the_lossy_path() {
     let d = dims(w, h);
     let mut with_nl = Vec::new();
     WebpEncoder::lossy(70)
+        .with_sns_strength(0)
         .with_near_lossless(Some(gamut_webp::NearLossless::new(0).expect("0..=99")))
         .encode_image(
             ImageRef::<Rgba8>::new(&px, d).expect("fixture"),
@@ -876,11 +880,12 @@ fn encode_lossless_rgb(effort: Effort, px: &[u8], d: Dimensions) -> Vec<u8> {
     out
 }
 
-/// [`encode_lossy`] for an RGB (no-alpha) surface.
+/// [`encode_lossy`] for an RGB (no-alpha) surface, likewise with spatial noise shaping off.
 fn encode_lossy_rgb(effort: Effort, quality: u8, px: &[u8], d: Dimensions) -> Vec<u8> {
     let mut out = Vec::new();
     WebpEncoder::lossy(quality)
         .with_effort(effort)
+        .with_sns_strength(0)
         .encode_image(ImageRef::<Rgb8>::new(px, d).expect("rgb fixture"), &mut out)
         .expect("encode");
     out

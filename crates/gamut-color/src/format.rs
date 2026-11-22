@@ -206,6 +206,30 @@ pub enum ChromaUpsampling {
     Interpolated = 1,
 }
 
+/// How an encoder derives subsampled chroma from full-resolution RGB — the encode-side twin of
+/// [`ChromaUpsampling`].
+///
+/// [`Box`](Self::Box) averages each chroma block in gamma space: fast, and what every converter
+/// does by default. [`Sharp`](Self::Sharp) is libwebp's sharp-YUV (`cwebp -sharp_yuv`), which
+/// solves for the planes that, after a decoder's interpolating upsampler, come closest to the
+/// source's linear-light luma and chroma — fewer colour halos at sharp edges, at several times
+/// the conversion cost.
+///
+/// The discriminants are permanent and new variants are only ever appended, so the value crosses
+/// a C boundary as a plain `u8`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub enum ChromaDownsampling {
+    /// The mean of the samples each chroma sample covers, in gamma space; an edge block averages
+    /// only the samples that exist.
+    #[default]
+    Box = 0,
+    /// libwebp's iterative sharp-YUV conversion, bit-exact to `WebPPictureSharpARGBToYUVA`.
+    Sharp = 1,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +239,13 @@ mod tests {
         assert_eq!(ChromaUpsampling::default(), ChromaUpsampling::Interpolated);
         assert_eq!(ChromaUpsampling::Nearest as u8, 0);
         assert_eq!(ChromaUpsampling::Interpolated as u8, 1);
+    }
+
+    #[test]
+    fn box_is_the_default_downsampling_and_discriminants_are_pinned() {
+        assert_eq!(ChromaDownsampling::default(), ChromaDownsampling::Box);
+        assert_eq!(ChromaDownsampling::Box as u8, 0);
+        assert_eq!(ChromaDownsampling::Sharp as u8, 1);
     }
 
     const ALL: [BitDepth; 4] = [

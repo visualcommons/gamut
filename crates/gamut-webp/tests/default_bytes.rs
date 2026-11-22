@@ -28,6 +28,11 @@
 //! 33 rather than 50, so each lossy file is larger and closer to its source (lossy RGB 134 → 152
 //! bytes, transparent lossy 184 → 202, the 16×16 opaque file 58 → 62). The historical anchor asks
 //! for quality 33, which lands on the old quantizer 50, and its bytes did not move.
+//!
+//! Issue #1017 moved them once more by turning on libwebp's spatial noise shaping at its default
+//! strength 50: up to four quantizer segments and the chroma quantizer deltas (lossy RGB 152 → 158
+//! bytes, transparent lossy 192 → 204, the opaque file 62 → 64). Every pre-#1017 pin is kept
+//! beside its successor with `with_sns_strength(0)`, which reproduces the old bytes exactly.
 
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy};
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
@@ -138,8 +143,15 @@ fn lossless_quality_75_at_effort_4_keeps_the_default_bytes() {
 
 #[test]
 fn lossy_rgb_default_bytes_are_unchanged() {
+    // Issue #1017 moved the default: a lossy encode now runs libwebp's spatial noise shaping at
+    // strength 50 (152 → 158 bytes here, the segment map and the finer chroma DC quantizer). SNS
+    // off still reproduces the pre-#1017 bytes, which is what shows SNS is the only thing that
+    // moved.
     let file = encode_rgb(&WebpEncoder::lossy(60), &rgb_fixture(32, 24), dims(32, 24));
-    assert_bytes("lossy rgb", &file, 152, 0x9408_de4e_61f6_9872);
+    assert_bytes("lossy rgb", &file, 158, 0x5753_e084_9c32_49d2);
+    let plain = WebpEncoder::lossy(60).with_sns_strength(0);
+    let file = encode_rgb(&plain, &rgb_fixture(32, 24), dims(32, 24));
+    assert_bytes("lossy rgb without sns", &file, 152, 0x9408_de4e_61f6_9872);
 }
 
 #[test]
@@ -151,9 +163,14 @@ fn lossy_rgba_extended_default_bytes_are_unchanged() {
     // (libwebp's `exact = 0`), which flattens the fixture's transparent luma (202 → 192 bytes).
     // `Exact::Preserve` still reproduces the pre-#1207 bytes, which is what shows the cleanup is the
     // only thing that moved.
+    //
+    // Issue #1017's spatial noise shaping moved it again (192 → 204); the `Exact::Preserve` row
+    // runs with SNS off, so it still pins the pre-#1207 file.
     let file = encode_rgba(&WebpEncoder::lossy(60), &rgba_fixture(32, 24), dims(32, 24));
-    assert_bytes("lossy rgba extended", &file, 192, 0xb44a_1f81_12d0_5f0d);
-    let exact = WebpEncoder::lossy(60).with_exact(Exact::Preserve);
+    assert_bytes("lossy rgba extended", &file, 204, 0x9b58_223e_004c_b63e);
+    let exact = WebpEncoder::lossy(60)
+        .with_exact(Exact::Preserve)
+        .with_sns_strength(0);
     let file = encode_rgba(&exact, &rgba_fixture(32, 24), dims(32, 24));
     assert_bytes(
         "lossy rgba extended exact",
@@ -165,13 +182,15 @@ fn lossy_rgba_extended_default_bytes_are_unchanged() {
 
 #[test]
 fn lossy_rgba_opaque_default_bytes_are_unchanged() {
-    // Small enough to pin every byte of the file, container header included.
-    const OPAQUE: [u8; 62] = [
-        0x52, 0x49, 0x46, 0x46, 0x36, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
-        0x20, 0x2a, 0x00, 0x00, 0x00, 0xb0, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00, 0x10, 0x00,
-        0x04, 0x00, 0x42, 0x08, 0x09, 0xd3, 0xd1, 0xbb, 0xe5, 0xc3, 0x40, 0xd4, 0x00, 0xfe, 0xca,
-        0xc3, 0x6f, 0xff, 0x25, 0x3f, 0xfb, 0xca, 0xff, 0x5d, 0xdb, 0x86, 0xdd, 0x27, 0xea, 0x7f,
-        0x28, 0x00,
+    // Small enough to pin every byte of the file, container header included. Issue #1017's
+    // spatial noise shaping grew it 62 → 64 bytes: one flat macroblock is one segment, so what
+    // moved is the frame's chroma quantizer deltas.
+    const OPAQUE: [u8; 64] = [
+        0x52, 0x49, 0x46, 0x46, 0x38, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x20, 0x2b, 0x00, 0x00, 0x00, 0xd0, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00, 0x10, 0x00,
+        0x04, 0x00, 0x42, 0x25, 0xa2, 0x02, 0x74, 0xf4, 0x6e, 0xf9, 0x70, 0xd0, 0x35, 0x00, 0xfe,
+        0xca, 0xc3, 0x6f, 0xff, 0x2c, 0xff, 0xfd, 0x96, 0xff, 0xb2, 0xde, 0x33, 0xf0, 0x24, 0xad,
+        0x59, 0x84, 0x00, 0x00,
     ];
     let px = [120u8, 60, 200, 0xff].repeat(16 * 16);
     let file = encode_rgba(&WebpEncoder::lossy(60), &px, dims(16, 16));
@@ -187,8 +206,12 @@ fn default_decode_output_is_unchanged() {
     // the files they decode at a finer quantizer. The transparent file is encoded with
     // `Exact::Preserve` since issue #1207, so it is still the very file these digests decode: this
     // pins the decoder, and the encoder's cleanup default is pinned above.
-    let lossy = encode_rgb(&WebpEncoder::lossy(60), &rgb_fixture(32, 24), dims(32, 24));
-    let exact = WebpEncoder::lossy(60).with_exact(Exact::Preserve);
+    //
+    // Both files are encoded with SNS off since issue #1017 turned it on by default, for the same
+    // reason: they are still the files these digests decode.
+    let plain = WebpEncoder::lossy(60).with_sns_strength(0);
+    let lossy = encode_rgb(&plain, &rgb_fixture(32, 24), dims(32, 24));
+    let exact = plain.with_exact(Exact::Preserve);
     let ext = encode_rgba(&exact, &rgba_fixture(32, 24), dims(32, 24));
     let nearest = WebpDecoder::new().with_chroma_upsampling(ChromaUpsampling::Nearest);
     for (decoder, rgb_digest, rgba_digest) in [
@@ -222,7 +245,12 @@ fn effort_two_still_reproduces_the_historical_lossy_bytes() {
     // Those digests were captured at quality 60, which the old linear mapping sent to base
     // quantizer 50. Since issue #1204 quality follows libwebp's curve, on which 33 is the quality
     // that lands on 50, so the anchor now asks for 33 and the bytes are untouched.
-    let e2 = WebpEncoder::lossy(33).with_effort(Effort::Fast);
+    //
+    // Since issue #1017 the lossy default runs spatial noise shaping; the pre-SNS coder is
+    // strength 0, so the anchor asks for that too.
+    let e2 = WebpEncoder::lossy(33)
+        .with_effort(Effort::Fast)
+        .with_sns_strength(0);
     let rgb = encode_rgb(&e2, &rgb_fixture(32, 24), dims(32, 24));
     assert_bytes("lossy rgb @ effort 2", &rgb, 136, 0x2eb3_c30d_36b6_067e);
 

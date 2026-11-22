@@ -12,7 +12,7 @@ use core::ops::Range;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use gamut_color::{ColorRange, Planar8};
+use gamut_color::{ChromaDownsampling, ColorRange, Planar8};
 use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Pixel, Result, Rgb8, Rgba8};
 use gamut_riff::{
     Chunk, FourCc, MetadataChunks, Vp8xHeader, WebpChunkId, write_extended_preserving,
@@ -26,34 +26,10 @@ use crate::backend::{
 };
 use crate::config::{Effort, Exact, NearLossless, WebpConfig, WebpMode};
 use crate::transparent::{cleanup_yuva, clear_transparent_argb};
-use crate::vp8::frame::{EncodeOptions, encode_frame_filtered};
+use crate::vp8::frame::{EncodeOptions, Sns, encode_frame_filtered};
 use crate::vp8l::encoder::encode as encode_vp8l;
 use crate::vp8l::near_lossless;
 use crate::vp8l::transform::make_argb;
-
-/// Maps a `0..=100` quality to a VP8 base quantizer index (`0..=127`); higher quality → lower index
-/// (less quantization).
-///
-/// This is libwebp's `QualityToCompression` curve (`src/enc/quant_enc.c`) with SNS off: with
-/// `c = quality / 100`, the piecewise-linear `linear_c = c < 0.75 ? c·2/3 : 2c − 1` is raised to
-/// `1/3` (file size scales roughly as the cube of the quantizer), and the index is
-/// `⌊127·(1 − linear_c^(1/3))⌋`. So the same `quality` lands on the same base quantizer as libwebp
-/// at `sns_strength = 0` — the oracle test below checks every `0..=100`.
-///
-/// The two lines meet at `c = 0.75` (both `0.5`), and below it `c·2/3` is the larger of the two, so
-/// `linear_c` is written as their `max` rather than as libwebp's branch: the branch's `<` and `<=`
-/// are indistinguishable on every input, and `max` leaves no such twin. That removes the
-/// comparison's mutants along with its equivalent one. The floor's fractional distance from an
-/// integer is at least `0.0119` over `0..=100`, so a last-ulp difference in a platform's `powf`
-/// cannot move an index.
-fn quality_to_quant(quality: u8) -> u8 {
-    let c = f64::from(quality.min(100)) / 100.0;
-    let linear_c = (c * (2.0 / 3.0)).max(2.0 * c - 1.0);
-    let compression = linear_c.powf(1.0 / 3.0);
-    // `compression` lies in `0.0..=1.0`, so the product is in `0.0..=127.0` and the truncating cast
-    // is libwebp's `(int)` floor.
-    (127.0 * (1.0 - compression)) as u8
-}
 
 /// Whether `fourcc` names a chunk that is genuinely *unknown* — the only kind
 /// [`WebpEncoder::with_unknown_chunks`] carries through.
@@ -304,6 +280,29 @@ impl WebpEncoder {
         self
     }
 
+    /// Sets how a lossy encode derives 4:2:0 chroma from RGB: the default
+    /// [`ChromaDownsampling::Box`] average, or [`ChromaDownsampling::Sharp`] — libwebp's
+    /// sharp-YUV (`cwebp -sharp_yuv`), which keeps sharp colour edges free of chroma halos at
+    /// several times the conversion cost. See
+    /// [`WebpConfig::chroma_downsampling`](crate::WebpConfig::chroma_downsampling). A lossless
+    /// encode ignores it. Calling this twice keeps the last value.
+    #[must_use]
+    pub fn with_chroma_downsampling(mut self, downsampling: ChromaDownsampling) -> Self {
+        self.config.chroma_downsampling = downsampling;
+        self
+    }
+
+    /// Sets the spatial-noise-shaping strength, `0..=100` (libwebp's `sns_strength`, cwebp's
+    /// `-sns`): how far a lossy encode moves each of its up to four macroblock segments'
+    /// quantizers from the quality's base. See
+    /// [`WebpConfig::sns_strength`](crate::WebpConfig::sns_strength). Values above `100` behave
+    /// as `100`. A lossless encode ignores it. Calling this twice keeps the last value.
+    #[must_use]
+    pub fn with_sns_strength(mut self, strength: u8) -> Self {
+        self.config.sns_strength = strength;
+        self
+    }
+
     /// Encodes the lossless codestream, applying near-lossless preprocessing when configured.
     ///
     /// With a strength set, the image is coded **both ways** and the smaller result kept. That
@@ -418,7 +417,8 @@ impl WebpEncoder {
         clean_under: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         // `from_rgb8_bt601` builds 4:2:0 planes by contract, which `try_from` re-checks.
-        let planar = Planar8::from_rgb8_bt601(rgb, ColorRange::Limited);
+        let planar =
+            Planar8::from_rgb8_bt601(rgb, ColorRange::Limited, self.config.chroma_downsampling);
         let yuv = &match clean_under {
             None => Vp8Planes::try_from(planar)?,
             Some(alpha) => {
@@ -444,7 +444,13 @@ impl WebpEncoder {
                     effort: self.config.effort,
                     ..EncodeOptions::default()
                 };
-                Ok(encode_frame_filtered(yuv, quality_to_quant(self.config.quality), opts)?.0)
+                // Up to four quantizer segments at every effort, as libwebp's default
+                // `segments = 4`; strength 0 settles on one.
+                let sns = Sns {
+                    quality: self.config.quality,
+                    strength: self.config.sns_strength,
+                };
+                Ok(encode_frame_filtered(yuv, sns, opts)?.0)
             }
         }
     }
@@ -757,8 +763,130 @@ mod tests {
             near_lossless: NearLossless::from_libwebp_strength(40),
             alpha_quality: 41,
             exact: Exact::Clean,
+            chroma_downsampling: ChromaDownsampling::Sharp,
+            sns_strength: 7,
         };
         assert_eq!(WebpEncoder::from_config(config).config(), config);
+    }
+
+    #[test]
+    fn with_chroma_downsampling_sets_the_knob_and_the_last_call_wins() {
+        assert_eq!(
+            WebpEncoder::lossy(40).config().chroma_downsampling,
+            ChromaDownsampling::Box
+        );
+        let enc = WebpEncoder::lossy(40)
+            .with_chroma_downsampling(ChromaDownsampling::Box)
+            .with_chroma_downsampling(ChromaDownsampling::Sharp);
+        assert_eq!(enc.config().chroma_downsampling, ChromaDownsampling::Sharp);
+    }
+
+    /// A backend that records the planes it is handed and then fails the job, so the test sees
+    /// exactly what the lossy path converted to without decoding anything.
+    struct PlaneRecorder(Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl WebpCodestreamEncoder for PlaneRecorder {
+        fn supports(&mut self, _req: &WebpEncodeRequest) -> bool {
+            true
+        }
+
+        fn encode(
+            &mut self,
+            _req: &WebpEncodeRequest,
+            raster: &WebpRasterRef<'_>,
+        ) -> Result<Vec<u8>> {
+            if let WebpRasterRef::Yuv420(yuv) = raster {
+                *self.0.lock().unwrap() = yuv.planes().map(<[u8]>::to_vec).to_vec();
+            }
+            Err(Error::unsupported("test", "recorded"))
+        }
+    }
+
+    /// The lossy path converts with the configured downsampling: the planes a backend receives
+    /// are gamut-color's for that choice, and on hard colour edges the two choices differ.
+    #[test]
+    fn lossy_converts_with_the_configured_chroma_downsampling() {
+        let (w, h) = (9u32, 6u32);
+        let rgb: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if (i % w + i / w) % 2 == 0 {
+                    [255, 0, 40]
+                } else {
+                    [0, 200, 255]
+                }
+            })
+            .collect();
+        let image = ImageRef::<Rgb8>::new(&rgb, dims(w, h)).unwrap();
+        let planes_for = |downsampling| {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let enc = WebpEncoder::lossy(80)
+                .with_chroma_downsampling(downsampling)
+                .with_backend(PlaneRecorder(Arc::clone(&seen)));
+            assert!(enc.encode_image(image, &mut Vec::new()).is_err());
+            let expected = Planar8::from_rgb8_bt601(image, ColorRange::Limited, downsampling);
+            let planes = seen.lock().unwrap().clone();
+            assert_eq!(
+                planes,
+                expected.planes().map(<[u8]>::to_vec),
+                "{downsampling:?}"
+            );
+            planes
+        };
+        assert_ne!(
+            planes_for(ChromaDownsampling::Box),
+            planes_for(ChromaDownsampling::Sharp)
+        );
+    }
+
+    /// The built-in lossy path runs spatial noise shaping at the configured strength: on a frame
+    /// whose top macroblock row is flat and bottom row textured, the default strength declares
+    /// segments with distinct quantizers and a map, and strength 0 declares none. The quantizer
+    /// values themselves are the analysis module's, pinned against libwebp there.
+    #[test]
+    fn lossy_frames_are_segmented_at_the_configured_sns_strength() {
+        use crate::vp8::bool_coder::BoolDecoder;
+        use crate::vp8::header::{self, Segmentation, UNCOMPRESSED_CHUNK_LEN};
+
+        let (w, h) = (32u32, 32u32);
+        let rgb: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                if y < 16 {
+                    [120; 3]
+                } else {
+                    [((x * 97 + y * 61) % 251) as u8, ((x * 13) % 256) as u8, 40]
+                }
+            })
+            .collect();
+        let segmentation = |enc: WebpEncoder| -> Segmentation {
+            let mut out = Vec::new();
+            enc.encode_image(ImageRef::<Rgb8>::new(&rgb, dims(w, h)).unwrap(), &mut out)
+                .unwrap();
+            // A simple file: the `RIFF` header, then the `VP8 ` chunk header, then its payload.
+            assert_eq!(&out[12..16], b"VP8 ");
+            let vp8 = &out[20..];
+            let chunk = header::read_uncompressed_chunk(vp8).unwrap();
+            let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
+            let mut modes = BoolDecoder::new(&vp8[UNCOMPRESSED_CHUNK_LEN..part0_end]);
+            header::read_frame_header(&chunk, &mut modes).0.segmentation
+        };
+        let shaped = segmentation(WebpEncoder::lossy(75));
+        assert!(shaped.enabled && shaped.update_map && !shaped.abs_delta);
+        assert_eq!(
+            shaped.quantizer[0], 0,
+            "deltas are against segment 0, the frame's base"
+        );
+        assert!(shaped.quantizer[1..].iter().any(|&d| d != 0));
+        assert!(!segmentation(WebpEncoder::lossy(75).with_sns_strength(0)).enabled);
+    }
+
+    #[test]
+    fn with_sns_strength_sets_the_knob_and_the_last_call_wins() {
+        assert_eq!(WebpEncoder::lossy(40).config().sns_strength, 50);
+        let enc = WebpEncoder::lossy(40)
+            .with_sns_strength(0)
+            .with_sns_strength(80);
+        assert_eq!(enc.config().sns_strength, 80);
     }
 
     #[test]
@@ -1012,25 +1140,6 @@ mod tests {
         assert_eq!(ids, vec![WebpChunkId::Vp8]);
     }
 
-    #[test]
-    fn quality_to_quant_maps_endpoints_and_is_monotonic() {
-        // Higher quality → lower base quantizer index. The exact values are libwebp's, pinned over
-        // the whole range by `quality_to_quant_matches_libwebp_base_quantizer`; this keeps the
-        // endpoints, the shared default 75 (libwebp's 26), and the saturation above 100, which
-        // libwebp's float `quality` cannot reach.
-        assert_eq!(quality_to_quant(0), 127);
-        assert_eq!(quality_to_quant(100), 0);
-        assert_eq!(quality_to_quant(50), 38);
-        assert_eq!(quality_to_quant(75), 26);
-        assert_eq!(quality_to_quant(255), 0, "quality saturates at 100");
-        for q in 1u8..=100 {
-            assert!(
-                quality_to_quant(q) <= quality_to_quant(q - 1),
-                "must be non-increasing at q={q}"
-            );
-        }
-    }
-
     /// The base quantizer index (`y_ac_qi`, RFC 6386 §9.6) in the frame header of the `VP8 ` chunk
     /// of the WebP file `file`.
     fn base_q_index(file: &[u8]) -> u8 {
@@ -1054,10 +1163,11 @@ mod tests {
     }
 
     #[test]
-    fn quality_to_quant_matches_libwebp_base_quantizer() {
+    fn quality_matches_libwebp_base_quantizer_without_sns() {
         // Differential against libwebp (issue #1204): with SNS off and one segment, libwebp's frame
         // header carries `QualityToCompression(quality)` unmodulated as its base quantizer, so the
-        // same `quality` must put the same index in gamut's header at every `0..=100`.
+        // same `quality` must put the same index in gamut's header at every `0..=100` once
+        // gamut's SNS is off too (`with_sns_strength(0)`, which also settles on one segment).
         use libwebp_oracle::fixtures::photo_like_rgba;
         use libwebp_oracle::{LibwebpLossyConfig, libwebp_encode_lossy_rgba_config};
 
@@ -1079,6 +1189,7 @@ mod tests {
             );
             let mut gamut = Vec::new();
             WebpEncoder::lossy(quality)
+                .with_sns_strength(0)
                 .encode_image(
                     ImageRef::<Rgba8>::new(&rgba, dims(w, h)).unwrap(),
                     &mut gamut,

@@ -224,7 +224,7 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
     // bit-exact, and chroma differs by ≤2 only because gamut box-averages 2×2 before converting while
     // libwebp sums-then-converts (a rounding-order difference). A regression to full-range — the bug
     // this fix closed — would shift luma by ~17 and fail the `assert_eq` below.
-    use gamut_color::{ColorRange, Planar8};
+    use gamut_color::{ChromaDownsampling, ColorRange, Planar8};
     use libwebp_oracle::libwebp_rgba_to_yuv;
 
     let chroma_max = |a: &[u8], b: &[u8]| {
@@ -239,7 +239,7 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
         let rgb = rgba_to_rgb(&rgba);
         let src =
             ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).expect("dims")).expect("rgb image");
-        let gamut = Planar8::from_rgb8_bt601(src, ColorRange::Limited);
+        let gamut = Planar8::from_rgb8_bt601(src, ColorRange::Limited, ChromaDownsampling::Box);
         let lib = libwebp_rgba_to_yuv(&rgba, w, h);
         assert_eq!(
             gamut.planes()[0],
@@ -254,6 +254,46 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
             chroma_max(gamut.planes()[2], &lib.v) <= 2,
             "V within 2 at {w}x{h}"
         );
+    }
+}
+
+#[test]
+fn gamut_sharp_yuv_matches_libwebp_bit_exactly() {
+    // Sharp-YUV is a port, not a re-derivation, so every plane must equal libwebp's
+    // `WebPPictureSharpARGBToYUVA` byte for byte. Odd widths and heights reach the padding column
+    // and the duplicated last row; the pattern's hard edges drive the working space into its
+    // clamps, and the photo-like content runs the refinement to its early exit. libwebp skips
+    // sharp-YUV below 4 pixels a side, so the matrix starts there.
+    use gamut_color::{ChromaDownsampling, ColorRange, Planar8};
+    use libwebp_oracle::fixtures::pattern_rgba;
+    use libwebp_oracle::libwebp_rgba_to_yuv_sharp;
+
+    for (w, h) in [
+        (4u32, 4u32),
+        (5, 7),
+        (16, 16),
+        (17, 9),
+        (64, 48),
+        (4, 255),
+        (255, 4),
+        (128, 96),
+        (300, 70),
+    ] {
+        for (label, rgba) in [
+            ("pattern", pattern_rgba(w, h)),
+            ("photo", photo_like_rgba(w, h, 0x5eed)),
+        ] {
+            let rgb = rgba_to_rgb(&rgba);
+            let src = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).expect("dims"))
+                .expect("rgb image");
+            let gamut =
+                Planar8::from_rgb8_bt601(src, ColorRange::Limited, ChromaDownsampling::Sharp);
+            let lib = libwebp_rgba_to_yuv_sharp(&rgba, w, h);
+            let [y, u, v] = gamut.planes();
+            assert_eq!(y, lib.y.as_slice(), "{label} Y at {w}x{h}");
+            assert_eq!(u, lib.u.as_slice(), "{label} U at {w}x{h}");
+            assert_eq!(v, lib.v.as_slice(), "{label} V at {w}x{h}");
+        }
     }
 }
 
@@ -283,6 +323,56 @@ fn gamut_lossy_webp_decodes_correctly_in_libwebp() {
             mae <= 8.0,
             "gamut→libwebp interop MAE {mae:.2} too high at {w}x{h} (colour shift regression?)"
         );
+    }
+}
+
+#[test]
+fn libwebp_decodes_segmented_lossy_to_gamuts_pixels() {
+    // The public lossy path codes four quantizer segments with measured map probabilities
+    // (issue #1017). libwebp must decode every such stream to exactly the RGB gamut's own decoder
+    // produces: both run libwebp's fancy upsampler, so any disagreement is in the VP8 layer —
+    // the segment map, its tree probabilities or the per-segment quantizers. The two-tone
+    // fixture uses only segments 0 and 3, which drives one tree node's probability to 0; the
+    // photo-like one spreads macroblocks over all four. Every effort rung and both chroma
+    // downsamplers run, at a coarse and a fine quality.
+    use gamut_webp::{ChromaDownsampling, Effort};
+
+    let (w, h) = (48u32, 40u32);
+    let two_tone: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            if i / w < 16 {
+                [12, 20, 30]
+            } else {
+                [240, 235, 220]
+            }
+        })
+        .collect();
+    let photo = rgba_to_rgb(&photo_like_rgba(w, h, 0x5e9));
+    let dims = Dimensions::new(w, h).expect("dims");
+    for (label, rgb) in [("two-tone", &two_tone), ("photo", &photo)] {
+        let image = ImageRef::<Rgb8>::new(rgb, dims).expect("rgb image");
+        for level in 0..=6u8 {
+            for (quality, downsampling) in [
+                (20u8, ChromaDownsampling::Box),
+                (90, ChromaDownsampling::Sharp),
+            ] {
+                let mut webp = Vec::new();
+                WebpEncoder::lossy(quality)
+                    .with_effort(Effort::from_level(level).expect("0..=6"))
+                    .with_chroma_downsampling(downsampling)
+                    .encode_image(image, &mut webp)
+                    .expect("gamut encode");
+                let ours: ImageBuf<Rgb8> = WebpDecoder::new()
+                    .decode_image(&webp)
+                    .expect("gamut decode");
+                let lib = rgba_to_rgb(&libwebp_decode_rgba(&webp).rgba);
+                assert_eq!(
+                    ours.as_samples(),
+                    lib.as_slice(),
+                    "{label} at effort {level}, quality {quality}"
+                );
+            }
+        }
     }
 }
 
@@ -876,15 +966,16 @@ fn cleaned_lossy_keeps_visible_pixels_in_both_decoders_and_shrinks() {
     // slightly), and the invisible noise stops costing bits. #1207 asks for "the same visible
     // pixels"; for lossy that is not attainable bit for bit, so the bound here is a visible MAE
     // within 0.5 of the uncleaned file's — the lossless test above stays exact.
+    //
+    // Spatial noise shaping (issue #1017) is off in both encodes: cleaning flattens the
+    // transparent macroblocks, which moves them between SNS segments and so re-spreads the
+    // frame's quantizers over the visible ones too. That is SNS working as designed, but it
+    // would make this bound measure the segmentation rather than the cleanup.
     let (rgba, w, h) = noisy_transparent_rgba();
-    let [exact, exact_gamut, exact_lib] = encode_and_decode_both(
-        &WebpEncoder::lossy(75).with_exact(Exact::Preserve),
-        &rgba,
-        w,
-        h,
-    );
-    let [clean, clean_gamut, clean_lib] =
-        encode_and_decode_both(&WebpEncoder::lossy(75), &rgba, w, h);
+    let lossy = WebpEncoder::lossy(75).with_sns_strength(0);
+    let [exact, exact_gamut, exact_lib] =
+        encode_and_decode_both(&lossy.clone().with_exact(Exact::Preserve), &rgba, w, h);
+    let [clean, clean_gamut, clean_lib] = encode_and_decode_both(&lossy, &rgba, w, h);
     assert_eq!(
         exact_gamut, exact_lib,
         "both decoders agree on the preserved file"

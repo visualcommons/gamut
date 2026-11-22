@@ -43,6 +43,7 @@ tolerance-level, not bit-for-bit.
 | P11 | Issue #1066 — one vocabulary (breaking): `ColorPrimaries` (American spelling throughout); `Chromaticities` struct and `primaries::RgbGamut` (`#[repr(u8)]`, was `oklab::Gamut`); `ChromaSubsampling::factors` replaces `subsampling()` and `Cs440` is added; `Planar8`/`Planar16` constructors take `Dimensions` (so zero sides are rejected), `plane`/`plane_dimensions` return `Option` and `planes()` returns all three; `Yuv420` folds into `Planar8::from_rgb8_bt601` / `to_rgb8_bt601` at `Cs420`; `bt601_rgb_to_ycbcr` / `bt601_ycbcr_to_rgb` and `RgbToYcbcr::convert` renames; the tone-mapping `eotf_for`/`oetf_for` removed in favour of `standard_eotf_for`/`standard_oetf_for`; the upsampling kernels and `clip_pixel8`/`clip_pixel` moved to `gamut-dsp` (`ChromaUpsampling` stays, in `format`) | ✅ |
 | P12 | Issue #1128 — `Planar8`/`Planar16` hold their size as a `Dimensions` (every constructor already takes one, directly or through an `ImageRef`) and expose it through an infallible `dimensions()`, so a consumer such as gamut-webp never re-validates a size the buffer already proved non-zero | ✅ |
 | P13 | Issue #1246 — `cct::daylight_xy`: the CIE daylight locus (CIE 15:2004's cubic in `1/T` over 4000–25 000 K, and `y(x)`), the inverse direction of `cct_from_xy` for daylight whites. Little-CMS's `cmsWhitePointFromTemp`, which `gamut-cmm`'s incomplete-adaptation absolute intent needs to turn a mixed temperature back into a white | ✅ |
+| P14 | Issue #1017 — `ChromaDownsampling` (`#[repr(u8)]`, `Box = 0` default, `Sharp = 1`, append-only), taken by `Planar8::from_rgb8_bt601` (breaking: a third argument, mirroring `to_rgb8_bt601`'s `ChromaUpsampling`). `Sharp` is a port of libwebp 1.5.0's `sharpyuv` for 8-bit RGB to 8-bit 4:2:0 with its sRGB gamma tables, byte-equal to `WebPPictureSharpARGBToYUVA` in gamut-webp's oracle suite | ✅ |
 
 ## API policies frozen at v1
 
@@ -84,7 +85,10 @@ tolerance-level, not bit-for-bit.
   for them, the Rec. ITU-R BT.1886 EOTF, is `bt1886_eotf` at reference
   black zero only (`V^2.4`, issue #586); `standard_eotf_for` keeps the inverse OETF, and BT.1886's
   non-zero-black form (`Lb > 0`) is not modelled.
-- **Better chroma resampling** (sharp-YUV-style) — the box filter is the documented baseline.
+- **Sharp-YUV beyond the WebP configuration** — `ChromaDownsampling::Sharp` covers what
+  `cwebp -sharp_yuv` runs: 8-bit RGB to 8-bit BT.601 4:2:0 through libwebp's sRGB gamma tables.
+  libsharpyuv's other transfer functions, matrices and 10/12-bit input and output (what an AVIF
+  encoder would want for `Planar16`) are additive.
 - **Bit-reproducible math substrate** — chromahash's `cbrt_halley`/portable-pow tier is
   deliberately not ported (Tier-1 policy, issue #37).
 - **ΔE94 and ΔE-CMC** — deliberately out of scope (issue #321): CIEDE2000 supersedes both for

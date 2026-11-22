@@ -40,7 +40,8 @@
 //!   or 4:2:0 from 16-bit RGB(A) ([`Planar16`]); monochrome ([`ChromaSubsampling::Cs400`])
 //!   planes from grey or alpha at every one of those depths, in either buffer (`gamut-avif` codes
 //!   all of these end to end); the CICP code-point tables;
-//!   BT.601 YCbCr 4:2:0 ([`ycbcr`], [`Planar8::from_rgb8_bt601`]); **the H.273 matrixing and de-matrixing at every modeled bit
+//!   BT.601 YCbCr 4:2:0 ([`ycbcr`], [`Planar8::from_rgb8_bt601`], box or sharp-YUV chroma per
+//!   [`ChromaDownsampling`]); **the H.273 matrixing and de-matrixing at every modeled bit
 //!   depth for [`MatrixCoefficients::Bt709`] / `Bt601` / `Bt470Bg` / `Bt2020Ncl` in both ranges
 //!   ([`RgbToYcbcr`] / [`YcbcrMatrix`])**; and the `f64` colour science ([`transfer`], [`oklab`],
 //!   [`lab`], [`xyb`], [`matrix`], [`gamut_map`], [`cct`], [`profile`]) for the sRGB, Display P3,
@@ -95,7 +96,7 @@ pub mod ycbcr;
 
 pub use cct::{cct_from_xy, daylight_xy};
 pub use cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics};
-pub use format::{BitDepth, ChromaSubsampling, ChromaUpsampling};
+pub use format::{BitDepth, ChromaDownsampling, ChromaSubsampling, ChromaUpsampling};
 pub use lab::{delta_e_76, delta_e_2000};
 pub use planar::Planar8;
 pub use planar16::Planar16;
