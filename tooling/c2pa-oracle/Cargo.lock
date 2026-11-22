@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-av1"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-avif"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "gamut-av1",
  "gamut-bitstream",
@@ -976,18 +976,18 @@ dependencies = [
 
 [[package]]
 name = "gamut-bitstream"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "gamut-core",
 ]
 
 [[package]]
 name = "gamut-codec-abi"
-version = "0.1.2"
+version = "0.2.0"
 
 [[package]]
 name = "gamut-color"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "gamut-core",
  "gamut-dsp",
@@ -995,14 +995,14 @@ dependencies = [
 
 [[package]]
 name = "gamut-core"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "gamut-deflate"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "gamut-core",
  "miniz_oxide 0.8.9",
@@ -1025,11 +1025,11 @@ dependencies = [
 
 [[package]]
 name = "gamut-dsp"
-version = "2.0.1"
+version = "3.0.0"
 
 [[package]]
 name = "gamut-exif"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "gamut-core",
  "gamut-ifd",
@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-icc"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "gamut-color",
  "gamut-core",
@@ -1071,14 +1071,14 @@ dependencies = [
 
 [[package]]
 name = "gamut-ifd"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "gamut-core",
 ]
 
 [[package]]
 name = "gamut-iptc"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "gamut-core",
  "gamut-xmp",
@@ -1087,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-isobmff"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "gamut-core",
 ]
@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-jxl"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "gamut-codec-abi",
  "gamut-color",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-metadata"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "gamut-core",
  "gamut-exif",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-xmp"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "gamut-core",
  "quick-xml 0.40.1",
