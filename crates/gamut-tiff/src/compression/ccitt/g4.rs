@@ -237,13 +237,20 @@ fn decode_row(
 /// # Errors
 ///
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if the stream is truncated or a code is invalid.
+///
+/// The output grows a row at a time as rows decode rather than being reserved from `rows` up
+/// front: `rows` and `width` come from the file's header, so a strip of a few bytes claiming a
+/// huge height fails on truncation having held only the rows its bits actually coded (every row
+/// of a non-zero `width` consumes at least one mode code, so at most eight rows per byte).
 pub fn g4_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>> {
     let stored = width.div_ceil(8);
     let mut reader = BitReader::new(data);
-    let mut out = vec![0u8; stored * rows];
+    let mut out = Vec::new();
     let mut refr: Vec<usize> = Vec::new();
-    for r in 0..rows {
-        let dst = &mut out[r * stored..(r + 1) * stored];
+    for _ in 0..rows {
+        let start = out.len();
+        out.resize(start + stored, 0u8);
+        let dst = &mut out[start..];
         refr = decode_row(&mut reader, &refr, width, dst)?;
     }
     Ok(out)
@@ -341,6 +348,22 @@ mod tests {
         let enc = g4_encode_strip(&packed, stored, rows.len(), width).expect("encode");
         let dec = g4_decode_strip(&enc, rows.len(), width).expect("decode");
         assert_eq!(dec, packed);
+    }
+
+    /// A strip of a few bytes whose header claims a huge height fails on truncation rather than
+    /// reserving every claimed row first (#1261). Three bytes per row times `usize::MAX / 3` rows
+    /// is past `isize::MAX`, so a decoder that sized its output from `rows` up front panics with
+    /// a capacity overflow here instead of returning the error. The strip is eight V0 codes --
+    /// eight all-white rows against an all-white reference -- filling its one byte exactly, so
+    /// the ninth row runs out of bits rather than meeting zero padding.
+    #[test]
+    fn a_tiny_strip_claiming_huge_rows_fails_on_truncation() {
+        let error = g4_decode_strip(&[0xFF], usize::MAX / 3, 24).expect_err("truncated strip");
+        assert!(
+            error
+                .static_message()
+                .is_some_and(|message| message.contains("truncated mode code"))
+        );
     }
 
     #[test]
