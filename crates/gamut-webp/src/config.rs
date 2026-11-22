@@ -257,9 +257,9 @@ pub struct WebpConfig {
     /// given `quality` here means what the same `quality` means to libwebp, cwebp's `-q` and
     /// libvips' `Q`: with `c = quality / 100`, `linear_c = c·2/3` below `c = 0.75` and `2c − 1` from
     /// there up, and the index is `⌊127·(1 − linear_c^(1/3))⌋` — `127` at `0`, `26` at the default
-    /// `75`, `0` at `100`. That is libwebp's base quantizer with spatial noise shaping off; gamut
-    /// codes the whole frame at it and does not yet modulate it per segment the way libwebp's SNS
-    /// does (deferred, issue #1017).
+    /// `75`, `0` at `100`. That is libwebp's base quantizer with spatial noise shaping off
+    /// ([`sns_strength`](Self::sns_strength) `0`); at the default strength each segment's
+    /// quantizer is modulated around it, as libwebp's are.
     pub quality: u8,
     /// Compression effort (libwebp's `method`, `0..=6`). Applies to **both** modes; it never
     /// changes the decoded pixels of a lossless encode nor the quality target of a lossy one,
@@ -304,6 +304,22 @@ pub struct WebpConfig {
     /// Applies to [`WebpMode::Lossy`] only; lossless codes RGB directly and ignores it. Unlike
     /// libwebp, which skips sharp-YUV below 4 pixels a side, gamut applies it at every size.
     pub chroma_downsampling: ChromaDownsampling,
+    /// Spatial-noise-shaping strength, `0..=100` (libwebp's `sns_strength`, cwebp's `-sns`,
+    /// default `50` as in libwebp); values above `100` behave as `100`.
+    ///
+    /// A lossy encode analyses every macroblock's susceptibility to quantization noise (how far
+    /// the spectrum of its source-predicted residual reaches), clusters the frame into up to four
+    /// segments by it, and quantizes textured segments, where noise is masked, harder and flat
+    /// ones more gently: segment `s` codes at `⌊127·(1 − c^(1 − 0.9·strength/100·alpha_s/128))⌋`,
+    /// `c` being [`quality`](Self::quality)'s compressibility and `alpha_s` the segment's
+    /// susceptibility in `-127..=127`. The chroma quantizers shift by frame-wide deltas derived the
+    /// same way. These are libwebp's own analysis and formulas, so the same planes, quality,
+    /// effort and strength code every macroblock at libwebp's quantizer. `0` leaves every segment
+    /// at the base quantizer, which codes a single segment.
+    ///
+    /// Applies to [`WebpMode::Lossy`] only. Per-segment loop-filter strength is not derived yet
+    /// (issue #1205); every segment filters at the frame's level.
+    pub sns_strength: u8,
 }
 
 impl Default for WebpConfig {
@@ -316,6 +332,7 @@ impl Default for WebpConfig {
             alpha_quality: 100,
             exact: Exact::ByMode,
             chroma_downsampling: ChromaDownsampling::Box,
+            sns_strength: 50,
         }
     }
 }
@@ -334,6 +351,7 @@ mod tests {
         assert_eq!(c.alpha_quality, 100, "alpha is lossless by default");
         assert_eq!(c.exact, Exact::ByMode);
         assert_eq!(c.chroma_downsampling, ChromaDownsampling::Box);
+        assert_eq!(c.sns_strength, 50, "libwebp's default");
         assert_eq!(Exact::default(), Exact::ByMode);
         assert_eq!(WebpMode::default(), WebpMode::Lossless);
     }

@@ -326,6 +326,56 @@ fn gamut_lossy_webp_decodes_correctly_in_libwebp() {
     }
 }
 
+#[test]
+fn libwebp_decodes_segmented_lossy_to_gamuts_pixels() {
+    // The public lossy path codes four quantizer segments with measured map probabilities
+    // (issue #1017). libwebp must decode every such stream to exactly the RGB gamut's own decoder
+    // produces: both run libwebp's fancy upsampler, so any disagreement is in the VP8 layer —
+    // the segment map, its tree probabilities or the per-segment quantizers. The two-tone
+    // fixture uses only segments 0 and 3, which drives one tree node's probability to 0; the
+    // photo-like one spreads macroblocks over all four. Every effort rung and both chroma
+    // downsamplers run, at a coarse and a fine quality.
+    use gamut_webp::{ChromaDownsampling, Effort};
+
+    let (w, h) = (48u32, 40u32);
+    let two_tone: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            if i / w < 16 {
+                [12, 20, 30]
+            } else {
+                [240, 235, 220]
+            }
+        })
+        .collect();
+    let photo = rgba_to_rgb(&photo_like_rgba(w, h, 0x5e9));
+    let dims = Dimensions::new(w, h).expect("dims");
+    for (label, rgb) in [("two-tone", &two_tone), ("photo", &photo)] {
+        let image = ImageRef::<Rgb8>::new(rgb, dims).expect("rgb image");
+        for level in 0..=6u8 {
+            for (quality, downsampling) in [
+                (20u8, ChromaDownsampling::Box),
+                (90, ChromaDownsampling::Sharp),
+            ] {
+                let mut webp = Vec::new();
+                WebpEncoder::lossy(quality)
+                    .with_effort(Effort::from_level(level).expect("0..=6"))
+                    .with_chroma_downsampling(downsampling)
+                    .encode_image(image, &mut webp)
+                    .expect("gamut encode");
+                let ours: ImageBuf<Rgb8> = WebpDecoder::new()
+                    .decode_image(&webp)
+                    .expect("gamut decode");
+                let lib = rgba_to_rgb(&libwebp_decode_rgba(&webp).rgba);
+                assert_eq!(
+                    ours.as_samples(),
+                    lib.as_slice(),
+                    "{label} at effort {level}, quality {quality}"
+                );
+            }
+        }
+    }
+}
+
 /// The largest per-sample difference between two equal-length buffers.
 fn max_abs(a: &[u8], b: &[u8]) -> u8 {
     assert_eq!(a.len(), b.len(), "buffers differ in length");
@@ -847,15 +897,16 @@ fn cleaned_lossy_keeps_visible_pixels_in_both_decoders_and_shrinks() {
     // slightly), and the invisible noise stops costing bits. #1207 asks for "the same visible
     // pixels"; for lossy that is not attainable bit for bit, so the bound here is a visible MAE
     // within 0.5 of the uncleaned file's — the lossless test above stays exact.
+    //
+    // Spatial noise shaping (issue #1017) is off in both encodes: cleaning flattens the
+    // transparent macroblocks, which moves them between SNS segments and so re-spreads the
+    // frame's quantizers over the visible ones too. That is SNS working as designed, but it
+    // would make this bound measure the segmentation rather than the cleanup.
     let (rgba, w, h) = noisy_transparent_rgba();
-    let [exact, exact_gamut, exact_lib] = encode_and_decode_both(
-        &WebpEncoder::lossy(75).with_exact(Exact::Preserve),
-        &rgba,
-        w,
-        h,
-    );
-    let [clean, clean_gamut, clean_lib] =
-        encode_and_decode_both(&WebpEncoder::lossy(75), &rgba, w, h);
+    let lossy = WebpEncoder::lossy(75).with_sns_strength(0);
+    let [exact, exact_gamut, exact_lib] =
+        encode_and_decode_both(&lossy.clone().with_exact(Exact::Preserve), &rgba, w, h);
+    let [clean, clean_gamut, clean_lib] = encode_and_decode_both(&lossy, &rgba, w, h);
     assert_eq!(
         exact_gamut, exact_lib,
         "both decoders agree on the preserved file"

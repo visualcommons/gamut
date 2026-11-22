@@ -20,7 +20,9 @@ use libwebp_oracle::{
 };
 
 use super::fixtures::{detailed, photo_like, synthetic};
-use super::{EncodeOptions, LoopFilterDeltas, decode_frame, encode_frame, encode_frame_filtered};
+use super::{
+    EncodeOptions, LoopFilterDeltas, Sns, decode_frame, encode_frame, encode_frame_filtered,
+};
 use crate::Effort;
 
 /// Requires gamut's decode of the VP8 `payload` and libwebp's decode of the WebP file `webp`
@@ -86,6 +88,8 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
     // partitions — must each produce a stream libwebp decodes identically to gamut's decoder.
     // libwebp's own encoder always writes one token partition, so this forward direction is
     // the only one that pins gamut's multi-partition decode against the reference.
+    // The `bool` codes the frame through SNS segmentation (at full strength, so the segments'
+    // quantizers spread as far as they go) rather than at a fixed quantizer.
     let base = EncodeOptions::default();
     let cases = [
         (
@@ -94,21 +98,16 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
                 simple_filter: true,
                 ..base
             },
+            false,
         ),
-        (
-            "segmented",
-            EncodeOptions {
-                segmented: true,
-                ..base
-            },
-        ),
+        ("segmented", base, true),
         (
             "segmented+simple",
             EncodeOptions {
                 simple_filter: true,
-                segmented: true,
                 ..base
             },
+            true,
         ),
         (
             "partitions-2",
@@ -116,6 +115,7 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
                 partitions: 2,
                 ..base
             },
+            false,
         ),
         (
             "partitions-4",
@@ -123,6 +123,7 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
                 partitions: 4,
                 ..base
             },
+            false,
         ),
         (
             "partitions-8",
@@ -130,24 +131,35 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
                 partitions: 8,
                 ..base
             },
+            false,
         ),
         (
             "everything",
             EncodeOptions {
                 simple_filter: true,
-                segmented: true,
                 partitions: 4,
                 ..base
             },
+            true,
         ),
     ];
-    for (label, opts) in cases {
+    for (label, opts, shaped) in cases {
         // (33, 145) spans ten macroblock rows, so the eight-partition cases route across every
         // one.
         for &(w, h) in &[(32u32, 32u32), (48, 48), (49, 33), (33, 145)] {
-            for &q in &[12u8, 48] {
-                let (payload, _) = encode_frame_filtered(&detailed(w, h), q, opts)
-                    .expect("fixture fits the partition-size fields");
+            // Quantizer index 12 and 48, or the qualities that land near them.
+            for &(q, quality) in &[(12u8, 90u8), (48, 45)] {
+                let yuv = detailed(w, h);
+                let encoded = if shaped {
+                    let sns = Sns {
+                        quality,
+                        strength: 100,
+                    };
+                    encode_frame_filtered(&yuv, sns, opts)
+                } else {
+                    encode_frame_filtered(&yuv, q, opts)
+                };
+                let (payload, _) = encoded.expect("fixture fits the partition-size fields");
                 assert_libwebp_decodes_like_gamut(
                     &payload,
                     (w, h),

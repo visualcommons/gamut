@@ -1,6 +1,7 @@
 //! VP8 key-frame encoder (RFC 6386 §9-§14 read in the writing direction): the per-macroblock mode
 //! decision (lowest-SAD whole-block 16×16 luma / 8×8 chroma, or per-4×4 `B_PRED` behind the effort
-//! rung's gate), quantizer segmentation by macroblock luma mean, forward transform and quantization,
+//! rung's gate), quantizer segmentation by libwebp's macroblock analysis and spatial noise shaping
+//! ([`super::analysis`]), forward transform and quantization,
 //! the measured skip and coefficient probabilities, and the two-pass write of the control and token
 //! partitions.
 //!
@@ -14,6 +15,7 @@
 use gamut_color::ChromaSubsampling;
 use gamut_core::{Error, Result};
 
+use super::analysis;
 use super::bool_coder::BoolEncoder;
 use super::cost::bit_cost;
 use super::effort::{Bpred, EFFORT_TABLE, QuantBias};
@@ -70,18 +72,46 @@ fn bpred_beats_whole_block(bpred_sad: u32, wb_sad: u32) -> bool {
 /// its length is the remainder — so it is unbounded.
 pub const MAX_TOKEN_PARTITION_SIZE: u32 = (1 << 24) - 1;
 
-/// Per-segment quantizer deltas the encoder assigns (delta mode) when segmentation is enabled — a
-/// coarse spread so distinct macroblock regions get distinct quantizers (refinement is issue #32).
-const SEGMENT_QUANT_DELTAS: [i8; 4] = [-12, -4, 4, 12];
+/// Spatial noise shaping: the quality a frame is coded at and how strongly its quantizer is
+/// modulated per segment (libwebp's `quality` and `sns_strength`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sns {
+    /// The quality, `0..=100` (saturating), the segment quantizers are derived from.
+    pub quality: u8,
+    /// Modulation strength, `0..=100`; `0` gives every segment the base quantizer, which merges
+    /// them into one and turns segmentation off.
+    pub strength: u8,
+}
 
-/// Encoder feature toggles for a frame. Defaults to the normal loop filter, no segmentation, a
-/// single token partition, and no per-macroblock loop-filter deltas.
+/// How a frame picks its quantizers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameQuant {
+    /// One segment at this base quantizer index (`0..=127`).
+    Fixed(u8),
+    /// libwebp's macroblock analysis and spatial noise shaping ([`super::analysis`]): up to four
+    /// quantizer segments, the chroma quantizer deltas, and a base quantizer, all derived from
+    /// the [`Sns`] quality and strength.
+    Shaped(Sns),
+}
+
+impl From<u8> for FrameQuant {
+    fn from(quant_index: u8) -> Self {
+        Self::Fixed(quant_index)
+    }
+}
+
+impl From<Sns> for FrameQuant {
+    fn from(sns: Sns) -> Self {
+        Self::Shaped(sns)
+    }
+}
+
+/// Encoder feature toggles for a frame. Defaults to the normal loop filter, a single token
+/// partition, and no per-macroblock loop-filter deltas.
 #[derive(Clone, Copy)]
 pub struct EncodeOptions {
     /// Use the simple loop filter instead of the normal one.
     pub simple_filter: bool,
-    /// Emit four quantizer segments, assigned per macroblock by luma mean.
-    pub segmented: bool,
     /// Number of DCT token partitions (1, 2, 4, or 8); macroblock rows are assigned round-robin.
     pub partitions: u8,
     /// Per-macroblock loop-filter deltas (`mb_lf_adjustments`, RFC 6386 §9.4). For key frames the
@@ -97,24 +127,11 @@ impl Default for EncodeOptions {
     fn default() -> Self {
         Self {
             simple_filter: false,
-            segmented: false,
             partitions: 1,
             loop_filter_deltas: LoopFilterDeltas::default(),
             effort: Effort::Default,
         }
     }
-}
-
-/// The mean luma of macroblock `(mb_x, mb_y)` in a `stride`-wide plane, used to assign its segment.
-fn mb_luma_mean(src: &[u8], stride: usize, mb_x: usize, mb_y: usize) -> u32 {
-    let (px, py) = (mb_x * 16, mb_y * 16);
-    let mut sum = 0u32;
-    for r in 0..16 {
-        for c in 0..16 {
-            sum += u32::from(src[(py + r) * stride + px + c]);
-        }
-    }
-    sum / 256
 }
 
 /// One macroblock's coding decisions — everything the writing pass needs to emit its mode and token
@@ -157,6 +174,30 @@ fn measured_skip_prob(records: &[MbRecord]) -> u8 {
     // `put_bool(prob_skip_false, skip)` codes `skip` as the *one* branch, so the stored probability
     // is that of the zero branch — not skipping.
     ((255 * (total - skipped)) / total).clamp(1, 255) as u8
+}
+
+/// The segment-id tree probabilities (RFC 6386 §9.3, §10) measured from the frame's segment map —
+/// libwebp's `SetSegmentProbas`.
+///
+/// Each node's probability is that of its zero branch, rounded: the root splits segments `{0, 1}`
+/// from `{2, 3}`, and its children split within each pair. A node no macroblock reaches keeps the
+/// default `255`, which the header codes as "no update" for one flag bit. A node whose zero branch
+/// is never taken measures `0`, which is still exact: the bool coder's split is `1` there and
+/// only one-branches are coded against it — libwebp emits the same value.
+fn measured_segment_tree_probs(segment_map: &[usize]) -> [u8; 3] {
+    let mut counts = [0u32; 4];
+    for &segment in segment_map {
+        counts[segment] += 1;
+    }
+    let proba = |zeros: u32, ones: u32| {
+        let total = zeros + ones;
+        // `None` only for an unreached node: `zeros <= total`, so the quotient fits a `u8`.
+        (255 * zeros + total / 2)
+            .checked_div(total)
+            .map_or(255, |p| p as u8)
+    };
+    let [s0, s1, s2, s3] = counts;
+    [proba(s0 + s1, s2 + s3), proba(s0, s1), proba(s2, s3)]
 }
 
 /// Tallies the zero/one branches every coefficient token in the frame would take, threading the
@@ -268,7 +309,7 @@ fn frame_header(width: u32, height: u32, quant_index: u8, simple_filter: bool) -
 }
 
 /// Replicates `src` (`sw × sh`) into a `dw × dh` plane, extending the right and bottom edges.
-fn pad_plane(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+pub(super) fn pad_plane(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
     let mut dst = vec![0u8; dw * dh];
     for y in 0..dh {
         let sy = y.min(sh - 1);
@@ -605,9 +646,9 @@ pub fn encode_frame(yuv: &Vp8Planes, quant_index: u8) -> Result<(Vec<u8>, FrameB
     encode_frame_filtered(yuv, quant_index, EncodeOptions::default())
 }
 
-/// Encodes a frame with explicit [`EncodeOptions`] — the loop-filter type and whether to emit
-/// quantizer segments. `encode_frame` uses the defaults (normal filter, unsegmented). This lets the
-/// differential oracle drive the alternative encoder paths.
+/// Encodes a frame at `quant` — a fixed base quantizer index (`u8`), or [`Sns`] segmentation —
+/// with explicit [`EncodeOptions`]. `encode_frame` uses a fixed index and the defaults (normal
+/// filter, one partition). This lets the differential oracle drive the alternative encoder paths.
 ///
 /// # Errors
 ///
@@ -627,26 +668,11 @@ pub fn encode_frame(yuv: &Vp8Planes, quant_index: u8) -> Result<(Vec<u8>, FrameB
 /// [`Vp8Planes`], so its chroma planes are read at that geometry without a check here.
 pub fn encode_frame_filtered(
     yuv: &Vp8Planes,
-    quant_index: u8,
+    quant: impl Into<FrameQuant>,
     opts: EncodeOptions,
 ) -> Result<(Vec<u8>, FrameBuffers)> {
     let (width, height) = (yuv.dimensions().width(), yuv.dimensions().height());
-    let mut header = frame_header(width, height, quant_index, opts.simple_filter);
-    if opts.segmented {
-        header.segmentation = Segmentation {
-            enabled: true,
-            update_map: true,
-            abs_delta: false,
-            quantizer: SEGMENT_QUANT_DELTAS,
-            filter_strength: [0; 4],
-            tree_probs: [128, 128, 128],
-        };
-    }
     let tools = EFFORT_TABLE[opts.effort.level() as usize];
-    header.token_partitions = opts.partitions.max(1);
-    header.loop_filter.deltas = opts.loop_filter_deltas;
-    let n = header.token_partitions as usize;
-    let seg_qf = segment_quant_factors(&header);
     let mut recon = FrameBuffers::new(width, height);
 
     let (yw, yh) = (recon.y_stride(), recon.mb_rows * 16);
@@ -658,16 +684,58 @@ pub fn encode_frame_filtered(
     let src_u = pad_plane(u_plane, vcw, vch, cw, ch);
     let src_v = pad_plane(v_plane, vcw, vch, cw, ch);
 
-    let segment_map: Vec<usize> = (0..recon.mb_rows * recon.mb_cols)
-        .map(|i| {
-            if header.segmentation.enabled {
-                let (mbx, mby) = (i % recon.mb_cols, i / recon.mb_cols);
-                (mb_luma_mean(&src_y, yw, mbx, mby) / 64).min(3) as usize
-            } else {
-                0
+    let plan = match quant.into() {
+        FrameQuant::Fixed(quant_index) => Err(quant_index),
+        FrameQuant::Shaped(sns) => {
+            let source = analysis::Source {
+                y: &src_y,
+                u: &src_u,
+                v: &src_v,
+                y_stride: yw,
+                c_stride: cw,
+                mb_cols: recon.mb_cols,
+                mb_rows: recon.mb_rows,
+            };
+            // libwebp's `method <= 1` analysis skips the luma predictors.
+            let fast = opts.effort.level() <= 1;
+            Ok(analysis::plan_segments(
+                &source,
+                sns.quality,
+                sns.strength,
+                fast,
+            ))
+        }
+    };
+    let base_q = plan.as_ref().map_or_else(|&q| q, |p| p.quant[0]);
+    let mut header = frame_header(width, height, base_q, opts.simple_filter);
+    let segment_map = match plan {
+        Ok(plan) => {
+            header.quant.uv_dc_delta = plan.uv_dc_delta;
+            header.quant.uv_ac_delta = plan.uv_ac_delta;
+            if plan.count > 1 {
+                // Delta mode against segment 0's quantizer, which is the frame's base: the
+                // per-segment values libwebp writes absolutely, while every segment keeps the
+                // frame's loop-filter level.
+                let tree_probs = measured_segment_tree_probs(&plan.map);
+                header.segmentation = Segmentation {
+                    enabled: true,
+                    // A map whose every macroblock is in segment 0 is the decoder's default
+                    // and is not sent (libwebp's `SetSegmentProbas`).
+                    update_map: tree_probs != [255; 3],
+                    abs_delta: false,
+                    quantizer: plan.quant.map(|q| (i16::from(q) - i16::from(base_q)) as i8),
+                    filter_strength: [0; 4],
+                    tree_probs,
+                };
             }
-        })
-        .collect();
+            plan.map
+        }
+        Err(_) => vec![0; recon.mb_rows * recon.mb_cols],
+    };
+    header.token_partitions = opts.partitions.max(1);
+    header.loop_filter.deltas = opts.loop_filter_deltas;
+    let n = header.token_partitions as usize;
+    let seg_qf = segment_quant_factors(&header);
 
     let mut filter_interior = vec![false; recon.mb_cols * recon.mb_rows];
     let mut is_bpred_map = vec![false; recon.mb_cols * recon.mb_rows];
@@ -913,18 +981,32 @@ mod tests {
     /// Re-pinning is expected when the encoder legitimately improves; the commit that moves this
     /// number says why. Same contract as `tests/default_bytes.rs`.
     /// Pinned from the current encoder; see `segmented_stream_is_byte_stable`.
-    const SEGMENTED_GOLDEN_LEN: usize = 875;
+    const SEGMENTED_GOLDEN_LEN: usize = 937;
     /// FNV-1a over the same bytes.
-    const SEGMENTED_GOLDEN_DIGEST: u64 = 2_735_266_621_437_739_432;
+    const SEGMENTED_GOLDEN_DIGEST: u64 = 6_097_463_668_424_892_297;
+
+    /// `SetSegmentProbas`' rounding at each node, its untouched-node default, and a zero branch
+    /// that is never taken measuring `0`.
+    #[test]
+    fn segment_tree_probs_are_measured_per_node() {
+        assert_eq!(measured_segment_tree_probs(&[]), [255; 3]);
+        // Counts 1/2/3/4: the root splits 3 from 7, its children 1 from 2 and 3 from 4.
+        let map = [0, 1, 1, 2, 2, 2, 3, 3, 3, 3];
+        assert_eq!(measured_segment_tree_probs(&map), [77, 85, 109]);
+        // Only segment 2: the root's zero branch and segment 3 never occur; the {0, 1} node is
+        // never reached.
+        assert_eq!(measured_segment_tree_probs(&[2; 5]), [0, 255, 255]);
+    }
 
     #[test]
     fn segmented_stream_is_byte_stable() {
-        let opts = EncodeOptions {
-            segmented: true,
-            ..EncodeOptions::default()
+        let sns = Sns {
+            quality: 60,
+            strength: 100,
         };
-        // Banded content over three macroblock rows, so the segment genuinely varies by row.
-        let (bits, _) = encode_frame_filtered(&banded(64, 64), 40, opts).expect("encode");
+        // Banded content over four macroblock rows, so the segment genuinely varies by row.
+        let (bits, _) =
+            encode_frame_filtered(&banded(64, 64), sns, EncodeOptions::default()).expect("encode");
 
         let digest = bits.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
             (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)

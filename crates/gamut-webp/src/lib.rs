@@ -32,9 +32,11 @@
 //!   alone does not thread them through.
 //! - **Animation** — `ANIM` / `ANMF` multi-frame sequences are out of scope under the image-first
 //!   charter. Each frame is an independent key frame, but assembling them needs a non-trait API.
-//! - **Lossy quality** — the `0..=100` quality maps coarsely onto the VP8 base quantizer. The
-//!   encoder has no rate-distortion mode search, so quality is a quantizer dial rather than a
-//!   rate target; [`Effort`] tunes how hard it looks within that dial.
+//! - **Lossy quality** — the `0..=100` quality maps onto the VP8 base quantizer along libwebp's
+//!   curve, and spatial noise shaping ([`WebpConfig::sns_strength`]) spreads it over up to four
+//!   macroblock segments exactly as libwebp does. The encoder has no rate-distortion mode search,
+//!   so quality is a quantizer dial rather than a rate target; [`Effort`] tunes how hard it looks
+//!   within that dial. Sharp-YUV chroma ([`WebpConfig::chroma_downsampling`]) is opt-in.
 //! - **Lossless** — reproduces the input exactly and ignores the quality value, unless
 //!   [`NearLossless`] preprocessing is configured (see below).
 //!

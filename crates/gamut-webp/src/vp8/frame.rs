@@ -28,7 +28,7 @@
 pub(crate) use super::decoder::decode_frame;
 #[cfg(test)]
 pub(crate) use super::encoder::encode_frame;
-pub(crate) use super::encoder::{EncodeOptions, encode_frame_filtered};
+pub(crate) use super::encoder::{EncodeOptions, Sns, encode_frame_filtered};
 /// Re-exported so the frame tests carry the loop-filter delta type next to [`EncodeOptions`].
 #[cfg(test)]
 pub(crate) use super::header::LoopFilterDeltas;
@@ -494,17 +494,18 @@ mod tests {
     /// `segmented_stream_is_byte_stable` below for why nothing consistency-shaped can.
     #[test]
     fn encoder_recon_matches_decoder_with_segmentation() {
-        let opts = EncodeOptions {
-            segmented: true,
-            ..EncodeOptions::default()
-        };
+        let opts = EncodeOptions::default();
         // Sizes spanning more than one macroblock row, so `mb_y` is not always 0 -- at one row the
         // row-stride arithmetic cannot be distinguished from anything.
         for &(w, h) in &[(64u32, 48u32), (33, 41)] {
-            for &q in &[10u8, 60] {
+            for &q in &[90u8, 30] {
                 let yuv = banded(w, h);
+                let sns = Sns {
+                    quality: q,
+                    strength: 100,
+                };
                 let (bits, recon) =
-                    encode_frame_filtered(&yuv, q, opts).expect("fixture fits the size fields");
+                    encode_frame_filtered(&yuv, sns, opts).expect("fixture fits the size fields");
                 let decoded = decode_frame(&bits).expect("decode");
                 let (enc, dec) = (recon.to_yuv420().unwrap(), decoded.to_yuv420().unwrap());
                 assert_eq!(
@@ -536,7 +537,6 @@ mod tests {
                 let yuv = detailed(48, 32);
                 let opts = EncodeOptions {
                     simple_filter: simple,
-                    segmented: false,
                     partitions: 1,
                     ..Default::default()
                 };
@@ -557,17 +557,20 @@ mod tests {
 
     #[test]
     fn segmentation_round_trips_bit_exact() {
-        // Four quantizer segments (assigned by macroblock luma mean) must reconstruct identically in
-        // the encoder and the decoder across a range of base quantizers.
-        for &q in &[10u8, 40, 90] {
+        // SNS quantizer segments must reconstruct identically in the encoder and the decoder
+        // across a range of qualities.
+        for &q in &[90u8, 60, 10] {
             let yuv = detailed(64, 48);
             let opts = EncodeOptions {
                 simple_filter: false,
-                segmented: true,
                 partitions: 1,
                 ..Default::default()
             };
-            let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
+            let sns = Sns {
+                quality: q,
+                strength: 50,
+            };
+            let (bits, recon) = encode_frame_filtered(&yuv, sns, opts)
                 .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
             let (enc, dec) = (recon.to_yuv420().unwrap(), dec.to_yuv420().unwrap());
@@ -585,7 +588,6 @@ mod tests {
             let yuv = detailed(32, 160);
             let opts = EncodeOptions {
                 simple_filter: false,
-                segmented: false,
                 partitions,
                 ..Default::default()
             };
