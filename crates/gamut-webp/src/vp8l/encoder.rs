@@ -83,13 +83,14 @@ impl Token {
 }
 
 /// Encodes an ARGB image (scan order, `0xAARRGGBB`) to a VP8L bitstream body — the bytes that go
-/// inside the `VP8L` chunk, signature byte included.
+/// inside the `VP8L` chunk, signature byte included — searching the candidates [`enumerate`] offers
+/// at `effort` and lossless `quality` (`0..=100`, clamped).
 ///
 /// # Errors
 ///
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
 /// `argb.len()` does not equal `width * height`, or the dimensions are out of the VP8L range.
-pub fn encode(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Vec<u8>> {
+pub fn encode(argb: &[u32], dims: Dimensions, effort: Effort, quality: u8) -> Result<Vec<u8>> {
     check_dimensions(argb, dims)?;
     let alpha_is_used = argb.iter().any(|&p| alpha(p) != 0xff);
     let header = Vp8lHeader::from_dimensions(dims, alpha_is_used)?;
@@ -99,7 +100,7 @@ pub fn encode(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Vec<u8>>
     // body can be encoded independently and concatenated rather than spliced bit by bit — which is
     // what lets candidate bodies be measured against each other before one is chosen.
     let mut out = w.finish();
-    out.extend_from_slice(&best_body(argb, dims, effort));
+    out.extend_from_slice(&best_body(argb, dims, effort, quality));
     Ok(out)
 }
 
@@ -112,21 +113,26 @@ pub fn encode(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Vec<u8>>
 ///
 /// Returns an [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error if
 /// `argb.len()` does not equal `width * height`.
-pub fn encode_image(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Vec<u8>> {
+pub fn encode_image(
+    argb: &[u32],
+    dims: Dimensions,
+    effort: Effort,
+    quality: u8,
+) -> Result<Vec<u8>> {
     check_dimensions(argb, dims)?;
-    Ok(best_body(argb, dims, effort))
+    Ok(best_body(argb, dims, effort, quality))
 }
 
-/// Encodes the image body under every candidate plan [`enumerate`] offers for `effort` and returns
-/// the shortest, ties going to the earliest (lowest-effort) plan.
+/// Encodes the image body under every candidate plan [`enumerate`] offers for `effort` and
+/// `quality` and returns the shortest, ties going to the earliest plan in the ladder's order.
 ///
 /// Candidates are compared in **bits**, not bytes: the body is byte-padded only once, when it is
 /// flushed, and `ceil` is monotone, so minimising bits also minimises the finished chunk.
-fn best_body(argb: &[u32], dims: Dimensions, effort: Effort) -> Vec<u8> {
+fn best_body(argb: &[u32], dims: Dimensions, effort: Effort, quality: u8) -> Vec<u8> {
     // Built once and shared: every palette candidate needs it, and it is an O(n) hash pass.
     let palette = build_palette(argb);
     let mut best: Option<(usize, Vec<u8>)> = None;
-    for plan in enumerate(effort) {
+    for plan in enumerate(effort, quality) {
         let mut w = BitWriter::new();
         if !write_image_body(&mut w, argb, dims, &plan, palette.as_deref()) {
             continue; // The plan does not apply to this image (a palette plan without a palette).
@@ -727,12 +733,13 @@ fn build_code(histogram: &[u32]) -> PrefixEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_QUALITY;
     use crate::vp8l::decoder::decode;
     use crate::vp8l::transform::make_argb;
 
     fn round_trip(argb: &[u32], width: u32, height: u32) {
         let dims = Dimensions::new(width, height).unwrap();
-        let bitstream = encode(argb, dims, Effort::default()).expect("encode");
+        let bitstream = encode(argb, dims, Effort::default(), DEFAULT_QUALITY).expect("encode");
         let (decoded_dims, pixels) = decode(&bitstream).expect("decode");
         assert_eq!(decoded_dims, dims);
         assert_eq!(pixels, argb, "round-trip mismatch at {width}x{height}");
@@ -1069,7 +1076,7 @@ mod tests {
         // Replicate the encoder's internal grouping to assert it splits into multiple groups.
         let detected = build_palette(&img).expect("few-color image has a palette");
         let (bundled, bundled_width) = forward_color_indexing(&img, w, h, &detected);
-        let plan = enumerate(Effort::default())[0];
+        let plan = enumerate(Effort::default(), DEFAULT_QUALITY)[0];
         let tokens = tokenize(&bundled, pick_cache_bits(bundled.len()), &plan.lz77);
         let assignment = assign_groups(
             &tokens,
@@ -1092,7 +1099,8 @@ mod tests {
         let tokens: Vec<Token> = (0..1024)
             .map(|_| Token::Literal(make_argb(0xff, 0, 7, 0)))
             .collect();
-        let assignment = assign_groups(&tokens, 32, 32, &enumerate(Effort::default())[0].grouping);
+        let spine = enumerate(Effort::default(), DEFAULT_QUALITY)[0];
+        let assignment = assign_groups(&tokens, 32, 32, &spine.grouping);
         assert_eq!(assignment.num_groups, 1);
     }
 
@@ -1117,7 +1125,8 @@ mod tests {
                 Token::Literal(make_argb(0xff, 0, g, 0))
             })
             .collect();
-        let assignment = assign_groups(&tokens, w, h, &enumerate(Effort::default())[0].grouping);
+        let spine = enumerate(Effort::default(), DEFAULT_QUALITY)[0];
+        let assignment = assign_groups(&tokens, w, h, &spine.grouping);
         assert_eq!(
             assignment.num_groups, 1,
             "tied signatures must resolve to the lower green symbol"
@@ -1139,7 +1148,13 @@ mod tests {
             .collect();
         round_trip(&img, 4, 4);
         // The header's alpha hint should be set when any pixel is non-opaque.
-        let bitstream = encode(&img, Dimensions::new(4, 4).unwrap(), Effort::default()).unwrap();
+        let bitstream = encode(
+            &img,
+            Dimensions::new(4, 4).unwrap(),
+            Effort::default(),
+            DEFAULT_QUALITY,
+        )
+        .unwrap();
         let mut r = crate::vp8l::bit_io::BitReader::new(&bitstream);
         let header = Vp8lHeader::read(&mut r).unwrap();
         assert!(header.alpha_is_used);
@@ -1151,7 +1166,8 @@ mod tests {
             encode(
                 &[0, 0, 0],
                 Dimensions::new(2, 2).unwrap(),
-                Effort::default()
+                Effort::default(),
+                DEFAULT_QUALITY
             ),
             Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));

@@ -15,7 +15,7 @@
 use gamut_core::{Dimensions, Error, Result};
 use gamut_dsp::math::clip_pixel8;
 
-use crate::config::Effort;
+use crate::config::{DEFAULT_QUALITY, Effort};
 use crate::vp8::effort::{AlphaEffort, EFFORT_TABLE};
 use crate::vp8l::bit_io::BitReader;
 use crate::vp8l::decoder::decode_image;
@@ -337,7 +337,10 @@ fn write_compressed_alph(
         .map(|&a| 0xff00_0000 + (u32::from(a) << 8))
         .collect();
     let dims = Dimensions::new(width as u32, height as u32)?;
-    let stream = encode_image(&argb, dims, effort)?;
+    // The plane is searched at the default lossless quality whatever the colour's `quality`: that
+    // is the colour image's dial, not the alpha plane's, and this budget is the one the `ALPH`
+    // encode ran at before lossless quality reached the VP8L search (issue #1240).
+    let stream = encode_image(&argb, dims, effort, DEFAULT_QUALITY)?;
     let mut out = Vec::with_capacity(1 + stream.len());
     out.push(header_byte(pre, method, 1)); // C = 1 (lossless)
     out.extend_from_slice(&stream);

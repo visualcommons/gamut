@@ -1,5 +1,5 @@
-//! Encoder configuration: lossless vs. lossy selection, the quality knob, and the compression
-//! effort ladder.
+//! Encoder configuration: lossless vs. lossy selection, the quality knob, the compression effort
+//! ladder, and the `cwebp -z` lossless presets.
 
 /// Compression effort: the encode-time/output-size trade-off, from fastest ([`Effort::Fastest`])
 /// to densest ([`Effort::Slowest`]).
@@ -67,6 +67,117 @@ impl Effort {
             6 => Self::Slowest,
             _ => return None,
         })
+    }
+}
+
+/// The default [`WebpConfig::quality`], `75` — libwebp's `WebPConfigInit` default. In lossless mode
+/// it is the search budget the VP8L encoder ran at before `quality` reached it (issue #1240), and
+/// the budget a lossy encode's `ALPH` plane is still searched at.
+pub(crate) const DEFAULT_QUALITY: u8 = 75;
+
+/// A lossless compression preset — libwebp's `WebPConfigLosslessPreset` levels, `cwebp -z 0..=9`.
+///
+/// Each level sets the two dials libwebp ties to it, [`effort`](Self::effort) (its `method`) and
+/// [`quality`](Self::quality), from fastest ([`Z0`](Self::Z0)) to densest ([`Z9`](Self::Z9)); apply
+/// one with [`WebpConfig::with_lossless_preset`]. The pairs are libwebp's own table:
+///
+/// | Level | Effort | Quality |
+/// | --- | --- | --- |
+/// | `Z0` | 0 | 0 |
+/// | `Z1` | 1 | 20 |
+/// | `Z2` | 2 | 25 |
+/// | `Z3` | 3 | 30 |
+/// | `Z4` | 3 | 50 |
+/// | `Z5` | 4 | 50 |
+/// | `Z6` | 4 | 75 |
+/// | `Z7` | 4 | 90 |
+/// | `Z8` | 5 | 90 |
+/// | `Z9` | 6 | 100 |
+///
+/// Neither dial decreases from one level to the next, and gamut's lossless search is monotone in
+/// both (see [`WebpConfig::quality`]), so a higher level never codes an image larger than a lower
+/// one. [`Z6`](Self::Z6) is the default configuration's search.
+///
+/// The discriminants **are** the `-z` levels and are a permanent, append-only part of the
+/// contract: they are what [`level`](Self::level) and [`from_level`](Self::from_level) round trip,
+/// and what a numeric CLI or FFI knob carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum LosslessPreset {
+    /// `-z 0` — effort 0, quality 0: the fastest.
+    Z0 = 0,
+    /// `-z 1` — effort 1, quality 20.
+    Z1 = 1,
+    /// `-z 2` — effort 2, quality 25.
+    Z2 = 2,
+    /// `-z 3` — effort 3, quality 30.
+    Z3 = 3,
+    /// `-z 4` — effort 3, quality 50.
+    Z4 = 4,
+    /// `-z 5` — effort 4, quality 50.
+    Z5 = 5,
+    /// `-z 6` — effort 4, quality 75: the default configuration's search (`cwebp`'s default `-z`).
+    Z6 = 6,
+    /// `-z 7` — effort 4, quality 90.
+    Z7 = 7,
+    /// `-z 8` — effort 5, quality 90.
+    Z8 = 8,
+    /// `-z 9` — effort 6, quality 100: the densest.
+    Z9 = 9,
+}
+
+impl LosslessPreset {
+    /// The `(effort, quality)` pair each level selects, indexed by level — libwebp's
+    /// `kLosslessPresets` (`src/enc/config_enc.c`).
+    const TABLE: [(Effort, u8); 10] = [
+        (Effort::Fastest, 0),
+        (Effort::Faster, 20),
+        (Effort::Fast, 25),
+        (Effort::Moderate, 30),
+        (Effort::Moderate, 50),
+        (Effort::Default, 50),
+        (Effort::Default, 75),
+        (Effort::Default, 90),
+        (Effort::Slower, 90),
+        (Effort::Slowest, 100),
+    ];
+
+    /// The `-z` level (`0..=9`) this variant selects.
+    #[must_use]
+    pub const fn level(self) -> u8 {
+        self as u8
+    }
+
+    /// The [`LosslessPreset`] for a `-z` level, or `None` if `level` is outside `0..=9`.
+    ///
+    /// The inverse of [`LosslessPreset::level`].
+    #[must_use]
+    pub const fn from_level(level: u8) -> Option<Self> {
+        Some(match level {
+            0 => Self::Z0,
+            1 => Self::Z1,
+            2 => Self::Z2,
+            3 => Self::Z3,
+            4 => Self::Z4,
+            5 => Self::Z5,
+            6 => Self::Z6,
+            7 => Self::Z7,
+            8 => Self::Z8,
+            9 => Self::Z9,
+            _ => return None,
+        })
+    }
+
+    /// The compression [`Effort`] (libwebp's `method`) this level sets.
+    #[must_use]
+    pub const fn effort(self) -> Effort {
+        Self::TABLE[self as usize].0
+    }
+
+    /// The lossless [`quality`](WebpConfig::quality) this level sets.
+    #[must_use]
+    pub const fn quality(self) -> u8 {
+        Self::TABLE[self as usize].1
     }
 }
 
@@ -221,9 +332,11 @@ impl Exact {
 
 /// Configuration for a [`WebpEncoder`](crate::WebpEncoder).
 ///
-/// `quality` ranges `0..=100` and applies only to [`WebpMode::Lossy`], where it is the usual quality
-/// factor (higher = larger output, closer to the source). [`WebpMode::Lossless`] reproduces the
-/// input exactly and ignores `quality`.
+/// `quality` ranges `0..=100` and drives both modes: for [`WebpMode::Lossy`] it is the usual quality
+/// factor (higher = larger output, closer to the source); for [`WebpMode::Lossless`], which
+/// reproduces the input exactly either way, it is libwebp's lossless search budget alongside
+/// [`effort`](Self::effort) (higher = smaller output, slower).
+/// [`with_lossless_preset`](Self::with_lossless_preset) sets both the way `cwebp -z` does.
 ///
 /// `#[non_exhaustive]`: the configuration is an open set — fields for deferred encoder knobs are
 /// added as they ship. Start from [`WebpConfig::default`] (or the snapshot
@@ -247,11 +360,21 @@ impl Exact {
 pub struct WebpConfig {
     /// The bitstream mode to encode.
     pub mode: WebpMode,
-    /// Lossy quality factor, `0..=100` (higher = larger, closer to the source). Ignored for
-    /// lossless. Values above `100` behave as `100` (the encoder clamps silently) — a frozen
-    /// contract.
+    /// Quality, `0..=100`. Values above `100` behave as `100` (the encoder clamps silently) — a
+    /// frozen contract.
     ///
-    /// It selects the VP8 base quantizer index along libwebp's `QualityToCompression` curve, so a
+    /// **Lossless.** The search budget, as libwebp's `quality` is for `lossless = 1` (`cwebp
+    /// -lossless -q N`): within each [`effort`](Self::effort) level, a higher quality races more
+    /// candidate encodings — deeper LZ77 hash chains and more colour-cache sizes — and keeps the
+    /// smallest. Every candidate offered at a quality is offered at every higher one, so output
+    /// size is **non-increasing in quality** as it is in effort, by construction; the decoded
+    /// pixels never change. The default `75` is the search the encoder ran before quality reached
+    /// it, byte for byte; below it candidates drop out (at `0` an effort level keeps only its
+    /// transform, palette and grouping candidates), above it more join (at `90` and at `100`).
+    /// gamut's candidates are its own, so a quality buys the same *kind* of work it buys libwebp,
+    /// not the same bytes.
+    ///
+    /// **Lossy.** The quality factor (higher = larger, closer to the source). It selects the VP8 base quantizer index along libwebp's `QualityToCompression` curve, so a
     /// given `quality` here means what the same `quality` means to libwebp, cwebp's `-q` and
     /// libvips' `Q`: with `c = quality / 100`, `linear_c = c·2/3` below `c = 0.75` and `2c − 1` from
     /// there up, and the index is `⌊127·(1 − linear_c^(1/3))⌋` — `127` at `0`, `26` at the default
@@ -266,8 +389,7 @@ pub struct WebpConfig {
     pub effort: Effort,
     /// Near-lossless preprocessing strength, or `None` (the default) for off — bit-exact.
     ///
-    /// Applies to [`WebpMode::Lossless`] only, and is ignored for [`WebpMode::Lossy`], exactly as
-    /// [`quality`](Self::quality) is ignored for lossless.
+    /// Applies to [`WebpMode::Lossless`] only, and is ignored for [`WebpMode::Lossy`].
     pub near_lossless: Option<NearLossless>,
     /// Alpha quality, `0..=100` (libwebp's `alpha_quality`, cwebp's `-alpha_q`, libvips' `alpha_q`);
     /// the default `100` stores alpha losslessly. Values above `100` behave as `100`, as for
@@ -299,12 +421,33 @@ impl Default for WebpConfig {
     fn default() -> Self {
         Self {
             mode: WebpMode::Lossless,
-            quality: 75,
+            quality: DEFAULT_QUALITY,
             effort: Effort::Default,
             near_lossless: None,
             alpha_quality: 100,
             exact: Exact::ByMode,
         }
+    }
+}
+
+impl WebpConfig {
+    /// Applies a lossless preset the way libwebp's `WebPConfigLosslessPreset` does (`cwebp -z N`):
+    /// selects [`WebpMode::Lossless`] and sets [`effort`](Self::effort) and
+    /// [`quality`](Self::quality) to the preset's pair, leaving every other field as it was.
+    ///
+    /// ```
+    /// use gamut_webp::{Effort, LosslessPreset, WebpConfig, WebpMode};
+    ///
+    /// let config = WebpConfig::default().with_lossless_preset(LosslessPreset::Z9);
+    /// assert_eq!(config.mode, WebpMode::Lossless);
+    /// assert_eq!((config.effort, config.quality), (Effort::Slowest, 100));
+    /// ```
+    #[must_use]
+    pub const fn with_lossless_preset(mut self, preset: LosslessPreset) -> Self {
+        self.mode = WebpMode::Lossless;
+        self.effort = preset.effort();
+        self.quality = preset.quality();
+        self
     }
 }
 
@@ -392,6 +535,66 @@ mod tests {
                 "strength {strength}"
             );
         }
+    }
+
+    #[test]
+    fn lossless_preset_level_round_trips_over_the_full_range() {
+        for level in 0..=9u8 {
+            let preset = LosslessPreset::from_level(level).expect("0..=9 is in range");
+            assert_eq!(preset.level(), level);
+        }
+        assert_eq!(LosslessPreset::Z0.level(), 0);
+        assert_eq!(LosslessPreset::Z9.level(), 9);
+        assert_eq!(LosslessPreset::from_level(10), None);
+        assert_eq!(LosslessPreset::from_level(u8::MAX), None);
+    }
+
+    #[test]
+    fn lossless_presets_follow_libwebps_table() {
+        // libwebp's `kLosslessPresets`; `tests/oracle.rs` checks the same pairs against the linked
+        // library's `WebPConfigLosslessPreset`.
+        let table: Vec<(u8, u8)> = (0..=9u8)
+            .map(|l| {
+                let p = LosslessPreset::from_level(l).expect("0..=9");
+                (p.effort().level(), p.quality())
+            })
+            .collect();
+        assert_eq!(
+            table,
+            [
+                (0, 0),
+                (1, 20),
+                (2, 25),
+                (3, 30),
+                (3, 50),
+                (4, 50),
+                (4, 75),
+                (4, 90),
+                (5, 90),
+                (6, 100)
+            ]
+        );
+    }
+
+    #[test]
+    fn with_lossless_preset_sets_mode_effort_and_quality_only() {
+        let base = WebpConfig {
+            mode: WebpMode::Lossy,
+            near_lossless: NearLossless::from_libwebp_strength(40),
+            alpha_quality: 41,
+            exact: Exact::Clean,
+            ..WebpConfig::default()
+        };
+        let got = base.with_lossless_preset(LosslessPreset::Z3);
+        assert_eq!(
+            got,
+            WebpConfig {
+                mode: WebpMode::Lossless,
+                effort: Effort::Moderate,
+                quality: 30,
+                ..base
+            }
+        );
     }
 
     #[test]

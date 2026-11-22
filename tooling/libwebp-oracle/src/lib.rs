@@ -5,7 +5,8 @@
 //! decoder produces, and a libwebp-encoded file must decode identically in gamut. This crate wraps
 //! the libwebp entry points those checks need — decode to YUV/RGBA, lossless and lossy encode
 //! (including the advanced `WebPEncode` path, [`libwebp_encode_lossy_rgba_config`]), the
-//! RGBA→YUV conversion, and libwebpmux's metadata read/write — behind a safe API.
+//! RGBA→YUV conversion, the `cwebp -z` lossless preset table ([`libwebp_lossless_preset`]), and
+//! libwebpmux's metadata read/write — behind a safe API.
 //!
 //! All `unsafe` FFI is confined to this crate. That is the point of it being a crate: gamut-webp is
 //! `#![forbid(unsafe_code)]`, which also covers its `#[cfg(test)]` modules, so its differential
@@ -252,6 +253,27 @@ pub fn libwebp_encode_lossless_rgba(rgba: &[u8], width: u32, height: u32) -> Vec
     // SAFETY: `out_ptr` was allocated by libwebp and must be released with WebPFree.
     unsafe { libwebp_sys::WebPFree(out_ptr.cast::<c_void>()) };
     bytes
+}
+
+/// The configuration libwebp's `WebPConfigLosslessPreset` builds for `cwebp -z level`, as
+/// `(lossless, method, quality)`, starting from `WebPConfigInit`'s defaults — or `None` when libwebp
+/// rejects `level` (anything outside `0..=9`).
+#[must_use]
+pub fn libwebp_lossless_preset(level: i32) -> Option<(bool, i32, f32)> {
+    // SAFETY: `config` is zero-initialised then filled by `WebPConfigInit`; both calls only write
+    // through the pointer to it, which stays valid for the whole block.
+    unsafe {
+        let mut config: libwebp_sys::WebPConfig = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPConfigInit(&mut config) != 0,
+            "WebPConfigInit failed (version mismatch?)"
+        );
+        (libwebp_sys::WebPConfigLosslessPreset(&mut config, level) != 0).then_some((
+            config.lossless != 0,
+            config.method,
+            config.quality,
+        ))
+    }
 }
 
 /// Encodes an interleaved RGBA image to a lossy (VP8) WebP file with libwebp at `quality` (`0..=100`),
