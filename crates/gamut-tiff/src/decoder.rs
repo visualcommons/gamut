@@ -961,7 +961,9 @@ fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
     // The page grows as its strips decompress rather than being reserved from the header: with no
     // byte budget set, the default limits still admit a 16384² RGBA16 page (2 GiB), which a
     // few-hundred-byte file would otherwise reserve up front — past `isize::MAX` on a 32-bit
-    // target. Each strip's decoder is itself bounded by the bytes it is given.
+    // target. Each strip's decoder grows its own output as it decodes too: the CCITT decoders add
+    // a row per row their bits code (#1261), so a tiny strip claiming a huge height fails on
+    // truncation without reserving `rows * stored_row_bytes` first.
     let mut packed = Vec::new();
     for (i, raw) in raws.into_iter().enumerate() {
         let rows = rows_per_strip.min(l.height - i * rows_per_strip);
