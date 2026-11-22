@@ -164,19 +164,20 @@ pub(super) mod fixtures {
         yuv420(width, height, y, u, v)
     }
 
-    /// Four horizontal bands, one per quantizer segment, each lightly textured.
+    /// Four horizontal luma bands, each lightly textured, over wrapping chroma ramps.
     ///
-    /// Segments are assigned by macroblock luma mean (`(mean / 64).min(3)`), so a fixture only
-    /// exercises the per-macroblock segment lookup if its macroblocks land in *different* buckets.
-    /// `pattern`'s wrapping ramp does not: it sweeps the whole 0..255 range inside every
-    /// macroblock, so each one averages near 128 and the segment map comes out uniform -- and a
-    /// uniform map makes any index into it indistinguishable from any other.
+    /// Segments are assigned by libwebp's analysis (`analysis::plan_segments`): k-means over each
+    /// macroblock's prediction-residual "alpha", a texture score, not its brightness. A fixture
+    /// only exercises the per-macroblock segment lookup if its macroblocks land in *different*
+    /// segments, and a uniform map makes any index into it indistinguishable from any other.
     ///
-    /// The bands average about 23, 87, 151 and 215, one per segment, and they are *horizontal* so
-    /// the difference falls between macroblock rows -- what a wrong row stride gets wrong. All
-    /// four matter: with only the outer two, the quantizer deltas for segments 1 and 2 are never
-    /// applied and changing either goes unnoticed. The `i % 16` texture keeps blocks from being
-    /// flat enough to skip entirely.
+    /// Here the score varies along both axes. Down the frame, the band steps fall on macroblock
+    /// row boundaries -- what a wrong row stride gets wrong -- so a macroblock's top edge predicts
+    /// it from another band, and the top row has no edge at all. Across it, the chroma ramps
+    /// (`i * 5`, `i * 11`) wrap at positions that differ from one macroblock to the next, which
+    /// moves the chroma residual between columns. At 64x64 the top row comes out in another segment
+    /// from the rows under it and several segments are in use. The `i % 16` texture keeps blocks
+    /// from being flat enough to skip entirely.
     ///
     /// `height` should cover four macroblock rows (64) so every band gets one.
     pub(in crate::vp8) fn banded(width: u32, height: u32) -> Vp8Planes {
