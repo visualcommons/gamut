@@ -168,14 +168,14 @@ fn collect(
 
 /// `GetAlpha` over the histogram `VP8SetHistogramData` reduces `bins` to: the last occupied bin
 /// scaled by the tallest one.
+///
+/// libwebp returns `0` unless the tallest bin holds more than one coefficient. That guard is
+/// omitted because no histogram here can trip it: the fewest coefficients one holds is chroma's
+/// 128 (eight 4×4 blocks), and 128 values in 32 bins put at least 4 in one.
 fn alpha(bins: &[u32; MAX_COEFF_THRESH + 1]) -> i32 {
-    let max_value = bins.iter().copied().max().unwrap_or(0) as i32;
+    let max_value = bins.iter().copied().max().unwrap_or(1) as i32;
     let last_non_zero = bins.iter().rposition(|&n| n > 0).unwrap_or(1) as i32;
-    if max_value > 1 {
-        2 * MAX_ALPHA * last_non_zero / max_value
-    } else {
-        0
-    }
+    2 * MAX_ALPHA * last_non_zero / max_value
 }
 
 /// The top, left and corner source edges of the `size`-square block at `(x, y)`, or `None` on the
