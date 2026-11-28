@@ -132,6 +132,29 @@ jobs:
         if: github.event_name == 'pull_request'
         run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
 
+  # On every pull request, so the change that breaks the MSRV is the one that fails, rather than
+  # the next master run. Pure `cargo check`: no submodules, no C toolchain, no sccache.
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v4
+        with:
+          install: false
+      - name: MSRV compile check
+        # The task reads the MSRV from Cargo.toml, asserts the README documents it, installs that
+        # toolchain, and `cargo +<msrv> check`s the libraries, against the committed Cargo.lock
+        # and against a fresh MSRV-aware resolution. No version is hardcoded here.
+        #
+        # `mise run` would otherwise auto-build every [tools] entry (convco/cargo-edit/cargo-mutants
+        # from source, plus cmake/ninja/meson) before the task — none of which check-msrv touches; it
+        # uses only the runner's rustup + cargo. That source build is slow and intermittently fails,
+        # so disable task auto-install to match the `install: false` above.
+        env:
+          MISE_TASK_RUN_AUTO_INSTALL: false
+        run: mise run check-msrv
+
   lint:
     name: Clippy & Doctests
     runs-on: ubuntu-latest

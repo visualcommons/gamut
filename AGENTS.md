@@ -276,7 +276,7 @@ mise run fetch-av1-oracles # fetch the `update = none` aom/dav1d submodules (~44
 mise run test-dng-real # gamut-dng vs real camera DNGs (needs `mise run fetch-dng-samples`
                        # first: a ~178 MiB CC0 corpus submodule). Extended CI, master/manual
 mise run check-cross <triple> # cross-compile check (wasm32/aarch64/musl); extended CI, master/manual
-mise run check-msrv    # compile on documented MSRV; extended CI, master/manual
+mise run check-msrv    # compile on documented MSRV (committed + fresh MSRV-aware lock); every PR
 mise run check-commits # commit messages are Conventional Commits
 ```
 

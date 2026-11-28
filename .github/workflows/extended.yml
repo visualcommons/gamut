@@ -1,10 +1,11 @@
 name: Extended
 
-# Extended, dependency-heavier portability checks that back the README's cross-compile and MSRV
-# claims. Deliberately NOT run on pull_request: they compile the whole shipped library surface
-# across several targets/toolchains. They run post-merge on master and can be started by hand on
-# any branch (Actions → Extended → Run workflow), so contributors gate locally with
-# `mise run check-cross <triple>` / `mise run check-msrv` before merging.
+# Extended, dependency-heavier portability checks that back the README's cross-compile claims.
+# Deliberately NOT run on pull_request: they compile the whole shipped library surface across
+# several targets. They run post-merge on master and can be started by hand on any branch
+# (Actions → Extended → Run workflow), so contributors gate locally with
+# `mise run check-cross <triple>` before merging. The MSRV check is not here: it runs on every
+# pull request, in ci.yml.
 #
 # Two cadences share this workflow (#594). Every job except `fuzz` runs per push to master and is
 # skipped on the nightly schedule, because rebuilding an unchanged tree finds nothing new. `fuzz`
@@ -60,27 +61,6 @@ jobs:
         env:
           MISE_TASK_RUN_AUTO_INSTALL: false
         run: mise run check-cross ${{ matrix.target }}
-
-  msrv:
-    name: MSRV
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: jdx/mise-action@v4
-        with:
-          install: false
-      - name: MSRV compile check
-        # The task reads the MSRV from Cargo.toml, asserts the README documents it, installs that
-        # toolchain, and `cargo +<msrv> check`s the libraries. No version is hardcoded here.
-        #
-        # `mise run` would otherwise auto-build every [tools] entry (convco/cargo-edit/cargo-mutants
-        # from source, plus cmake/ninja/meson) before the task — none of which check-msrv touches; it
-        # uses only the runner's rustup + cargo. That source build is slow and intermittently fails,
-        # so disable task auto-install to match the `install: false` above.
-        env:
-          MISE_TASK_RUN_AUTO_INSTALL: false
-        run: mise run check-msrv
 
   # The JPEG XL encoder on WebAssembly, for real: builds libjxl with the emsdk toolchain and runs
   # the gamut-jxl-sys + gamut-jxl test suites (including the libjxl-oracle differential tests) on
