@@ -161,8 +161,18 @@ test -n "$msrv" || { echo "could not read rust-version from Cargo.toml"; exit 1;
 grep -qF "$msrv" README.md || { echo "README.md does not document MSRV $msrv"; exit 1; }
 rustup toolchain install "$msrv" --profile minimal
 # GAMUT_JXL_SYS_SKIP_NATIVE=1: skip gamut-jxl-sys's libjxl cmake build; safe because `cargo check`
-# compiles but never links.
-GAMUT_JXL_SYS_SKIP_NATIVE=1 cargo +"$msrv" check --workspace --exclude gamut-cli --all-features
+# compiles but never links. The library targets only: `--all-targets` would compile the
+# dev-dependency oracles, which build vendored C codecs from the submodules.
+# The committed Cargo.lock, unchanged (`--locked`): what contributors and CI build must stay
+# installable on the MSRV.
+GAMUT_JXL_SYS_SKIP_NATIVE=1 cargo +"$msrv" check --locked --workspace --exclude gamut-cli --all-features
+# A fresh resolution, which is what a downstream user gets: resolver 3 prefers dependency releases
+# whose `rust-version` the MSRV satisfies. The committed lock is put back however this exits.
+lock="$(mktemp)"
+cp Cargo.lock "$lock"
+trap 'cp "$lock" Cargo.lock; rm -f "$lock"' EXIT
+cargo +stable generate-lockfile
+GAMUT_JXL_SYS_SKIP_NATIVE=1 cargo +"$msrv" check --locked --workspace --exclude gamut-cli --all-features
 """
 
 [tasks.check-commits]
